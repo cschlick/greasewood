@@ -86,7 +86,7 @@ def gw_root(gw_image, gw_network):
         ipv6 = container_ipv6(cid, gw_network)
         assert ipv6, "root container got no IPv6 address"
 
-        pexec(cid, "greasewood", "setup-root",
+        pexec(cid, "gw", "setup-root",
               "--hostname", "root",
               "--endpoint", f"[{ipv6}]:51820")
 
@@ -98,7 +98,7 @@ def gw_root(gw_image, gw_network):
         digest = hashlib.blake2s(bytes.fromhex(overlay)).digest()
         overlay_addr = str(ipaddress.IPv6Address(prefix + digest[:8]))
 
-        podman("exec", "-d", cid, "sh", "-c", "greasewood run >> /tmp/gw.log 2>&1")
+        podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
         url = f"http://[{ipv6}]:7946"
         assert wait_for_http(f"{url}/health", timeout=20), \
@@ -166,7 +166,7 @@ trusted_pubs = ["{gw_root['ca_pub']}"]
         _copy_text_to_container(cfg, cid, "/etc/greasewood.toml")
 
         # Generate node identity + WireGuard keypair
-        pexec(cid, "greasewood", "init-node")
+        pexec(cid, "gw", "init-node")
         id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
         wg_pub = pexec(cid, "cat", "/var/lib/greasewood/wg_pub.b64").stdout.strip()
 
@@ -178,7 +178,7 @@ trusted_pubs = ["{gw_root['ca_pub']}"]
 
         # Issue credential from root container (outputs JSON to stdout)
         r = pexec(
-            gw_root["cid"], "greasewood", "issue",
+            gw_root["cid"], "gw", "issue",
             "--id-pub", id_pub,
             "--wg-pub", wg_pub,
             "--hostname", hostname,
@@ -188,7 +188,7 @@ trusted_pubs = ["{gw_root['ca_pub']}"]
         _copy_text_to_container(cred_json, cid, "/tmp/cred.json")
 
         # Install credential — merges node's NodeRecord into the pre-seeded directory
-        pexec(cid, "greasewood", "install-cred", "/tmp/cred.json")
+        pexec(cid, "gw", "install-cred", "/tmp/cred.json")
 
         # Derive overlay address from id_pub
         prefix = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
@@ -196,7 +196,7 @@ trusted_pubs = ["{gw_root['ca_pub']}"]
         overlay_addr = str(ipaddress.IPv6Address(prefix + digest[:8]))
 
         # Start daemon
-        podman("exec", "-d", cid, "sh", "-c", "greasewood run >> /tmp/gw.log 2>&1")
+        podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
         yield {"cid": cid, "hostname": hostname, "overlay": overlay_addr}
     finally:

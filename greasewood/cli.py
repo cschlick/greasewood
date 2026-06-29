@@ -821,19 +821,19 @@ def cmd_purge(args) -> int:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
-        prog="greasewood",
+        prog="gw",
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
         epilog=(
             "sudo requirements:\n"
-            "  sudo greasewood setup-root   -- writes /etc and /var/lib, owned back to you\n"
-            "  sudo -E HOME=$HOME greasewood join ...  -- needs root for /etc + /var/lib,\n"
+            "  sudo gw setup-root           -- writes /etc and /var/lib, owned back to you\n"
+            "  sudo -E HOME=$HOME gw join   -- needs root for /etc + /var/lib,\n"
             "                               -E HOME=$HOME so SSH finds your key not root's\n"
-            "  sudo greasewood run          -- creates WireGuard interface\n"
-            "  sudo greasewood purge        -- removes WireGuard interface\n"
+            "  sudo gw run                  -- creates WireGuard interface\n"
+            "  sudo gw purge                -- removes WireGuard interface\n"
             "\n"
             "no sudo needed:\n"
-            "  greasewood status\n"
-            "  greasewood issue   (ca.key is owned by you after setup-root)\n"
+            "  gw status\n"
+            "  gw issue   (ca.key is owned by you after setup-root)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
