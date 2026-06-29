@@ -227,18 +227,25 @@ renew_before = "12h"
 
 
 # ---------------------------------------------------------------------------
-# join  (new-node bootstrap — generates keys, SSHes to root to issue credential)
+# join  (new-node bootstrap)
+#
+# Two modes:
+#   Node-side  (default): run ON the new node; SSH only to root to issue.
+#   Operator   (--node user@host): run from the operator's machine; SSH to
+#              both the new node (key gen + install) and root (issue).
+#              Use this when your key is only on your laptop.
+#
+# Extra SSH options (e.g. -J for ProxyJump) can be passed via --ssh-opt.
 # ---------------------------------------------------------------------------
 
 def cmd_join(args) -> int:
     import json as json_mod
     import shlex
     import subprocess
-    from .keys import NodeKeys
-    from .wire import Credential, NodeRecord
-    from .directory import Directory
+    from .wire import Credential
 
     root_ssh = args.root_ssh
+    node_ssh = args.node          # None → node-side mode
     hostname = args.hostname
     caps = [c.strip() for c in args.caps.split(",")]
     cfg_path = Path(args.config)
@@ -248,21 +255,25 @@ def cmd_join(args) -> int:
     endpoint = args.endpoint
     root_cfg = args.root_config
     listen_port = args.listen_port
+    ssh_opts = shlex.split(args.ssh_opt) if args.ssh_opt else []
 
-    # Data directory and node keys
-    data_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(data_dir, 0o700)
-    except PermissionError:
-        pass
+    base_ssh = ["ssh", "-o", "StrictHostKeyChecking=accept-new"] + ssh_opts
 
-    node_keys = NodeKeys.load_or_generate(data_dir)
-    log.info("overlay addr: %s", node_keys.addr)
+    def _ssh(target, remote_cmd, check=True):
+        return subprocess.run(
+            base_ssh + [target, remote_cmd],
+            capture_output=True, text=True, check=check,
+        )
 
-    # Write config
+    def _ssh_write(target, path, content):
+        """Write text content to a file on a remote host via SSH stdin."""
+        subprocess.run(
+            base_ssh + [target, f"cat > {shlex.quote(path)}"],
+            input=content, capture_output=True, text=True, check=True,
+        )
+
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(f"""[node]
+    cfg_content = f"""[node]
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "node"
@@ -277,27 +288,52 @@ root_url = {json_mod.dumps(root_url)}
 
 [ca]
 trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
-""")
-    log.info("wrote config → %s", cfg_path)
+"""
 
-    # SSH to root and issue credential
+    # ------------------------------------------------------------------ #
+    # Step 1 — generate node keys (locally or on the remote new node)
+    # ------------------------------------------------------------------ #
+    if node_ssh:
+        log.info("operator mode: configuring %s via SSH", node_ssh)
+        _ssh_write(node_ssh, str(cfg_path), cfg_content)
+        log.info("wrote config to %s:%s", node_ssh, cfg_path)
+
+        r = _ssh(node_ssh, f"greasewood -c {shlex.quote(str(cfg_path))} init-node")
+        if r.returncode != 0:
+            sys.exit(f"init-node on {node_ssh} failed:\n{r.stderr.strip()}")
+
+        id_pub = _ssh(node_ssh, f"cat {shlex.quote(str(data_dir / 'id_pub.hex'))}").stdout.strip()
+        wg_pub = _ssh(node_ssh, f"cat {shlex.quote(str(data_dir / 'wg_pub.b64'))}").stdout.strip()
+    else:
+        from .keys import NodeKeys
+        data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(data_dir, 0o700)
+        except PermissionError:
+            pass
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(cfg_content)
+        log.info("wrote config → %s", cfg_path)
+
+        node_keys = NodeKeys.load_or_generate(data_dir)
+        log.info("overlay addr: %s", node_keys.addr)
+        id_pub = node_keys.id_pub_hex
+        wg_pub = node_keys.wg_pub_b64
+
+    # ------------------------------------------------------------------ #
+    # Step 2 — issue credential from root via SSH
+    # ------------------------------------------------------------------ #
     log.info("requesting credential from %s ...", root_ssh)
-    remote_cmd = (
+    remote_issue = (
         f"greasewood -c {shlex.quote(root_cfg)} issue"
-        f" --id-pub {node_keys.id_pub_hex}"
-        f" --wg-pub {shlex.quote(node_keys.wg_pub_b64)}"
+        f" --id-pub {id_pub}"
+        f" --wg-pub {shlex.quote(wg_pub)}"
         f" --hostname {shlex.quote(hostname)}"
         f" --caps {shlex.quote(','.join(caps))}"
     )
-    result = subprocess.run(
-        ["ssh", "-o", "StrictHostKeyChecking=accept-new", root_ssh, remote_cmd],
-        capture_output=True, text=True,
-    )
+    result = _ssh(root_ssh, remote_issue, check=False)
     if result.returncode != 0:
-        sys.exit(
-            f"Failed to issue credential via SSH ({root_ssh}):\n"
-            f"{result.stderr.strip()}"
-        )
+        sys.exit(f"Failed to issue credential via SSH ({root_ssh}):\n{result.stderr.strip()}")
 
     try:
         cred_data = json_mod.loads(result.stdout)
@@ -308,33 +344,49 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
     cred.verify([bytes.fromhex(ca_pub_hex)])
     log.info("credential verified, expires %s", cred.exp.strftime("%Y-%m-%d %H:%M UTC"))
 
-    # Verify the credential was issued for this node
-    if cred.id_pub != node_keys.id_pub_bytes:
-        sys.exit("Credential id_pub does not match this node's identity — something went wrong.")
+    # ------------------------------------------------------------------ #
+    # Step 3 — install credential (on remote new node or locally)
+    # ------------------------------------------------------------------ #
+    if node_ssh:
+        _ssh_write(node_ssh, "/tmp/gw-cred.json", result.stdout)
+        r = _ssh(node_ssh, f"greasewood -c {shlex.quote(str(cfg_path))} install-cred /tmp/gw-cred.json")
+        if r.returncode != 0:
+            sys.exit(f"install-cred on {node_ssh} failed:\n{r.stderr.strip()}")
 
-    # Install credential (create and sign NodeRecord)
-    dir_cache = data_dir / "directory.json"
-    directory = Directory.load(dir_cache)
-    existing = directory.get(node_keys.id_pub_hex)
-    seq = (existing.seq + 1) if existing else 1
-    record = NodeRecord(
-        id_pub=node_keys.id_pub_bytes,
-        seq=seq,
-        endpoints=[endpoint] if endpoint else [],
-        inbound="yes",
-        hostname=hostname,
-        cred=cred,
-    ).sign(node_keys.id_priv)
-    directory.put(record)
-    directory.save(dir_cache)
+        print(f"\nNode setup complete.")
+        print(f"  hostname : {hostname}")
+        print()
+        print(f"Start the daemon on {node_ssh}:")
+        print(f"  ssh {node_ssh} 'sudo greasewood run'")
+    else:
+        from .wire import NodeRecord
+        from .directory import Directory
 
-    print(f"\nNode setup complete.")
-    print(f"  hostname     : {hostname}")
-    print(f"  overlay addr : {node_keys.addr}")
-    print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
-    print()
-    print(f"Start the daemon:")
-    print(f"  sudo env PATH=\"$PATH\" greasewood -c {cfg_path} run")
+        if cred.id_pub != node_keys.id_pub_bytes:
+            sys.exit("Credential id_pub does not match this node's identity — something went wrong.")
+
+        dir_cache = data_dir / "directory.json"
+        directory = Directory.load(dir_cache)
+        existing = directory.get(node_keys.id_pub_hex)
+        seq = (existing.seq + 1) if existing else 1
+        record = NodeRecord(
+            id_pub=node_keys.id_pub_bytes,
+            seq=seq,
+            endpoints=[endpoint] if endpoint else [],
+            inbound="yes",
+            hostname=hostname,
+            cred=cred,
+        ).sign(node_keys.id_priv)
+        directory.put(record)
+        directory.save(dir_cache)
+
+        print(f"\nNode setup complete.")
+        print(f"  hostname     : {hostname}")
+        print(f"  overlay addr : {node_keys.addr}")
+        print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
+        print()
+        print(f"Start the daemon:")
+        print(f"  sudo greasewood run")
     return 0
 
 
@@ -752,6 +804,11 @@ def main(argv=None) -> int:
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT")
     sp.add_argument("--root-config", dest="root_config", default="/etc/greasewood.toml",
                     metavar="PATH", help="path to greasewood.toml on the root node")
+    sp.add_argument("--node", default=None, metavar="USER@HOST",
+                    help="operator mode: SSH to this host to generate keys and install "
+                         "credential (run join from your laptop instead of the new node)")
+    sp.add_argument("--ssh-opt", dest="ssh_opt", default=None, metavar="OPTS",
+                    help="extra SSH options, e.g. '--ssh-opt \"-J user@jump\"'")
     sp.set_defaults(fn=cmd_join)
 
     # init-ca
