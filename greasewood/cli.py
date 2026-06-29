@@ -660,15 +660,27 @@ def cmd_status(args) -> int:
     from .keys import NodeKeys
     from .directory import Directory
 
-    cfg = load_config(Path(args.config))
-    directory = Directory.load(cfg.dir_cache_path)
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        print("not configured (no config file at %s)" % cfg_path)
+        return 0
+
+    cfg = load_config(cfg_path)
 
     try:
         keys = NodeKeys.load(cfg.data_dir)
         own_id = keys.id_pub_hex
+        own_addr = keys.addr
     except FileNotFoundError:
         own_id = None
+        own_addr = None
 
+    print(f"role     : {cfg.role}")
+    print(f"hostname : {cfg.hostname}")
+    print(f"addr     : {own_addr or '(keys not generated)'}")
+    print()
+
+    directory = Directory.load(cfg.dir_cache_path)
     now = dt.datetime.now(_UTC)
     records = sorted(directory.all(), key=lambda r: r.hostname)
 
