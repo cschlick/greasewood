@@ -106,7 +106,7 @@ root_url = "{root_url}"
 trusted_pubs = ["{gw_root['ca_pub']}"]
 """
         _copy_text_to_container(cfg, cid2, "/etc/greasewood.toml")
-        pexec(cid2, "greasewood", "init-node")
+        pexec(cid2, "gw", "init-node")
         id_pub2 = pexec(cid2, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
         wg_pub2 = pexec(cid2, "cat", "/var/lib/greasewood/wg_pub.b64").stdout.strip()
 
@@ -114,18 +114,18 @@ trusted_pubs = ["{gw_root['ca_pub']}"]
         _copy_bytes_to_container(root_dir, cid2, "/var/lib/greasewood/directory.json")
 
         r = pexec(
-            gw_root["cid"], "greasewood", "issue",
+            gw_root["cid"], "gw", "issue",
             "--id-pub", id_pub2, "--wg-pub", wg_pub2,
             "--hostname", hostname2, "--caps", "mesh",
         )
         _copy_text_to_container(r.stdout, cid2, "/tmp/cred.json")
-        pexec(cid2, "greasewood", "install-cred", "/tmp/cred.json")
+        pexec(cid2, "gw", "install-cred", "/tmp/cred.json")
 
         prefix = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
         digest = hashlib.blake2s(bytes.fromhex(id_pub2)).digest()
         overlay2 = str(ipaddress.IPv6Address(prefix + digest[:8]))
 
-        podman("exec", "-d", cid2, "sh", "-c", "greasewood run >> /tmp/gw.log 2>&1")
+        podman("exec", "-d", cid2, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
         # Both nodes need to know about each other — wait for root to have both
         assert wait_for_hostname(root_url, hostname2, timeout=20)
