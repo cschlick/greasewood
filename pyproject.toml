@@ -16,3 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--ignore=tests/integration"
+markers = [
+    "integration: requires podman + WireGuard kernel module (run with: pytest tests/integration/)",
+]
