@@ -61,18 +61,56 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 # ---------------------------------------------------------------------------
 
 def _detect_public_ipv6() -> str | None:
-    """Best-effort: return the public IPv6 address used for outbound connections."""
-    import socket
+    """
+    Return the most stable Global Unicast Address on this machine.
+
+    Preference order:
+      1. non-deprecated, non-temporary GUA  (EUI-64 / static SLAAC)
+      2. non-deprecated, temporary GUA
+      3. any GUA (fallback)
+
+    GUA = 2000::/3 (first 3 bits are 001).  ULA (fc/fd) and link-local
+    (fe80) are excluded because they are not routable across the internet.
+    """
+    import ipaddress
+    import subprocess
+
     try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(("2001:4860:4860::8888", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ":" in ip and not ip.startswith("fd") and not ip.startswith("fe80"):
-            return ip
-    except Exception:
-        pass
-    return None
+        r = subprocess.run(
+            ["ip", "-6", "-o", "addr", "show", "scope", "global"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+    stable, temporary, any_gua = [], [], []
+
+    for line in r.stdout.splitlines():
+        # Format: <idx>: <iface>    inet6 <addr/prefix> scope global [flags...]
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet6":
+            continue
+        try:
+            addr = ipaddress.IPv6Address(parts[3].split("/")[0])
+        except ValueError:
+            continue
+
+        # GUA: 2000::/3  (first 3 bits == 001)
+        if addr.packed[0] & 0xe0 != 0x20:
+            continue
+
+        flags = line
+        is_temp = "temporary" in flags
+        is_deprecated = "deprecated" in flags
+
+        if not is_deprecated and not is_temp:
+            stable.append(str(addr))
+        elif not is_deprecated:
+            temporary.append(str(addr))
+        else:
+            any_gua.append(str(addr))
+
+    return (stable or temporary or any_gua or [None])[0]
 
 
 def cmd_setup_root(args) -> int:
