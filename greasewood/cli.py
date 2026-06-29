@@ -330,9 +330,28 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
     if cred.id_pub != node_keys.id_pub_bytes:
         sys.exit("Credential id_pub does not match this node's identity — something went wrong.")
 
-    # Install credential (create and sign NodeRecord)
+    # Fetch root's current directory and merge it in so the daemon knows
+    # about existing peers immediately without waiting for the first sync.
+    import urllib.request as _urllib
     dir_cache = data_dir / "directory.json"
     directory = Directory.load(dir_cache)
+    ca_pubs_bytes = [bytes.fromhex(ca_pub_hex)]
+    try:
+        resp = _urllib.urlopen(f"{root_url}/directory", timeout=5)
+        for rec_data in json_mod.loads(resp.read()):
+            rec = NodeRecord.from_dict(rec_data)
+            try:
+                rec.verify(ca_pubs_bytes, set())
+                existing_rec = directory.get(rec.id_pub.hex())
+                if not existing_rec or rec.seq > existing_rec.seq:
+                    directory.put(rec)
+            except Exception:
+                pass
+        log.info("pre-seeded directory from root (%d records)", len(directory.all()))
+    except Exception as e:
+        log.warning("could not pre-seed directory from root: %s", e)
+
+    # Install credential (create and sign NodeRecord)
     existing = directory.get(node_keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
     record = NodeRecord(
