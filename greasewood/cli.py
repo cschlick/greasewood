@@ -154,18 +154,21 @@ def cmd_setup_root(args) -> int:
         ca_keys.save(ca_key_path)
         log.info("generated CA key → %s", ca_key_path)
 
-    # If run via sudo, give the data_dir and ca.key to the real operator so
+    # If run via sudo, recursively give data_dir to the real operator so
     # they can run `greasewood issue` over SSH without needing sudo.
+    # Root can still read everything regardless of ownership.
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         import pwd
         try:
             pw = pwd.getpwnam(sudo_user)
-            os.chown(data_dir, pw.pw_uid, -1)
-            os.chown(ca_key_path, pw.pw_uid, -1)
-            os.chown(ca_key_path.with_suffix(".pub"), pw.pw_uid, -1)
-            log.info("data_dir + ca.key ownership → %s", sudo_user)
-        except (KeyError, OSError):
+            for path in [data_dir, *data_dir.rglob("*")]:
+                try:
+                    os.chown(path, pw.pw_uid, -1)
+                except OSError:
+                    pass
+            log.info("data_dir ownership → %s", sudo_user)
+        except KeyError:
             pass
 
     ca_pub_hex = ca_keys.ca_pub_bytes.hex()
