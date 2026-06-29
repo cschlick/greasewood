@@ -141,14 +141,11 @@ def cmd_issue(args) -> int:
     caps = [c.strip() for c in args.caps.split(",")]
     cred = ca.issue(id_pub, wg_pub, args.hostname, caps)
 
-    # Write a signed NodeRecord into the root's directory so the root's
-    # reconcile loop can configure a WireGuard peer for the new node.
-    # We sign this record with the root's id_priv (using its own node keys),
-    # which is wrong — a NodeRecord must be signed by the node's own id_priv.
-    # Instead, we write a bare credential entry and let the new node push
-    # its own record via /publish on first startup. The root writes nothing to
-    # the directory here; that's the new node's job.
-
+    # The credential is output here; the new node wraps it in a NodeRecord
+    # (signed with its own id_priv) and pushes that record to the root via
+    # POST /publish on first daemon startup. Nothing is written to the root's
+    # directory here — a NodeRecord must be signed by the node's own id_priv,
+    # which only the node itself holds.
     cred_json = json.dumps(cred.to_dict(), indent=2)
 
     if args.output:

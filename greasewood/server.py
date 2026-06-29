@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
@@ -103,6 +104,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(e)}, 400)
 
 
+class _IPv6Server(HTTPServer):
+    address_family = socket.AF_INET6
+
+
 class ControlServer:
     def __init__(
         self,
@@ -113,7 +118,8 @@ class ControlServer:
         ca: "CA | None" = None,
     ) -> None:
         host, _, port_str = listen.rpartition(":")
-        host = host.strip("[]") or "0.0.0.0"
+        # Strip brackets from IPv6 literals like "[fd8d::1]"
+        host = host.strip("[]")
 
         class Handler(_Handler):
             pass
@@ -122,7 +128,15 @@ class ControlServer:
         Handler.ca_pubs = ca_pubs
         Handler.get_revoked = staticmethod(get_revoked)
 
-        self._server = HTTPServer((host, int(port_str)), Handler)
+        # Use AF_INET6 when binding to an IPv6 address or unspecified (":port").
+        # On Linux, AF_INET6 with "::" accepts both IPv4 and IPv6 unless
+        # IPV6_V6ONLY is set, so this is safe for dual-stack hosts too.
+        is_ipv4 = "." in host  # simple heuristic: IPv4 literals contain dots
+        if is_ipv4:
+            self._server = HTTPServer((host, int(port_str)), Handler)
+        else:
+            bind_host = host or "::"
+            self._server = _IPv6Server((bind_host, int(port_str)), Handler)
 
     def start(self) -> threading.Thread:
         t = threading.Thread(target=self._server.serve_forever, name="http", daemon=True)
