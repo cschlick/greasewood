@@ -154,6 +154,19 @@ def cmd_setup_root(args) -> int:
         ca_keys.save(ca_key_path)
         log.info("generated CA key → %s", ca_key_path)
 
+    # If run via sudo, give ca.key to the real operator so they can run
+    # `greasewood issue` over SSH without needing sudo on the root node.
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            pw = pwd.getpwnam(sudo_user)
+            os.chown(ca_key_path, pw.pw_uid, -1)
+            os.chown(ca_key_path.with_suffix(".pub"), pw.pw_uid, -1)
+            log.info("ca.key ownership → %s", sudo_user)
+        except (KeyError, OSError):
+            pass
+
     ca_pub_hex = ca_keys.ca_pub_bytes.hex()
 
     # Node keypairs
