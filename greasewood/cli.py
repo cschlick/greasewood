@@ -57,6 +57,250 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
+# setup-root  (one-shot root bootstrap — replaces init-ca + init-node + issue + install-cred)
+# ---------------------------------------------------------------------------
+
+def _detect_public_ipv6() -> str | None:
+    """Best-effort: return the public IPv6 address used for outbound connections."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(("2001:4860:4860::8888", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ":" in ip and not ip.startswith("fd") and not ip.startswith("fe80"):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def cmd_setup_root(args) -> int:
+    import json as json_mod
+    from .keys import CAKeys, NodeKeys
+    from .ca import CA
+    from .wire import NodeRecord
+    from .directory import Directory
+    from .config import _parse_duration
+
+    cfg_path = Path(args.config)
+    data_dir = Path(args.data_dir)
+    ca_key_path = data_dir / "ca.key"
+    hostname = args.hostname
+    listen_port = args.listen_port
+    control_port = args.control_port
+    caps = [c.strip() for c in args.caps.split(",")]
+    ttl = _parse_duration(args.credential_ttl)
+
+    # Auto-detect endpoint if not provided
+    endpoint = args.endpoint
+    if not endpoint:
+        ip = _detect_public_ipv6()
+        if ip:
+            endpoint = f"[{ip}]:{listen_port}"
+            log.info("detected public IPv6 endpoint: %s", endpoint)
+
+    # Data directory
+    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(data_dir, 0o700)
+    except PermissionError:
+        pass
+
+    # CA keypair
+    if ca_key_path.exists() and not args.force:
+        ca_keys = CAKeys.load(ca_key_path)
+        log.info("loaded existing CA key from %s", ca_key_path)
+    else:
+        ca_keys = CAKeys.generate()
+        ca_keys.save(ca_key_path)
+        log.info("generated CA key → %s", ca_key_path)
+
+    ca_pub_hex = ca_keys.ca_pub_bytes.hex()
+
+    # Node keypairs
+    node_keys = NodeKeys.load_or_generate(data_dir)
+    log.info("overlay addr: %s", node_keys.addr)
+
+    # Write config
+    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(f"""[node]
+hostname = "{hostname}"
+data_dir = "{data_dir}"
+role = "root"
+inbound = "yes"
+caps = {json_mod.dumps(caps)}{endpoint_line}
+
+[network]
+interface = "greasewood0"
+listen_port = {listen_port}
+seeds = []
+root_url = "http://[::1]:{control_port}"
+
+[ca]
+trusted_pubs = ["{ca_pub_hex}"]
+
+[root]
+ca_key_file = "{ca_key_path}"
+control_listen = ":{control_port}"
+credential_ttl = "{args.credential_ttl}"
+renew_before = "12h"
+""")
+    log.info("wrote config → %s", cfg_path)
+
+    # Issue and install self-credential
+    ca = CA(ca_keys, data_dir, ttl)
+    cred = ca.issue(node_keys.id_pub_bytes, node_keys.wg_pub_bytes, hostname, caps)
+
+    dir_cache = data_dir / "directory.json"
+    directory = Directory.load(dir_cache)
+    existing = directory.get(node_keys.id_pub_hex)
+    seq = (existing.seq + 1) if existing else 1
+    record = NodeRecord(
+        id_pub=node_keys.id_pub_bytes,
+        seq=seq,
+        endpoints=[endpoint] if endpoint else [],
+        inbound="yes",
+        hostname=hostname,
+        cred=cred,
+    ).sign(node_keys.id_priv)
+    directory.put(record)
+    directory.save(dir_cache)
+
+    # Print summary
+    ep_host = endpoint.rsplit(":", 1)[0] if endpoint else None
+    seeds_url = f"http://{ep_host}:{control_port}" if ep_host else f"http://[{node_keys.addr}]:{control_port}"
+
+    print(f"\nRoot setup complete.")
+    print(f"  overlay addr : {node_keys.addr}")
+    print(f"  CA pub key   : {ca_pub_hex}")
+    print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
+    print()
+    print(f"Start the daemon:")
+    print(f"  sudo env PATH=\"$PATH\" greasewood -c {cfg_path} run")
+    print()
+    print(f"Enroll a new node (run on the new machine, daemon must be running here first):")
+    print(f"  greasewood join <user>@<this-host> \\")
+    print(f"    --hostname <name> \\")
+    print(f"    --ca-pub {ca_pub_hex} \\")
+    print(f"    --root-url {seeds_url}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# join  (new-node bootstrap — generates keys, SSHes to root to issue credential)
+# ---------------------------------------------------------------------------
+
+def cmd_join(args) -> int:
+    import json as json_mod
+    import shlex
+    import subprocess
+    from .keys import NodeKeys
+    from .wire import Credential, NodeRecord
+    from .directory import Directory
+
+    root_ssh = args.root_ssh
+    hostname = args.hostname
+    caps = [c.strip() for c in args.caps.split(",")]
+    cfg_path = Path(args.config)
+    data_dir = Path(args.data_dir)
+    ca_pub_hex = args.ca_pub
+    root_url = args.root_url
+    endpoint = args.endpoint
+    root_cfg = args.root_config
+    listen_port = args.listen_port
+
+    # Data directory and node keys
+    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(data_dir, 0o700)
+    except PermissionError:
+        pass
+
+    node_keys = NodeKeys.load_or_generate(data_dir)
+    log.info("overlay addr: %s", node_keys.addr)
+
+    # Write config
+    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(f"""[node]
+hostname = "{hostname}"
+data_dir = "{data_dir}"
+role = "node"
+inbound = "yes"
+caps = {json_mod.dumps(caps)}{endpoint_line}
+
+[network]
+interface = "greasewood0"
+listen_port = {listen_port}
+seeds = [{json_mod.dumps(root_url)}]
+root_url = {json_mod.dumps(root_url)}
+
+[ca]
+trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
+""")
+    log.info("wrote config → %s", cfg_path)
+
+    # SSH to root and issue credential
+    log.info("requesting credential from %s ...", root_ssh)
+    remote_cmd = (
+        f"greasewood -c {shlex.quote(root_cfg)} issue"
+        f" --id-pub {node_keys.id_pub_hex}"
+        f" --wg-pub {shlex.quote(node_keys.wg_pub_b64)}"
+        f" --hostname {shlex.quote(hostname)}"
+        f" --caps {shlex.quote(','.join(caps))}"
+    )
+    result = subprocess.run(
+        ["ssh", root_ssh, remote_cmd],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        sys.exit(
+            f"Failed to issue credential via SSH ({root_ssh}):\n"
+            f"{result.stderr.strip()}"
+        )
+
+    try:
+        cred_data = json_mod.loads(result.stdout)
+    except json_mod.JSONDecodeError:
+        sys.exit(f"Unexpected output from root issue command:\n{result.stdout[:500]}")
+
+    cred = Credential.from_dict(cred_data)
+    cred.verify([bytes.fromhex(ca_pub_hex)])
+    log.info("credential verified, expires %s", cred.exp.strftime("%Y-%m-%d %H:%M UTC"))
+
+    # Verify the credential was issued for this node
+    if cred.id_pub != node_keys.id_pub_bytes:
+        sys.exit("Credential id_pub does not match this node's identity — something went wrong.")
+
+    # Install credential (create and sign NodeRecord)
+    dir_cache = data_dir / "directory.json"
+    directory = Directory.load(dir_cache)
+    existing = directory.get(node_keys.id_pub_hex)
+    seq = (existing.seq + 1) if existing else 1
+    record = NodeRecord(
+        id_pub=node_keys.id_pub_bytes,
+        seq=seq,
+        endpoints=[endpoint] if endpoint else [],
+        inbound="yes",
+        hostname=hostname,
+        cred=cred,
+    ).sign(node_keys.id_priv)
+    directory.put(record)
+    directory.save(dir_cache)
+
+    print(f"\nNode setup complete.")
+    print(f"  hostname     : {hostname}")
+    print(f"  overlay addr : {node_keys.addr}")
+    print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
+    print()
+    print(f"Start the daemon:")
+    print(f"  sudo env PATH=\"$PATH\" greasewood -c {cfg_path} run")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # init-ca  (genesis — run once on the root node)
 # ---------------------------------------------------------------------------
 
@@ -427,6 +671,38 @@ def main(argv=None) -> int:
     p.add_argument("-c", "--config", default="greasewood.toml", metavar="FILE")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # setup-root
+    sp = sub.add_parser("setup-root", help="one-shot root node bootstrap (CA + keys + config + self-credential)")
+    sp.add_argument("--hostname", default="root")
+    sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
+    sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
+    sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
+                    help="underlay endpoint (auto-detected if omitted)")
+    sp.add_argument("--caps", default="mesh")
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
+    sp.set_defaults(fn=cmd_setup_root)
+
+    # join
+    sp = sub.add_parser("join", help="enroll this machine as a node (SSHes to root to issue credential)")
+    sp.add_argument("root_ssh", metavar="USER@ROOT",
+                    help="SSH connection to root node, e.g. user@gp1")
+    sp.add_argument("--hostname", required=True)
+    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
+                    help="CA public key hex (from setup-root output)")
+    sp.add_argument("--root-url", dest="root_url", required=True, metavar="URL",
+                    help="root control plane URL, e.g. http://[addr]:7946")
+    sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
+    sp.add_argument("--caps", default="mesh")
+    sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT")
+    sp.add_argument("--root-config", dest="root_config", default="/etc/greasewood.toml",
+                    metavar="PATH", help="path to greasewood.toml on the root node")
+    sp.set_defaults(fn=cmd_join)
 
     # init-ca
     sp = sub.add_parser("init-ca", help="generate CA keypair (root, run once at genesis)")

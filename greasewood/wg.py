@@ -78,12 +78,16 @@ def set_peer(
     if endpoint:
         cmd += ["endpoint", endpoint]
     _run(*cmd)
+    # wg set configures the peer but does NOT install a kernel route; do it explicitly.
+    _run("ip", "-6", "route", "replace", f"{allowed_ip}/128", "dev", iface)
     log.debug("set peer ...%s  endpoint=%s  allowed=%s/128", wg_pub_b64[-8:], endpoint, allowed_ip)
 
 
-def remove_peer(iface: str, wg_pub_b64: str) -> None:
+def remove_peer(iface: str, wg_pub_b64: str, allowed_ip: str | None = None) -> None:
     """Remove a single WireGuard peer from the live interface."""
     _run("wg", "set", iface, "peer", wg_pub_b64, "remove")
+    if allowed_ip:
+        _run("ip", "-6", "route", "del", f"{allowed_ip}/128", "dev", iface, check=False)
     log.debug("removed peer ...%s", wg_pub_b64[-8:])
 
 
