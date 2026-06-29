@@ -22,7 +22,12 @@ log = logging.getLogger(__name__)
 
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     log.debug("$ %s", " ".join(args))
-    return subprocess.run(list(args), capture_output=True, text=True, check=check)
+    try:
+        return subprocess.run(list(args), capture_output=True, text=True, check=check)
+    except subprocess.CalledProcessError as e:
+        if e.stderr:
+            log.error("command failed: %s\nstderr: %s", " ".join(args), e.stderr.strip())
+        raise
 
 
 def ensure_interface(
