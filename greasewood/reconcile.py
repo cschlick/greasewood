@@ -89,8 +89,9 @@ def reconcile_once(
 
     for pub in desired_set & live_set:
         addr, ep = desired[pub]
-        # Update only if the endpoint changed; allowed-ips are stable (derived from id_pub)
-        if ep and live[pub].endpoint != ep:
+        endpoint_changed = ep and live[pub].endpoint != ep
+        route_missing = not live[pub].allowed_ips or addr not in live[pub].allowed_ips
+        if endpoint_changed or route_missing:
             try:
                 wgmod.set_peer(iface, pub, addr, ep)
             except Exception as e:
@@ -98,7 +99,9 @@ def reconcile_once(
 
     for pub in live_set - desired_set:
         try:
-            wgmod.remove_peer(iface, pub)
+            # Pass allowed_ip so the kernel route is also removed
+            peer_ip = live[pub].allowed_ips.split("/")[0] if live[pub].allowed_ips else None
+            wgmod.remove_peer(iface, pub, peer_ip)
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", pub[-8:], e)
 
