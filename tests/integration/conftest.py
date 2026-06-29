@@ -155,7 +155,7 @@ caps = ["mesh"]
 endpoints = ["[{ipv6}]:51820"]
 
 [network]
-interface = "greasewood0"
+interface = "gw0"
 listen_port = 51820
 seeds = ["{root_url}"]
 root_url = "{root_url}"
