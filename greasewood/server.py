@@ -2,15 +2,22 @@
 greasewood.server — HTTP control plane (root and seed roles).
 
 Endpoints:
-  GET  /directory   → JSON array of NodeRecords (root and seeds)
-  POST /enroll      → EnrollRequest → Credential  (root only)
-  POST /renew       → RenewRequest  → Credential  (root only)
+  GET  /directory   → JSON array of NodeRecords
+  POST /publish     → accept a self-signed, CA-credentialed NodeRecord
+  POST /renew       → RenewRequest → Credential  (root only)
   GET  /health      → {"status": "ok"}
 
-Directory reads are unauthenticated — every record is self-signed so the
-reader verifies locally. A compromised seed can withhold records but cannot
-forge them. Enrollment and renewal are authenticated by self-signatures in
-the request body; the CA also enforces token and revoke-list checks.
+There is no /enroll endpoint. Enrollment is SSH-only: the operator runs
+`greasewood issue` on the root node and copies the credential to the new
+node by hand. This server is intended to run on the overlay address so
+all traffic goes through the WireGuard tunnel.
+
+/publish is the exception that may be called before a node is fully in the
+mesh: a newly installed node POSTs its own signed record so the root can
+configure a WireGuard peer for it. It is safe to expose because it requires
+a fully valid, CA-signed NodeRecord — a bad actor cannot forge one without
+ca_priv, and the worst they can do with a valid record is cause a failed
+connection, not an intercepted one.
 """
 from __future__ import annotations
 
@@ -28,9 +35,10 @@ log = logging.getLogger(__name__)
 
 
 class _Handler(BaseHTTPRequestHandler):
-    # Set at server-build time via subclass attributes
     directory: "Directory"
     ca: "CA | None" = None
+    ca_pubs: list[bytes] = []
+    get_revoked: "callable" = staticmethod(set)
 
     def log_message(self, fmt, *args) -> None:
         log.debug("http %s %s", self.command, self.path)
@@ -56,29 +64,32 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.ca is None:
-            self.send_error(403, "not a root node")
-            return
         try:
             body = self._read_json()
         except Exception:
             self.send_error(400, "bad JSON")
             return
-        if self.path == "/enroll":
-            self._handle_enroll(body)
+
+        if self.path == "/publish":
+            self._handle_publish(body)
         elif self.path == "/renew":
-            self._handle_renew(body)
+            if self.ca is None:
+                self.send_error(403, "not a root node")
+            else:
+                self._handle_renew(body)
         else:
             self.send_error(404)
 
-    def _handle_enroll(self, body: dict) -> None:
-        from .wire import EnrollRequest
+    def _handle_publish(self, body: dict) -> None:
+        from .wire import NodeRecord
         try:
-            req = EnrollRequest.from_dict(body)
-            cred = self.ca.enroll(req)
-            self._send_json(cred.to_dict())
-        except ValueError as e:
-            log.warning("enroll rejected: %s", e)
+            record = NodeRecord.from_dict(body)
+            record.verify(self.ca_pubs, self.get_revoked())
+            self.directory.merge([record])
+            log.debug("published record from %s seq=%d", record.hostname, record.seq)
+            self._send_json({"status": "ok"})
+        except (ValueError, KeyError) as e:
+            log.warning("publish rejected: %s", e)
             self._send_json({"error": str(e)}, 400)
 
     def _handle_renew(self, body: dict) -> None:
@@ -97,6 +108,8 @@ class ControlServer:
         self,
         listen: str,
         directory: "Directory",
+        ca_pubs: list[bytes],
+        get_revoked,
         ca: "CA | None" = None,
     ) -> None:
         host, _, port_str = listen.rpartition(":")
@@ -106,6 +119,8 @@ class ControlServer:
             pass
         Handler.directory = directory
         Handler.ca = ca
+        Handler.ca_pubs = ca_pubs
+        Handler.get_revoked = staticmethod(get_revoked)
 
         self._server = HTTPServer((host, int(port_str)), Handler)
 

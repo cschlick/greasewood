@@ -13,8 +13,9 @@ NodeRecord (self-signed by id_priv, §5.2):
 Both objects use json.dumps(sort_keys=True) as the canonical signing form.
 Binary fields (keys, signatures) are standard base64.
 
-EnrollRequest and RenewRequest are the two messages nodes send to the root;
-both are self-signed so interception reveals nothing useful.
+RenewRequest is sent by enrolled nodes to the root for credential renewal.
+Enrollment is SSH-only (operator runs `greasewood issue` on the root); there
+is no HTTP enrollment endpoint.
 """
 from __future__ import annotations
 
@@ -200,66 +201,6 @@ class NodeRecord:
             inbound=d["inbound"],
             hostname=d["hostname"],
             cred=Credential.from_dict(d["cred"]),
-            sig=_b64d(d["sig"]),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Enrollment request
-# ---------------------------------------------------------------------------
-
-@dataclass
-class EnrollRequest:
-    """
-    CSR sent by a new node to the root during enrollment (§10.1).
-    Self-signed by id_priv — proves the sender holds the private key.
-    Interception reveals nothing secret (all public material plus the token).
-    The token is the one-time secret that authenticates the operator's intent.
-    """
-    id_pub: bytes
-    wg_pub: bytes
-    addr: str
-    hostname: str
-    req_caps: list[str]
-    token: str
-    sig: bytes = field(default=b"", repr=False)
-
-    def _body_dict(self) -> dict[str, Any]:
-        return {
-            "addr": self.addr,
-            "hostname": self.hostname,
-            "id_pub": _b64e(self.id_pub),
-            "req_caps": sorted(self.req_caps),
-            "token": self.token,
-            "wg_pub": _b64e(self.wg_pub),
-        }
-
-    def sign(self, id_priv: Ed25519PrivateKey) -> "EnrollRequest":
-        sig = id_priv.sign(_canonical(self._body_dict()))
-        return replace(self, sig=sig)
-
-    def verify_self_sig(self) -> None:
-        body = _canonical(self._body_dict())
-        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
-        try:
-            pub.verify(self.sig, body)
-        except InvalidSignature:
-            raise ValueError("invalid enrollment self-signature")
-
-    def to_dict(self) -> dict[str, Any]:
-        d = self._body_dict()
-        d["sig"] = _b64e(self.sig)
-        return d
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "EnrollRequest":
-        return cls(
-            id_pub=_b64d(d["id_pub"]),
-            wg_pub=_b64d(d["wg_pub"]),
-            addr=d["addr"],
-            hostname=d["hostname"],
-            req_caps=d["req_caps"],
-            token=d["token"],
             sig=_b64d(d["sig"]),
         )
 
