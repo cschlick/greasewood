@@ -282,8 +282,9 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
 
     # SSH to root and issue credential
     log.info("requesting credential from %s ...", root_ssh)
+    sudo_prefix = "sudo " if args.root_sudo else ""
     remote_cmd = (
-        f"greasewood -c {shlex.quote(root_cfg)} issue"
+        f"{sudo_prefix}greasewood -c {shlex.quote(root_cfg)} issue"
         f" --id-pub {node_keys.id_pub_hex}"
         f" --wg-pub {shlex.quote(node_keys.wg_pub_b64)}"
         f" --hostname {shlex.quote(hostname)}"
@@ -752,6 +753,8 @@ def main(argv=None) -> int:
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT")
     sp.add_argument("--root-config", dest="root_config", default="/etc/greasewood.toml",
                     metavar="PATH", help="path to greasewood.toml on the root node")
+    sp.add_argument("--root-sudo", dest="root_sudo", action="store_true",
+                    help="prefix the remote issue command with sudo (needed when ca.key is root-owned)")
     sp.set_defaults(fn=cmd_join)
 
     # init-ca
