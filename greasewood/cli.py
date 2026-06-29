@@ -747,6 +747,75 @@ def cmd_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# purge  (decommission or start-over — removes all local greasewood state)
+# ---------------------------------------------------------------------------
+
+def cmd_purge(args) -> int:
+    import shutil
+    import subprocess
+
+    cfg_path = Path(args.config)
+
+    # Determine interface name and data_dir from config if available
+    iface = "greasewood0"
+    data_dir = Path("/var/lib/greasewood")
+    if cfg_path.exists():
+        try:
+            from .config import load_config
+            cfg = load_config(cfg_path)
+            iface = cfg.wg_interface
+            data_dir = cfg.data_dir
+        except Exception:
+            pass
+
+    if not args.yes:
+        print(f"This will permanently remove:")
+        print(f"  WireGuard interface : {iface}")
+        print(f"  data directory      : {data_dir}")
+        print(f"  config file         : {cfg_path}")
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.")
+            return 1
+
+    removed = []
+    failed = []
+
+    # Tear down WireGuard interface
+    r = subprocess.run(["ip", "link", "show", iface], capture_output=True)
+    if r.returncode == 0:
+        subprocess.run(["ip", "link", "set", iface, "down"], capture_output=True)
+        subprocess.run(["ip", "link", "delete", iface], capture_output=True)
+        removed.append(f"interface {iface}")
+
+    # Remove data directory
+    if data_dir.exists():
+        try:
+            shutil.rmtree(data_dir)
+            removed.append(str(data_dir))
+        except OSError as e:
+            failed.append(f"{data_dir}: {e}")
+
+    # Remove config file
+    if cfg_path.exists():
+        try:
+            cfg_path.unlink()
+            removed.append(str(cfg_path))
+        except OSError as e:
+            failed.append(f"{cfg_path}: {e}")
+
+    for item in removed:
+        print(f"removed: {item}")
+    for item in failed:
+        print(f"failed:  {item}")
+
+    if failed:
+        return 1
+    print("purge complete")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -792,6 +861,11 @@ def main(argv=None) -> int:
     sp.add_argument("--root-sudo", dest="root_sudo", action="store_true",
                     help="prefix the remote issue command with sudo (needed when ca.key is root-owned)")
     sp.set_defaults(fn=cmd_join)
+
+    # purge
+    sp = sub.add_parser("purge", help="remove all greasewood state from this machine (decommission or start over)")
+    sp.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
+    sp.set_defaults(fn=cmd_purge)
 
     # init-ca
     sp = sub.add_parser("init-ca", help="generate CA keypair (root, run once at genesis)")
