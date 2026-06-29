@@ -718,7 +718,7 @@ def main(argv=None) -> int:
         prog="greasewood",
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
     )
-    p.add_argument("-c", "--config", default="greasewood.toml", metavar="FILE")
+    p.add_argument("-c", "--config", default="/etc/greasewood.toml", metavar="FILE")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
