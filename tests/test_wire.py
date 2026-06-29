@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from greasewood.keys import CAKeys, NodeKeys, derive_addr
-from greasewood.wire import Credential, EnrollRequest, NodeRecord, RenewRequest
+from greasewood.wire import Credential, NodeRecord, RenewRequest
 
 _UTC = dt.timezone.utc
 
@@ -215,51 +215,6 @@ class TestNodeRecord:
         d.merge([r5])
         d.merge([r1])
         assert d.get(node.id_pub_hex).seq == 5
-
-
-# ---------------------------------------------------------------------------
-# EnrollRequest
-# ---------------------------------------------------------------------------
-
-class TestEnrollRequest:
-    def test_sign_and_verify(self):
-        node = NodeKeys.generate()
-        req = EnrollRequest(
-            id_pub=node.id_pub_bytes,
-            wg_pub=node.wg_pub_bytes,
-            addr=node.addr,
-            hostname="mynode",
-            req_caps=["mesh"],
-            token="tok-abc123",
-        ).sign(node.id_priv)
-        req.verify_self_sig()
-
-    def test_tampered_token_rejected(self):
-        node = NodeKeys.generate()
-        req = EnrollRequest(
-            id_pub=node.id_pub_bytes,
-            wg_pub=node.wg_pub_bytes,
-            addr=node.addr,
-            hostname="mynode",
-            req_caps=["mesh"],
-            token="tok-abc123",
-        ).sign(node.id_priv)
-        bad = replace(req, token="evil-token")
-        with pytest.raises(ValueError):
-            bad.verify_self_sig()
-
-    def test_json_roundtrip(self):
-        node = NodeKeys.generate()
-        req = EnrollRequest(
-            id_pub=node.id_pub_bytes,
-            wg_pub=node.wg_pub_bytes,
-            addr=node.addr,
-            hostname="mynode",
-            req_caps=["mesh"],
-            token="tok",
-        ).sign(node.id_priv)
-        restored = EnrollRequest.from_dict(req.to_dict())
-        restored.verify_self_sig()
 
 
 # ---------------------------------------------------------------------------

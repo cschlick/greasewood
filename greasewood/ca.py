@@ -2,37 +2,34 @@
 greasewood.ca — certificate authority operations (root-node only).
 
 The CA signs Credentials only. It never generates or sees any private key
-other than ca_priv — only public material crosses the wire in enrollment.
+other than ca_priv.
 
-Token management: one-time enrollment tokens in tokens.json (0600).
-  Consuming a token removes it from the list — each token works exactly once.
+Enrollment is SSH-only: the operator runs `greasewood issue` on the root node,
+which calls CA.issue() directly. No token management, no HTTP enrollment
+endpoint, no network exposure at enrollment time.
 
 Revoke list: revoked.json — a set of id_pub hex strings.
   Revoking = stopping renewal. The existing credential expires on its own.
-  For emergency eviction before expiry, push an updated revoked.json to peers
-  (they re-read it on each reconcile cycle).
+  For fast eviction push the updated revoke list to peers (they re-read on
+  each reconcile cycle via the reconcile loop's revoked set).
 
 Node caps: stored in nodes/<id_pub_hex>.json so renewal can re-use them
-  without a separate config lookup.
+  without a separate config lookup. Written at issue time.
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 import logging
-import os
-import secrets
 from pathlib import Path
 from typing import Callable
 
 from .keys import CAKeys, derive_addr
-from .wire import Credential, EnrollRequest, RenewRequest
+from .wire import Credential, RenewRequest
 
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
 
-# Called with the requested caps, returns the granted caps.
-# Default: grant what was requested — override to enforce allowlists.
 CapPolicy = Callable[[list[str]], list[str]]
 
 
@@ -49,11 +46,25 @@ class CA:
         self._ttl = credential_ttl
         self._cap_policy: CapPolicy = cap_policy or (lambda caps: caps)
         self._revoke_path = data_dir / "revoked.json"
-        self._token_path = data_dir / "tokens.json"
 
     # --- credential issuance ---
 
-    def issue(self, id_pub: bytes, wg_pub: bytes, caps: list[str]) -> Credential:
+    def issue(
+        self,
+        id_pub: bytes,
+        wg_pub: bytes,
+        hostname: str,
+        caps: list[str],
+    ) -> Credential:
+        """
+        Sign a credential for a node. Call from `greasewood issue` on the root.
+        Persists node caps so renewal can re-use them without operator input.
+        Raises ValueError if id_pub is on the revoke list.
+        """
+        if self.is_revoked(id_pub):
+            raise ValueError("id_pub is on the revoke list")
+
+        caps = self._cap_policy(caps)
         now = dt.datetime.now(_UTC).replace(microsecond=0)
         cred = Credential(
             id_pub=id_pub,
@@ -63,45 +74,21 @@ class CA:
             iat=now,
             exp=now + self._ttl,
         )
-        return cred.sign(self._keys.ca_priv)
-
-    # --- enrollment (§10.1) ---
-
-    def enroll(self, req: EnrollRequest) -> Credential:
-        """
-        Process an enrollment request. Raises ValueError on any failure.
-        Token is consumed (one-time use) on success.
-        """
-        req.verify_self_sig()
-
-        expected_addr = derive_addr(req.id_pub)
-        if req.addr != expected_addr:
-            raise ValueError(
-                f"addr mismatch: claimed {req.addr}, expected {expected_addr}"
-            )
-
-        if self.is_revoked(req.id_pub):
-            raise ValueError("id_pub is on the revoke list")
-
-        if not self._consume_token(req.token):
-            raise ValueError("invalid or already-used enrollment token")
-
-        caps = self._cap_policy(req.req_caps)
-        log.info("enrolling %s caps=%s", req.hostname, caps)
-        cred = self.issue(req.id_pub, req.wg_pub, caps)
-        self._save_node_caps(req.id_pub, req.hostname, caps)
-        return cred
+        signed = cred.sign(self._keys.ca_priv)
+        self._save_node_caps(id_pub, hostname, caps)
+        log.info("issued credential for %s caps=%s exp=%s", hostname, caps, signed.exp)
+        return signed
 
     # --- renewal (§10.3) ---
 
     def renew(self, req: RenewRequest) -> Credential:
         """
-        Process a renewal request. Raises ValueError on any failure.
+        Process a renewal request from an already-enrolled node.
         id_priv possession is proven by the self-signature on the request.
+        Raises ValueError on any failure.
         """
         req.verify_self_sig()
 
-        # Guard against large clock skew (±5 min)
         skew = abs((dt.datetime.now(_UTC) - req.ts).total_seconds())
         if skew > 300:
             raise ValueError(f"timestamp skew too large ({skew:.0f}s); check NTP")
@@ -109,12 +96,13 @@ class CA:
         if self.is_revoked(req.id_pub):
             raise ValueError("id_pub is on the revoke list")
 
-        caps = self._load_node_caps(req.id_pub)
-        if caps is None:
-            raise ValueError("unknown node — enroll first")
+        node_info = self._load_node_info(req.id_pub)
+        if node_info is None:
+            raise ValueError("unknown node — issue a credential first")
 
-        log.info("renewing %s", req.id_pub.hex()[:16])
-        return self.issue(req.id_pub, req.wg_pub, caps)
+        hostname, caps = node_info
+        log.info("renewing %s", hostname)
+        return self.issue(req.id_pub, req.wg_pub, hostname, caps)
 
     # --- revoke list ---
 
@@ -140,44 +128,19 @@ class CA:
             json.dumps({"revoked": sorted(revoked)}, indent=2)
         )
 
-    # --- one-time enrollment tokens ---
+    # --- node info (for renewal) ---
 
-    def generate_token(self) -> str:
-        token = secrets.token_urlsafe(32)
-        tokens = self._load_tokens()
-        tokens.append(token)
-        self._save_tokens(tokens)
-        return token
-
-    def _consume_token(self, token: str) -> bool:
-        tokens = self._load_tokens()
-        if token not in tokens:
-            return False
-        tokens.remove(token)
-        self._save_tokens(tokens)
-        return True
-
-    def _load_tokens(self) -> list[str]:
-        if not self._token_path.exists():
-            return []
-        return json.loads(self._token_path.read_text()).get("tokens", [])
-
-    def _save_tokens(self, tokens: list[str]) -> None:
-        self._token_path.write_text(json.dumps({"tokens": tokens}, indent=2))
-        os.chmod(self._token_path, 0o600)
-
-    # --- node caps (for renewal) ---
-
-    def _node_caps_path(self, id_pub: bytes) -> Path:
+    def _node_path(self, id_pub: bytes) -> Path:
         return self._data_dir / "nodes" / f"{id_pub.hex()}.json"
 
     def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str]) -> None:
-        p = self._node_caps_path(id_pub)
+        p = self._node_path(id_pub)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"hostname": hostname, "caps": caps}, indent=2))
 
-    def _load_node_caps(self, id_pub: bytes) -> list[str] | None:
-        p = self._node_caps_path(id_pub)
+    def _load_node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
+        p = self._node_path(id_pub)
         if not p.exists():
             return None
-        return json.loads(p.read_text()).get("caps", [])
+        d = json.loads(p.read_text())
+        return d.get("hostname", ""), d.get("caps", [])

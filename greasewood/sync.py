@@ -34,6 +34,22 @@ def pull_directory(seed_url: str, timeout: float = 10.0) -> list[NodeRecord]:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
 
+def push_record(seed_url: str, record: NodeRecord, timeout: float = 10.0) -> None:
+    """POST a self-signed NodeRecord to a seed's /publish endpoint."""
+    url = f"{seed_url.rstrip('/')}/publish"
+    body = json.dumps(record.to_dict()).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"publish to {url} failed: {e}") from e
+    if "error" in data:
+        raise RuntimeError(data["error"])
+
+
 class SyncLoop:
     def __init__(
         self,
@@ -49,6 +65,12 @@ class SyncLoop:
         self._stop = threading.Event()
 
     def _pull_once(self) -> None:
+        # Re-merge the cache file first so records written by `greasewood issue`
+        # (which writes directly to disk) are picked up without a daemon restart.
+        from .directory import Directory as _Dir
+        on_disk = _Dir.load(self._cache_path)
+        self._directory.merge(on_disk.all())
+
         for seed in self._seeds:
             try:
                 records = pull_directory(seed)
