@@ -1,0 +1,18 @@
+[project]
+name = "greasewood"
+version = "0.1.0"
+description = "Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=42.0",
+]
+
+[project.scripts]
+greasewood = "greasewood.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
