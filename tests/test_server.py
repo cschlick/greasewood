@@ -1,0 +1,238 @@
+"""Tests for the HTTP control plane — directory, publish, renew endpoints."""
+import datetime as dt
+import json
+import socket
+import threading
+import urllib.request
+
+import pytest
+
+from greasewood.ca import CA
+from greasewood.directory import Directory
+from greasewood.keys import CAKeys, NodeKeys
+from greasewood.server import ControlServer
+from greasewood.wire import Credential, NodeRecord, RenewRequest
+
+_UTC = dt.timezone.utc
+
+
+def _make_cred(node: NodeKeys, ca: CAKeys, ttl: int = 3600) -> Credential:
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    return Credential(
+        id_pub=node.id_pub_bytes,
+        wg_pub=node.wg_pub_bytes,
+        addr=node.addr,
+        caps=["mesh"],
+        iat=now,
+        exp=now + dt.timedelta(seconds=ttl),
+    ).sign(ca.ca_priv)
+
+
+def _make_record(node: NodeKeys, cred: Credential, seq: int = 1) -> NodeRecord:
+    return NodeRecord(
+        id_pub=node.id_pub_bytes,
+        seq=seq,
+        endpoints=["[2001:db8::1]:51820"],
+        inbound="yes",
+        hostname="test-node",
+        cred=cred,
+    ).sign(node.id_priv)
+
+
+@pytest.fixture
+def ca_and_node():
+    ca = CAKeys.generate()
+    node = NodeKeys.generate()
+    cred = _make_cred(node, ca)
+    record = _make_record(node, cred)
+    return ca, node, cred, record
+
+
+@pytest.fixture
+def running_server(ca_and_node, tmp_path):
+    """Start a ControlServer on a free IPv6 loopback port; yield (srv, port)."""
+    ca, node, cred, record = ca_and_node
+    directory = Directory()
+    directory.put(record)
+
+    ca_obj = CA(CAKeys.generate(), tmp_path)  # separate CA for renewal tests
+    # Use the real CA for verification
+    ca_keys = ca
+
+    srv = ControlServer(
+        listen="[::1]:0",  # OS picks a free port
+        directory=directory,
+        ca_pubs=[ca.ca_pub_bytes],
+        get_revoked=set,
+        ca=None,  # no renewal in basic fixture
+    )
+
+    # Grab the actual bound port
+    port = srv._server.server_address[1]
+
+    thread = srv.start()
+    yield srv, port, directory, ca, node, cred
+    srv.stop()
+
+
+def _get(port: int, path: str) -> dict:
+    url = f"http://[::1]:{port}{path}"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _post(port: int, path: str, data: dict) -> tuple[int, dict | None]:
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(
+        f"http://[::1]:{port}{path}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return e.code, None  # send_error() returns HTML, not JSON
+
+
+class TestServerIPv6Binding:
+    def test_binds_ipv6(self, running_server):
+        srv, port, *_ = running_server
+        assert srv._server.address_family == socket.AF_INET6
+
+    def test_health_reachable(self, running_server):
+        _, port, *_ = running_server
+        data = _get(port, "/health")
+        assert data == {"status": "ok"}
+
+
+class TestDirectoryEndpoint:
+    def test_returns_records(self, running_server):
+        _, port, directory, ca, node, cred = running_server
+        data = _get(port, "/directory")
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["hostname"] == "test-node"
+
+    def test_empty_directory(self, ca_and_node, tmp_path):
+        srv = ControlServer(
+            listen="[::1]:0",
+            directory=Directory(),
+            ca_pubs=[],
+            get_revoked=set,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            data = _get(port, "/directory")
+            assert data == []
+        finally:
+            srv.stop()
+
+
+class TestPublishEndpoint:
+    def test_valid_record_accepted(self, running_server):
+        _, port, directory, ca, node, cred = running_server
+        node2 = NodeKeys.generate()
+        cred2 = _make_cred(node2, ca)
+        record2 = _make_record(node2, cred2)
+
+        status, body = _post(port, "/publish", record2.to_dict())
+        assert status == 200
+        assert body == {"status": "ok"}
+        assert directory.get(node2.id_pub_hex) is not None
+
+    def test_tampered_record_rejected(self, running_server):
+        from dataclasses import replace
+        _, port, directory, ca, node, cred = running_server
+        node2 = NodeKeys.generate()
+        cred2 = _make_cred(node2, ca)
+        record2 = _make_record(node2, cred2)
+        bad = replace(record2, hostname="evil")  # invalidates self-sig
+
+        status, body = _post(port, "/publish", bad.to_dict())
+        assert status == 400
+        assert "error" in body
+
+    def test_expired_credential_rejected(self, running_server):
+        _, port, directory, ca, node, cred = running_server
+        node2 = NodeKeys.generate()
+        cred2 = _make_cred(node2, ca, ttl=-1)  # already expired
+        record2 = _make_record(node2, cred2)
+
+        status, body = _post(port, "/publish", record2.to_dict())
+        assert status == 400
+        assert "error" in body
+
+    def test_revoked_node_rejected(self, ca_and_node, tmp_path):
+        ca, node, cred, record = ca_and_node
+        directory = Directory()
+        revoked = {node.id_pub_bytes.hex()}
+        srv = ControlServer(
+            listen="[::1]:0",
+            directory=directory,
+            ca_pubs=[ca.ca_pub_bytes],
+            get_revoked=lambda: revoked,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            status, body = _post(port, "/publish", record.to_dict())
+            assert status == 400
+        finally:
+            srv.stop()
+
+    def test_higher_seq_replaces_lower(self, running_server):
+        _, port, directory, ca, node, cred = running_server
+        # node already has seq=1 in directory; publish seq=2
+        record2 = _make_record(node, cred, seq=2)
+        _post(port, "/publish", record2.to_dict())
+        assert directory.get(node.id_pub_hex).seq == 2
+
+
+class TestRenewEndpoint:
+    def test_no_renew_without_ca(self, running_server):
+        _, port, *_ = running_server
+        status, body = _post(port, "/renew", {})
+        assert status == 403
+
+    def test_renew_with_ca(self, tmp_path):
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        cred = _make_cred(node, ca)
+        record = _make_record(node, cred)
+
+        directory = Directory()
+        directory.put(record)
+
+        ca_obj = CA(ca, tmp_path)
+        # Pre-populate node caps so renewal works
+        ca_obj._save_node_caps(node.id_pub_bytes, "test-node", ["mesh"])
+
+        srv = ControlServer(
+            listen="[::1]:0",
+            directory=directory,
+            ca_pubs=[ca.ca_pub_bytes],
+            get_revoked=set,
+            ca=ca_obj,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            import secrets
+            req = RenewRequest(
+                id_pub=node.id_pub_bytes,
+                wg_pub=node.wg_pub_bytes,
+                nonce=secrets.token_hex(16),
+                ts=dt.datetime.now(_UTC).replace(microsecond=0),
+            ).sign(node.id_priv)
+            status, body = _post(port, "/renew", req.to_dict())
+            assert status == 200
+            new_cred = Credential.from_dict(body)
+            new_cred.verify([ca.ca_pub_bytes])
+        finally:
+            srv.stop()
