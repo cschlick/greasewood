@@ -93,7 +93,10 @@ class NodeKeys:
           This is the self-limiting key; on-disk exposure is an accepted risk.
         """
         data_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(data_dir, 0o700)
+        try:
+            os.chmod(data_dir, 0o700)
+        except PermissionError:
+            pass  # files are 0600; dir perms are best-effort
 
         enc = (
             serialization.BestAvailableEncryption(passphrase)
