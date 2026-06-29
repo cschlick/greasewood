@@ -823,13 +823,27 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="greasewood",
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
+        epilog=(
+            "sudo requirements:\n"
+            "  sudo greasewood setup-root   -- writes /etc and /var/lib, owned back to you\n"
+            "  sudo -E HOME=$HOME greasewood join ...  -- needs root for /etc + /var/lib,\n"
+            "                               -E HOME=$HOME so SSH finds your key not root's\n"
+            "  sudo greasewood run          -- creates WireGuard interface\n"
+            "  sudo greasewood purge        -- removes WireGuard interface\n"
+            "\n"
+            "no sudo needed:\n"
+            "  greasewood status\n"
+            "  greasewood issue   (ca.key is owned by you after setup-root)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-c", "--config", default="/etc/greasewood.toml", metavar="FILE")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # setup-root
-    sp = sub.add_parser("setup-root", help="one-shot root node bootstrap (CA + keys + config + self-credential)")
+    sp = sub.add_parser("setup-root",
+                        help="[sudo] one-shot root bootstrap: CA + keys + config + self-credential")
     sp.add_argument("--hostname", default="root")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
@@ -843,12 +857,13 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_setup_root)
 
     # join
-    sp = sub.add_parser("join", help="enroll this machine as a node (SSHes to root to issue credential)")
+    sp = sub.add_parser("join",
+                        help="[sudo -E HOME=$HOME] enroll this machine: generates keys, SSHes to root to issue credential")
     sp.add_argument("root_ssh", metavar="USER@ROOT",
                     help="SSH connection to root node, e.g. user@gp1")
     sp.add_argument("--hostname", required=True)
     sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
-                    help="CA public key hex (from setup-root output)")
+                    help="CA public key hex (printed by setup-root)")
     sp.add_argument("--root-url", dest="root_url", required=True, metavar="URL",
                     help="root control plane URL, e.g. http://[addr]:7946")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
@@ -859,28 +874,25 @@ def main(argv=None) -> int:
     sp.add_argument("--root-config", dest="root_config", default="/etc/greasewood.toml",
                     metavar="PATH", help="path to greasewood.toml on the root node")
     sp.add_argument("--root-sudo", dest="root_sudo", action="store_true",
-                    help="prefix the remote issue command with sudo (needed when ca.key is root-owned)")
+                    help="prefix the remote issue command with sudo (only needed if ca.key is still root-owned)")
     sp.set_defaults(fn=cmd_join)
 
     # purge
-    sp = sub.add_parser("purge", help="remove all greasewood state from this machine (decommission or start over)")
+    sp = sub.add_parser("purge",
+                        help="[sudo] remove all greasewood state from this machine (decommission or start over)")
     sp.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     sp.set_defaults(fn=cmd_purge)
 
-    # init-ca
-    sp = sub.add_parser("init-ca", help="generate CA keypair (root, run once at genesis)")
-    sp.add_argument("key_path", help="path to write the CA private key")
-    sp.add_argument("--force", action="store_true", help="overwrite existing key")
-    sp.add_argument("--passphrase-env", dest="passphrase_env", metavar="ENV",
-                    help="env var containing CA key passphrase")
-    sp.set_defaults(fn=cmd_init_ca)
+    # run
+    sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
+    sp.set_defaults(fn=cmd_run)
 
-    # init-node
-    sp = sub.add_parser("init-node", help="generate node keypairs and print public material")
-    sp.set_defaults(fn=cmd_init_node)
+    # status
+    sp = sub.add_parser("status", help="show local node and directory state")
+    sp.set_defaults(fn=cmd_status)
 
     # issue  (root-side, run over SSH)
-    sp = sub.add_parser("issue", help="sign a credential for a new node (run on root via SSH)")
+    sp = sub.add_parser("issue", help="sign a credential for a new node (run on root via SSH, no sudo needed)")
     sp.add_argument("--id-pub", required=True, metavar="HEX",
                     help="node identity public key (hex)")
     sp.add_argument("--wg-pub", required=True, metavar="B64",
@@ -894,7 +906,7 @@ def main(argv=None) -> int:
 
     # install-cred  (node-side)
     sp = sub.add_parser("install-cred",
-                        help="install a credential received from the root (run on new node)")
+                        help="install a credential received from root (called automatically by join)")
     sp.add_argument("cred_file", help="path to credential JSON file")
     sp.set_defaults(fn=cmd_install_cred)
 
@@ -903,13 +915,17 @@ def main(argv=None) -> int:
     sp.add_argument("id_pub_hex", help="64-char hex identity public key")
     sp.set_defaults(fn=cmd_revoke)
 
-    # run
-    sp = sub.add_parser("run", help="run the daemon")
-    sp.set_defaults(fn=cmd_run)
+    # init-ca
+    sp = sub.add_parser("init-ca", help="generate CA keypair (called automatically by setup-root)")
+    sp.add_argument("key_path", help="path to write the CA private key")
+    sp.add_argument("--force", action="store_true", help="overwrite existing key")
+    sp.add_argument("--passphrase-env", dest="passphrase_env", metavar="ENV",
+                    help="env var containing CA key passphrase")
+    sp.set_defaults(fn=cmd_init_ca)
 
-    # status
-    sp = sub.add_parser("status", help="show local directory state")
-    sp.set_defaults(fn=cmd_status)
+    # init-node
+    sp = sub.add_parser("init-node", help="generate node keypairs (called automatically by join)")
+    sp.set_defaults(fn=cmd_init_node)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
