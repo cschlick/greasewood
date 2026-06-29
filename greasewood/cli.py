@@ -1,19 +1,19 @@
 """
-greasewood — CLI entry point.
+gw — CLI entry point.
 
 Enrollment flow (§10.1) — entirely over SSH, no HTTP:
 
   On the new node:
-    greasewood init-node          # generate keypairs, print public material
+    gw init-node          # generate keypairs, print public material
 
   On the root (operator SSHes in):
-    greasewood issue \\
+    gw issue \\
         --id-pub <hex> --wg-pub <hex> --hostname <name> --caps mesh \\
         [--endpoint [addr]:port]  # sign + output credential JSON, update directory
 
   Back on the new node:
-    greasewood install-cred cred.json   # create signed NodeRecord, seed directory
-    greasewood run                      # start daemon (pushes record to seeds on start)
+    gw install-cred cred.json   # create signed NodeRecord, seed directory
+    gw run                      # start daemon (pushes record to seeds on start)
 
 Other subcommands:
   init-ca             Generate CA keypair (root, run once at genesis).
@@ -155,7 +155,7 @@ def cmd_setup_root(args) -> int:
         log.info("generated CA key → %s", ca_key_path)
 
     # If run via sudo, recursively give data_dir to the real operator so
-    # they can run `greasewood issue` over SSH without needing sudo.
+    # they can run `gw issue` over SSH without needing sudo.
     # Root can still read everything regardless of ownership.
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
@@ -188,7 +188,7 @@ inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "greasewood0"
+interface = "gw0"
 listen_port = {listen_port}
 seeds = []
 root_url = "http://[::1]:{control_port}"
@@ -233,10 +233,10 @@ renew_before = "12h"
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
     print(f"Start the daemon:")
-    print(f"  sudo env PATH=\"$PATH\" greasewood -c {cfg_path} run")
+    print(f"  sudo env PATH=\"$PATH\" gw -c {cfg_path} run")
     print()
     print(f"Enroll a new node (run on the new machine, daemon must be running here first):")
-    print(f"  greasewood join <user>@<this-host> \\")
+    print(f"  gw join <user>@<this-host> \\")
     print(f"    --hostname <name> \\")
     print(f"    --ca-pub {ca_pub_hex} \\")
     print(f"    --root-url {seeds_url}")
@@ -287,7 +287,7 @@ inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "greasewood0"
+interface = "gw0"
 listen_port = {listen_port}
 seeds = [{json_mod.dumps(root_url)}]
 root_url = {json_mod.dumps(root_url)}
@@ -301,7 +301,7 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
     log.info("requesting credential from %s ...", root_ssh)
     sudo_prefix = "sudo " if args.root_sudo else ""
     remote_cmd = (
-        f"{sudo_prefix}greasewood -c {shlex.quote(root_cfg)} issue"
+        f"{sudo_prefix}gw -c {shlex.quote(root_cfg)} issue"
         f" --id-pub {node_keys.id_pub_hex}"
         f" --wg-pub {shlex.quote(node_keys.wg_pub_b64)}"
         f" --hostname {shlex.quote(hostname)}"
@@ -371,7 +371,7 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
     print(f"Start the daemon:")
-    print(f"  sudo env PATH=\"$PATH\" greasewood -c {cfg_path} run")
+    print(f"  sudo env PATH=\"$PATH\" gw -c {cfg_path} run")
     return 0
 
 
@@ -422,7 +422,7 @@ def cmd_init_node(args) -> int:
     else:
         print("endpoint: (not configured — set [node] endpoints in greasewood.toml)")
     print()
-    print("Pass id_pub and wg_pub to `greasewood issue` on the root node.")
+    print("Pass id_pub and wg_pub to `gw issue` on the root node.")
     return 0
 
 
@@ -476,7 +476,7 @@ def cmd_issue(args) -> int:
     # Print the next step for the operator
     print(
         f"\n# Next: copy the credential to {args.hostname} and run:\n"
-        f"#   greasewood install-cred <cred-file>",
+        f"#   gw install-cred <cred-file>",
         file=sys.stderr,
     )
     return 0
@@ -535,7 +535,7 @@ def cmd_install_cred(args) -> int:
     print(f"  caps    : {cred.caps}")
     print(f"  expires : {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    print("Run 'greasewood run' to start the daemon.")
+    print("Run 'gw run' to start the daemon.")
     print("The daemon will push this node's record to seeds on startup.")
     return 0
 
@@ -663,7 +663,7 @@ def cmd_run(args) -> int:
         )
         renewal.start()
     elif not own_record:
-        log.warning("no credential in directory — run 'greasewood install-cred' first")
+        log.warning("no credential in directory — run 'gw install-cred' first")
     elif not cfg.root_url:
         log.warning("root_url not set — automatic renewal disabled")
 
@@ -722,7 +722,7 @@ def cmd_status(args) -> int:
     records = sorted(directory.all(), key=lambda r: r.hostname)
 
     if not records:
-        print("directory is empty — run 'greasewood install-cred' then 'greasewood run'")
+        print("directory is empty — run 'gw install-cred' then 'gw run'")
         return 0
 
     fmt = "{:<20} {:<44} {:<22} {}"
@@ -757,7 +757,7 @@ def cmd_purge(args) -> int:
     cfg_path = Path(args.config)
 
     # Determine interface name and data_dir from config if available
-    iface = "greasewood0"
+    iface = "gw0"
     data_dir = Path("/var/lib/greasewood")
     if cfg_path.exists():
         try:

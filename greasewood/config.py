@@ -82,7 +82,7 @@ def load_config(path: Path) -> Config:
         caps=node.get("caps", ["mesh"]),
         endpoints=node.get("endpoints", []),
 
-        wg_interface=net.get("interface", "greasewood0"),
+        wg_interface=net.get("interface", "gw0"),
         listen_port=int(net.get("listen_port", 51820)),
 
         seeds=net.get("seeds", []),
