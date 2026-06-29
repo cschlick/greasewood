@@ -290,7 +290,7 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
         f" --caps {shlex.quote(','.join(caps))}"
     )
     result = subprocess.run(
-        ["ssh", root_ssh, remote_cmd],
+        ["ssh", "-o", "StrictHostKeyChecking=accept-new", root_ssh, remote_cmd],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
