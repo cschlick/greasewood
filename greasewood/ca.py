@@ -130,21 +130,36 @@ class CA:
                  subject_pub.hex()[:16], hub_endpoint, stmt.exp)
         return stmt
 
-    def retire(self, subject_pub: bytes, ttl: dt.timedelta) -> CAStatement:
+    def retire(
+        self,
+        subject_pub: bytes,
+        ttl: dt.timedelta,
+        grace: dt.timedelta = dt.timedelta(0),
+    ) -> CAStatement:
         """
-        Sign a retirement: subject_pub is no longer an accepted signer. Use
-        after a successor has taken over and the overlap window has elapsed.
+        Sign a retirement: subject_pub will no longer be an accepted signer.
+
+        The retirement takes effect after `grace` (it is dated now + grace), not
+        immediately. This is essential: a retirement removes trust in the old CA
+        and therefore in every still-old-signed node. If it took effect at once,
+        the new hub would drop those nodes as peers before they could learn of
+        the retirement and renew under the new CA — they'd be cut off mid-
+        migration. The grace (≈ one credential TTL) lets the statement propagate
+        and every node re-credential under the successor first, then it
+        activates. This is the "one-TTL overlap" of §11.
         """
         now = dt.datetime.now(_UTC).replace(microsecond=0)
+        effective = now + grace
         stmt = CAStatement(
             kind="retire",
             by_pub=self._keys.ca_pub_bytes,
             subject_pub=subject_pub,
             hub_endpoint="",
-            iat=now,
-            exp=now + ttl,
+            iat=effective,
+            exp=effective + ttl,
         ).sign(self._keys.ca_priv)
-        log.info("retired CA %s until %s", subject_pub.hex()[:16], stmt.exp)
+        log.info("retired CA %s effective %s until %s",
+                 subject_pub.hex()[:16], effective, stmt.exp)
         return stmt
 
     # --- revoke list ---
