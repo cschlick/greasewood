@@ -215,13 +215,14 @@ def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
     )
 
 
-def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) -> dict:
+def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
+                  caps: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
     Enrollment uses the real `gw mint` / `gw join` flow — the only supported
     path (see door_enroll). Container creation and `gw run` stay parallel; only
-    the door section serializes.
+    the door section serializes. `caps` (e.g. "mesh,tls") is passed to join.
 
     Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
     """
@@ -236,7 +237,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) ->
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    door_enroll(gw_root, cid, ipv6, hostname=hostname)
+    door_enroll(gw_root, cid, ipv6, hostname=hostname, caps=caps)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")

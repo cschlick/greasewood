@@ -179,6 +179,8 @@ udp dport { 51820, 51821 } accept
 | `hub-promote`      | yes   | Turn this enrolled node into a hub (mint its own CA key).  |
 | `hub-endorse`      | no    | Endorse a successor hub's CA (on the current hub).         |
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
+| `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
+| `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
@@ -219,6 +221,42 @@ credential_ttl = "24h"
 - **hub** — holds the CA private key; serves the control plane and the
   enrollment door; participates in the mesh.
 - **node** — a plain mesh participant.
+
+## TLS certificates for services
+
+The same CA that gates the mesh also issues ordinary **x509 TLS certificates**,
+so a service on a node (Postgres, an internal API, …) gets a cert that every
+peer validates against one trust root — no second PKI. These are real x509
+certs with SANs, distinct from the mesh credential, but signed by the same
+Ed25519 CA key.
+
+A node may request certs only if its credential carries the **`tls`**
+capability — grant it at enrollment:
+
+```bash
+sudo gw join "$TOKEN" --hostname dbnode --caps mesh,tls
+```
+
+Then, on that node:
+
+```bash
+sudo gw cert-request --san postgres.mesh --san 2001:db8::5 --name postgres
+# writes <data_dir>/tls/postgres.key, postgres.crt, ca.crt
+gw cert-status                      # show what's issued and when it expires
+```
+
+The leaf private key is generated locally and never sent to the hub; only its
+public key goes in the request, which is signed by the node's identity key. The
+hub returns the leaf cert plus the CA cert. Point the service at them — e.g.
+Postgres `ssl_cert_file=postgres.crt`, `ssl_key_file=postgres.key`, and clients
+`sslrootcert=ca.crt`. Certs are short-lived (default 7 days, `[hub] tls_cert_ttl`);
+re-run `cert-request` from cron/timer to renew. Revocation is passive — stop
+renewing and it expires.
+
+> SANs aren't otherwise constrained — the `tls` capability is the gate, so grant
+> it only to nodes that run services. The hub's CA cert is also at
+> `GET /ca-cert`. (Across a hub succession the CA changes; re-request to pick up
+> the new issuer.)
 
 ## Moving the hub (CA succession)
 

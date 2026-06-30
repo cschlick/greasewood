@@ -339,3 +339,64 @@ class CAStatement:
             exp=_parse_ts(d["exp"]),
             sig=_b64d(d["sig"]),
         )
+
+
+# ---------------------------------------------------------------------------
+# CertRequest — a node asking the hub for an x509 TLS cert (§12)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CertRequest:
+    """
+    Sent by an enrolled node to the hub to obtain an x509 TLS certificate for a
+    local service. id_priv possession authenticates the requester (same model
+    as RenewRequest); the leaf private key never leaves the node — only leaf_pub
+    is sent. nonce + ts bound replay.
+    """
+    id_pub: bytes        # requesting node identity (Ed25519, 32 bytes)
+    leaf_pub: bytes      # the service's TLS public key (Ed25519, 32 bytes)
+    cn: str              # subject common name
+    dns: list[str]       # requested DNS SANs
+    ips: list[str]       # requested IP SANs
+    nonce: str
+    ts: dt.datetime
+    sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "cn": self.cn,
+            "dns": self.dns,
+            "id_pub": _b64e(self.id_pub),
+            "ips": self.ips,
+            "leaf_pub": _b64e(self.leaf_pub),
+            "nonce": self.nonce,
+            "ts": _ts(self.ts),
+        }
+
+    def sign(self, id_priv: Ed25519PrivateKey) -> "CertRequest":
+        return replace(self, sig=id_priv.sign(_canonical(self._body_dict())))
+
+    def verify_self_sig(self) -> None:
+        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
+        try:
+            pub.verify(self.sig, _canonical(self._body_dict()))
+        except InvalidSignature:
+            raise ValueError("invalid cert-request self-signature")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["sig"] = _b64e(self.sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CertRequest":
+        return cls(
+            id_pub=_b64d(d["id_pub"]),
+            leaf_pub=_b64d(d["leaf_pub"]),
+            cn=d["cn"],
+            dns=list(d.get("dns", [])),
+            ips=list(d.get("ips", [])),
+            nonce=d["nonce"],
+            ts=_parse_ts(d["ts"]),
+            sig=_b64d(d["sig"]),
+        )
