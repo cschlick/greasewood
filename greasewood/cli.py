@@ -740,6 +740,7 @@ def cmd_run(args) -> int:
     ca: CA | None = None
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
+    door_watcher = None
 
     revoked: set[str] = set()
     is_hub = cfg.role in ("hub", "root")
@@ -838,6 +839,8 @@ def cmd_run(args) -> int:
         sync.stop()
     if renewal:
         renewal.stop()
+    if door_watcher:
+        door_watcher.stop()
     log.info("shutdown complete")
     return 0
 
