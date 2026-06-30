@@ -167,25 +167,15 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
     return False
 
 
-def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
-                hostname: str | None = None, caps: str | None = None,
-                check: bool = True):
+def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, *,
+                    hostname: str | None = None, caps: str | None = None,
+                    check: bool = True):
     """
-    Run one `gw mint` (hub) → `gw join` (node) door enrollment against an
-    EXISTING node container. Returns the `gw join` CompletedProcess so callers
-    can inspect stdout/stderr (e.g. the re-enrollment notice).
-
-    The door is single-slot, so the whole mint→join→teardown is serialized and
-    we wait for the hub to destroy gw-door before releasing — the next mint then
-    starts clean, with no race against the door-watcher teardown.
-
-    `hostname`/`caps` are passed through as flags only when given, so omitting
-    them exercises join's "keep existing config" behavior. An explicit endpoint
-    is always passed: containers only have a ULA, which join's GUA auto-detection
-    skips (fine inside the Podman bridge, but it would leave node<->node links
-    unable to form).
+    Run one `gw mint` (on hub_cid) → `gw join` (on node_cid) door enrollment.
+    `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
+    over the hub so a test can enroll via a successor hub, not just the root.
+    Returns the `gw join` CompletedProcess.
     """
-    hub_cid = gw_root["cid"]
     extra = []
     if hostname is not None:
         extra += ["--hostname", hostname]
@@ -195,7 +185,7 @@ def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
     with _ENROLL_LOCK:
         # mint --endpoint takes a BARE address; the door port is fixed and the
         # token carries only the host.
-        mint = pexec(hub_cid, "gw", "mint", "--endpoint", gw_root["ipv6"])
+        mint = pexec(hub_cid, "gw", "mint", "--endpoint", hub_ipv6)
         token = _extract_token(mint.stdout + "\n" + mint.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
@@ -211,6 +201,18 @@ def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
         assert _wait_iface_gone(hub_cid, "gw-door"), \
             "hub did not tear down gw-door after enrollment"
     return j
+
+
+def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
+                hostname: str | None = None, caps: str | None = None,
+                check: bool = True):
+    """Enroll an existing node container via the root hub (see door_enroll_via).
+    `hostname`/`caps` are passed only when given, so omitting them exercises
+    join's "keep existing config" behavior."""
+    return door_enroll_via(
+        gw_root["cid"], gw_root["ipv6"], node_cid, node_ipv6,
+        hostname=hostname, caps=caps, check=check,
+    )
 
 
 def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) -> dict:
@@ -237,7 +239,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) ->
     door_enroll(gw_root, cid, ipv6, hostname=hostname)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-    podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
+    podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
 
     return {
         "cid": cid,

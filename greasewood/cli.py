@@ -750,12 +750,16 @@ def cmd_hub_retire(args) -> int:
         sys.exit("--ca-pub must be a 64-character hex Ed25519 public key")
 
     ttl = _parse_duration(args.ttl)
-    stmt = ca.retire(subject_pub, ttl)
+    # Grace = how long the old CA stays trusted before the retirement bites, so
+    # every node migrates to the new CA first. Defaults to one credential TTL.
+    grace = _parse_duration(args.grace) if args.grace else cfg.credential_ttl
+    stmt = ca.retire(subject_pub, ttl, grace)
     _append_to_bundle(cfg, stmt)
 
-    print(f"retired CA {args.ca_pub[:16]}…")
-    print("Once this propagates, the fleet no longer accepts its credentials.")
-    print("Ensure every node has renewed under the new CA before decommissioning.")
+    print(f"retired CA {args.ca_pub[:16]}… effective {stmt.iat:%Y-%m-%d %H:%M UTC}")
+    print(f"  grace    : {grace} (nodes must renew under the new CA before then)")
+    print("Until the effective time the old CA stays trusted, so the migration")
+    print("is non-disruptive. Decommission the old hub after the effective time.")
     return 0
 
 
@@ -1146,6 +1150,9 @@ def main(argv=None) -> int:
                     help="CA public key to retire")
     sp.add_argument("--ttl", default="3650d",
                     help="how long the retirement stays in effect (default: 3650d)")
+    sp.add_argument("--grace", default=None,
+                    help="delay before the retirement takes effect, for nodes to "
+                         "migrate first (default: the hub's credential TTL)")
     sp.set_defaults(fn=cmd_hub_retire)
 
     args = p.parse_args(argv)
