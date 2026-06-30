@@ -55,6 +55,29 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
     return val.encode()
 
 
+def _print_firewall_help(listen_port: int = 51820, control_port: int = 7946) -> None:
+    """
+    Print (never apply) the recommended firewall posture. greasewood binds its
+    control/enroll planes only to the overlay + loopback, so nothing it runs is
+    exposed on the underlay regardless of firewall. On a default-drop host you
+    still allow the few things below to *reach* those sockets.
+
+    Recommended: apply the SAME rules on EVERY node, not just the current hub.
+    Since any node can be promoted to hub (gw hub-promote), a uniform ruleset
+    means a hub handover needs no firewall change anywhere. A rule allowing a
+    port nothing is bound to is harmless — the kernel just refuses the
+    connection until that node actually becomes a hub and binds it.
+    """
+    from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
+    print("Firewall (greasewood never edits it). Recommended posture — the SAME")
+    print("rules on every node, so any node can become the hub with no firewall")
+    print("change. On a default-drop host, allow (nftables):")
+    print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept            # WireGuard (underlay)")
+    print(f"  iifname \"lo\" accept                          # hub talks to itself")
+    print(f"  iifname \"gw0\" tcp dport {control_port} accept        # control plane (when hub)")
+    print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept    # enrollment (when hub)")
+
+
 # ---------------------------------------------------------------------------
 # setup-hub  (one-shot hub bootstrap: CA + door key + routing + self-credential)
 # ---------------------------------------------------------------------------
@@ -243,6 +266,8 @@ door_window = "15m"
     print(f"Enroll a new node:")
     print(f"  TOKEN=$(sudo gw mint)          # on this machine")
     print(f"  sudo gw join \"$TOKEN\" --hostname <name>   # on the new machine")
+    print()
+    _print_firewall_help(listen_port, control_port)
     return 0
 
 
@@ -454,33 +479,36 @@ def cmd_join(args) -> int:
         "caps": caps,
     }
     req_body = json_mod.dumps(req, separators=(",", ":")).encode()
-    try:
-        conn.sendall(struct.pack(">I", len(req_body)) + req_body)
 
-        # Receive response
+    def _recv_framed(sock):
         hdr = b""
         while len(hdr) < 4:
-            chunk = conn.recv(4 - len(hdr))
+            chunk = sock.recv(4 - len(hdr))
             if not chunk:
                 raise ConnectionError("connection closed")
             hdr += chunk
         length = struct.unpack(">I", hdr)[0]
         raw = b""
         while len(raw) < length:
-            chunk = conn.recv(length - len(raw))
+            chunk = sock.recv(length - len(raw))
             if not chunk:
                 raise ConnectionError("connection closed")
             raw += chunk
-        resp = json_mod.loads(raw)
+        return json_mod.loads(raw)
+
+    def _send_framed(sock, obj):
+        b = json_mod.dumps(obj, separators=(",", ":")).encode()
+        sock.sendall(struct.pack(">I", len(b)) + b)
+
+    # Leave the connection OPEN after the response — we send our signed record
+    # back on it as a second leg (see below).
+    try:
+        conn.sendall(struct.pack(">I", len(req_body)) + req_body)
+        resp = _recv_framed(conn)
     except Exception as e:
         conn.close()
         wgmod.destroy_interface("gw-door")
         sys.exit(f"enroll RPC failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
     if not resp.get("ok"):
         wgmod.destroy_interface("gw-door")
@@ -528,17 +556,25 @@ def cmd_join(args) -> int:
     directory.put(record)
     directory.save(dir_cache)
 
-    # Push our record to the hub via the door tunnel before tearing it down.
-    # This bootstraps the hub's directory so the ReconcileLoop installs our
-    # WG peer immediately — without this, the node can't reach the hub overlay
-    # address to publish, and the hub never adds the peer (chicken-and-egg).
-    from .door import HUB_DOOR_IP as _HUB_DOOR_IP
-    from .sync import push_record as _push_record
+    # Send our signed record back over the SAME door connection; the hub merges
+    # it into its directory so the ReconcileLoop keeps the peer it just installed
+    # (the bootstrap chicken-and-egg). Doing this on the door tunnel — rather
+    # than a separate POST /publish — means the control plane never has to listen
+    # on the door interface.
     try:
-        _push_record(f"http://[{_HUB_DOOR_IP}]:7946", record, timeout=5.0)
-        log.info("pre-published record to hub via door tunnel")
+        _send_framed(conn, {"v": 1, "record": record.to_dict()})
+        ack = _recv_framed(conn)
+        if ack.get("ok"):
+            log.info("published record to hub via door tunnel")
+        else:
+            log.warning("hub rejected door publish: %s", ack.get("error"))
     except Exception as e:
-        log.warning("door pre-publish failed (hub learns this node on next sync): %s", e)
+        log.warning("door publish failed (hub learns this node on next sync): %s", e)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     # Tear down the door interface
     wgmod.destroy_interface("gw-door")
@@ -575,6 +611,8 @@ trusted_pubs = ["{ca_pub_hex}"]
     print()
     print(f"Start the daemon:")
     print(f"  sudo gw run")
+    print()
+    _print_firewall_help(listen_port)
     return 0
 
 
@@ -995,8 +1033,13 @@ def cmd_run(args) -> int:
         # Re-apply door routing in case the machine rebooted since setup-hub
         wgmod.setup_door_routing()
 
+        # Bind the control plane to the overlay address (reachable only through
+        # the mesh) and loopback (for the hub talking to itself) — NOT "::".
+        # This keeps it off the underlay structurally, no firewall rule needed.
+        port = _control_port(cfg)
+        listen_addrs = [f"[{keys.addr}]:{port}", f"[::1]:{port}"]
         srv = ControlServer(
-            cfg.control_listen,
+            listen_addrs,
             directory,
             get_ca_pubs=trust.trusted_pubs,
             get_revoked=lambda: revoked,
@@ -1014,6 +1057,9 @@ def cmd_run(args) -> int:
             directory=directory,
             node_keys=keys,
             wg_iface=cfg.wg_interface,
+            get_ca_pubs=trust.trusted_pubs,
+            get_revoked=lambda: revoked,
+            cache_path=cfg.dir_cache_path,
         )
         door_watcher.start()
         log.info("door watcher started")

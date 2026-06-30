@@ -177,7 +177,7 @@ class _IPv6Server(HTTPServer):
 class ControlServer:
     def __init__(
         self,
-        listen: str,
+        listen,                     # str or list[str] of "[addr]:port"
         directory: "Directory",
         get_ca_pubs,
         get_revoked,
@@ -186,9 +186,7 @@ class ControlServer:
         get_bundle=None,
         tls_cert_ttl=None,
     ) -> None:
-        host, _, port_str = listen.rpartition(":")
-        # Strip brackets from IPv6 literals like "[fd8d::1]"
-        host = host.strip("[]")
+        listens = [listen] if isinstance(listen, str) else list(listen)
 
         class Handler(_Handler):
             pass
@@ -201,21 +199,30 @@ class ControlServer:
         Handler.cache_path = cache_path
         Handler.tls_cert_ttl = tls_cert_ttl
 
-        # Use AF_INET6 when binding to an IPv6 address or unspecified (":port").
-        # On Linux, AF_INET6 with "::" accepts both IPv4 and IPv6 unless
-        # IPV6_V6ONLY is set, so this is safe for dual-stack hosts too.
-        is_ipv4 = "." in host  # simple heuristic: IPv4 literals contain dots
-        if is_ipv4:
-            self._server = HTTPServer((host, int(port_str)), Handler)
-        else:
-            bind_host = host or "::"
-            self._server = _IPv6Server((bind_host, int(port_str)), Handler)
+        # Bind one socket per address — typically the hub's overlay address and
+        # loopback, NOT "::". The control plane is then unreachable on the
+        # underlay by construction, no firewall rule required.
+        self._servers = []
+        for lst in listens:
+            host, _, port_str = lst.rpartition(":")
+            host = host.strip("[]")  # strip brackets from "[fd8d::1]"
+            is_ipv4 = "." in host    # IPv4 literals contain dots
+            if is_ipv4:
+                self._servers.append(HTTPServer((host, int(port_str)), Handler))
+            else:
+                self._servers.append(_IPv6Server((host or "::", int(port_str)), Handler))
+        # Primary server (callers/tests read its bound port).
+        self._server = self._servers[0]
 
     def start(self) -> threading.Thread:
-        t = threading.Thread(target=self._server.serve_forever, name="http", daemon=True)
-        t.start()
-        log.info("control plane listening on %s", self._server.server_address)
-        return t
+        threads = []
+        for srv in self._servers:
+            t = threading.Thread(target=srv.serve_forever, name="http", daemon=True)
+            t.start()
+            threads.append(t)
+            log.info("control plane listening on %s", srv.server_address)
+        return threads[0]
 
     def stop(self) -> None:
-        self._server.shutdown()
+        for srv in self._servers:
+            srv.shutdown()

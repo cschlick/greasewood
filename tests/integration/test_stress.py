@@ -152,7 +152,7 @@ def test_grow_mesh_to_n_nodes(gw_root, gw_image, gw_network):
 
         # 1. Directory: root + N nodes
         expected_records = N_NODES + 1
-        got = wait_for_directory_size(gw_root["url"], expected_records, timeout=60)
+        got = wait_for_directory_size(gw_root["cid"], expected_records, timeout=60)
         assert got >= expected_records, (
             f"root directory has {got}/{expected_records} records"
         )

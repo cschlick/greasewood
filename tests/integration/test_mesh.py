@@ -6,30 +6,27 @@ Each test uses real WireGuard interfaces inside privileged Podman containers.
 Run:
   pytest tests/integration/ -v
 """
-import json
-import urllib.request
-
 import pytest
 
-from .helpers import wait_for_hostname, wait_for_ping
+from .helpers import (
+    directory_hostnames, directory_records, hub_get, wait_for_hostname,
+    wait_for_ping,
+)
 
 pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
-# Root-only tests (no node needed)
+# Root-only tests (no node needed). Control plane is queried from inside the
+# hub container over loopback — it's not reachable from the host by design.
 # ---------------------------------------------------------------------------
 
 def test_root_health(gw_root):
-    resp = urllib.request.urlopen(f"{gw_root['url']}/health")
-    assert resp.status == 200
+    assert "ok" in hub_get(gw_root["cid"], "/health")
 
 
 def test_root_in_own_directory(gw_root):
-    resp = urllib.request.urlopen(f"{gw_root['url']}/directory")
-    data = json.loads(resp.read())
-    hostnames = {r["hostname"] for r in data}
-    assert "root" in hostnames
+    assert "root" in directory_hostnames(gw_root["cid"])
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +35,13 @@ def test_root_in_own_directory(gw_root):
 
 def test_node_appears_in_root_directory(gw_root, gw_node):
     """Node pushes its NodeRecord to root on startup — should appear within seconds."""
-    assert wait_for_hostname(gw_root["url"], gw_node["hostname"], timeout=20), \
+    assert wait_for_hostname(gw_root["cid"], gw_node["hostname"], timeout=20), \
         f"{gw_node['hostname']} never appeared in root directory"
 
 
 def test_root_overlay_addr_in_directory(gw_root):
     """Root's NodeRecord contains a valid fd8d:: overlay address."""
-    resp = urllib.request.urlopen(f"{gw_root['url']}/directory")
-    data = json.loads(resp.read())
+    data = directory_records(gw_root["cid"])
     root_record = next(r for r in data if r["hostname"] == "root")
     # addr is anchored in the signed credential, not a top-level record field.
     assert root_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
@@ -114,7 +110,7 @@ def test_two_nodes_ping_each_other(gw_root, gw_node, gw_image, gw_network):
         node2 = bring_up_node(gw_image, gw_network, gw_root)
 
         # Both nodes need to know about each other — wait for root to have both
-        assert wait_for_hostname(gw_root["url"], node2["hostname"], timeout=20)
+        assert wait_for_hostname(gw_root["cid"], node2["hostname"], timeout=20)
 
         # node1 → node2
         assert wait_for_ping(gw_node["cid"], node2["overlay"], timeout=30), \

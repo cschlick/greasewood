@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import container_ipv6, pexec, podman, wait_for_http
+from .helpers import container_ipv6, pexec, podman, wait_for_control_plane
 
 IMAGE_TAG = "greasewood-test:latest"
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -58,41 +58,26 @@ def gw_network():
     podman("network", "rm", "-f", name, check=False)
 
 
-def _free_tcp_port() -> int:
-    """Grab an ephemeral TCP port the kernel says is free, then release it."""
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
 @pytest.fixture(scope="session")
 def gw_root(gw_image, gw_network):
     """
     Start the hub container, run setup-hub, launch daemon.
 
-    The host has no route onto the Podman IPv6 bridge, so the control plane
-    port is published to host loopback for the pytest driver. Node containers,
-    which DO share the bridge, talk to the root over the container-network
-    address. Hence two URLs.
+    The control plane binds only to the overlay address + loopback (never the
+    underlay), so it is not reachable from the host. Tests query it from inside
+    the hub container over loopback via helpers.hub_get(cid, path).
 
     Yields a dict:
-      cid        — container ID
+      cid        — container ID (also the handle for control-plane queries)
       ipv6       — underlay IPv6 address (fd52:ba5e::.../64)
-      url        — host-reachable control plane URL (published, 127.0.0.1:PORT)
-      net_url    — container-network control plane URL (http://[fd52:...]:7946)
       ca_pub     — CA public key hex
       overlay    — overlay address (fd8d:e5c1:db1a::/48 prefix)
     """
     cid = None
     try:
-        host_port = _free_tcp_port()
         r = podman(
             "run", "-d", "--privileged",
             "--network", gw_network,
-            "-p", f"127.0.0.1:{host_port}:7946",
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
             gw_image, "sleep", "infinity",
         )
@@ -106,24 +91,18 @@ def gw_root(gw_image, gw_network):
               "--hostname", "root",
               "--endpoint", f"[{ipv6}]:51820")
 
-        ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
         overlay = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-
-        # Derive overlay addr (same formula as keys.py)
+        ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
         overlay_addr = overlay_addr_from_id_pub(overlay)
 
         podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
-        url = f"http://127.0.0.1:{host_port}"          # host → published
-        net_url = f"http://[{ipv6}]:7946"              # container → bridge
-        assert wait_for_http(f"{url}/health", timeout=20), \
+        assert wait_for_control_plane(cid, timeout=20), \
             "root daemon did not start — check /tmp/gw.log in the container"
 
         yield {
             "cid": cid,
             "ipv6": ipv6,
-            "url": url,
-            "net_url": net_url,
             "ca_pub": ca_pub,
             "overlay": overlay_addr,
         }

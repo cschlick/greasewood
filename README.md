@@ -149,22 +149,38 @@ provisioner is minting ahead of itself.
 
 ## Firewall
 
-On each node's **underlay** (public) interface, open:
+**greasewood never touches your firewall.** Its control plane (`7946/tcp`) and
+enrollment RPC (`7947/tcp`) bind only to the node's overlay address and
+loopback — *never* the underlay — so nothing it runs is reachable off-mesh
+regardless of firewall policy. The only thing that must face the underlay is
+WireGuard itself (UDP), which you open like for any VPN. `setup-hub` and `join`
+print the exact rules below; they don't apply them.
 
-| Port        | Proto | Purpose                                  |
-|-------------|-------|------------------------------------------|
-| `51820`     | UDP   | mesh WireGuard (`gw0`)                    |
-| `51821`     | UDP   | enrollment door (`gw-door`), during join |
+On a default-drop host, allow (nftables):
 
-The control plane (`7946/tcp`) and enrollment RPC (`7947/tcp`) are **not**
-reached over the underlay — they travel inside the overlay and door tunnels
-respectively. If a host runs a default-drop input policy, allow them on the
-tunnel interfaces instead of the public NIC, e.g. with nftables:
+| Interface  | Rule                          | Purpose                              |
+|------------|-------------------------------|--------------------------------------|
+| underlay   | `udp dport 51820 accept`      | mesh WireGuard                       |
+| underlay   | `udp dport 51821 accept`      | enrollment door (during join)        |
+| `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:7946`) |
+| `gw0`      | `tcp dport 7946 accept`       | control plane — **only used when this node is the hub** |
+| `gw-door`  | `tcp dport 7947 accept`       | enrollment exchange — **only when hub** |
 
 ```
-iifname { "gw0", "gw-door" } tcp dport { 7946, 7947 } accept
 udp dport { 51820, 51821 } accept
+iifname "lo" accept
+iifname "gw0" tcp dport 7946 accept
+iifname "gw-door" tcp dport 7947 accept
 ```
+
+**Recommended posture: apply the same ruleset on *every* node, not just the
+current hub.** Any node can be promoted to hub ([Moving the
+hub](#moving-the-hub-ca-succession)), so a uniform ruleset means a hub handover
+needs **no firewall change anywhere**. Opening `7946`/`7947` on a node that
+isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
+connection until that node actually becomes a hub and binds it. Plain nodes run
+no control plane, so on a node that will never be a hub you can omit the `gw0`/
+`gw-door` TCP rules and open only the two UDP ports.
 
 ## Command reference
 
