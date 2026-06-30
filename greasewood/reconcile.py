@@ -113,7 +113,7 @@ class ReconcileLoop:
         directory: Directory,
         local_id_pub: bytes,
         local_caps: list[str],
-        ca_pubs: list[bytes],
+        get_ca_pubs: "Callable[[], list[bytes]]",
         revoked: set[str],
         interval: float = 5.0,
         policy: Policy = default_policy,
@@ -122,7 +122,9 @@ class ReconcileLoop:
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
-        self._ca_pubs = ca_pubs
+        # Resolved each cycle — the trusted-CA set grows/shrinks during CA
+        # succession (§11), so it cannot be captured once.
+        self._get_ca_pubs = get_ca_pubs
         self._revoked = revoked
         self._interval = interval
         self._policy = policy
@@ -140,7 +142,7 @@ class ReconcileLoop:
                     self._directory,
                     self._local_id_pub,
                     self._local_caps,
-                    self._ca_pubs,
+                    self._get_ca_pubs(),
                     self._revoked,
                     self._policy,
                 )

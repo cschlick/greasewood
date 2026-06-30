@@ -32,11 +32,16 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
+import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .wire import CAStatement
 
+log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
 
 
@@ -168,3 +173,116 @@ def active_hub_endpoint(
             if best is None or s.iat > best.iat:
                 best = s
     return best.hub_endpoint if best else None
+
+
+# ---------------------------------------------------------------------------
+# Runtime: live trust state + distribution
+# ---------------------------------------------------------------------------
+
+def fetch_ca_bundle(hub_url: str, timeout: float = 10.0) -> list[CAStatement]:
+    """GET {hub_url}/ca-bundle and parse it into statements."""
+    url = f"{hub_url.rstrip('/')}/ca-bundle"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        raw = json.loads(resp.read())
+    out: list[CAStatement] = []
+    for sd in raw.get("statements", []):
+        try:
+            out.append(CAStatement.from_dict(sd))
+        except Exception:
+            continue
+    return out
+
+
+class TrustStore:
+    """
+    Thread-safe holder of a node's live trust state: static roots + the CA
+    bundle. Everything that needs "who do I currently trust?" / "where is the
+    hub?" reads from here, so trust can change at runtime as the bundle syncs.
+    """
+
+    def __init__(
+        self,
+        roots: list[bytes],
+        bundle: "CABundle",
+        bundle_path: Path,
+        static_seeds: list[str] | None = None,
+        fallback_hub_url: str = "",
+    ) -> None:
+        self._roots = set(roots)
+        self._bundle = bundle
+        self._path = bundle_path
+        self._static_seeds = list(static_seeds or [])
+        self._fallback = fallback_hub_url
+        self._lock = threading.Lock()
+
+    def trusted_pubs(self) -> list[bytes]:
+        with self._lock:
+            return list(resolve_trust(self._roots, self._bundle))
+
+    def hub_url(self) -> str:
+        with self._lock:
+            ep = active_hub_endpoint(self._roots, self._bundle)
+        return ep or self._fallback
+
+    def seeds(self) -> list[str]:
+        """Directory seeds = static seeds plus the current hub, de-duplicated."""
+        hub = self.hub_url()
+        out = list(self._static_seeds)
+        if hub and hub not in out:
+            out.append(hub)
+        return out
+
+    def bundle_dict(self) -> dict:
+        with self._lock:
+            return self._bundle.to_dict()
+
+    def merge(self, statements: list[CAStatement]) -> int:
+        with self._lock:
+            n = self._bundle.merge(statements)
+            if n:
+                self._bundle.save(self._path)
+            return n
+
+    def refresh_from_disk(self) -> int:
+        """Re-read the on-disk bundle and merge it — picks up local
+        hub-endorse / hub-retire writes without a daemon restart."""
+        return self.merge(CABundle.load(self._path).statements)
+
+
+class TrustSyncLoop:
+    """Pulls the CA bundle from the current hub and re-reads local writes,
+    keeping the TrustStore current. Mirror of SyncLoop for the trust set."""
+
+    def __init__(self, store: TrustStore, interval: float = 20.0) -> None:
+        self._store = store
+        self._interval = interval
+        self._stop = threading.Event()
+
+    def _tick(self) -> None:
+        self._store.refresh_from_disk()
+        url = self._store.hub_url()
+        if not url:
+            return
+        try:
+            stmts = fetch_ca_bundle(url)
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            log.debug("trust sync from %s failed: %s", url, e)
+            return
+        n = self._store.merge(stmts)
+        if n:
+            log.info("trust: merged %d new CA statement(s) from %s", n, url)
+
+    def run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._tick()
+            except Exception as e:  # noqa: BLE001
+                log.error("trust sync loop error: %s", e)
+
+    def start(self) -> threading.Thread:
+        t = threading.Thread(target=self.run, name="trust-sync", daemon=True)
+        t.start()
+        return t
+
+    def stop(self) -> None:
+        self._stop.set()

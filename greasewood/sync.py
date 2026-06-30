@@ -16,6 +16,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 from .directory import Directory
 from .wire import NodeRecord
@@ -54,24 +55,26 @@ class SyncLoop:
     def __init__(
         self,
         directory: Directory,
-        seeds: list[str],
+        get_seeds: "Callable[[], list[str]]",
         cache_path: Path,
         interval: float = 20.0,
     ) -> None:
         self._directory = directory
-        self._seeds = seeds
+        # Resolved each cycle — seeds follow the active hub during CA
+        # succession (§11), so they cannot be captured once.
+        self._get_seeds = get_seeds
         self._cache_path = cache_path
         self._interval = interval
         self._stop = threading.Event()
 
     def _pull_once(self) -> None:
-        # Re-merge the cache file first so records written by `greasewood issue`
-        # (which writes directly to disk) are picked up without a daemon restart.
+        # Re-merge the cache file first so records written directly to disk
+        # are picked up without a daemon restart.
         from .directory import Directory as _Dir
         on_disk = _Dir.load(self._cache_path)
         self._directory.merge(on_disk.all())
 
-        for seed in self._seeds:
+        for seed in self._get_seeds():
             try:
                 records = pull_directory(seed)
                 n = self._directory.merge(records)

@@ -781,7 +781,18 @@ def cmd_run(args) -> int:
     log.info("overlay addr: %s", keys.addr)
 
     directory = Directory.load(cfg.dir_cache_path)
-    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
+
+    # Live trust state: static roots + the CA-succession bundle. Everything that
+    # asks "who do I trust?" / "where is the hub?" reads from here, so trust and
+    # the active hub can change at runtime as the bundle syncs (§11).
+    from .trust import CABundle, TrustStore, TrustSyncLoop
+    trust = TrustStore(
+        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
+        bundle=CABundle.load(cfg.ca_bundle_path),
+        bundle_path=cfg.ca_bundle_path,
+        static_seeds=cfg.seeds,
+        fallback_hub_url=cfg.root_url,
+    )
 
     wgmod.ensure_interface(
         cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
@@ -791,6 +802,7 @@ def cmd_run(args) -> int:
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
     door_watcher = None
+    trust_sync = None
 
     revoked: set[str] = set()
     is_hub = cfg.role in ("hub", "root")
@@ -808,10 +820,11 @@ def cmd_run(args) -> int:
         srv = ControlServer(
             cfg.control_listen,
             directory,
-            ca_pubs=ca_pubs,
+            get_ca_pubs=trust.trusted_pubs,
             get_revoked=lambda: revoked,
             ca=ca,
             cache_path=cfg.dir_cache_path,
+            get_bundle=trust.bundle_dict,
         )
         srv.start()
 
@@ -826,39 +839,43 @@ def cmd_run(args) -> int:
         door_watcher.start()
         log.info("door watcher started")
 
-    if cfg.seeds:
-        sync = SyncLoop(directory, cfg.seeds, cfg.dir_cache_path)
-        sync.start()
+    # Keep the trusted-CA set current (picks up succession bundle + local
+    # hub-endorse/retire writes). Runs on every role.
+    trust_sync = TrustSyncLoop(trust)
+    trust_sync.start()
+
+    # Directory sync — seeds follow the active hub via the TrustStore.
+    sync = SyncLoop(directory, trust.seeds, cfg.dir_cache_path)
+    sync.start()
 
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
         directory=directory,
         local_id_pub=keys.id_pub_bytes,
         local_caps=cfg.caps,
-        ca_pubs=ca_pubs,
+        get_ca_pubs=trust.trusted_pubs,
         revoked=revoked,
     )
     recon.start()
 
-    # Push our own record to all seeds so the rest of the mesh knows about us.
-    # This is the step that gets a newly enrolled node into the directory on the
-    # root/seeds; it is also how endpoint changes propagate without waiting for
-    # the next renewal cycle.
+    # Push our own record so the rest of the mesh knows about us. This gets a
+    # newly enrolled node into the hub's directory; it is also how endpoint
+    # changes propagate without waiting for the next renewal cycle.
     own_record = directory.get(keys.id_pub_hex)
-    if own_record and cfg.seeds:
-        for seed in cfg.seeds:
+    if own_record:
+        for seed in trust.seeds():
             try:
                 push_record(seed, own_record)
                 log.info("pushed own record to %s", seed)
             except Exception as e:
                 log.warning("push to %s failed (will retry on next sync): %s", seed, e)
 
-    # Renewal loop
-    if cfg.root_url and own_record:
+    # Renewal loop — targets the active hub (follows succession).
+    if own_record:
         renewal = RenewalLoop(
             node_keys=keys,
             directory=directory,
-            root_url=cfg.root_url,
+            get_root_url=trust.hub_url,
             current_cred=own_record.cred,
             inbound=cfg.inbound,
             hostname=cfg.hostname,
@@ -866,10 +883,8 @@ def cmd_run(args) -> int:
             cache_path=cfg.dir_cache_path,
         )
         renewal.start()
-    elif not own_record:
+    else:
         log.warning("no credential in directory — run 'gw join <token>' first")
-    elif not cfg.root_url:
-        log.warning("root_url not set — automatic renewal disabled")
 
     # Block until SIGTERM / SIGINT
     stop_flag = threading.Event()
@@ -884,6 +899,8 @@ def cmd_run(args) -> int:
     stop_flag.wait()
 
     recon.stop()
+    if trust_sync:
+        trust_sync.stop()
     if sync:
         sync.stop()
     if renewal:

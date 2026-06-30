@@ -39,8 +39,9 @@ log = logging.getLogger(__name__)
 class _Handler(BaseHTTPRequestHandler):
     directory: "Directory"
     ca: "CA | None" = None
-    ca_pubs: list[bytes] = []
+    get_ca_pubs: "callable" = staticmethod(list)
     get_revoked: "callable" = staticmethod(set)
+    get_bundle: "callable" = staticmethod(lambda: {"v": 1, "statements": []})
     cache_path: "Path | None" = None
 
     def log_message(self, fmt, *args) -> None:
@@ -61,6 +62,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/directory":
             self._send_json([r.to_dict() for r in self.directory.all()])
+        elif self.path == "/ca-bundle":
+            self._send_json(self.get_bundle())
         elif self.path == "/health":
             self._send_json({"status": "ok"})
         else:
@@ -87,7 +90,7 @@ class _Handler(BaseHTTPRequestHandler):
         from .wire import NodeRecord
         try:
             record = NodeRecord.from_dict(body)
-            record.verify(self.ca_pubs, self.get_revoked())
+            record.verify(self.get_ca_pubs(), self.get_revoked())
             accepted = self.directory.merge([record])
             # Persist so the record survives a daemon restart and shows up in
             # `gw status` (which reads the on-disk cache, not live memory).
@@ -122,10 +125,11 @@ class ControlServer:
         self,
         listen: str,
         directory: "Directory",
-        ca_pubs: list[bytes],
+        get_ca_pubs,
         get_revoked,
         ca: "CA | None" = None,
         cache_path: "Path | None" = None,
+        get_bundle=None,
     ) -> None:
         host, _, port_str = listen.rpartition(":")
         # Strip brackets from IPv6 literals like "[fd8d::1]"
@@ -135,8 +139,10 @@ class ControlServer:
             pass
         Handler.directory = directory
         Handler.ca = ca
-        Handler.ca_pubs = ca_pubs
+        Handler.get_ca_pubs = staticmethod(get_ca_pubs)
         Handler.get_revoked = staticmethod(get_revoked)
+        if get_bundle is not None:
+            Handler.get_bundle = staticmethod(get_bundle)
         Handler.cache_path = cache_path
 
         # Use AF_INET6 when binding to an IPv6 address or unspecified (":port").
