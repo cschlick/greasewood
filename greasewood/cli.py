@@ -311,8 +311,7 @@ door_port = {args.door_port}
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    print(f"Start the daemon (then mint tokens to enroll nodes):")
-    print(f"  sudo gw run")
+    _print_daemon_guidance("then mint tokens to enroll nodes")
     print()
     print(f"Enroll a new node:")
     print(f"  TOKEN=$(sudo gw mint)          # on this machine")
@@ -694,9 +693,7 @@ trusted_pubs = ["{ca_pub_hex}"]
     if hub_overlay_url:
         print(f"  hub control  : {hub_overlay_url}")
     print()
-    print(f"Start the daemon:")
-    print(f"  sudo gw run")
-    print()
+    _print_daemon_guidance()
     print()
     from . import firewall as _fw
     if node_inbound == "no":
@@ -758,6 +755,41 @@ def _control_port(cfg) -> int:
         return int(cfg.control_listen.rsplit(":", 1)[1])
     except (ValueError, IndexError):
         return 51902
+
+
+def _service_state() -> str:
+    """How the greasewood daemon is managed on this host: 'active' (systemd
+    unit installed and running), 'installed' (unit present, not yet running),
+    or 'manual' (no unit). Used so setup-hub / join don't tell the user to run
+    `gw run` when systemd already starts the daemon on its own."""
+    if not Path("/etc/systemd/system/greasewood.service").exists():
+        return "manual"
+    import shutil
+    import subprocess
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return "installed"
+    r = subprocess.run([systemctl, "is-active", "greasewood.service"],
+                       capture_output=True, text=True)
+    return "active" if r.stdout.strip() == "active" else "installed"
+
+
+def _print_daemon_guidance(then: str = "") -> None:
+    """Tell the user how the daemon runs, correctly for service vs manual mode.
+    `then` is an optional trailing clause (e.g. 'then mint tokens to enroll')."""
+    state = _service_state()
+    tail = f" — {then}" if then else ""
+    if state == "active":
+        print(f"The greasewood service is already running{tail}.")
+        print("  status: systemctl status greasewood   logs: journalctl -u greasewood -f")
+    elif state == "installed":
+        print("The greasewood service is installed; it starts automatically now that")
+        print("the config exists (and on every reboot). Check it in a moment with:")
+        print("  systemctl status greasewood   (logs: journalctl -u greasewood -f)")
+    else:
+        print(f"Start the daemon{tail}:")
+        print("  sudo gw run")
+        print("  (tip: 'sudo gw install-service' makes it start on boot — no manual gw run)")
 
 
 def cmd_hub_promote(args) -> int:
