@@ -321,9 +321,11 @@ node's `<hostname>.internal` **plus** its overlay address. So the name a node is
 reached by is exactly the name its certificate is valid for — resolve
 `db.internal` → connect over WireGuard → TLS validates the `db.internal` SAN.
 
-> Names are sanitized to a DNS-safe form (`root@node01` → `root-node01`). They
-> aren't enforced unique yet, so give nodes distinct hostnames at `join` (or
-> enforce uniqueness at the hub) to avoid duplicate entries.
+> Names are sanitized to a DNS-safe form (`root@node01` → `root-node01`). The
+> hub **enforces uniqueness at enrollment** — a `join` whose (sanitized) name is
+> already taken is refused — so resolution stays unambiguous. A node can still
+> rename or renew itself; a decommissioned node keeps its name until its
+> `nodes/<id>.json` is removed on the hub.
 
 ## TLS certificates for services
 
