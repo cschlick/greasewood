@@ -315,6 +315,13 @@ door_window = "15m"
     print(f"  sudo gw join \"$TOKEN\" --hostname <name>   # on the new machine")
     print()
     _print_firewall_help(listen_port, control_port)
+    print()
+    from . import firewall as _fw
+    _rules = _fw.hub_rules(listen_port, control_port)
+    if getattr(args, "open_firewall", False):
+        _fw.apply(_rules, log)
+    else:
+        _fw.check(_rules, log)
     return 0
 
 
@@ -660,6 +667,13 @@ trusted_pubs = ["{ca_pub_hex}"]
     print(f"  sudo gw run")
     print()
     _print_firewall_help(listen_port)
+    print()
+    from . import firewall as _fw
+    _rules = _fw.node_rules(listen_port)
+    if getattr(args, "open_firewall", False):
+        _fw.apply(_rules, log)
+    else:
+        _fw.check(_rules, log)
     return 0
 
 
@@ -1423,6 +1437,9 @@ def main(argv=None) -> int:
     sp.add_argument("--caps", default="mesh")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
+    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
+                    help="insert the needed nftables accept rules (opt-in; tagged "
+                         "\"greasewood\"). Default: only check and warn.")
     sp.set_defaults(fn=cmd_setup_hub)
 
     # mint
@@ -1446,6 +1463,9 @@ def main(argv=None) -> int:
                     help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
+    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
+                    help="insert the needed nftables accept rules (opt-in; tagged "
+                         "\"greasewood\"). Default: only check and warn.")
     sp.set_defaults(fn=cmd_join)
 
     # purge

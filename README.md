@@ -194,12 +194,19 @@ provisioner is minting ahead of itself.
 
 ## Firewall
 
-**greasewood never touches your firewall.** Its control plane (`7946/tcp`) and
-enrollment RPC (`7947/tcp`) bind only to the node's overlay address and
-loopback — *never* the underlay — so nothing it runs is reachable off-mesh
-regardless of firewall policy. The only thing that must face the underlay is
-WireGuard itself (UDP), which you open like for any VPN. `setup-hub` and `join`
-print the exact rules below; they don't apply them.
+**greasewood never touches your firewall unless you ask it to.** Its control
+plane (`7946/tcp`) and enrollment RPC (`7947/tcp`) bind only to the node's
+overlay address and loopback — *never* the underlay — so nothing it runs is
+reachable off-mesh regardless of firewall policy. The only thing that must face
+the underlay is WireGuard itself (UDP), which you open like for any VPN.
+
+`setup-hub` and `join` **check** the local nftables ruleset and loudly warn if a
+needed port looks blocked by a default-drop policy (printing the exact rule to
+add). They do not change anything by default. Pass **`--open-firewall`** to have
+them insert the accept rules for you (tagged with a `greasewood` comment so
+you can find/remove them) — opt-in, for hosts you aren't managing with IaC. If
+your firewall *is* IaC-managed (Ansible, etc.), put the rules below in that
+instead and ignore the flag.
 
 On a default-drop host, allow (nftables):
 

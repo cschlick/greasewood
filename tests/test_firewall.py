@@ -1,0 +1,117 @@
+"""
+Unit tests for greasewood.firewall — the pure logic over `nft -j` JSON.
+
+No nftables needed: we feed fixture rulesets and check the detection +
+command-generation. The side-effecting check()/apply() are thin wrappers.
+"""
+from greasewood import firewall as fw
+
+
+def _chain(policy="drop", family="inet", table="filter", name="input"):
+    return {"chain": {"family": family, "table": table, "name": name,
+                      "type": "filter", "hook": "input", "prio": 0,
+                      "policy": policy}}
+
+
+def _accept_rule(proto, port, iif=None, family="inet", table="filter",
+                 chain="input", right=None):
+    exprs = []
+    if iif:
+        exprs.append({"match": {"op": "==",
+                                "left": {"meta": {"key": "iifname"}},
+                                "right": iif}})
+    exprs.append({"match": {"op": "==",
+                            "left": {"payload": {"protocol": proto, "field": "dport"}},
+                            "right": right if right is not None else port}})
+    exprs.append({"accept": None})
+    return {"rule": {"family": family, "table": table, "chain": chain, "expr": exprs}}
+
+
+def _ruleset(*items):
+    return {"nftables": [{"metainfo": {}}, *items]}
+
+
+# --- required rule sets ---
+
+def test_hub_rules_cover_control_and_door():
+    rules = fw.hub_rules()
+    ports = {(r.proto, r.port, r.iif) for r in rules}
+    assert ("udp", 51820, None) in ports
+    assert ("udp", 51821, None) in ports
+    assert ("tcp", 7946, "gw0") in ports
+    assert ("tcp", 7947, "gw-door") in ports
+
+
+def test_node_rules_are_udp_only():
+    rules = fw.node_rules()
+    assert all(r.proto == "udp" and r.iif is None for r in rules)
+    assert {r.port for r in rules} == {51820, 51821}
+
+
+# --- default-drop detection ---
+
+def test_default_drop_detected():
+    assert fw.default_drop(_ruleset(_chain(policy="drop")))
+    assert not fw.default_drop(_ruleset(_chain(policy="accept")))
+    assert not fw.default_drop(_ruleset())  # no input chain
+
+
+# --- missing-rule detection ---
+
+def test_missing_when_port_absent():
+    rs = _ruleset(_chain("drop"), _accept_rule("udp", 51820))
+    missing = fw.missing_rules(rs, fw.node_rules())
+    assert {r.port for r in missing} == {51821}  # 51820 present, 51821 missing
+
+
+def test_nothing_missing_when_all_present():
+    rs = _ruleset(_chain("drop"),
+                  _accept_rule("udp", 51820),
+                  _accept_rule("udp", 51821))
+    assert fw.missing_rules(rs, fw.node_rules()) == []
+
+
+def test_port_in_a_set_counts_as_present():
+    rs = _ruleset(_chain("drop"),
+                  _accept_rule("udp", 0, right={"set": [51820, 51821]}))
+    assert fw.missing_rules(rs, fw.node_rules()) == []
+
+
+def test_iifname_scoped_rule_must_match_interface():
+    # An accept for tcp/7946 with NO iifname does NOT satisfy a rule that
+    # requires iifname gw0... actually it does (broader allow). But a rule
+    # scoped to the WRONG interface must not count.
+    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 7946, iif="eth0"))
+    hub = [r for r in fw.hub_rules() if r.port == 7946]
+    assert fw.missing_rules(rs, hub) == hub  # gw0 rule still missing
+
+
+def test_iifname_match_satisfies():
+    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 7946, iif="gw0"))
+    hub = [r for r in fw.hub_rules() if r.port == 7946]
+    assert fw.missing_rules(rs, hub) == []
+
+
+# --- insert command generation ---
+
+def test_find_input_chain_prefers_inet():
+    rs = _ruleset(_chain("drop", family="ip", name="INPUT"),
+                  _chain("drop", family="inet", table="filter", name="input"))
+    assert fw.find_input_chain(rs) == ("inet", "filter", "input")
+
+
+def test_insert_commands_shape():
+    target = ("inet", "filter", "input")
+    cmds = fw.insert_commands(target, fw.node_rules())
+    assert cmds[0][:6] == ["nft", "insert", "rule", "inet", "filter", "input"]
+    joined = " ".join(cmds[0])
+    assert "udp dport 51820" in joined
+    assert joined.endswith('accept comment "greasewood"')
+
+
+def test_insert_command_includes_iifname():
+    target = ("inet", "filter", "input")
+    hub = [r for r in fw.hub_rules() if r.iif == "gw0"]
+    cmd = fw.insert_commands(target, hub)[0]
+    joined = " ".join(cmd)
+    assert 'iifname "gw0"' in joined and "tcp dport 7946" in joined
