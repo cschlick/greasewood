@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import getpass
 import json
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -326,7 +328,7 @@ def cmd_join(args) -> int:
     import base64
 
     token = args.token
-    hostname = args.hostname
+    hostname = args.hostname or f"{getpass.getuser()}@{socket.gethostname()}"
     caps = [c.strip() for c in args.caps.split(",")]
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
@@ -437,12 +439,14 @@ def cmd_join(args) -> int:
     directory = Directory.load(dir_cache)
 
     # Hub's record — pre-seeds so the daemon knows the hub immediately
+    hub_overlay_url = ""
     if resp.get("hub_record"):
         hub_rec = NodeRecord.from_dict(resp["hub_record"])
         try:
             hub_rec.verify([ca_pub_bytes], set())
             directory.put(hub_rec)
             log.info("pre-seeded hub record (hostname=%s)", hub_rec.hostname)
+            hub_overlay_url = f"http://[{hub_rec.cred.addr}]:7946"
         except Exception as e:
             log.warning("hub record verify failed: %s", e)
 
@@ -459,14 +463,6 @@ def cmd_join(args) -> int:
     ).sign(node_keys.id_priv)
     directory.put(record)
     directory.save(dir_cache)
-
-    # Derive hub's overlay address and control plane URL from the hub record
-    hub_overlay_url = ""
-    if resp.get("hub_record"):
-        hub_addr = resp["hub_record"].get("addr", "")
-        hub_control_port = 7946  # default — hub sends its overlay addr, port is standard
-        if hub_addr:
-            hub_overlay_url = f"http://[{hub_addr}]:{hub_control_port}"
 
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
     seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
@@ -1011,7 +1007,7 @@ def main(argv=None) -> int:
     sp = sub.add_parser("join",
                         help="[sudo] enroll this machine using a token from 'gw mint'")
     sp.add_argument("token", help="join token printed by 'gw mint' on the hub")
-    sp.add_argument("--hostname", required=True, help="this node's hostname in the mesh")
+    sp.add_argument("--hostname", default=None, help="this node's hostname in the mesh (default: user@hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
