@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import getpass
 import json
 import logging
 import os
@@ -440,7 +439,8 @@ def cmd_join(args) -> int:
     elif prior and prior.hostname:
         hostname = prior.hostname
     else:
-        hostname = f"{getpass.getuser()}@{socket.gethostname()}"
+        # Default to the machine's short hostname (first label, no domain).
+        hostname = socket.gethostname().split(".")[0] or "node"
 
     if args.caps is not None:
         caps = [c.strip() for c in args.caps.split(",")]
@@ -1877,7 +1877,7 @@ def main(argv=None) -> int:
     sp.add_argument("token", help="join token printed by 'gw invite' on the hub")
     sp.add_argument("--hostname", default=None,
                     help="this node's hostname in the mesh "
-                         "(default: keep existing, else user@hostname)")
+                         "(default: keep existing, else the machine's hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
