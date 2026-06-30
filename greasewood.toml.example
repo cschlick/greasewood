@@ -38,7 +38,7 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"
 # Trusted CA public key(s) — raw Ed25519, hex-encoded.
 # Build this as a SET from day one to allow CA migration (§11).
 # Add both old and new keys during a migration overlap window.
-# Get this value from `greasewood init-ca` on the root node.
+# `gw setup-hub` prints this value (and join tokens carry it automatically).
 trusted_pubs = [
     "REPLACE_WITH_HEX_PRINTED_BY_gw_setup-hub",
 ]
@@ -72,6 +72,3 @@ renew_before = "12h"
 #                     sudo gw run
 #      join receives a CA-signed credential over a transient WireGuard door;
 #      run brings the node into the mesh and publishes its record to the hub.
-#
-# Manual alternative: `gw init-node` on the node, `gw issue` on the hub over
-# SSH, then `gw install-cred` on the node.

@@ -69,7 +69,7 @@ pip install .
 ```
 
 This installs the `gw` command. Most subcommands need root (they create
-WireGuard interfaces and edit routing); `gw status` and `gw issue` do not.
+WireGuard interfaces and edit routing); `gw status` does not.
 
 ## Quickstart
 
@@ -175,22 +175,14 @@ udp dport { 51820, 51821 } accept
 | `mint`             | yes   | Open a 15-min door window, print a single-use join token. |
 | `join <token>`     | yes   | Enroll this machine using a token from `mint`.            |
 | `status`           | no    | Show local node and directory state.                      |
-| `issue`            | no    | CA-sign a credential directly (SSH-style enrollment).     |
-| `install-cred`     | yes   | Install a credential from `issue` (used by `join`).       |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
-| `init-ca`/`init-node` | —  | Low-level key generation (used by the commands above).    |
 
 Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
 `-v/--verbose`. Both must precede the subcommand (`gw -v run`, not `gw run -v`).
 
-### Two enrollment paths
-
-- **Door (recommended):** `mint` + `join`. Token-based, no SSH, no underlay
-  HTTP. This is the primary path.
-- **SSH/manual:** `init-node` on the node → `issue` on the hub (over SSH) →
-  `install-cred` on the node. Useful when you'd rather move a credential file by
-  hand than open a door.
+Enrollment is door-only: `mint` on the hub, `join` on the node. There is no
+manual credential-copy path.
 
 ## Configuration
 

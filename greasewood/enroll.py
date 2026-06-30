@@ -9,7 +9,8 @@ EnrollServer
 
 DoorWatcher
   Background thread in gw-run (hub role only).  Polls data_dir/door_window.json
-  every 10 s.  When a valid, unexpired window appears, it starts an EnrollServer.
+  every poll_interval seconds.  When a valid, unexpired window appears, it
+  starts an EnrollServer.
   When the window is consumed, expired, or absent, it cleans up.
 
 Wire framing: 4-byte big-endian length prefix + JSON body (max 64 KiB).
@@ -185,7 +186,7 @@ class EnrollServer:
 
 class DoorWatcher:
     """
-    Polls data_dir/door_window.json every 10 s.
+    Polls data_dir/door_window.json every poll_interval seconds.
     Starts an EnrollServer when a valid window is found; cleans up when it expires.
     """
 
@@ -196,12 +197,14 @@ class DoorWatcher:
         directory: "Directory",
         node_keys: "NodeKeys",
         wg_iface: str,
+        poll_interval: float = 5.0,
     ) -> None:
         self._data_dir = data_dir
         self._ca = ca
         self._directory = directory
         self._node_keys = node_keys
         self._wg_iface = wg_iface
+        self._poll_interval = poll_interval
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -217,7 +220,7 @@ class DoorWatcher:
                 self._enroll.stop()
 
     def _loop(self) -> None:
-        while not self._stop.wait(10):
+        while not self._stop.wait(self._poll_interval):
             self._tick()
 
     def _tick(self) -> None:

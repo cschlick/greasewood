@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import os
 import subprocess
-import tempfile
+import threading
 import time
-import urllib.request
 import uuid
 from pathlib import Path
 
@@ -145,18 +143,42 @@ def overlay_addr_from_id_pub(id_pub_hex: str) -> str:
     return str(ipaddress.IPv6Address(prefix + digest[:8]))
 
 
+# The enrollment door is a single slot (one window, one guest key, one peer).
+# Concurrent callers — the stress tests grow the mesh from many threads — must
+# serialize the mint→join critical section, exactly like a real provisioner.
+_ENROLL_LOCK = threading.Lock()
+
+
+def _extract_token(text: str) -> str:
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("gw1."):
+            return s
+    raise AssertionError(f"no join token in mint output:\n{text}")
+
+
+def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
+    """Block until `iface` no longer exists in the container."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pexec(cid, "ip", "link", "show", iface, check=False).returncode != 0:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) -> dict:
     """
-    Create, enroll, and start a single node container.
+    Create, enroll (via the door), and start a single node container.
 
-    This is the reusable core behind the `gw_node` fixture; the stress tests
-    call it directly (often from many threads at once) to grow the mesh.
-    Safe to run concurrently: each node has a unique id_pub, so `gw issue`
-    only ever writes per-node files (nodes/<id_pub>.json) on the root — no
-    shared-file race.
+    Enrollment uses the real `gw mint` / `gw join` flow — the only supported
+    path. Because the door is single-slot, the mint→join section is serialized
+    across concurrent callers and we wait for the hub to tear the door fully
+    down before the next mint, so each enrollment starts from a clean slate
+    (no race with the hub's door-watcher teardown). Container creation and
+    `gw run` stay parallel.
 
-    Returns a dict {cid, hostname, overlay, id_pub}. The CALLER owns cleanup
-    (`podman rm -f cid`).
+    Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
     """
     hostname = hostname or f"node-{uuid.uuid4().hex[:6]}"
     r = podman(
@@ -169,56 +191,34 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) ->
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    # The node (a container on the bridge) reaches the root over the
-    # container-network URL; the pytest driver (host) uses the published one.
-    net_url = gw_root["net_url"]
-    host_url = gw_root["url"]
+    hub_cid = gw_root["cid"]
+    # mint --endpoint takes a BARE address; the door port is fixed and the
+    # token carries only the host.
+    hub_endpoint = gw_root["ipv6"]
 
-    cfg = f"""[node]
-hostname = "{hostname}"
-data_dir = "/var/lib/greasewood"
-role = "node"
-inbound = "yes"
-caps = ["mesh"]
-endpoints = ["[{ipv6}]:51820"]
+    with _ENROLL_LOCK:
+        # Hub opens the door and prints a single-use token.
+        mint = pexec(hub_cid, "gw", "mint", "--endpoint", hub_endpoint)
+        token = _extract_token(mint.stdout + "\n" + mint.stderr)
 
-[network]
-interface = "gw0"
-listen_port = 51820
-seeds = ["{net_url}"]
-root_url = "{net_url}"
+        # Node redeems it: stands up gw-door, enrolls, writes its own config,
+        # and door-pre-publishes its record to the hub. Blocks until enrolled.
+        # Pass an explicit endpoint: containers only have a ULA, which `join`'s
+        # GUA auto-detection skips, leaving the node unreachable for node↔node
+        # links (the ULA is fine inside the Podman bridge).
+        j = pexec(cid, "gw", "join", token, "--hostname", hostname,
+                  "--endpoint", f"[{ipv6}]:51820", check=False)
+        assert j.returncode == 0, (
+            f"gw join failed (rc={j.returncode}):\n"
+            f"stdout: {j.stdout}\nstderr: {j.stderr}"
+        )
 
-[ca]
-trusted_pubs = ["{gw_root['ca_pub']}"]
-"""
-    _copy_text_to_container(cfg, cid, "/etc/greasewood.toml")
+        # Wait for the hub to close the window and destroy its gw-door before
+        # releasing the lock, so the next mint doesn't race the teardown.
+        assert _wait_iface_gone(hub_cid, "gw-door"), \
+            "hub did not tear down gw-door after enrollment"
 
-    # Generate node identity + WireGuard keypair
-    pexec(cid, "gw", "init-node")
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-    wg_pub = pexec(cid, "cat", "/var/lib/greasewood/wg_pub.b64").stdout.strip()
-
-    # Pre-seed local directory with root's current directory so the node
-    # can reconcile root as a peer immediately on first startup (otherwise
-    # it would have to wait up to 20 s for the first sync cycle). Fetched
-    # from the host via the published URL.
-    root_dir = urllib.request.urlopen(f"{host_url}/directory").read()
-    _copy_bytes_to_container(root_dir, cid, "/var/lib/greasewood/directory.json")
-
-    # Issue credential from root container (outputs JSON to stdout)
-    r = pexec(
-        gw_root["cid"], "gw", "issue",
-        "--id-pub", id_pub,
-        "--wg-pub", wg_pub,
-        "--hostname", hostname,
-        "--caps", "mesh",
-    )
-    _copy_text_to_container(r.stdout, cid, "/tmp/cred.json")
-
-    # Install credential — merges node's NodeRecord into the pre-seeded directory
-    pexec(cid, "gw", "install-cred", "/tmp/cred.json")
-
-    # Start daemon
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
     return {
@@ -247,27 +247,3 @@ def gw_node(gw_image, gw_network, gw_root):
     finally:
         if node:
             podman("rm", "-f", node["cid"], check=False)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _copy_text_to_container(text: str, cid: str, path: str) -> None:
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-        f.write(text)
-        tmp = f.name
-    try:
-        podman("cp", tmp, f"{cid}:{path}")
-    finally:
-        os.unlink(tmp)
-
-
-def _copy_bytes_to_container(data: bytes, cid: str, path: str) -> None:
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        f.write(data)
-        tmp = f.name
-    try:
-        podman("cp", tmp, f"{cid}:{path}")
-    finally:
-        os.unlink(tmp)
