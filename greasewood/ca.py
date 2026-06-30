@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from .keys import CAKeys, derive_addr
-from .wire import Credential, RenewRequest
+from .wire import CAStatement, Credential, RenewRequest
 
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
@@ -103,6 +103,49 @@ class CA:
         hostname, caps = node_info
         log.info("renewing %s", hostname)
         return self.issue(req.id_pub, req.wg_pub, hostname, caps)
+
+    # --- CA succession (§11) ---
+
+    def endorse(
+        self,
+        subject_pub: bytes,
+        hub_endpoint: str,
+        ttl: dt.timedelta,
+    ) -> CAStatement:
+        """
+        Sign an endorsement: this CA vouches for subject_pub as a (successor)
+        CA and advertises its hub control-plane endpoint. Long-lived by design
+        — the chain must stay intact for nodes still rooted at this CA.
+        """
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        stmt = CAStatement(
+            kind="endorse",
+            by_pub=self._keys.ca_pub_bytes,
+            subject_pub=subject_pub,
+            hub_endpoint=hub_endpoint,
+            iat=now,
+            exp=now + ttl,
+        ).sign(self._keys.ca_priv)
+        log.info("endorsed CA %s (endpoint=%s) until %s",
+                 subject_pub.hex()[:16], hub_endpoint, stmt.exp)
+        return stmt
+
+    def retire(self, subject_pub: bytes, ttl: dt.timedelta) -> CAStatement:
+        """
+        Sign a retirement: subject_pub is no longer an accepted signer. Use
+        after a successor has taken over and the overlap window has elapsed.
+        """
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        stmt = CAStatement(
+            kind="retire",
+            by_pub=self._keys.ca_pub_bytes,
+            subject_pub=subject_pub,
+            hub_endpoint="",
+            iat=now,
+            exp=now + ttl,
+        ).sign(self._keys.ca_priv)
+        log.info("retired CA %s until %s", subject_pub.hex()[:16], stmt.exp)
+        return stmt
 
     # --- revoke list ---
 
