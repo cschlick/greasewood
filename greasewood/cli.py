@@ -113,13 +113,15 @@ def _detect_public_ipv6() -> str | None:
     return (stable or temporary or any_gua or [None])[0]
 
 
-def cmd_setup_root(args) -> int:
+def cmd_setup_hub(args) -> int:
     import json as json_mod
     from .keys import CAKeys, NodeKeys
     from .ca import CA
     from .wire import NodeRecord
     from .directory import Directory
     from .config import _parse_duration
+    from .door import load_or_generate_door_key, door_pub_bytes_from_key
+    from . import wg as wgmod
 
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
@@ -130,7 +132,6 @@ def cmd_setup_root(args) -> int:
     caps = [c.strip() for c in args.caps.split(",")]
     ttl = _parse_duration(args.credential_ttl)
 
-    # Auto-detect endpoint if not provided
     endpoint = args.endpoint
     if not endpoint:
         ip = _detect_public_ipv6()
@@ -138,7 +139,6 @@ def cmd_setup_root(args) -> int:
             endpoint = f"[{ip}]:{listen_port}"
             log.info("detected public IPv6 endpoint: %s", endpoint)
 
-    # Data directory
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(data_dir, 0o700)
@@ -154,9 +154,15 @@ def cmd_setup_root(args) -> int:
         ca_keys.save(ca_key_path)
         log.info("generated CA key → %s", ca_key_path)
 
-    # If run via sudo, recursively give data_dir to the real operator so
-    # they can run `gw issue` over SSH without needing sudo.
-    # Root can still read everything regardless of ownership.
+    # Door keypair (persistent across mints)
+    load_or_generate_door_key(data_dir)
+    log.info("door key ready → %s/door.key", data_dir)
+
+    # Set up door routing (idempotent — also called in gw run for reboots)
+    wgmod.setup_door_routing()
+
+    # If run via sudo, give data_dir to the real operator so they can
+    # run gw issue / gw mint without sudo.
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         import pwd
@@ -173,17 +179,15 @@ def cmd_setup_root(args) -> int:
 
     ca_pub_hex = ca_keys.ca_pub_bytes.hex()
 
-    # Node keypairs
     node_keys = NodeKeys.load_or_generate(data_dir)
     log.info("overlay addr: %s", node_keys.addr)
 
-    # Write config
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
 data_dir = "{data_dir}"
-role = "root"
+role = "hub"
 inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
@@ -196,15 +200,15 @@ root_url = "http://[::1]:{control_port}"
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
 
-[root]
+[hub]
 ca_key_file = "{ca_key_path}"
 control_listen = ":{control_port}"
 credential_ttl = "{args.credential_ttl}"
 renew_before = "12h"
+door_window = "15m"
 """)
     log.info("wrote config → %s", cfg_path)
 
-    # Issue and install self-credential
     ca = CA(ca_keys, data_dir, ttl)
     cred = ca.issue(node_keys.id_pub_bytes, node_keys.wg_pub_bytes, hostname, caps)
 
@@ -223,135 +227,239 @@ renew_before = "12h"
     directory.put(record)
     directory.save(dir_cache)
 
-    # Print summary
     ep_host = endpoint.rsplit(":", 1)[0] if endpoint else None
-    seeds_url = f"http://{ep_host}:{control_port}" if ep_host else f"http://[{node_keys.addr}]:{control_port}"
+    control_url = (
+        f"http://{ep_host}:{control_port}" if ep_host
+        else f"http://[{node_keys.addr}]:{control_port}"
+    )
 
-    print(f"\nRoot setup complete.")
+    print(f"\nHub setup complete.")
     print(f"  overlay addr : {node_keys.addr}")
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    print(f"Start the daemon:")
-    print(f"  sudo env PATH=\"$PATH\" gw -c {cfg_path} run")
+    print(f"Start the daemon (then mint tokens to enroll nodes):")
+    print(f"  sudo gw run")
     print()
-    print(f"Enroll a new node (run on the new machine, daemon must be running here first):")
-    print(f"  gw join <user>@<this-host> \\")
-    print(f"    --hostname <name> \\")
-    print(f"    --ca-pub {ca_pub_hex} \\")
-    print(f"    --root-url {seeds_url}")
+    print(f"Enroll a new node:")
+    print(f"  TOKEN=$(sudo gw mint)          # on this machine")
+    print(f"  sudo gw join \"$TOKEN\" --hostname <name>   # on the new machine")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# join  (new-node bootstrap — generates keys, SSHes to root to issue credential)
+# mint  (hub — generate a join token and open a door window)
+# ---------------------------------------------------------------------------
+
+def cmd_mint(args) -> int:
+    import datetime as dt_mod
+    import json as json_mod
+    from .config import load_config
+    from .door import (
+        generate_seed, derive_door_params, encode_token,
+        load_or_generate_door_key, door_pub_bytes_from_key,
+    )
+    from . import wg as wgmod
+
+    cfg = load_config(Path(args.config))
+    if cfg.role not in ("hub", "root"):
+        sys.exit("gw mint must be run on the hub node (role = hub)")
+    if cfg.ca_key_file is None:
+        sys.exit("mint requires ca_key_file in [hub]")
+
+    data_dir = cfg.data_dir
+    door_key_raw = load_or_generate_door_key(data_dir)
+    hub_door_pub = door_pub_bytes_from_key(door_key_raw)
+    import base64
+    door_key_b64 = base64.b64encode(door_key_raw).decode()
+
+    from .keys import CAKeys
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+
+    # Detect hub's underlay endpoint for the token (nodes need it to reach gw-door)
+    endpoint = args.endpoint
+    if not endpoint:
+        ip = _detect_public_ipv6()
+        if not ip:
+            sys.exit("could not detect a public IPv6 address; use --endpoint")
+        endpoint = ip
+
+    window = cfg.door_window
+
+    # Roll a seed; re-roll if the derived port is already bound
+    import socket
+    for _ in range(10):
+        seed = generate_seed()
+        params = derive_door_params(seed)
+        try:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s.bind(("", params.door_port))
+            s.close()
+            break
+        except OSError:
+            log.debug("door port %d busy, re-rolling seed", params.door_port)
+    else:
+        sys.exit("could not find a free port in the door range after 10 attempts")
+
+    # Set up door routing (idempotent — survives reboots if called here too)
+    wgmod.setup_door_routing()
+
+    # Bring up the hub's door WG interface
+    door_key_path = data_dir / "door.key"
+    wgmod.ensure_hub_door_interface(door_key_path, params.door_port, params.guest_pub_b64, params.psk_b64)
+
+    # Write window file so the running gw-run daemon starts the enroll server
+    expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
+    window_path = data_dir / "door_window.json"
+    window_path.write_text(json_mod.dumps({
+        "v": 1,
+        "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }))
+
+    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed)
+    print(token)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# join  (new node — door-based enrollment, no SSH)
 # ---------------------------------------------------------------------------
 
 def cmd_join(args) -> int:
     import json as json_mod
-    import shlex
-    import subprocess
+    import socket
+    import struct
+    import time
     from .keys import NodeKeys
     from .wire import Credential, NodeRecord
     from .directory import Directory
+    from .door import decode_token, derive_door_params
+    from . import wg as wgmod
+    import base64
 
-    root_ssh = args.root_ssh
+    token = args.token
     hostname = args.hostname
     caps = [c.strip() for c in args.caps.split(",")]
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
-    ca_pub_hex = args.ca_pub
-    root_url = args.root_url
-    endpoint = args.endpoint
-    root_cfg = args.root_config
     listen_port = args.listen_port
+    endpoint = args.endpoint
 
-    # Data directory and node keys
+    # Decode token → hub_door_pub, ca_pub, hub_host, seed
+    try:
+        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed = decode_token(token)
+    except ValueError as e:
+        sys.exit(f"invalid token: {e}")
+
+    hub_door_pub_b64 = base64.b64encode(hub_door_pub_bytes).decode()
+    ca_pub_hex = ca_pub_bytes.hex()
+
+    # Derive door params from seed (same derivation the hub ran at mint time)
+    params = derive_door_params(seed)
+    log.info("door port: %d  guest_pub: ...%s", params.door_port, params.guest_pub_b64[-8:])
+
+    # Generate this node's permanent keypairs
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(data_dir, 0o700)
     except PermissionError:
         pass
-
     node_keys = NodeKeys.load_or_generate(data_dir)
     log.info("overlay addr: %s", node_keys.addr)
 
-    # Write config
-    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(f"""[node]
-hostname = "{hostname}"
-data_dir = "{data_dir}"
-role = "node"
-inbound = "yes"
-caps = {json_mod.dumps(caps)}{endpoint_line}
-
-[network]
-interface = "gw0"
-listen_port = {listen_port}
-seeds = [{json_mod.dumps(root_url)}]
-root_url = {json_mod.dumps(root_url)}
-
-[ca]
-trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
-""")
-    log.info("wrote config → %s", cfg_path)
-
-    # SSH to root and issue credential
-    log.info("requesting credential from %s ...", root_ssh)
-    sudo_prefix = "sudo " if args.root_sudo else ""
-    remote_cmd = (
-        f"{sudo_prefix}gw -c {shlex.quote(root_cfg)} issue"
-        f" --id-pub {node_keys.id_pub_hex}"
-        f" --wg-pub {shlex.quote(node_keys.wg_pub_b64)}"
-        f" --hostname {shlex.quote(hostname)}"
-        f" --caps {shlex.quote(','.join(caps))}"
+    # Bring up the local door interface
+    wgmod.ensure_node_door_interface(
+        params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64,
+        hub_host, params.door_port,
     )
-    result = subprocess.run(
-        ["ssh", "-o", "StrictHostKeyChecking=accept-new", root_ssh, remote_cmd],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        sys.exit(
-            f"Failed to issue credential via SSH ({root_ssh}):\n"
-            f"{result.stderr.strip()}"
-        )
 
+    # Connect to hub's enroll daemon via the door tunnel (retry for WG handshake)
+    from .door import HUB_DOOR_IP, ENROLL_PORT
+    log.info("connecting to enroll daemon at [%s]:%d ...", HUB_DOOR_IP, ENROLL_PORT)
+    conn: socket.socket | None = None
+    for attempt in range(15):
+        try:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect((HUB_DOOR_IP, ENROLL_PORT))
+            conn = s
+            break
+        except OSError:
+            if attempt < 14:
+                time.sleep(1)
+    if conn is None:
+        wgmod.destroy_interface("gw-door")
+        sys.exit(f"could not connect to enroll daemon at [{HUB_DOOR_IP}]:{ENROLL_PORT} — is the hub daemon running and the token valid?")
+
+    # Send enroll request
+    req = {
+        "v": 1,
+        "id_pub": node_keys.id_pub_hex,
+        "wg_pub": node_keys.wg_pub_b64,
+        "hostname": hostname,
+        "caps": caps,
+    }
+    req_body = json_mod.dumps(req, separators=(",", ":")).encode()
     try:
-        cred_data = json_mod.loads(result.stdout)
-    except json_mod.JSONDecodeError:
-        sys.exit(f"Unexpected output from root issue command:\n{result.stdout[:500]}")
+        conn.sendall(struct.pack(">I", len(req_body)) + req_body)
 
-    cred = Credential.from_dict(cred_data)
-    cred.verify([bytes.fromhex(ca_pub_hex)])
+        # Receive response
+        hdr = b""
+        while len(hdr) < 4:
+            chunk = conn.recv(4 - len(hdr))
+            if not chunk:
+                raise ConnectionError("connection closed")
+            hdr += chunk
+        length = struct.unpack(">I", hdr)[0]
+        raw = b""
+        while len(raw) < length:
+            chunk = conn.recv(length - len(raw))
+            if not chunk:
+                raise ConnectionError("connection closed")
+            raw += chunk
+        resp = json_mod.loads(raw)
+    except Exception as e:
+        conn.close()
+        wgmod.destroy_interface("gw-door")
+        sys.exit(f"enroll RPC failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not resp.get("ok"):
+        wgmod.destroy_interface("gw-door")
+        sys.exit(f"enrollment rejected: {resp.get('error')} — {resp.get('reason')}")
+
+    # Tear down the door interface — we're done with it
+    wgmod.destroy_interface("gw-door")
+
+    # Verify and install the credential
+    cred = Credential.from_dict(resp["credential"])
+    try:
+        cred.verify([ca_pub_bytes])
+    except Exception as e:
+        sys.exit(f"credential verification failed: {e}")
+    if cred.id_pub != node_keys.id_pub_bytes:
+        sys.exit("credential id_pub mismatch — something went wrong")
     log.info("credential verified, expires %s", cred.exp.strftime("%Y-%m-%d %H:%M UTC"))
 
-    # Verify the credential was issued for this node
-    if cred.id_pub != node_keys.id_pub_bytes:
-        sys.exit("Credential id_pub does not match this node's identity — something went wrong.")
-
-    # Fetch root's current directory and merge it in so the daemon knows
-    # about existing peers immediately without waiting for the first sync.
-    import urllib.request as _urllib
+    # Build directory with our record + hub's record
     dir_cache = data_dir / "directory.json"
     directory = Directory.load(dir_cache)
-    ca_pubs_bytes = [bytes.fromhex(ca_pub_hex)]
-    try:
-        resp = _urllib.urlopen(f"{root_url}/directory", timeout=5)
-        for rec_data in json_mod.loads(resp.read()):
-            rec = NodeRecord.from_dict(rec_data)
-            try:
-                rec.verify(ca_pubs_bytes, set())
-                existing_rec = directory.get(rec.id_pub.hex())
-                if not existing_rec or rec.seq > existing_rec.seq:
-                    directory.put(rec)
-            except Exception:
-                pass
-        log.info("pre-seeded directory from root (%d records)", len(directory.all()))
-    except Exception as e:
-        log.warning("could not pre-seed directory from root: %s", e)
 
-    # Install credential (create and sign NodeRecord)
+    # Hub's record — pre-seeds so the daemon knows the hub immediately
+    if resp.get("hub_record"):
+        hub_rec = NodeRecord.from_dict(resp["hub_record"])
+        try:
+            hub_rec.verify([ca_pub_bytes], set())
+            directory.put(hub_rec)
+            log.info("pre-seeded hub record (hostname=%s)", hub_rec.hostname)
+        except Exception as e:
+            log.warning("hub record verify failed: %s", e)
+
+    # Our own record
     existing = directory.get(node_keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
     record = NodeRecord(
@@ -365,13 +473,46 @@ trusted_pubs = [{json_mod.dumps(ca_pub_hex)}]
     directory.put(record)
     directory.save(dir_cache)
 
-    print(f"\nNode setup complete.")
+    # Derive hub's overlay address and control plane URL from the hub record
+    hub_overlay_url = ""
+    if resp.get("hub_record"):
+        hub_addr = resp["hub_record"].get("addr", "")
+        hub_control_port = 7946  # default — hub sends its overlay addr, port is standard
+        if hub_addr:
+            hub_overlay_url = f"http://[{hub_addr}]:{hub_control_port}"
+
+    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
+    root_url_val = json_mod.dumps(hub_overlay_url) if hub_overlay_url else '""'
+
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(f"""[node]
+hostname = "{hostname}"
+data_dir = "{data_dir}"
+role = "node"
+inbound = "yes"
+caps = {json_mod.dumps(caps)}{endpoint_line}
+
+[network]
+interface = "gw0"
+listen_port = {listen_port}
+seeds = {seeds_list}
+root_url = {root_url_val}
+
+[ca]
+trusted_pubs = ["{ca_pub_hex}"]
+""")
+    log.info("wrote config → %s", cfg_path)
+
+    print(f"\nNode enrolled successfully.")
     print(f"  hostname     : {hostname}")
     print(f"  overlay addr : {node_keys.addr}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
+    if hub_overlay_url:
+        print(f"  hub control  : {hub_overlay_url}")
     print()
     print(f"Start the daemon:")
-    print(f"  sudo env PATH=\"$PATH\" gw -c {cfg_path} run")
+    print(f"  sudo gw run")
     return 0
 
 
@@ -600,18 +741,19 @@ def cmd_run(args) -> int:
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
 
-    # Revoke list — root reads from disk; others start empty and rely on
-    # credential expiry for routine revocation.
     revoked: set[str] = set()
+    is_hub = cfg.role in ("hub", "root")
 
-    if cfg.role in ("root", "seed"):
-        if cfg.role == "root":
+    if is_hub or cfg.role == "seed":
+        if is_hub:
             if not cfg.ca_key_file:
-                sys.exit("role=root requires ca_key_file in [root]")
+                sys.exit("hub role requires ca_key_file in [hub]")
             ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
             ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
             revoked = ca.load_revoked_set()
             log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
+            # Re-apply door routing in case the machine rebooted since setup-hub
+            wgmod.setup_door_routing()
 
         srv = ControlServer(
             cfg.control_listen,
@@ -621,6 +763,18 @@ def cmd_run(args) -> int:
             ca=ca,
         )
         srv.start()
+
+        if is_hub and ca is not None:
+            from .enroll import DoorWatcher
+            door_watcher = DoorWatcher(
+                data_dir=cfg.data_dir,
+                ca=ca,
+                directory=directory,
+                node_keys=keys,
+                wg_iface=cfg.wg_interface,
+            )
+            door_watcher.start()
+            log.info("door watcher started")
 
     if cfg.seeds:
         sync = SyncLoop(directory, cfg.seeds, cfg.dir_cache_path)
@@ -825,15 +979,15 @@ def main(argv=None) -> int:
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
         epilog=(
             "sudo requirements:\n"
-            "  sudo gw setup-root           -- writes /etc and /var/lib, owned back to you\n"
-            "  sudo -E HOME=$HOME gw join   -- needs root for /etc + /var/lib,\n"
-            "                               -E HOME=$HOME so SSH finds your key not root's\n"
-            "  sudo gw run                  -- creates WireGuard interface\n"
-            "  sudo gw purge                -- removes WireGuard interface\n"
+            "  sudo gw setup-hub            -- one-shot hub bootstrap\n"
+            "  sudo gw mint                 -- open a door window, print join token\n"
+            "  sudo gw join <token> ...     -- enroll this machine (creates WG interfaces)\n"
+            "  sudo gw run                  -- start the daemon\n"
+            "  sudo gw purge                -- remove all local state\n"
             "\n"
             "no sudo needed:\n"
             "  gw status\n"
-            "  gw issue   (ca.key is owned by you after setup-root)\n"
+            "  gw issue   (ca.key owned by you after setup-hub)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -841,40 +995,39 @@ def main(argv=None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # setup-root
-    sp = sub.add_parser("setup-root",
-                        help="[sudo] one-shot root bootstrap: CA + keys + config + self-credential")
-    sp.add_argument("--hostname", default="root")
+    # setup-hub
+    sp = sub.add_parser("setup-hub",
+                        help="[sudo] one-shot hub bootstrap: CA + door key + routing + self-credential")
+    sp.add_argument("--hostname", default="hub")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
     sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
-    sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
-                    help="underlay endpoint (auto-detected if omitted)")
+    sp.add_argument("--endpoint", default=None, metavar="ADDR",
+                    help="underlay IPv6 address (auto-detected if omitted)")
     sp.add_argument("--caps", default="mesh")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
-    sp.set_defaults(fn=cmd_setup_root)
+    sp.set_defaults(fn=cmd_setup_hub)
+
+    # mint
+    sp = sub.add_parser("mint",
+                        help="[sudo] open a 15-min door window and print a single-use join token")
+    sp.add_argument("--endpoint", default=None, metavar="ADDR",
+                    help="underlay IPv6 address to embed in token (auto-detected if omitted)")
+    sp.set_defaults(fn=cmd_mint)
 
     # join
     sp = sub.add_parser("join",
-                        help="[sudo -E HOME=$HOME] enroll this machine: generates keys, SSHes to root to issue credential")
-    sp.add_argument("root_ssh", metavar="USER@ROOT",
-                    help="SSH connection to root node, e.g. user@gp1")
-    sp.add_argument("--hostname", required=True)
-    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
-                    help="CA public key hex (printed by setup-root)")
-    sp.add_argument("--root-url", dest="root_url", required=True, metavar="URL",
-                    help="root control plane URL, e.g. http://[addr]:7946")
+                        help="[sudo] enroll this machine using a token from 'gw mint'")
+    sp.add_argument("token", help="join token printed by 'gw mint' on the hub")
+    sp.add_argument("--hostname", required=True, help="this node's hostname in the mesh")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
     sp.add_argument("--caps", default="mesh")
-    sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT")
-    sp.add_argument("--root-config", dest="root_config", default="/etc/greasewood.toml",
-                    metavar="PATH", help="path to greasewood.toml on the root node")
-    sp.add_argument("--root-sudo", dest="root_sudo", action="store_true",
-                    help="prefix the remote issue command with sudo (only needed if ca.key is still root-owned)")
+    sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
+                    help="this node's underlay endpoint (auto-detected if omitted)")
     sp.set_defaults(fn=cmd_join)
 
     # purge

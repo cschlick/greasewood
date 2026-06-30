@@ -1,9 +1,12 @@
 """
 greasewood.config — TOML configuration loading.
 
-All nodes share one config format. Role ("root", "seed", "node") is a runtime
+All nodes share one config format. Role ("hub", "seed", "node") is a runtime
 setting, not a build distinction. "Special" is a function of holding ca_priv
-and being pointed-to as a seed — nothing else (§17).
+and being pointed-to as a seed — nothing else.
+
+"hub" is the canonical name for the coordinating node; "root" is accepted as
+an alias in existing configs.
 """
 from __future__ import annotations
 
@@ -35,12 +38,13 @@ class Config:
     # CA trust set — list of hex-encoded raw Ed25519 public keys
     ca_pubs: list[str]
 
-    # Root-only
+    # Hub-only (written under [hub] section; [root] accepted as alias)
     ca_key_file: Path | None
     ca_key_passphrase_env: str | None
     control_listen: str
     credential_ttl: dt.timedelta
     renew_before: dt.timedelta
+    door_window: dt.timedelta
 
     @property
     def dir_cache_path(self) -> Path:
@@ -69,7 +73,8 @@ def load_config(path: Path) -> Config:
     node = raw.get("node", {})
     net = raw.get("network", {})
     ca_sec = raw.get("ca", {})
-    root = raw.get("root", {})
+    # [hub] is canonical; [root] accepted for backwards compatibility
+    root = raw.get("hub", raw.get("root", {}))
 
     if not node.get("hostname"):
         sys.exit("config: [node] hostname is required")
@@ -95,4 +100,5 @@ def load_config(path: Path) -> Config:
         control_listen=root.get("control_listen", ":7946"),
         credential_ttl=_parse_duration(root.get("credential_ttl", "24h")),
         renew_before=_parse_duration(root.get("renew_before", "12h")),
+        door_window=_parse_duration(root.get("door_window", "15m")),
     )
