@@ -117,6 +117,7 @@ class ReconcileLoop:
         revoked: set[str],
         interval: float = 5.0,
         policy: Policy = default_policy,
+        hosts_domain: str | None = None,
     ) -> None:
         self._iface = iface
         self._directory = directory
@@ -128,6 +129,8 @@ class ReconcileLoop:
         self._revoked = revoked
         self._interval = interval
         self._policy = policy
+        # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
+        self._hosts_domain = hosts_domain
         self._stop = threading.Event()
 
     def update_revoked(self, revoked: set[str]) -> None:
@@ -148,6 +151,12 @@ class ReconcileLoop:
                 )
             except Exception as e:
                 log.error("reconcile error: %s", e)
+            if self._hosts_domain:
+                try:
+                    from . import hosts
+                    hosts.sync(self._directory.all(), self._hosts_domain)
+                except Exception as e:
+                    log.error("hosts sync error: %s", e)
 
     def start(self) -> threading.Thread:
         t = threading.Thread(target=self.run, name="reconcile", daemon=True)
