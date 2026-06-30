@@ -83,7 +83,7 @@ tls_cert_ttl = "7d"
 
 # Enrollment flow (door-based — no SSH, no underlay HTTP):
 #
-#   1. On the hub:    TOKEN=$(sudo gw mint)
+#   1. On the hub:    TOKEN=$(sudo gw invite)
 #                     (delivers a single-use token out of band)
 #   2. On new node:   sudo gw join "$TOKEN" --hostname newnode
 #                     sudo gw run

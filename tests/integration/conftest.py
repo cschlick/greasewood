@@ -124,7 +124,7 @@ def overlay_addr_from_id_pub(id_pub_hex: str) -> str:
 
 # The enrollment door is a single slot (one window, one guest key, one peer).
 # Concurrent callers — the stress tests grow the mesh from many threads — must
-# serialize the mint→join critical section, exactly like a real provisioner.
+# serialize the invite→join critical section, exactly like a real provisioner.
 _ENROLL_LOCK = threading.Lock()
 
 
@@ -133,7 +133,7 @@ def _extract_token(text: str) -> str:
         s = line.strip()
         if s.startswith("gw1."):
             return s
-    raise AssertionError(f"no join token in mint output:\n{text}")
+    raise AssertionError(f"no join token in invite output:\n{text}")
 
 
 def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
@@ -150,7 +150,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
                     hostname: str | None = None, caps: str | None = None,
                     inbound: str | None = None, check: bool = True):
     """
-    Run one `gw mint` (on hub_cid) → `gw join` (on node_cid) door enrollment.
+    Run one `gw invite` (on hub_cid) → `gw join` (on node_cid) door enrollment.
     `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
     over the hub so a test can enroll via a successor hub, not just the root.
     Returns the `gw join` CompletedProcess.
@@ -164,10 +164,10 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
         extra += ["--inbound", inbound]
 
     with _ENROLL_LOCK:
-        # mint --endpoint takes a BARE address; the door port is fixed and the
+        # invite --endpoint takes a BARE address; the door port is fixed and the
         # token carries only the host.
-        mint = pexec(hub_cid, "gw", "mint", "--endpoint", hub_ipv6)
-        token = _extract_token(mint.stdout + "\n" + mint.stderr)
+        res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6)
+        token = _extract_token(res.stdout + "\n" + res.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
                   "--endpoint", f"[{node_ipv6}]:51900", *extra, check=False)
@@ -178,7 +178,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
             )
 
         # Wait for the hub to close the window and destroy its gw-door before
-        # releasing the lock, so the next mint doesn't race the teardown.
+        # releasing the lock, so the next invite doesn't race the teardown.
         assert _wait_iface_gone(hub_cid, "gw-door"), \
             "hub did not tear down gw-door after enrollment"
     return j
@@ -201,7 +201,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
     """
     Create, enroll (via the door), and start a single node container.
 
-    Enrollment uses the real `gw mint` / `gw join` flow — the only supported
+    Enrollment uses the real `gw invite` / `gw join` flow — the only supported
     path (see door_enroll). Container creation and `gw run` stay parallel; only
     the door section serializes. `caps` (e.g. "mesh,tls") is passed to join.
 

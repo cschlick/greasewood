@@ -7,7 +7,7 @@ underlay.
   On the hub:
     gw setup-hub          # one-shot: CA, door key, routing, self-credential
     gw run                # start the daemon (serves control plane + door)
-    gw mint               # open a 15-min window, print a single-use join token
+    gw invite             # open a 15-min window, print a single-use join token
 
   On the new node:
     gw join <token>       # enroll over the door, then:
@@ -224,7 +224,7 @@ def cmd_setup_hub(args) -> int:
         ca_keys.save(ca_key_path)
         log.info("generated CA key → %s", ca_key_path)
 
-    # Door keypair (persistent across mints)
+    # Door keypair (persistent across invites)
     load_or_generate_door_key(data_dir)
     log.info("door key ready → %s/door.key", data_dir)
 
@@ -301,10 +301,10 @@ door_port = {args.door_port}
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    _print_daemon_guidance("then mint tokens to enroll nodes")
+    _print_daemon_guidance("then invite nodes to enroll them")
     print()
     print(f"Enroll a new node:")
-    print(f"  TOKEN=$(sudo gw mint)          # on this machine")
+    print(f"  TOKEN=$(sudo gw invite)          # on this machine")
     print(f"  sudo gw join \"$TOKEN\" --hostname <name>   # on the new machine")
     print()
     _print_firewall_help(listen_port, control_port)
@@ -319,11 +319,11 @@ door_port = {args.door_port}
 
 
 # ---------------------------------------------------------------------------
-# mint  (hub — generate a join token and open a door window)
+# invite  (hub — generate a join token and open a door window)
 # ---------------------------------------------------------------------------
 
-def cmd_mint(args) -> int:
-    _require_root("mint")
+def cmd_invite(args) -> int:
+    _require_root("invite")
     import datetime as dt_mod
     import json as json_mod
     from .config import load_config
@@ -336,23 +336,23 @@ def cmd_mint(args) -> int:
 
     cfg = load_config(Path(args.config))
     if cfg.role not in ("hub", "root"):
-        sys.exit("gw mint must be run on the hub node (role = hub)")
+        sys.exit("gw invite must be run on the hub node (role = hub)")
     if cfg.ca_key_file is None:
-        sys.exit("mint requires ca_key_file in [hub]")
+        sys.exit("invite requires ca_key_file in [hub]")
 
     data_dir = cfg.data_dir
 
-    # The door is a single slot: a new mint regenerates the guest key and
-    # overwrites the one window, so any previously minted-but-unused token
+    # The door is a single slot: a new invite regenerates the guest key and
+    # overwrites the one window, so any previously issued-but-unused token
     # stops working. Warn (don't fail) if we're clobbering a still-open
-    # window — for orderly provisioning, mint the next token only after the
+    # window — for orderly provisioning, run the next invite only after the
     # current node has joined (the window clears automatically on success).
     open_exp = active_window_expiry(data_dir)
     if open_exp:
         log.warning(
             "superseding an open door window (expires %s) — the previously "
-            "minted token is now INVALID. The door enrolls one node at a time; "
-            "mint the next token only after the current node has joined.",
+            "issued token is now INVALID. The door enrolls one node at a time; "
+            "run the next invite only after the current node has joined.",
             open_exp,
         )
 
@@ -489,7 +489,7 @@ def cmd_join(args) -> int:
     hub_door_pub_b64 = base64.b64encode(hub_door_pub_bytes).decode()
     ca_pub_hex = ca_pub_bytes.hex()
 
-    # Derive door params from seed (same derivation the hub ran at mint time)
+    # Derive door params from seed (same derivation the hub ran at invite time)
     params = derive_door_params(seed)
     log.info("guest_pub: ...%s", params.guest_pub_b64[-8:])
 
@@ -810,7 +810,7 @@ def _service_state() -> str:
 
 def _print_daemon_guidance(then: str = "") -> None:
     """Tell the user how the daemon runs, correctly for service vs manual mode.
-    `then` is an optional trailing clause (e.g. 'then mint tokens to enroll')."""
+    `then` is an optional trailing clause (e.g. 'then invite nodes')."""
     state = _service_state()
     tail = f" — {then}" if then else ""
     if state == "active":
@@ -827,7 +827,7 @@ def _print_daemon_guidance(then: str = "") -> None:
 
 
 def cmd_hub_promote(args) -> int:
-    """On a prospective new hub (currently a node): mint its own CA key and
+    """On a prospective new hub (currently a node): generate its own CA key and
     rewrite its config to role=hub, so a restart makes it serve as a hub.
     Prints the CA public key + control endpoint to hand to `gw hub-endorse`."""
     _require_root("hub-promote")
@@ -1825,7 +1825,7 @@ def main(argv=None) -> int:
         epilog=(
             "sudo requirements:\n"
             "  sudo gw setup-hub            -- one-shot hub bootstrap\n"
-            "  sudo gw mint                 -- open a door window, print join token\n"
+            "  sudo gw invite                 -- open a door window, print join token\n"
             "  sudo gw join <token> ...     -- enroll this machine (creates WG interfaces)\n"
             "  sudo gw run                  -- start the daemon\n"
             "  sudo gw purge                -- remove all local state\n"
@@ -1864,17 +1864,17 @@ def main(argv=None) -> int:
                          "-> overlay addr) from the directory")
     sp.set_defaults(fn=cmd_setup_hub)
 
-    # mint
-    sp = sub.add_parser("mint",
+    # invite
+    sp = sub.add_parser("invite",
                         help="[sudo] open a 15-min door window and print a single-use join token")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
-    sp.set_defaults(fn=cmd_mint)
+    sp.set_defaults(fn=cmd_invite)
 
     # join
     sp = sub.add_parser("join",
-                        help="[sudo] enroll this machine using a token from 'gw mint'")
-    sp.add_argument("token", help="join token printed by 'gw mint' on the hub")
+                        help="[sudo] enroll this machine using a token from 'gw invite'")
+    sp.add_argument("token", help="join token printed by 'gw invite' on the hub")
     sp.add_argument("--hostname", default=None,
                     help="this node's hostname in the mesh "
                          "(default: keep existing, else user@hostname)")
@@ -1939,7 +1939,7 @@ def main(argv=None) -> int:
 
     # hub-promote (on the prospective new hub)
     sp = sub.add_parser("hub-promote",
-                        help="[sudo] turn this enrolled node into a hub (mint CA key, set role=hub)")
+                        help="[sudo] turn this enrolled node into a hub (generate CA key, set role=hub)")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")

@@ -65,7 +65,7 @@ Outstanding join tokens embed the hub's door public key, so they break if the ke
 changes — but the door key is otherwise disposable.
 
 1. `sudo rm /var/lib/greasewood/door.key`
-2. The next `gw mint` regenerates it. **Re-mint every outstanding token** — old
+2. The next `gw invite` regenerates it. **Re-issue every outstanding token** — old
    ones no longer work.
 
 ## SOP: CA key compromised — *and you still have it*
@@ -96,7 +96,7 @@ so transitive trust to a new CA is impossible. You must **re-root** the fleet.
    (`gw join` with a fresh token, or let renewal target the new hub).
 4. Old credentials expire on their own.
 
-> If the key is in an attacker's hands, they can mint valid credentials until
+> If the key is in an attacker's hands, they can issue valid credentials until
 > step 2 completes on every node — `gw revoke` cannot stop the CA itself. Treat
 > this as an emergency re-root and prioritize pushing the new `trusted_pubs`.
 

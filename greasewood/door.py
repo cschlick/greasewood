@@ -67,7 +67,7 @@ class DoorParams:
 def derive_door_params(seed: bytes) -> DoorParams:
     """
     Derive door parameters from a 32-byte seed using HKDF-SHA256.
-    Hub (at mint) and node (at join) run this identically — no extra comm needed.
+    Hub (at invite) and node (at join) run this identically — no extra comm needed.
     """
     import hmac
     import hashlib
@@ -167,7 +167,7 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int]:
 # ---------------------------------------------------------------------------
 # Hub door key — persisted X25519 keypair for the door WG interface.
 # Its public key is the hub_door_pub baked into every token, so it is stable
-# across mint calls.  Lose it and you must re-mint all outstanding tokens.
+# across invite calls.  Lose it and you must re-issue all outstanding tokens.
 # ---------------------------------------------------------------------------
 
 def load_or_generate_door_key(data_dir: Path) -> bytes:
@@ -201,7 +201,7 @@ def active_window_expiry(data_dir: Path) -> str | None:
     unexpired, else None.
 
     The door admits one node at a time, so this doubles as a "slot occupied?"
-    check: `gw mint` uses it to warn before clobbering a live window, and an
+    check: `gw invite` uses it to warn before clobbering a live window, and an
     orderly provisioner can poll it to know when the door is free again (the
     window file is removed by the hub when an enrollment completes).
     """

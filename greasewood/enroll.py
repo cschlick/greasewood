@@ -307,7 +307,7 @@ class DoorWatcher:
 
             def on_done():
                 # Only delete the window if it still belongs to this session.
-                # If gw mint ran again while we were waiting, the new window has
+                # If gw invite ran again while we were waiting, the new window has
                 # a different expiry — leave it so the DoorWatcher can start a
                 # fresh EnrollServer for the new token.
                 try:
