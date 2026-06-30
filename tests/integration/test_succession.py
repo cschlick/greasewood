@@ -140,9 +140,9 @@ def test_ca_and_hub_succession(gw_root, gw_image, gw_network):
         b_ipv6 = container_ipv6(b["cid"], gw_network)
 
         # Promote B (mint its own CA key, flip config to role=hub).
-        pexec(b["cid"], "gw", "hub-promote", "--control-port", "7946")
+        pexec(b["cid"], "gw", "hub-promote", "--control-port", "51902")
         b_pub = _ca_pub_hex(b["cid"])
-        b_endpoint = f"http://[{b['overlay']}]:7946"
+        b_endpoint = f"http://[{b['overlay']}]:51902"
         assert b_pub != a_pub
 
         # Restart B's daemon so it serves as a hub (control plane + door + bundle).

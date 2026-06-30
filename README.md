@@ -195,7 +195,7 @@ provisioner is minting ahead of itself.
 ## Firewall
 
 **greasewood never touches your firewall unless you ask it to.** Its control
-plane (`7946/tcp`) and enrollment RPC (`7947/tcp`) bind only to the node's
+plane (`51902/tcp`) and enrollment RPC (`51903/tcp`) bind only to the node's
 overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
 the underlay is WireGuard itself (UDP), which you open like for any VPN.
@@ -212,26 +212,27 @@ On a default-drop host, allow (nftables):
 
 | Interface  | Rule                          | Purpose                              |
 |------------|-------------------------------|--------------------------------------|
-| underlay   | `udp dport 51820 accept`      | mesh WireGuard                       |
-| underlay   | `udp dport 51821 accept`      | enrollment door (during join)        |
-| `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:7946`) |
-| `gw0`      | `tcp dport 7946 accept`       | control plane — **only used when this node is the hub** |
-| `gw-door`  | `tcp dport 7947 accept`       | enrollment exchange — **only when hub** |
+| underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
+| underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
+| `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:51902`)|
+| `gw0`      | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
+| `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when hub** |
 
 ```
-udp dport { 51820, 51821 } accept
+udp dport { 51900, 51901 } accept
 iifname "lo" accept
-iifname "gw0" tcp dport 7946 accept
-iifname "gw-door" tcp dport 7947 accept
+iifname "gw0" tcp dport 51902 accept
+iifname "gw-door" tcp dport 51903 accept
 ```
 
-All of these ports are configurable, so you can move off the defaults if they
-clash (51820 is the WireGuard default; 7946 is Docker Swarm / Serf): mesh
+The four ports sit in one contiguous block, **51900–51903**, deliberately clear
+of the WireGuard default (51820) and Docker Swarm / Serf (7946) so greasewood
+doesn't squat a port something else likely wants. All are configurable: mesh
 `[network] listen_port`, control `[hub] control_listen`, door `[hub] door_port`
-(or `setup-hub --control-port/--door-port`). The door port rides in join tokens
-and the control port in the enrollment response, so nodes pick up non-default
-values automatically — no client config. (The internal enrollment port lives
-inside the door tunnel and can't collide, so it isn't exposed as a knob.)
+(or `setup-hub --listen-port/--control-port/--door-port`). The door port rides
+in join tokens and the control port in the enrollment response, so nodes pick up
+non-default values automatically — no client config. (The internal enrollment
+port lives inside the door tunnel and can't collide, so it isn't a knob.)
 
 Your base default-drop ruleset should also carry `ct state established,related
 accept` (almost everyone has it). It's what lets an **outbound-only** node work:
@@ -241,7 +242,7 @@ and the replies come back through `established,related`.
 **Recommended posture: apply the same ruleset on *every* node, not just the
 current hub.** Any node can be promoted to hub ([Moving the
 hub](#moving-the-hub-ca-succession)), so a uniform ruleset means a hub handover
-needs **no firewall change anywhere**. Opening `7946`/`7947` on a node that
+needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
 isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
 no control plane, so on a node that will never be a hub you can omit the `gw0`/
@@ -307,9 +308,9 @@ caps     = ["mesh"]
 
 [network]
 interface  = "gw0"
-listen_port = 51820
-seeds    = ["http://[<hub-overlay>]:7946"]   # directory URLs to pull (the hub)
-root_url = "http://[<hub-overlay>]:7946"     # where to publish / renew
+listen_port = 51900
+seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
+root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
 hosts_sync  = false                          # manage /etc/hosts names (opt-in)
 mesh_domain = "internal"                     # name suffix + default TLS cert name
 
@@ -318,7 +319,7 @@ trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
 
 [hub]                        # hub role only
 ca_key_file    = "/var/lib/greasewood/ca.key"
-control_listen = ":7946"
+control_listen = ":51902"
 credential_ttl = "24h"
 ```
 

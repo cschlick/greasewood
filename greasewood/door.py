@@ -47,11 +47,12 @@ DOOR_SUBNET = "fd8d:e5c1:db1a:d::/64"
 DOOR_TABLE = 51820
 DOOR_RULE_PRIO = 100
 
-# Fixed door port — one firewall rule, no range. Adjacent to the main WG port
-# so the two rules are obvious together: allow udp dport 51820; allow udp dport 51821.
-DOOR_PORT = 51821
+# Door port — adjacent to the mesh port so all four greasewood ports form one
+# contiguous block (UDP 51900/51901, TCP 51902/51903), clear of the WireGuard
+# default (51820) and Docker Swarm/Serf (7946).
+DOOR_PORT = 51901
 
-ENROLL_PORT = 7947
+ENROLL_PORT = 51903
 DOOR_IFACE = "gw-door"
 TOKEN_PREFIX = "gw1."
 

@@ -19,7 +19,7 @@ caps = ["mesh"]
 
 [network]
 interface = "gw0"
-listen_port = 51820
+listen_port = 51900
 seeds = []
 root_url = ""
 """)
@@ -44,7 +44,7 @@ def test_set_inbound_to_yes_rewrites_config(tmp_path):
 def test_hub_promote_refuses_outbound_only(tmp_path):
     cfg = tmp_path / "gw.toml"
     _write_cfg(cfg, "no")
-    args = types.SimpleNamespace(config=str(cfg), control_port=7946,
+    args = types.SimpleNamespace(config=str(cfg), control_port=51902,
                                  credential_ttl="24h", open_firewall=False)
     with pytest.raises(SystemExit) as e:
         cli.cmd_hub_promote(args)

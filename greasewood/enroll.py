@@ -85,7 +85,7 @@ class EnrollServer:
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
-        control_port: int = 7946,
+        control_port: int = 51902,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -246,7 +246,7 @@ class DoorWatcher:
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
-        control_port: int = 7946,
+        control_port: int = 51902,
     ) -> None:
         self._data_dir = data_dir
         self._ca = ca
