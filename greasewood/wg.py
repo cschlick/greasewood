@@ -114,13 +114,17 @@ def setup_door_routing() -> None:
     One-time idempotent setup of the door subnet's policy routing.
     Call from setup-hub and from gw-run (hub role) to survive reboots.
 
-    Isolation mechanism: packets sourced from DOOR_SUBNET consult DOOR_TABLE,
-    which contains only a blackhole default.  The kernel's local table (priority 0)
-    is checked first, so the enroll daemon's address (HUB_DOOR_IP, a local addr)
-    is still reachable from the door.  Mesh addresses are not local and hit the
-    blackhole — the door subnet is a dead end for everything except the enroll RPC.
+    Isolation mechanism: packets sourced from GUEST_DOOR_IP consult DOOR_TABLE,
+    which contains only a blackhole default.  This prevents a joining node from
+    reaching the mesh even if the hub has IPv6 forwarding enabled.
+
+    The rule is scoped to GUEST_DOOR_IP, NOT the full DOOR_SUBNET — HUB_DOOR_IP
+    must NOT match or the enroll daemon's TCP replies are blackholed too.
+    WireGuard's allowed-ips already enforces that only GUEST_DOOR_IP can inject
+    packets into the hub via gw-door; the policy rule adds a second layer for
+    forwarded traffic only.
     """
-    from .door import DOOR_SUBNET, DOOR_TABLE, DOOR_RULE_PRIO
+    from .door import GUEST_DOOR_IP, DOOR_TABLE, DOOR_RULE_PRIO
 
     # Blackhole default in the door table
     r = _run("ip", "-6", "route", "show", "table", str(DOOR_TABLE), check=False)
@@ -129,15 +133,16 @@ def setup_door_routing() -> None:
              "table", str(DOOR_TABLE), check=False)
         log.info("door routing: blackhole default in table %d", DOOR_TABLE)
 
-    # Source rule: packets from DOOR_SUBNET → DOOR_TABLE
+    # Source rule: packets FROM GUEST_DOOR_IP → DOOR_TABLE.
+    # Do NOT use the full /64 — HUB_DOOR_IP is in that range and must route normally.
     r = _run("ip", "-6", "rule", "show", check=False)
-    if str(DOOR_TABLE) not in r.stdout or DOOR_SUBNET not in r.stdout:
+    if str(DOOR_TABLE) not in r.stdout or GUEST_DOOR_IP not in r.stdout:
         _run("ip", "-6", "rule", "add",
-             "from", DOOR_SUBNET,
+             "from", GUEST_DOOR_IP,
              "lookup", str(DOOR_TABLE),
              "priority", str(DOOR_RULE_PRIO),
              check=False)
-        log.info("door routing: source rule for %s → table %d", DOOR_SUBNET, DOOR_TABLE)
+        log.info("door routing: source rule for %s → table %d", GUEST_DOOR_IP, DOOR_TABLE)
 
 
 def ensure_hub_door_interface(
