@@ -69,7 +69,7 @@ def ping_once(container: str, addr: str, timeout: int = 2) -> bool:
     return r.returncode == 0
 
 
-def wg_peer_count(container: str, iface: str = "gw0") -> int:
+def wg_peer_count(container: str, iface: str = "gw-mesh") -> int:
     """Number of WireGuard peers currently installed on the interface."""
     r = pexec(container, "wg", "show", iface, "peers", check=False)
     if r.returncode != 0:
@@ -77,7 +77,7 @@ def wg_peer_count(container: str, iface: str = "gw0") -> int:
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
-def wait_for_peer_count(container: str, expected: int, iface: str = "gw0",
+def wait_for_peer_count(container: str, expected: int, iface: str = "gw-mesh",
                         timeout: int = 90) -> int:
     """
     Block until the interface has at least `expected` peers. Returns the final

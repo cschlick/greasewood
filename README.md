@@ -88,7 +88,7 @@ sudo gw run
 
 `setup-hub` generates the CA, the persistent door key, the policy routing for
 the enrollment door, and the hub's own credential, then writes
-`/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw0`
+`/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw-mesh`
 WireGuard interface, serves the control plane, and watches for door windows.
 
 ### 2. Enroll a node
@@ -117,7 +117,7 @@ mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
 
 ```bash
 gw status            # local node + directory view
-sudo wg show gw0     # live WireGuard peers
+sudo wg show gw-mesh     # live WireGuard peers
 ```
 
 ## Running as a service
@@ -153,7 +153,7 @@ sudo gw uninstall-service             # disable + remove the units
 
 Notes:
 - It runs `gw run` as root (it manages WireGuard interfaces and routing). Don't
-  also run `gw run` by hand while the service is up — both would fight over `gw0`.
+  also run `gw run` by hand while the service is up — both would fight over `gw-mesh`.
 - A **config-changing re-join** (new hub, new caps) isn't auto-detected — the
   daemon reads its config at startup, so run `sudo systemctl restart greasewood`
   afterward.
@@ -215,13 +215,13 @@ On a default-drop host, allow (nftables):
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
 | underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
 | `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:51902`)|
-| `gw0`      | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
+| `gw-mesh`  | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
 | `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when hub** |
 
 ```
 udp dport { 51900, 51901 } accept
 iifname "lo" accept
-iifname "gw0" tcp dport 51902 accept
+iifname "gw-mesh" tcp dport 51902 accept
 iifname "gw-door" tcp dport 51903 accept
 ```
 
@@ -245,7 +245,7 @@ hub](#moving-the-hub-ca-succession)), so a uniform ruleset means a hub handover
 needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
 isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
-no control plane, so on a node that will never be a hub you can omit the `gw0`/
+no control plane, so on a node that will never be a hub you can omit the `gw-mesh`/
 `gw-door` TCP rules and open only the two UDP ports.
 
 ### Reachability (`inbound`)
@@ -307,7 +307,7 @@ inbound  = "yes"           # can this node accept cold inbound handshakes?
 caps     = ["mesh"]
 
 [network]
-interface  = "gw0"
+interface  = "gw-mesh"
 listen_port = 51900
 seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew

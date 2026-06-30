@@ -46,7 +46,7 @@ def hub_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Rule]
     return [
         Rule("udp", listen_port, None, "mesh WireGuard"),
         Rule("udp", DOOR_PORT, None, "enrollment door (WireGuard)"),
-        Rule("tcp", control_port, "gw0", "control plane (when hub)"),
+        Rule("tcp", control_port, "gw-mesh", "control plane (when hub)"),
         Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when hub)"),
     ]
 

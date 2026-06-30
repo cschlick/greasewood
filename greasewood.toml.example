@@ -25,7 +25,7 @@ caps = ["mesh"]
 
 
 [network]
-interface = "greasewood0"
+interface = "gw-mesh"
 listen_port = 51900
 
 # Seeds to pull the directory from (HTTP).

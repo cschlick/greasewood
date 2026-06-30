@@ -121,7 +121,7 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) ->
     print("change. On a default-drop host, allow (nftables):")
     print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept            # WireGuard (underlay)")
     print(f"  iifname \"lo\" accept                          # hub talks to itself")
-    print(f"  iifname \"gw0\" tcp dport {control_port} accept        # control plane (when hub)")
+    print(f"  iifname \"gw-mesh\" tcp dport {control_port} accept        # control plane (when hub)")
     print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept    # enrollment (when hub)")
 
 
@@ -262,7 +262,7 @@ inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "gw0"
+interface = "gw-mesh"
 listen_port = {listen_port}
 seeds = []
 root_url = "http://[::1]:{control_port}"
@@ -675,7 +675,7 @@ inbound = "{node_inbound}"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "gw0"
+interface = "gw-mesh"
 listen_port = {listen_port}
 seeds = {seeds_list}
 root_url = {root_url_val}
@@ -1418,7 +1418,7 @@ def cmd_purge(args) -> int:
     cfg_path = Path(args.config)
 
     # Determine interface name and data_dir from config if available
-    iface = "gw0"
+    iface = "gw-mesh"
     data_dir = Path("/var/lib/greasewood")
     if cfg_path.exists():
         try:

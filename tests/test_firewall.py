@@ -48,7 +48,7 @@ def test_hub_rules_cover_control_and_door():
     ports = {(r.proto, r.port, r.iif) for r in rules}
     assert ("udp", 51900, None) in ports
     assert ("udp", 51901, None) in ports
-    assert ("tcp", 51902, "gw0") in ports
+    assert ("tcp", 51902, "gw-mesh") in ports
     assert ("tcp", 51903, "gw-door") in ports
 
 
@@ -94,15 +94,15 @@ def test_port_in_a_set_counts_as_present():
 
 def test_iifname_scoped_rule_must_match_interface():
     # An accept for tcp/51902 with NO iifname does NOT satisfy a rule that
-    # requires iifname gw0... actually it does (broader allow). But a rule
+    # requires iifname gw-mesh... actually it does (broader allow). But a rule
     # scoped to the WRONG interface must not count.
     rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="eth0"))
     hub = [r for r in fw.hub_rules() if r.port == 51902]
-    assert fw.missing_rules(rs, hub) == hub  # gw0 rule still missing
+    assert fw.missing_rules(rs, hub) == hub  # gw-mesh rule still missing
 
 
 def test_iifname_match_satisfies():
-    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="gw0"))
+    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="gw-mesh"))
     hub = [r for r in fw.hub_rules() if r.port == 51902]
     assert fw.missing_rules(rs, hub) == []
 
@@ -126,10 +126,10 @@ def test_insert_commands_shape():
 
 def test_insert_command_includes_iifname():
     target = ("inet", "filter", "input")
-    hub = [r for r in fw.hub_rules() if r.iif == "gw0"]
+    hub = [r for r in fw.hub_rules() if r.iif == "gw-mesh"]
     cmd = fw.insert_commands(target, hub)[0]
     joined = " ".join(cmd)
-    assert 'iifname "gw0"' in joined and "tcp dport 51902" in joined
+    assert 'iifname "gw-mesh"' in joined and "tcp dport 51902" in joined
 
 
 # --- live nft validation (skipped where nft/root unavailable) ---
