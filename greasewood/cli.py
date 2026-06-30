@@ -608,6 +608,158 @@ def cmd_revoke(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# hub succession (§11) — hub-promote / hub-endorse / hub-retire
+# ---------------------------------------------------------------------------
+
+def _control_port(cfg) -> int:
+    """The control-plane port from cfg.control_listen (':7946' -> 7946)."""
+    try:
+        return int(cfg.control_listen.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return 7946
+
+
+def cmd_hub_promote(args) -> int:
+    """On a prospective new hub (currently a node): mint its own CA key and
+    rewrite its config to role=hub, so a restart makes it serve as a hub.
+    Prints the CA public key + control endpoint to hand to `gw hub-endorse`."""
+    import json as json_mod
+    from .config import load_config
+    from .keys import CAKeys, NodeKeys
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"no config at {cfg_path} — this command runs on an enrolled node")
+    cfg = load_config(cfg_path)
+
+    keys = NodeKeys.load_or_generate(cfg.data_dir)
+    ca_key_path = cfg.data_dir / "ca.key"
+    if ca_key_path.exists():
+        ca_keys = CAKeys.load(ca_key_path)
+        log.info("loaded existing CA key from %s", ca_key_path)
+    else:
+        ca_keys = CAKeys.generate()
+        ca_keys.save(ca_key_path)
+        log.info("generated CA key → %s", ca_key_path)
+    ca_pub_hex = ca_keys.ca_pub_bytes.hex()
+
+    control_port = args.control_port
+    # Nodes reach the hub control plane over the overlay, so advertise the
+    # overlay address (not the underlay).
+    endpoint = f"http://[{keys.addr}]:{control_port}"
+
+    # Trust our own CA as a root, in addition to whatever we already trust, so
+    # we accept credentials we issue even before the bundle has propagated.
+    trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
+
+    endpoint_line = (
+        f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
+    )
+    cfg_path.write_text(f"""[node]
+hostname = "{cfg.hostname}"
+data_dir = "{cfg.data_dir}"
+role = "hub"
+inbound = "{cfg.inbound}"
+caps = {json_mod.dumps(cfg.caps)}{endpoint_line}
+
+[network]
+interface = "{cfg.wg_interface}"
+listen_port = {cfg.listen_port}
+seeds = {json_mod.dumps(cfg.seeds)}
+root_url = "{cfg.root_url}"
+
+[ca]
+trusted_pubs = {json_mod.dumps(trusted)}
+
+[hub]
+ca_key_file = "{ca_key_path}"
+control_listen = ":{control_port}"
+credential_ttl = "{args.credential_ttl}"
+renew_before = "12h"
+door_window = "15m"
+""")
+    log.info("promoted to hub role in %s", cfg_path)
+
+    print("\nReady to become a hub. CA key generated; config set to role=hub.")
+    print(f"  CA pub key   : {ca_pub_hex}")
+    print(f"  hub endpoint : {endpoint}")
+    print()
+    print("Next, on the CURRENT hub, endorse this one:")
+    print(f"  gw hub-endorse --ca-pub {ca_pub_hex} \\")
+    print(f"                 --endpoint {endpoint}")
+    print("Then restart the daemon here:  sudo gw run")
+    return 0
+
+
+def _load_ca_for_succession(cfg):
+    from .keys import CAKeys
+    from .ca import CA
+    if cfg.ca_key_file is None:
+        sys.exit("this command must run on a hub (no ca_key_file in config)")
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    return CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
+
+
+def _append_to_bundle(cfg, stmt) -> None:
+    from .trust import CABundle
+    bundle = CABundle.load(cfg.ca_bundle_path)
+    bundle.merge([stmt])
+    bundle.save(cfg.ca_bundle_path)
+
+
+def cmd_hub_endorse(args) -> int:
+    """On the current hub: endorse another CA as a successor and advertise its
+    endpoint. The endorsement enters the bundle and propagates to the fleet."""
+    from .config import load_config, _parse_duration
+
+    cfg = load_config(Path(args.config))
+    ca = _load_ca_for_succession(cfg)
+    try:
+        subject_pub = bytes.fromhex(args.ca_pub)
+        if len(subject_pub) != 32:
+            raise ValueError
+    except ValueError:
+        sys.exit("--ca-pub must be a 64-character hex Ed25519 public key")
+
+    ttl = _parse_duration(args.ttl)
+    stmt = ca.endorse(subject_pub, args.endpoint, ttl)
+    _append_to_bundle(cfg, stmt)
+
+    print(f"endorsed CA {args.ca_pub[:16]}… as successor")
+    print(f"  endpoint : {args.endpoint}")
+    print(f"  valid    : {stmt.exp:%Y-%m-%d %H:%M UTC}")
+    print()
+    print("The fleet will trust the new CA within one sync cycle. Start the new")
+    print("hub (sudo gw run there); nodes repoint to it and renew under it.")
+    print("After the overlap, run 'gw hub-retire' for the old CA.")
+    return 0
+
+
+def cmd_hub_retire(args) -> int:
+    """On a hub: retire a CA (typically the predecessor) so the fleet stops
+    accepting its signatures. Run after the successor has taken over."""
+    from .config import load_config, _parse_duration
+
+    cfg = load_config(Path(args.config))
+    ca = _load_ca_for_succession(cfg)
+    try:
+        subject_pub = bytes.fromhex(args.ca_pub)
+        if len(subject_pub) != 32:
+            raise ValueError
+    except ValueError:
+        sys.exit("--ca-pub must be a 64-character hex Ed25519 public key")
+
+    ttl = _parse_duration(args.ttl)
+    stmt = ca.retire(subject_pub, ttl)
+    _append_to_bundle(cfg, stmt)
+
+    print(f"retired CA {args.ca_pub[:16]}…")
+    print("Once this propagates, the fleet no longer accepts its credentials.")
+    print("Ensure every node has renewed under the new CA before decommissioning.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -950,6 +1102,34 @@ def main(argv=None) -> int:
     sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the hub)")
     sp.add_argument("id_pub_hex", help="64-char hex identity public key")
     sp.set_defaults(fn=cmd_revoke)
+
+    # hub-promote (on the prospective new hub)
+    sp = sub.add_parser("hub-promote",
+                        help="[sudo] turn this enrolled node into a hub (mint CA key, set role=hub)")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.set_defaults(fn=cmd_hub_promote)
+
+    # hub-endorse (on the current hub)
+    sp = sub.add_parser("hub-endorse",
+                        help="endorse another CA as a successor hub (run on the current hub)")
+    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
+                    help="successor CA public key (from 'gw hub-promote')")
+    sp.add_argument("--endpoint", required=True, metavar="URL",
+                    help="successor's control-plane URL (from 'gw hub-promote')")
+    sp.add_argument("--ttl", default="3650d",
+                    help="how long the endorsement stays valid (default: 3650d)")
+    sp.set_defaults(fn=cmd_hub_endorse)
+
+    # hub-retire (on a hub, after the successor has taken over)
+    sp = sub.add_parser("hub-retire",
+                        help="retire a CA so the fleet stops accepting its signatures")
+    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
+                    help="CA public key to retire")
+    sp.add_argument("--ttl", default="3650d",
+                    help="how long the retirement stays in effect (default: 3650d)")
+    sp.set_defaults(fn=cmd_hub_retire)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
