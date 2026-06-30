@@ -59,10 +59,18 @@ class CA:
         """
         Sign a credential for a node. Call from `greasewood issue` on the root.
         Persists node caps so renewal can re-use them without operator input.
-        Raises ValueError if id_pub is on the revoke list.
+        Raises ValueError if id_pub is revoked or the hostname is already taken
+        by a different node (enforced on the sanitized name, so db/DB collide).
         """
         if self.is_revoked(id_pub):
             raise ValueError("id_pub is on the revoke list")
+
+        owner = self._hostname_owner(hostname)
+        if owner is not None and owner != id_pub.hex():
+            raise ValueError(
+                f"hostname {hostname!r} is already in use by another node "
+                f"({owner[:16]}…); choose a different hostname"
+            )
 
         caps = self._cap_policy(caps)
         now = dt.datetime.now(_UTC).replace(microsecond=0)
@@ -240,3 +248,22 @@ class CA:
             return None
         d = json.loads(p.read_text())
         return d.get("hostname", ""), d.get("caps", [])
+
+    def _hostname_owner(self, hostname: str) -> str | None:
+        """id_pub hex of the node already using this (sanitized) hostname among
+        the credentials this CA has issued, or None. Note: this tracks the
+        names the CA *issued*; a decommissioned node keeps its name until its
+        nodes/<id>.json is removed."""
+        from .hosts import sanitize
+        want = sanitize(hostname)
+        nodes_dir = self._data_dir / "nodes"
+        if not nodes_dir.exists():
+            return None
+        for p in nodes_dir.glob("*.json"):
+            try:
+                info = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if sanitize(info.get("hostname", "")) == want:
+                return p.stem  # filename is the id_pub hex
+        return None

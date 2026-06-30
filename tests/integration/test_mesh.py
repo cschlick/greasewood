@@ -6,11 +6,13 @@ Each test uses real WireGuard interfaces inside privileged Podman containers.
 Run:
   pytest tests/integration/ -v
 """
+import time
+
 import pytest
 
 from .helpers import (
-    directory_hostnames, directory_records, hub_get, wait_for_hostname,
-    wait_for_ping,
+    container_ipv6, directory_hostnames, directory_records, hub_get, podman,
+    wait_for_hostname, wait_for_ping,
 )
 
 pytestmark = pytest.mark.integration
@@ -45,6 +47,31 @@ def test_root_overlay_addr_in_directory(gw_root):
     root_record = next(r for r in data if r["hostname"] == "root")
     # addr is anchored in the signed credential, not a top-level record field.
     assert root_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
+
+
+def test_duplicate_hostname_refused(gw_root, gw_image, gw_network):
+    """The hub refuses to enroll a second node with a name already in use."""
+    from .conftest import bring_up_node, door_enroll_via
+
+    node = c2 = None
+    try:
+        node = bring_up_node(gw_image, gw_network, gw_root, hostname="dupename")
+        c2 = podman(
+            "run", "-d", "--privileged", "--network", gw_network,
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
+            gw_image, "sleep", "infinity",
+        ).stdout.strip()
+        time.sleep(1)
+        ipv6 = container_ipv6(c2, gw_network)
+        j = door_enroll_via(gw_root["cid"], gw_root["ipv6"], c2, ipv6,
+                            hostname="dupename", check=False)
+        assert j.returncode != 0, "join should fail for a duplicate hostname"
+        assert "already in use" in (j.stdout + j.stderr).lower(), \
+            f"unexpected message:\n{j.stdout}\n{j.stderr}"
+    finally:
+        for cid in (node["cid"] if node else None, c2):
+            if cid:
+                podman("rm", "-f", cid, check=False)
 
 
 def test_rejoin_reuses_keys_and_preserves_config(gw_root, gw_image, gw_network):

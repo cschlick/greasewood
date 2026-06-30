@@ -26,7 +26,9 @@ _BEGIN = "# BEGIN greasewood — managed, do not edit"
 _END = "# END greasewood"
 
 
-def _sanitize(hostname: str) -> str:
+def sanitize(hostname: str) -> str:
+    """DNS-safe form of a hostname ([a-z0-9-]); the key used for name uniqueness
+    and the label in mesh names. 'root@node01' -> 'root-node01'."""
     s = re.sub(r"[^a-z0-9-]+", "-", hostname.strip().lower()).strip("-")
     return s or "node"
 
@@ -38,7 +40,7 @@ def mesh_name(hostname: str, domain: str) -> str:
     and as the default TLS cert CN/SAN (gw cert-request), so the name a node is
     reachable by is exactly the name its certificate is valid for.
     """
-    return f"{_sanitize(hostname)}.{domain}"
+    return f"{sanitize(hostname)}.{domain}"
 
 
 def _strip_managed(text: str) -> str:
