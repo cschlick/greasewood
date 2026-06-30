@@ -33,6 +33,13 @@ seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"]
 # Where to send enroll/renew requests.
 root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"
 
+# Name resolution (opt-in). When true, the daemon maintains a managed block in
+# /etc/hosts mapping overlay addresses to "<hostname>.<mesh_domain>", so you can
+# `ping db.internal`. The domain is also the default TLS cert name from
+# `gw cert-request`, so a node's address name matches its certificate SAN.
+hosts_sync = false
+mesh_domain = "internal"
+
 
 [ca]
 # Trusted CA public key(s) — raw Ed25519, hex-encoded.
