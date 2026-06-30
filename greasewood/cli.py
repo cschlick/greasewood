@@ -455,6 +455,15 @@ def cmd_join(args) -> int:
     else:
         caps = ["mesh"]
 
+    # inbound: "yes" (reachable, advertise endpoint), "no" (outbound-only,
+    # suppress endpoint — peers won't dial it; it dials them), or "unknown".
+    if args.inbound is not None:
+        node_inbound = args.inbound
+    elif prior and getattr(prior, "inbound", None):
+        node_inbound = prior.inbound
+    else:
+        node_inbound = "yes"
+
     # Endpoint = where other nodes dial this one for a direct tunnel. If not
     # given, try to auto-detect a public IPv6. A node with no endpoint can
     # still reach the hub (it initiates outbound), but peers can't dial it, so
@@ -599,14 +608,16 @@ def cmd_join(args) -> int:
         except Exception as e:
             log.warning("hub record verify failed: %s", e)
 
-    # Our own record
+    # Our own record. Outbound-only nodes don't advertise an endpoint, so peers
+    # don't waste handshakes dialing an address they can't reach.
     existing = directory.get(node_keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
+    adv_endpoints = [endpoint] if (endpoint and node_inbound != "no") else []
     record = NodeRecord(
         id_pub=node_keys.id_pub_bytes,
         seq=seq,
-        endpoints=[endpoint] if endpoint else [],
-        inbound="yes",
+        endpoints=adv_endpoints,
+        inbound=node_inbound,
         hostname=hostname,
         cred=cred,
     ).sign(node_keys.id_priv)
@@ -654,7 +665,7 @@ def cmd_join(args) -> int:
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "node"
-inbound = "yes"
+inbound = "{node_inbound}"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
@@ -680,14 +691,25 @@ trusted_pubs = ["{ca_pub_hex}"]
     print(f"Start the daemon:")
     print(f"  sudo gw run")
     print()
-    _print_firewall_help(listen_port)
     print()
     from . import firewall as _fw
-    _rules = _fw.node_rules(listen_port)
-    if getattr(args, "open_firewall", False):
-        _fw.apply(_rules, log)
+    if node_inbound == "no":
+        log.warning(
+            "firewall: inbound=no — outbound-only. No greasewood inbound ports "
+            "are needed (it dials peers + the hub's door outbound); just keep "
+            "your base 'ct state established,related accept' rule for replies. "
+            "Note: this node can only pair with inbound-reachable nodes, not "
+            "with other outbound-only nodes, and cannot be promoted to hub "
+            "without switching to inbound (gw set-inbound yes --open-firewall)."
+        )
     else:
-        _fw.check(_rules, log)
+        _print_firewall_help(listen_port)
+        print()
+        _rules = _fw.node_rules(listen_port, node_inbound)
+        if getattr(args, "open_firewall", False):
+            _fw.apply(_rules, log)
+        else:
+            _fw.check(_rules, log)
     return 0
 
 
@@ -745,6 +767,16 @@ def cmd_hub_promote(args) -> int:
         sys.exit(f"no config at {cfg_path} — this command runs on an enrolled node")
     cfg = load_config(cfg_path)
 
+    # A hub must accept inbound connections (it serves the control plane + door).
+    # An outbound-only node can't be one until it's reachable.
+    if cfg.inbound == "no":
+        sys.exit(
+            "this node is outbound-only (inbound=no); a hub must accept inbound "
+            "connections. Switch it first:\n"
+            "  sudo gw set-inbound yes --open-firewall\n"
+            "then re-run hub-promote."
+        )
+
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     ca_key_path = cfg.data_dir / "ca.key"
     if ca_key_path.exists():
@@ -768,11 +800,12 @@ def cmd_hub_promote(args) -> int:
     endpoint_line = (
         f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
     )
+    hosts_sync = "true" if cfg.hosts_sync else "false"
     cfg_path.write_text(f"""[node]
 hostname = "{cfg.hostname}"
 data_dir = "{cfg.data_dir}"
 role = "hub"
-inbound = "{cfg.inbound}"
+inbound = "yes"
 caps = {json_mod.dumps(cfg.caps)}{endpoint_line}
 
 [network]
@@ -780,6 +813,8 @@ interface = "{cfg.wg_interface}"
 listen_port = {cfg.listen_port}
 seeds = {json_mod.dumps(cfg.seeds)}
 root_url = "{cfg.root_url}"
+hosts_sync = {hosts_sync}
+mesh_domain = "{cfg.mesh_domain}"
 
 [ca]
 trusted_pubs = {json_mod.dumps(trusted)}
@@ -801,6 +836,13 @@ door_window = "15m"
     print(f"  gw hub-endorse --ca-pub {ca_pub_hex} \\")
     print(f"                 --endpoint {endpoint}")
     print("Then restart the daemon here:  sudo gw run")
+    print()
+    from . import firewall as _fw
+    _rules = _fw.hub_rules(cfg.listen_port, control_port)
+    if getattr(args, "open_firewall", False):
+        _fw.apply(_rules, log)
+    else:
+        _fw.check(_rules, log)
     return 0
 
 
@@ -1059,6 +1101,50 @@ def cmd_cert_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# set-inbound — flip a node between reachable and outbound-only
+# ---------------------------------------------------------------------------
+
+def cmd_set_inbound(args) -> int:
+    """Change this node's reachability (yes/no/unknown). Switching to inbound
+    means peers can dial it — so it can hold direct links to outbound-only nodes
+    and be promoted to hub — but it must accept the WireGuard port; pair with
+    --open-firewall to open it. Restart the daemon to advertise the change."""
+    import re
+    from .config import load_config
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"no config at {cfg_path}")
+    cfg = load_config(cfg_path)
+    value = args.value
+
+    text = cfg_path.read_text()
+    new, n = re.subn(r'(?m)^\s*inbound\s*=\s*".*?"\s*$',
+                     f'inbound = "{value}"', text, count=1)
+    if n == 0:
+        sys.exit("could not find an [node] inbound = \"...\" line to update")
+    cfg_path.write_text(new)
+    print(f"inbound = {value} (was {cfg.inbound})")
+
+    from . import firewall as _fw
+    if value == "no":
+        print("Outbound-only: greasewood needs no inbound ports; keep your base "
+              "'ct state established,related accept' for replies. (Open ports left "
+              "in place are harmless; remove them yourself if you like.)")
+    else:
+        is_hub = cfg.role in ("hub", "root")
+        rules = (_fw.hub_rules(cfg.listen_port, _control_port(cfg))
+                 if is_hub else _fw.node_rules(cfg.listen_port, value))
+        if getattr(args, "open_firewall", False):
+            _fw.apply(rules, log)
+        else:
+            _fw.check(rules, log)
+    print("Restart the daemon to advertise the change: sudo systemctl restart "
+          "greasewood  (or re-run sudo gw run)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -1179,10 +1265,33 @@ def cmd_run(args) -> int:
     )
     recon.start()
 
+    # Effective advertised endpoints: outbound-only nodes (inbound=no) suppress
+    # their endpoint so peers don't waste handshakes dialing an unreachable addr.
+    eff_endpoints = [] if cfg.inbound == "no" else cfg.endpoints
+
+    # Honor config changes on (re)start: if our record's inbound/endpoints no
+    # longer match config (e.g. after `gw set-inbound`), re-sign it so what we
+    # advertise is current — the daemon reads config only at startup.
+    own_record = directory.get(keys.id_pub_hex)
+    if own_record and (own_record.inbound != cfg.inbound
+                       or list(own_record.endpoints) != list(eff_endpoints)):
+        from .wire import NodeRecord
+        own_record = NodeRecord(
+            id_pub=keys.id_pub_bytes,
+            seq=own_record.seq + 1,
+            endpoints=eff_endpoints,
+            inbound=cfg.inbound,
+            hostname=cfg.hostname,
+            cred=own_record.cred,
+        ).sign(keys.id_priv)
+        directory.put(own_record)
+        directory.save(cfg.dir_cache_path)
+        log.info("updated own record (inbound=%s, endpoints=%s)",
+                 cfg.inbound, eff_endpoints)
+
     # Push our own record so the rest of the mesh knows about us. This gets a
     # newly enrolled node into the hub's directory; it is also how endpoint
     # changes propagate without waiting for the next renewal cycle.
-    own_record = directory.get(keys.id_pub_hex)
     if own_record:
         for seed in trust.seeds():
             try:
@@ -1200,7 +1309,7 @@ def cmd_run(args) -> int:
             current_cred=own_record.cred,
             inbound=cfg.inbound,
             hostname=cfg.hostname,
-            endpoints=cfg.endpoints,
+            endpoints=eff_endpoints,
             cache_path=cfg.dir_cache_path,
         )
         renewal.start()
@@ -1515,6 +1624,10 @@ def main(argv=None) -> int:
     sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
                     help="maintain a managed /etc/hosts block (<name>.internal "
                          "-> overlay addr) from the directory")
+    sp.add_argument("--inbound", choices=["yes", "no", "unknown"], default=None,
+                    help="can peers dial this node? 'no' = outbound-only "
+                         "(suppress endpoint, no inbound ports). Default: keep "
+                         "existing, else yes.")
     sp.set_defaults(fn=cmd_join)
 
     # purge
@@ -1555,6 +1668,8 @@ def main(argv=None) -> int:
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
+                    help="insert the needed nftables accept rules (opt-in)")
     sp.set_defaults(fn=cmd_hub_promote)
 
     # hub-endorse (on the current hub)
@@ -1600,6 +1715,15 @@ def main(argv=None) -> int:
     sp.add_argument("--out-dir", dest="out_dir", default=None)
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_cert_status)
+
+    # set-inbound
+    sp = sub.add_parser("set-inbound",
+                        help="change reachability: yes (dialable) / no (outbound-only) / unknown")
+    sp.add_argument("value", choices=["yes", "no", "unknown"])
+    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
+                    help="when switching to inbound, open the WireGuard port (opt-in)")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.set_defaults(fn=cmd_set_inbound)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
