@@ -225,6 +225,11 @@ iifname "gw0" tcp dport 7946 accept
 iifname "gw-door" tcp dport 7947 accept
 ```
 
+Your base default-drop ruleset should also carry `ct state established,related
+accept` (almost everyone has it). It's what lets an **outbound-only** node work:
+such a node opens *no* greasewood inbound ports — it dials peers and the hub,
+and the replies come back through `established,related`.
+
 **Recommended posture: apply the same ruleset on *every* node, not just the
 current hub.** Any node can be promoted to hub ([Moving the
 hub](#moving-the-hub-ca-succession)), so a uniform ruleset means a hub handover
@@ -233,6 +238,26 @@ isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
 no control plane, so on a node that will never be a hub you can omit the `gw0`/
 `gw-door` TCP rules and open only the two UDP ports.
+
+### Reachability (`inbound`)
+
+WireGuard has no client/server roles — both peers try to handshake and the
+direction that physically works wins, then endpoint roaming pins it. So a link
+forms as long as **at least one side is reachable**: a firewalled node dials an
+open one, and the reply returns via `established,related`. Two fully-blocked
+nodes can't pair (direct-or-fail — no relays).
+
+Declare a node's reachability at join (`--inbound yes|no|unknown`, default
+`yes`) or change it later with `gw set-inbound`:
+
+- **`no`** (outbound-only): the node advertises *no* endpoint, so peers don't
+  waste handshakes dialing it; it opens no inbound ports. It can only pair with
+  inbound-reachable nodes, and **can't be promoted to hub** (a hub must be
+  reachable). Switch it back with `sudo gw set-inbound yes --open-firewall`.
+- **`yes` / `unknown`**: advertises its endpoint; needs the mesh UDP port open.
+
+`inbound` is an optimization + a guard, not what decides direction — WireGuard
+does that on its own.
 
 ## Command reference
 
@@ -249,6 +274,7 @@ no control plane, so on a node that will never be a hub you can omit the `gw0`/
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
+| `set-inbound`      | yes   | Change reachability (yes/no/unknown); `--open-firewall`.   |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |

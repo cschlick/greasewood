@@ -11,8 +11,10 @@ role = "node"
 
 # Can this node accept cold inbound WireGuard handshakes? (§8)
 # "yes"     — open firewall, publicly reachable (cloud VMs, etc.)
-# "no"      — behind stateful firewall; must initiate outward
-# "unknown" — unsure (homelab with churny DHCPv6-PD)
+# "no"      — outbound-only: advertises no endpoint, opens no inbound ports,
+#             can only pair with inbound nodes, and can't be a hub. Change with
+#             `gw set-inbound yes --open-firewall`.
+# "unknown" — unsure (homelab with churny DHCPv6-PD); advertises like "yes"
 inbound = "yes"
 
 # Capability set for this node. mesh↔mesh links are allowed by default policy.
