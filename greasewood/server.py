@@ -1,16 +1,16 @@
 """
-greasewood.server — HTTP control plane (root and seed roles).
+greasewood.server — HTTP control plane (hub role).
 
 Endpoints:
   GET  /directory   → JSON array of NodeRecords
   POST /publish     → accept a self-signed, CA-credentialed NodeRecord
-  POST /renew       → RenewRequest → Credential  (root only)
+  POST /renew       → RenewRequest → Credential  (hub only)
   GET  /health      → {"status": "ok"}
 
-There is no /enroll endpoint. Enrollment is SSH-only: the operator runs
-`greasewood issue` on the root node and copies the credential to the new
-node by hand. This server is intended to run on the overlay address so
-all traffic goes through the WireGuard tunnel.
+There is no /enroll endpoint here. Enrollment happens out of band — over the
+transient WireGuard "door" (`gw mint` / `gw join`, see greasewood.enroll), or
+by manually copying a credential from `gw issue`. This server is intended to
+run on the overlay address so all traffic goes through the WireGuard tunnel.
 
 /publish is the exception that may be called before a node is fully in the
 mesh: a newly installed node POSTs its own signed record so the root can

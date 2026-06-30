@@ -1,9 +1,9 @@
 """
 greasewood.config — TOML configuration loading.
 
-All nodes share one config format. Role ("hub", "seed", "node") is a runtime
-setting, not a build distinction. "Special" is a function of holding ca_priv
-and being pointed-to as a seed — nothing else.
+All nodes share one config format. Role ("hub", "node") is a runtime setting,
+not a build distinction. A hub is just a node that additionally holds ca_priv
+and serves the control plane + enrollment door.
 
 "hub" is the canonical name for the coordinating node; "root" is accepted as
 an alias in existing configs.
@@ -22,7 +22,7 @@ class Config:
     # Node identity
     data_dir: Path
     hostname: str
-    role: str              # "root" | "seed" | "node"
+    role: str              # "hub" (alias "root") | "node"
     inbound: str           # "yes" | "no" | "unknown"
     caps: list[str]
     endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51820"]

@@ -1,19 +1,131 @@
 # greasewood
 
+A minimal, self-hosted WireGuard mesh overlay. Nodes form a full mesh of
+direct WireGuard tunnels, authorized by a single certificate authority. There
+is nothing in the data path but WireGuard itself.
+
+- **IPv6-only.** Every node gets a stable overlay address under
+  `fd8d:e5c1:db1a:7::/64`, derived from its own identity key — no allocator.
+- **Direct-or-fail.** No routing, no multi-hop, no relays, no NAT traversal. A
+  link either comes up directly or it honestly fails.
+- **CA-gated.** Membership is a CA-signed credential with an expiry.
+  "Revoking" a node means not renewing it; it falls out of the mesh fleet-wide
+  when its last credential expires. No CRL.
+- **Nothing central in the data path.** The hub serves enrollment and the
+  directory, but every node caches the directory locally and keeps its tunnels
+  running even if the hub is offline for up to one credential lifetime.
+- **Small.** Pure Python (3.11+), one dependency (`cryptography`), one binary
+  (`gw`). WireGuard is driven through the standard `wg` / `ip` tools.
+
+> Status: early. The core — enrollment, directory, reconcile loop, door-based
+> join — works end to end (see Testing). Renewal, CA migration, and a TLS
+> service-cert layer are partially built or planned.
+
+## How it works
+
+**Two keys per node.** Identity and transport are deliberately split:
+
+- `id_priv` / `id_pub` (Ed25519) — durable identity. It derives the node's
+  overlay address and authorizes credential renewal. Used rarely; guard it
+  hard (a leak is catastrophic).
+- `wg_priv` / `wg_pub` (X25519) — the hot WireGuard tunnel key. It lives
+  unattended on disk so the node survives reboots, and it's self-limiting: a
+  leak expires with the credential.
+
+**Two signed objects.**
+
+- **Credential** — signed by the CA. Binds `id_pub`, `wg_pub`, overlay address,
+  capabilities, and an expiry. Slow-moving (default 24 h TTL).
+- **NodeRecord** — signed by the node's own `id_priv`. Carries the credential
+  plus mutable facts (endpoints, hostname, a sequence number). Fast-moving;
+  this is what gets published and gossiped through the directory.
+
+**Self-certifying addresses.** A node's overlay address is
+`prefix : truncate64(blake2s(id_pub))`. Any peer recomputes it from `id_pub`
+and rejects a record whose claimed address doesn't match — so addresses can't
+be spoofed and need no central allocator.
+
+**The reconcile loop** is the only thing that touches the data plane. Every few
+seconds each node walks the directory and, per peer, runs seven checks — verify
+the CA signature, check expiry, verify the record's self-signature, verify the
+address derives from `id_pub`, check the revoke list, check the authorization
+policy (`mesh` ↔ `mesh` by default) — then installs or removes that WireGuard
+peer with `wg set`. Membership changes, revocations, and key rotations all
+reduce to "add or remove a peer," computed locally with no coordinator.
+
+**The control plane** is a small HTTP service the hub runs: `GET /directory`,
+`POST /publish`, `POST /renew`, `GET /health`. Nodes poll `/directory`, merge by
+highest sequence number, and persist a local cache.
+
+## Install
+
+Requires Linux with the WireGuard kernel module (built into 5.6+), the
+`wireguard-tools` (`wg`) and `iproute2` (`ip`) packages, and Python 3.11+.
+
+```bash
+git clone https://gitlab.com/cschlick/greasewood.git
+cd greasewood
+pip install .
+```
+
+This installs the `gw` command. Most subcommands need root (they create
+WireGuard interfaces and edit routing); `gw status` and `gw issue` do not.
+
+## Quickstart
+
+### 1. Bootstrap the hub
+
+On the machine that will hold the CA and serve enrollment:
+
+```bash
+sudo gw setup-hub --hostname hub
+sudo gw run
+```
+
+`setup-hub` generates the CA, the persistent door key, the policy routing for
+the enrollment door, and the hub's own credential, then writes
+`/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw0`
+WireGuard interface, serves the control plane, and watches for door windows.
+
+### 2. Enroll a node
+
+Enrollment uses a transient WireGuard "door" — no SSH, no HTTP exposed on the
+underlay. On the hub, open a window and mint a single-use token:
+
+```bash
+TOKEN=$(sudo gw mint)
+echo "$TOKEN"
+```
+
+Deliver that token to the new machine (any channel) and redeem it:
+
+```bash
+sudo gw join "$TOKEN" --hostname node01
+sudo gw run
+```
+
+`join` derives a throwaway guest key from the token, stands up a temporary
+`gw-door` tunnel to the hub, receives a CA-signed credential over it, tears the
+door down, and writes the node's config. `gw run` then brings the node into the
+mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
+
+### 3. Check it
+
+```bash
+gw status            # local node + directory view
+sudo wg show gw0     # live WireGuard peers
+```
+
 ## Provisioning many nodes
 
 Enrollment tokens are **pushed by the hub, never pulled by nodes**. A node
 cannot request admission; the hub (or an orchestrator acting on it) decides to
-admit a machine, runs `gw mint` to create a single-use token, and delivers that
-token to the node out of band (SSH, cloud-init, a secrets store, etc.). The
-node then runs `gw join <token>` to redeem it.
+admit a machine, runs `gw mint`, and delivers the token out of band. The node
+only redeems what it was handed.
 
-Because of this, the door is **single-slot and orderly by construction**: one
-mint opens one enrollment window; the hub closes that window the instant the
-node finishes joining. There is no inbound request flood to arbitrate — the
-only actor that could create contention is the minting side itself.
-
-So to provision N machines, mint and join in a simple sequential loop:
+Because of this the door is **single-slot and orderly by construction**: one
+mint opens one enrollment window, and the hub closes it the instant the node
+finishes joining. To provision N machines, mint and join in a sequential loop:
 
 ```bash
 for host in node01 node02 node03; do
@@ -23,104 +135,129 @@ done                                         # next mint only runs after join re
 ```
 
 Each `gw join` blocks until the node is enrolled, so the window is always closed
-again before the next `gw mint` — no coordination, locks, or queue needed.
+again before the next `gw mint` — no locks or queue needed.
 
 A new `gw mint` regenerates the door's guest key and overwrites the current
-window, **invalidating any previously minted-but-unused token**. If you mint
-while a window is still open, `gw mint` prints a warning to stderr (the token
-still goes to stdout, so `TOKEN=$(gw mint)` is unaffected). Treat that warning
-as a sign your provisioner is minting ahead of itself.
+window, **invalidating any previously minted-but-unused token**. Minting while a
+window is still open prints a warning to stderr (the token still goes to stdout,
+so `TOKEN=$(gw mint)` is unaffected). Treat that warning as a sign the
+provisioner is minting ahead of itself.
 
 > The door enrolls one node at a time on the wire by design. Running the minting
-> side as parallel workers would not speed this up — it would just need a lock to
-> avoid clobbering — so the sequential loop above is the intended model.
+> side as parallel workers would not speed this up, so the sequential loop is
+> the intended model.
 
-## Getting started
+## Firewall
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+On each node's **underlay** (public) interface, open:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| Port        | Proto | Purpose                                  |
+|-------------|-------|------------------------------------------|
+| `51820`     | UDP   | mesh WireGuard (`gw0`)                    |
+| `51821`     | UDP   | enrollment door (`gw-door`), during join |
 
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+The control plane (`7946/tcp`) and enrollment RPC (`7947/tcp`) are **not**
+reached over the underlay — they travel inside the overlay and door tunnels
+respectively. If a host runs a default-drop input policy, allow them on the
+tunnel interfaces instead of the public NIC, e.g. with nftables:
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/cschlick/greasewood.git
-git branch -M main
-git push -uf origin main
+iifname { "gw0", "gw-door" } tcp dport { 7946, 7947 } accept
+udp dport { 51820, 51821 } accept
 ```
 
-## Integrate with your tools
+## Command reference
 
-* [Set up project integrations](https://gitlab.com/cschlick/greasewood/-/settings/integrations)
+| Command            | Root? | What it does                                              |
+|--------------------|-------|-----------------------------------------------------------|
+| `setup-hub`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
+| `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
+| `mint`             | yes   | Open a 15-min door window, print a single-use join token. |
+| `join <token>`     | yes   | Enroll this machine using a token from `mint`.            |
+| `status`           | no    | Show local node and directory state.                      |
+| `issue`            | no    | CA-sign a credential directly (SSH-style enrollment).     |
+| `install-cred`     | yes   | Install a credential from `issue` (used by `join`).       |
+| `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
+| `purge`            | yes   | Remove all greasewood state from this machine.            |
+| `init-ca`/`init-node` | —  | Low-level key generation (used by the commands above).    |
 
-## Collaborate with your team
+Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
+`-v/--verbose`. Both must precede the subcommand (`gw -v run`, not `gw run -v`).
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+### Two enrollment paths
 
-## Test and Deploy
+- **Door (recommended):** `mint` + `join`. Token-based, no SSH, no underlay
+  HTTP. This is the primary path.
+- **SSH/manual:** `init-node` on the node → `issue` on the hub (over SSH) →
+  `install-cred` on the node. Useful when you'd rather move a credential file by
+  hand than open a door.
 
-Use the built-in continuous integration in GitLab.
+## Configuration
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+`gw setup-hub` and `gw join` write `/etc/greasewood.toml` for you; see
+`greasewood.toml.example` for the full annotated schema. Key fields:
 
-***
+```toml
+[node]
+hostname = "node01"
+role     = "node"          # "hub" | "node"
+inbound  = "yes"           # can this node accept cold inbound handshakes?
+caps     = ["mesh"]
 
-# Editing this README
+[network]
+interface  = "gw0"
+listen_port = 51820
+seeds    = ["http://[<hub-overlay>]:7946"]   # directory URLs to pull (the hub)
+root_url = "http://[<hub-overlay>]:7946"     # where to publish / renew
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+[ca]
+trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
 
-## Suggestions for a good README
+[hub]                        # hub role only
+ca_key_file    = "/var/lib/greasewood/ca.key"
+control_listen = ":7946"
+credential_ttl = "24h"
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### Roles
 
-## Name
-Choose a self-explaining name for your project.
+- **hub** — holds the CA private key; serves the control plane and the
+  enrollment door; participates in the mesh.
+- **node** — a plain mesh participant.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## Testing
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+```bash
+pip install -e '.[test]'   # or: pip install pytest
+python -m pytest           # unit tests (fast, no privileges)
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Integration and stress tests run real WireGuard inside privileged Podman
+containers and are skipped by the default run. They need Podman 4+ and the
+WireGuard kernel module:
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```bash
+# Functional mesh tests (hub + nodes, real tunnels, overlay pings)
+python -m pytest tests/integration/
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# Scale tests — grow the mesh to many nodes and verify full convergence.
+# Gated behind GW_STRESS; knobs: GW_STRESS_N / _WAVES / _WORKERS.
+GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -s
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Design notes & non-goals
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Deliberately **not** implemented (and not bugs): routing or relays, NAT
+traversal / hole-punching, gossip between nodes, lazy on-demand tunnels,
+continuous key rotation, or a mobile CA key. These are revisited only at
+specific scale or threat triggers — e.g. gossip if the network genuinely
+partitions, lazy tunnels at hundreds of nodes, a threshold CA when hub
+compromise becomes unacceptable.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+**Clock integrity is part of the security posture.** Every allow/deny is a
+timestamp comparison against a credential expiry, so run NTP/chrony on every
+node.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+**CA trust is a set, not a single key,** from day one — so the CA can be rotated
+later by a signed handoff with a one-TTL overlap, never by moving the private
+key.
