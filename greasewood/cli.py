@@ -421,16 +421,15 @@ def cmd_join(args) -> int:
         wgmod.destroy_interface("gw-door")
         sys.exit(f"enrollment rejected: {resp.get('error')} — {resp.get('reason')}")
 
-    # Tear down the door interface — we're done with it
-    wgmod.destroy_interface("gw-door")
-
-    # Verify and install the credential
+    # Verify and install the credential (gw-door still up — needed for door publish below)
     cred = Credential.from_dict(resp["credential"])
     try:
         cred.verify([ca_pub_bytes])
     except Exception as e:
+        wgmod.destroy_interface("gw-door")
         sys.exit(f"credential verification failed: {e}")
     if cred.id_pub != node_keys.id_pub_bytes:
+        wgmod.destroy_interface("gw-door")
         sys.exit("credential id_pub mismatch — something went wrong")
     log.info("credential verified, expires %s", cred.exp.strftime("%Y-%m-%d %H:%M UTC"))
 
@@ -463,6 +462,21 @@ def cmd_join(args) -> int:
     ).sign(node_keys.id_priv)
     directory.put(record)
     directory.save(dir_cache)
+
+    # Push our record to the hub via the door tunnel before tearing it down.
+    # This bootstraps the hub's directory so the ReconcileLoop installs our
+    # WG peer immediately — without this, the node can't reach the hub overlay
+    # address to publish, and the hub never adds the peer (chicken-and-egg).
+    from .door import HUB_DOOR_IP as _HUB_DOOR_IP
+    from .sync import push_record as _push_record
+    try:
+        _push_record(f"http://[{_HUB_DOOR_IP}]:7946", record, timeout=5.0)
+        log.info("pre-published record to hub via door tunnel")
+    except Exception as e:
+        log.warning("door pre-publish failed (hub learns this node on next sync): %s", e)
+
+    # Tear down the door interface
+    wgmod.destroy_interface("gw-door")
 
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
     seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
