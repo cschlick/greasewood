@@ -47,9 +47,56 @@ def wait_for_ping(container: str, addr: str, timeout: int = 30) -> bool:
     return False
 
 
+def ping_once(container: str, addr: str, timeout: int = 2) -> bool:
+    """Single ping, no retry — use once the mesh is known to be converged."""
+    r = pexec(container, "ping", "-6", "-c1", "-W", str(timeout), addr, check=False)
+    return r.returncode == 0
+
+
+def wg_peer_count(container: str, iface: str = "gw0") -> int:
+    """Number of WireGuard peers currently installed on the interface."""
+    r = pexec(container, "wg", "show", iface, "peers", check=False)
+    if r.returncode != 0:
+        return 0
+    return len([ln for ln in r.stdout.splitlines() if ln.strip()])
+
+
+def wait_for_peer_count(container: str, expected: int, iface: str = "gw0",
+                        timeout: int = 90) -> int:
+    """
+    Block until the interface has at least `expected` peers. Returns the final
+    observed count (== expected on success, < expected on timeout).
+    """
+    deadline = time.time() + timeout
+    last = 0
+    while time.time() < deadline:
+        last = wg_peer_count(container, iface)
+        if last >= expected:
+            return last
+        time.sleep(1)
+    return last
+
+
 def directory_hostnames(root_url: str) -> set[str]:
     resp = urllib.request.urlopen(f"{root_url}/directory")
     return {r["hostname"] for r in json.loads(resp.read())}
+
+
+def directory_size(root_url: str) -> int:
+    resp = urllib.request.urlopen(f"{root_url}/directory")
+    return len(json.loads(resp.read()))
+
+
+def wait_for_directory_size(root_url: str, expected: int, timeout: int = 60) -> int:
+    """Block until root's directory holds at least `expected` records."""
+    deadline = time.time() + timeout
+    last = 0
+    while time.time() < deadline:
+        last = directory_size(root_url)
+        if last >= expected:
+            return last
+        time.sleep(1)
+    return last
 
 
 def wait_for_hostname(root_url: str, hostname: str, timeout: int = 20) -> bool:
