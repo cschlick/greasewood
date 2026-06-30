@@ -193,7 +193,9 @@ def ensure_node_door_interface(
 
     guest_priv_b64 = base64.b64encode(guest_priv_bytes).decode()
     with _temp_key_file(guest_priv_b64) as key_path, _temp_key_file(psk_b64) as psk_path:
-        _run("wg", "set", DOOR_IFACE, "private-key", key_path)
+        _run("wg", "set", DOOR_IFACE,
+             "private-key", key_path,
+             "listen-port", str(DOOR_PORT))
         _run("wg", "set", DOOR_IFACE,
              "peer", hub_door_pub_b64,
              "preshared-key", psk_path,
