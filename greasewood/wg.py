@@ -156,7 +156,7 @@ def ensure_hub_door_interface(
 ) -> None:
     """
     Bring up the hub's gw-door interface for one enrollment window.
-    Destroys any existing gw-door first so each mint gets a clean start.
+    Destroys any existing gw-door first so each invite gets a clean start.
     """
     from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
     door_port = DOOR_PORT if door_port is None else door_port

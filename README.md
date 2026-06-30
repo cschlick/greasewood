@@ -94,10 +94,10 @@ WireGuard interface, serves the control plane, and watches for door windows.
 ### 2. Enroll a node
 
 Enrollment uses a transient WireGuard "door" — no SSH, no HTTP exposed on the
-underlay. On the hub, open a window and mint a single-use token:
+underlay. On the hub, open a window and create a single-use token:
 
 ```bash
-TOKEN=$(sudo gw mint)
+TOKEN=$(sudo gw invite)
 echo "$TOKEN"
 ```
 
@@ -173,30 +173,30 @@ Notes:
 
 Enrollment tokens are **pushed by the hub, never pulled by nodes**. A node
 cannot request admission; the hub (or an orchestrator acting on it) decides to
-admit a machine, runs `gw mint`, and delivers the token out of band. The node
+admit a machine, runs `gw invite`, and delivers the token out of band. The node
 only redeems what it was handed.
 
 Because of this the door is **single-slot and orderly by construction**: one
-mint opens one enrollment window, and the hub closes it the instant the node
-finishes joining. To provision N machines, mint and join in a sequential loop:
+each invite opens one enrollment window, and the hub closes it the instant the node
+finishes joining. To provision N machines, invite and join in a sequential loop:
 
 ```bash
 for host in node01 node02 node03; do
-    TOKEN=$(ssh hub 'sudo gw mint')          # hub opens the door
+    TOKEN=$(ssh hub 'sudo gw invite')          # hub opens the door
     ssh "$host" "sudo gw join '$TOKEN'"      # node joins; hub closes the door
-done                                         # next mint only runs after join returns
+done                                         # next invite only runs after join returns
 ```
 
 Each `gw join` blocks until the node is enrolled, so the window is always closed
-again before the next `gw mint` — no locks or queue needed.
+again before the next `gw invite` — no locks or queue needed.
 
-A new `gw mint` regenerates the door's guest key and overwrites the current
-window, **invalidating any previously minted-but-unused token**. Minting while a
+A new `gw invite` regenerates the door's guest key and overwrites the current
+window, **invalidating any previously issued-but-unused token**. Issuing while a
 window is still open prints a warning to stderr (the token still goes to stdout,
-so `TOKEN=$(gw mint)` is unaffected). Treat that warning as a sign the
-provisioner is minting ahead of itself.
+so `TOKEN=$(gw invite)` is unaffected). Treat that warning as a sign the
+provisioner is issuing ahead of itself.
 
-> The door enrolls one node at a time on the wire by design. Running the minting
+> The door enrolls one node at a time on the wire by design. Running the issuing
 > side as parallel workers would not speed this up, so the sequential loop is
 > the intended model.
 
@@ -282,11 +282,11 @@ does that on its own.
 |--------------------|-------|-----------------------------------------------------------|
 | `setup-hub`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
-| `mint`             | yes   | Open a 15-min door window, print a single-use join token. |
-| `join <token>`     | yes   | Enroll this machine using a token from `mint`.            |
+| `invite`           | yes   | Open a 15-min door window, print a single-use join token. |
+| `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `status`           | no    | Show local node and directory state.                      |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
-| `hub-promote`      | yes   | Turn this enrolled node into a hub (mint its own CA key).  |
+| `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
 | `hub-endorse`      | no    | Endorse a successor hub's CA (on the current hub).         |
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
@@ -299,7 +299,7 @@ does that on its own.
 Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
 `-v/--verbose`. Both must precede the subcommand (`gw -v run`, not `gw run -v`).
 
-Enrollment is door-only: `mint` on the hub, `join` on the node. There is no
+Enrollment is door-only: `invite` on the hub, `join` on the node. There is no
 manual credential-copy path.
 
 ## Configuration
@@ -434,7 +434,7 @@ Migrating from hub **A** to a new node **B**:
 ```bash
 # 1. Enroll B as an ordinary node (gw join …) and start it.
 
-# 2. On B — mint B's own CA key and flip it to a hub-in-waiting:
+# 2. On B — generate B's own CA key and flip it to a hub-in-waiting:
 sudo gw hub-promote                 # prints B's CA pubkey + control endpoint
 
 # 3. On A — endorse B; the whole fleet now trusts A *and* B:

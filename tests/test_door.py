@@ -120,7 +120,7 @@ def test_token_different_hosts():
         assert decoded_host == host
 
 
-# ── Door window slot detection (mint clobber guard) ──────────────────────────
+# ── Door window slot detection (invite clobber guard) ──────────────────────────
 
 def _write_window(data_dir, delta_minutes):
     import datetime as dt

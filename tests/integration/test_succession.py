@@ -139,7 +139,7 @@ def test_ca_and_hub_succession(gw_root, gw_image, gw_network):
         extra_cids.append(b["cid"])
         b_ipv6 = container_ipv6(b["cid"], gw_network)
 
-        # Promote B (mint its own CA key, flip config to role=hub).
+        # Promote B (generate its own CA key, flip config to role=hub).
         pexec(b["cid"], "gw", "hub-promote", "--control-port", "51902")
         b_pub = _ca_pub_hex(b["cid"])
         b_endpoint = f"http://[{b['overlay']}]:51902"

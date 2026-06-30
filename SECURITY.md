@@ -10,7 +10,7 @@ enforced, the accepted risks, and the results of the security review.
 
 | Secret | Held by | Blast radius if leaked | Protection |
 |--------|---------|------------------------|------------|
-| `ca.key` (Ed25519) | the hub | **Total.** Mint credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to a node. The CA key never moves — succession hands off by signing, not by copying (§11). |
+| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to a node. The CA key never moves — succession hands off by signing, not by copying (§11). |
 | `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | On-disk at `0600` on server VMs (the primary deployment; no TPM expected — hardware-backed identity is a v2 item, see the founding doc). Treat a leak as "that node is compromised" → revoke. |
 | `wg_priv` (X25519) | each node | **Self-limiting.** Usable only until the node's credential expires; peers tear down the stale key on the next reconcile. | On-disk at `0600`; on-disk exposure is an accepted, bounded risk. |
 | join token / door seed | transient | Enroll **one** node during a single open window. The hub still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |

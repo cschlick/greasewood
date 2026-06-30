@@ -14,7 +14,7 @@ Both objects use json.dumps(sort_keys=True) as the canonical signing form.
 Binary fields (keys, signatures) are standard base64.
 
 RenewRequest is sent by enrolled nodes to the hub for credential renewal.
-Enrollment is out of band over the transient WireGuard "door" (`gw mint` /
+Enrollment is out of band over the transient WireGuard "door" (`gw invite` /
 `gw join`, see greasewood.door / greasewood.enroll); the control plane has no
 network-reachable enrollment endpoint.
 """

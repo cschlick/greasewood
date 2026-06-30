@@ -48,7 +48,7 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
 
         node = _run_container(gw_image, gw_network)
         node_ipv6 = container_ipv6(node, gw_network)
-        # mint (embeds DOOR_PORT in the token) + join (reads it). The enroll
+        # invite (embeds DOOR_PORT in the token) + join (reads it). The enroll
         # response carries CONTROL_PORT so the node builds the right hub URL.
         door_enroll_via(hub, hub_ipv6, node, node_ipv6, hostname="cnode")
 
