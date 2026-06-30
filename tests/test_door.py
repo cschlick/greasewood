@@ -9,8 +9,6 @@ import base64
 import pytest
 
 from greasewood.door import (
-    DOOR_PORT_MIN,
-    DOOR_PORT_MAX,
     TOKEN_PREFIX,
     decode_token,
     derive_door_params,
@@ -29,7 +27,6 @@ def test_derive_deterministic():
     p2 = derive_door_params(_ZERO_SEED)
     assert p1.guest_pub_b64 == p2.guest_pub_b64
     assert p1.psk_b64 == p2.psk_b64
-    assert p1.door_port == p2.door_port
 
 
 def test_derive_guest_priv_clamped():
@@ -42,20 +39,11 @@ def test_derive_guest_priv_clamped():
 
 
 def test_derive_outputs_are_independent():
-    """guest_pub, psk, and door_port must differ from each other."""
+    """guest_pub and psk must differ from each other."""
     params = derive_door_params(_ZERO_SEED)
     guest_raw = base64.b64decode(params.guest_pub_b64)
     psk_raw = base64.b64decode(params.psk_b64)
     assert guest_raw != psk_raw, "guest_pub and psk must be independent"
-
-
-def test_derive_port_in_range():
-    """Derived port must be within [DOOR_PORT_MIN, DOOR_PORT_MAX)."""
-    for seed_byte in [0, 1, 127, 255]:
-        seed = bytes([seed_byte] * 32)
-        params = derive_door_params(seed)
-        assert DOOR_PORT_MIN <= params.door_port < DOOR_PORT_MAX, \
-            f"port {params.door_port} out of range for seed byte {seed_byte}"
 
 
 def test_derive_different_seeds_differ():

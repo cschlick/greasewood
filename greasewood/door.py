@@ -4,39 +4,37 @@ greasewood.door — door enrollment protocol: key derivation and token encoding.
 The door is a transient WireGuard interface the hub uses to admit a joining node
 without SSH, without exposing the main mesh, and without any HTTP reachable from
 the underlay network.  A join token is a high-entropy 32-byte seed; everything
-else — guest keypair, PSK, UDP port — is derived deterministically from it by
-both sides independently.
+else — guest keypair, PSK — is derived deterministically from it by both sides
+independently.  The door UDP port is fixed (DOOR_PORT), requiring only one
+firewall rule instead of a range.
 
 Token wire format:
   "gw1." + base64url_nopad(
       hub_door_pub : 32 bytes   (hub's persistent door WG pubkey)
       ca_pub       : 32 bytes   (CA public key — so join needs no --ca-pub flag)
       host_len     : 1 byte
-      hub_host     : host_len bytes  (underlay host, no port — port is derived)
+      hub_host     : host_len bytes  (underlay host, no port — port is fixed)
       seed         : 32 bytes   (the only secret)
   )
 
 Derivation uses HKDF-SHA256 with salt="greasewood-door-v1":
   guest_priv → node's ephemeral X25519 key for the door WG tunnel
   psk        → WireGuard pre-shared key for the door tunnel
-  door_port  → UDP listen port for the hub's door interface
 
-Distinct info strings make the three outputs independent: knowing one reveals
-nothing about the others.  The seed is necessary and sufficient — possessing it
+Distinct info strings make the two outputs independent: knowing one reveals
+nothing about the other.  The seed is necessary and sufficient — possessing it
 gives door access; nothing else does.
 """
 from __future__ import annotations
 
 import base64
 import os
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 _SALT = b"greasewood-door-v1"
 _INFO_GUEST = b"gw/door/guest-x25519/v1"
 _INFO_PSK = b"gw/door/psk/v1"
-_INFO_PORT = b"gw/door/port/v1"
 
 # Door subnet — a throwaway /64 used only during the enrollment window.
 HUB_DOOR_IP = "fd8d:e5c1:db1a:d::1"
@@ -47,10 +45,9 @@ DOOR_SUBNET = "fd8d:e5c1:db1a:d::/64"
 DOOR_TABLE = 51820
 DOOR_RULE_PRIO = 100
 
-# Port range below the Linux ephemeral range (32768+) to avoid collision with
-# the hub's outbound sockets.
-DOOR_PORT_MIN = 20000
-DOOR_PORT_MAX = 32000
+# Fixed door port — one firewall rule, no range. Adjacent to the main WG port
+# so the two rules are obvious together: allow udp dport 51820; allow udp dport 51821.
+DOOR_PORT = 51821
 
 ENROLL_PORT = 7947
 DOOR_IFACE = "gw-door"
@@ -62,12 +59,11 @@ class DoorParams:
     guest_priv_bytes: bytes  # 32-byte X25519 private key (RFC 7748-clamped)
     guest_pub_b64: str       # base64 WG public key — hub adds this as its peer
     psk_b64: str             # base64 pre-shared key for the door WG tunnel
-    door_port: int           # UDP port the hub's door interface listens on
 
 
 def derive_door_params(seed: bytes) -> DoorParams:
     """
-    Derive all door parameters from a 32-byte seed using HKDF-SHA256.
+    Derive door parameters from a 32-byte seed using HKDF-SHA256.
     Hub (at mint) and node (at join) run this identically — no extra comm needed.
     """
     import hmac
@@ -103,14 +99,10 @@ def derive_door_params(seed: bytes) -> DoorParams:
 
     psk_b64 = base64.b64encode(_expand(_INFO_PSK, 32)).decode()
 
-    port_raw = struct.unpack(">H", _expand(_INFO_PORT, 2))[0]
-    door_port = DOOR_PORT_MIN + (port_raw % (DOOR_PORT_MAX - DOOR_PORT_MIN))
-
     return DoorParams(
         guest_priv_bytes=guest_priv_bytes,
         guest_pub_b64=guest_pub_b64,
         psk_b64=psk_b64,
-        door_port=door_port,
     )
 
 

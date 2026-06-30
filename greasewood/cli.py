@@ -286,27 +286,15 @@ def cmd_mint(args) -> int:
 
     window = cfg.door_window
 
-    # Roll a seed; re-roll if the derived port is already bound
-    import socket
-    for _ in range(10):
-        seed = generate_seed()
-        params = derive_door_params(seed)
-        try:
-            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-            s.bind(("", params.door_port))
-            s.close()
-            break
-        except OSError:
-            log.debug("door port %d busy, re-rolling seed", params.door_port)
-    else:
-        sys.exit("could not find a free port in the door range after 10 attempts")
+    seed = generate_seed()
+    params = derive_door_params(seed)
 
     # Set up door routing (idempotent — survives reboots if called here too)
     wgmod.setup_door_routing()
 
     # Bring up the hub's door WG interface
     door_key_path = data_dir / "door.key"
-    wgmod.ensure_hub_door_interface(door_key_path, params.door_port, params.guest_pub_b64, params.psk_b64)
+    wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64, params.psk_b64)
 
     # Write window file so the running gw-run daemon starts the enroll server
     expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
@@ -356,7 +344,7 @@ def cmd_join(args) -> int:
 
     # Derive door params from seed (same derivation the hub ran at mint time)
     params = derive_door_params(seed)
-    log.info("door port: %d  guest_pub: ...%s", params.door_port, params.guest_pub_b64[-8:])
+    log.info("guest_pub: ...%s", params.guest_pub_b64[-8:])
 
     # Generate this node's permanent keypairs
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -369,8 +357,7 @@ def cmd_join(args) -> int:
 
     # Bring up the local door interface
     wgmod.ensure_node_door_interface(
-        params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64,
-        hub_host, params.door_port,
+        params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64, hub_host,
     )
 
     # Connect to hub's enroll daemon via the door tunnel (retry for WG handshake)
