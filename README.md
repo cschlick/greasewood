@@ -176,6 +176,9 @@ udp dport { 51820, 51821 } accept
 | `join <token>`     | yes   | Enroll this machine using a token from `mint`.            |
 | `status`           | no    | Show local node and directory state.                      |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
+| `hub-promote`      | yes   | Turn this enrolled node into a hub (mint its own CA key).  |
+| `hub-endorse`      | no    | Endorse a successor hub's CA (on the current hub).         |
+| `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
@@ -217,6 +220,52 @@ credential_ttl = "24h"
   enrollment door; participates in the mesh.
 - **node** — a plain mesh participant.
 
+## Moving the hub (CA succession)
+
+Hub status — both the control plane and the certificate authority — can be
+handed from one node to another with no downtime and no config edit on any
+node, and this can repeat indefinitely (A → B → C → …; every node can take a
+turn). The private CA key never moves; the successor generates its own.
+
+Trust is a **set**, not a single key. Each node bootstraps from its configured
+`trusted_pubs`, then grows and shrinks that set at runtime from signed
+statements in a *CA bundle* the hub serves (`GET /ca-bundle`) and every node
+syncs. Two statement kinds, each signed by an already-trusted CA:
+
+- **endorse** — "CA X vouches for CA Y as a successor" (and advertises Y's hub
+  endpoint). Nodes resolve trust transitively: trusting A and seeing A→B→C…
+  means trusting the whole chain, so a node enrolled long ago under A follows
+  the hub all the way to the current one.
+- **retire** — "CA X is no longer an accepted signer." It is **scheduled** with
+  a grace period (default one credential TTL), so it propagates and every node
+  re-credentials under the successor *before* it takes effect — nobody is cut
+  off mid-handover. A retired CA's past endorsements stay valid (successors
+  survive), but it can't make new ones (a leaked decommissioned key can't inject
+  a rogue successor).
+
+Migrating from hub **A** to a new node **B**:
+
+```bash
+# 1. Enroll B as an ordinary node (gw join …) and start it.
+
+# 2. On B — mint B's own CA key and flip it to a hub-in-waiting:
+sudo gw hub-promote                 # prints B's CA pubkey + control endpoint
+
+# 3. On A — endorse B; the whole fleet now trusts A *and* B:
+gw hub-endorse --ca-pub <B-pubkey> --endpoint <B-endpoint>
+
+# 4. On B — restart so it serves as a hub:
+sudo gw run
+
+# Nodes repoint to B and, over the next credential cycle, renew under B.
+
+# 5. After the overlap, on B — retire A, then decommission A:
+gw hub-retire --ca-pub <A-pubkey>   # grace defaults to one credential TTL
+```
+
+Throughout, existing tunnels stay up (the data plane never depends on the hub),
+so the handover is non-disruptive.
+
 ## Testing
 
 ```bash
@@ -229,7 +278,8 @@ containers and are skipped by the default run. They need Podman 4+ and the
 WireGuard kernel module:
 
 ```bash
-# Functional mesh tests (hub + nodes, real tunnels, overlay pings)
+# Functional tests: mesh connectivity, re-enrollment, and hub/CA succession
+# (hub handover on real containers) — all under tests/integration/
 python -m pytest tests/integration/
 
 # Scale tests — grow the mesh to many nodes and verify full convergence.
@@ -250,6 +300,6 @@ compromise becomes unacceptable.
 timestamp comparison against a credential expiry, so run NTP/chrony on every
 node.
 
-**CA trust is a set, not a single key,** from day one — so the CA can be rotated
-later by a signed handoff with a one-TTL overlap, never by moving the private
-key.
+**CA trust is a set, not a single key.** The CA (and hub) is rotated by a signed
+handoff with a one-TTL overlap, never by moving the private key — see
+[Moving the hub](#moving-the-hub-ca-succession).
