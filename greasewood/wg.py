@@ -99,6 +99,9 @@ class LivePeer:
     wg_pub_b64: str
     endpoint: str      # empty string if none/unknown
     allowed_ips: str
+    latest_handshake: int = 0   # unix epoch seconds; 0 = never handshaked
+    rx_bytes: int = 0
+    tx_bytes: int = 0
 
 
 def destroy_interface(iface: str) -> None:
@@ -232,8 +235,9 @@ def _temp_key_file(b64_key: str):
 def get_peers(iface: str) -> dict[str, LivePeer]:
     """
     Return currently installed peers from `wg show <iface> dump`.
-    First line is the interface; subsequent lines are peers.
-    Tab-separated: pubkey, preshared-key, endpoint, allowed-ips, ...
+    First line is the interface; subsequent lines are peers. Tab-separated:
+    pubkey, preshared-key, endpoint, allowed-ips, latest-handshake,
+    rx-bytes, tx-bytes, persistent-keepalive.
     """
     r = _run("wg", "show", iface, "dump", check=False)
     if r.returncode != 0:
@@ -244,10 +248,20 @@ def get_peers(iface: str) -> dict[str, LivePeer]:
         parts = line.split("\t")
         if len(parts) < 4:
             continue
-        pub, _preshared, endpoint, allowed_ips, *_ = parts
+        pub, _preshared, endpoint, allowed_ips, *rest = parts
+
+        def _int(i: int) -> int:
+            try:
+                return int(rest[i])
+            except (IndexError, ValueError):
+                return 0
+
         peers[pub] = LivePeer(
             wg_pub_b64=pub,
             endpoint=endpoint if endpoint != "(none)" else "",
             allowed_ips=allowed_ips,
+            latest_handshake=_int(0),
+            rx_bytes=_int(1),
+            tx_bytes=_int(2),
         )
     return peers

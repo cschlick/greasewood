@@ -28,10 +28,26 @@ class Directory:
         self._records: dict[str, NodeRecord] = {}  # id_pub_hex → NodeRecord
 
     def merge(self, records: list[NodeRecord]) -> int:
-        """Merge incoming records; return count of accepted (higher-seq) entries."""
+        """
+        Merge incoming records; return count of accepted (higher-seq) entries.
+
+        Each record is structurally verified (self-signature + addr derivation +
+        id_pub/cred consistency) before it can enter the directory. This is
+        CA- and clock-independent, so it never drops a genuine record during CA
+        succession or under clock skew, but it does stop a malicious or
+        compromised directory response from shadowing a real record with a
+        high-seq forgery (which, once cached, would otherwise stick forever).
+        Full trust/expiry/revocation checks still run at reconcile time.
+        """
         accepted = 0
         with self._lock:
             for r in records:
+                try:
+                    r.verify_structural()
+                except ValueError as e:
+                    log.debug("merge: dropping unverifiable record for %s: %s",
+                              r.id_pub.hex()[:16], e)
+                    continue
                 key = r.id_pub.hex()
                 existing = self._records.get(key)
                 if existing is None or r.seq > existing.seq:

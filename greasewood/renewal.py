@@ -6,8 +6,12 @@ windows before expiry. Jitter spreads load across the fleet so the root
 doesn't see a thundering herd at the N-hour mark.
 
 On success: embeds the new credential in a fresh NodeRecord (seq bumped),
-re-signs it, pushes it to the local directory, and saves the cache. Peers
-will pick up the updated wg_pub on their next sync + reconcile cycle.
+re-signs it, updates the local directory + cache, AND re-publishes it to the
+hub. The re-publish is essential: peers pull records from the hub, so a renewed
+credential that only lived locally would never reach them — the hub would keep
+serving the about-to-expire record and peers would evict this node at its old
+expiry even though it renewed. Pushing the fresh record is what keeps the mesh
+from tearing down one credential TTL after start.
 """
 from __future__ import annotations
 
@@ -85,7 +89,7 @@ class RenewalLoop:
         jitter = random.uniform(-half * 0.1, half * 0.1)
         return half + jitter
 
-    def _publish(self, cred: Credential) -> None:
+    def _publish(self, cred: Credential) -> NodeRecord:
         existing = self._directory.get(self._keys.id_pub_hex)
         seq = (existing.seq + 1) if existing else 1
         record = NodeRecord(
@@ -98,15 +102,27 @@ class RenewalLoop:
         ).sign(self._keys.id_priv)
         self._directory.put(record)
         self._directory.save(self._cache_path)
+        return record
+
+    def _renew_and_publish(self) -> Credential:
+        """Renew the credential, update the local directory, and re-publish the
+        fresh record to the hub. The push is not optional: peers pull records
+        from the hub, so a credential that only lived locally would never reach
+        them and they would evict this node at its old expiry. Raises on any
+        failure so the caller's retry/backoff loop re-attempts the whole step."""
+        from .sync import push_record
+        new_cred = _do_renew(self._get_root_url(), self._keys)
+        self._cred = new_cred
+        record = self._publish(new_cred)
+        push_record(self._get_root_url(), record)
+        return new_cred
 
     def run(self) -> None:
         while not self._stop.wait(self._next_delay()):
             for attempt in range(5):
                 try:
-                    new_cred = _do_renew(self._get_root_url(), self._keys)
-                    self._cred = new_cred
-                    self._publish(new_cred)
-                    log.info("credential renewed, expires %s", new_cred.exp)
+                    new_cred = self._renew_and_publish()
+                    log.info("credential renewed + republished, expires %s", new_cred.exp)
                     break
                 except Exception as e:
                     backoff = 30 * (2 ** attempt)

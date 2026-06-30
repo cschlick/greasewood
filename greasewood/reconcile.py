@@ -114,7 +114,7 @@ class ReconcileLoop:
         local_id_pub: bytes,
         local_caps: list[str],
         get_ca_pubs: "Callable[[], list[bytes]]",
-        revoked: set[str],
+        get_revoked: "Callable[[], set[str]]",
         interval: float = 5.0,
         policy: Policy = default_policy,
         hosts_domain: str | None = None,
@@ -123,19 +123,17 @@ class ReconcileLoop:
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
-        # Resolved each cycle — the trusted-CA set grows/shrinks during CA
-        # succession (§11), so it cannot be captured once.
+        # Both resolved each cycle: the trusted-CA set grows/shrinks during CA
+        # succession (§11), and the revoke list changes at runtime when the
+        # operator runs `gw revoke` — capturing either once would mean a hub
+        # restart to pick up a revocation. So they are callables, not snapshots.
         self._get_ca_pubs = get_ca_pubs
-        self._revoked = revoked
+        self._get_revoked = get_revoked
         self._interval = interval
         self._policy = policy
         # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
         self._hosts_domain = hosts_domain
         self._stop = threading.Event()
-
-    def update_revoked(self, revoked: set[str]) -> None:
-        """Thread-safe revoke list refresh (called when root pushes an update)."""
-        self._revoked = revoked
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
@@ -146,7 +144,7 @@ class ReconcileLoop:
                     self._local_id_pub,
                     self._local_caps,
                     self._get_ca_pubs(),
-                    self._revoked,
+                    self._get_revoked(),
                     self._policy,
                 )
             except Exception as e:

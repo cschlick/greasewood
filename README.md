@@ -116,9 +116,17 @@ mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
 ### 3. Check it
 
 ```bash
-gw status            # local node + directory view
-sudo wg show gw-mesh     # live WireGuard peers
+gw status               # local node + directory view
+sudo gw diagnose        # per-peer: why each link is/isn't forming
+sudo wg show gw-mesh    # live WireGuard peers
 ```
+
+`gw diagnose` is the tool to reach for when a peer won't connect. Because the
+mesh is direct-or-fail, a link that doesn't form is otherwise silent; diagnose
+runs the full verification chain per peer and overlays the live WireGuard
+handshake state, so it tells you *which* step failed — expired credential,
+untrusted CA, policy denial, or "configured but no handshake, check the peer's
+firewall." See [RUNBOOK.md](RUNBOOK.md) for how to read it and what to do next.
 
 ## Running as a service
 
@@ -481,3 +489,10 @@ node.
 **CA trust is a set, not a single key.** The CA (and hub) is rotated by a signed
 handoff with a one-TTL overlap, never by moving the private key — see
 [Moving the hub](#moving-the-hub-ca-succession).
+
+## Security & operations
+
+- **[SECURITY.md](SECURITY.md)** — trust boundaries, what the 7-step check
+  enforces, accepted risks, and the results of the security review.
+- **[RUNBOOK.md](RUNBOOK.md)** — disaster SOPs: compromised node, lost/leaked CA
+  key, destroyed hub, fleet-wide teardown, and how to read `gw diagnose`.

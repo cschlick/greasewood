@@ -14,11 +14,14 @@ Resolution (resolve_trust):
      node rooted at A trust the whole chain A -> B -> C -> ... down to the
      current hub, long after A stopped serving.
 
-  2. A retired CA's past endorsements remain valid, but it cannot make new
-     ones. An endorsement by X only counts if it was issued before X was
-     retired (endorse.iat < X's retirement). So a successor survives its
-     predecessor's retirement, but a decommissioned hub's leaked key cannot
-     inject a fresh rogue CA.
+  2. A retired CA's past statements remain valid, but it cannot make new ones
+     of EITHER kind. A statement by X only counts if it was issued before X was
+     retired: an endorsement (endorse.iat < X's retirement) or a retirement
+     (retire.iat <= X's own retirement). So a successor survives its
+     predecessor's retirement, but a decommissioned hub's leaked key can
+     neither inject a fresh rogue CA nor retire the live hub to DoS the fleet.
+     (The retirement guard is the symmetric twin of the endorsement guard —
+     without it a leaked retired key could un-trust the current hub everywhere.)
 
   3. Active set = ever-trusted minus retired. Only active CAs may sign
      credentials a node will accept.
@@ -119,18 +122,34 @@ def resolve_trust(
 
     roots = set(roots)
     ever = set(roots)
+    retired_at: dict[bytes, dt.datetime] = {}
 
     # Fixpoint: `ever` (who has ever been legitimately trusted) and the
-    # retirement times of endorsers are mutually dependent, so iterate until
-    # stable. Each outer pass recomputes retirement times from the current
+    # effective retirement times are mutually dependent, so iterate until
+    # stable. Each outer pass recomputes effective retirements from the current
     # `ever`, then rebuilds the endorsement closure honoring those times.
     while True:
-        retired_at: dict[bytes, dt.datetime] = {}
-        for s in retirements:
-            if s.by_pub in ever:
+        # Effective retirements: a retirement counts only if its issuer is
+        # ever-trusted AND was not itself retired before it signed. This is the
+        # symmetric guard to the endorsement rule below — it stops a leaked,
+        # already-retired key from retiring (un-trusting) the live hub. Compute
+        # by shrinking the candidate set until stable (monotonic → terminates).
+        eff = [s for s in retirements if s.by_pub in ever]
+        while True:
+            retired_at = {}
+            for s in eff:
                 cur = retired_at.get(s.subject_pub)
                 if cur is None or s.iat < cur:
                     retired_at[s.subject_pub] = s.iat
+            # Drop a retirement whose issuer was retired strictly before it was
+            # issued (<=, so a CA may always retire itself: rt == s.iat keeps it).
+            new_eff = [
+                s for s in eff
+                if retired_at.get(s.by_pub) is None or s.iat <= retired_at[s.by_pub]
+            ]
+            if len(new_eff) == len(eff):
+                break
+            eff = new_eff
 
         new_ever = set(roots)
         changed = True
@@ -149,8 +168,8 @@ def resolve_trust(
             break
         ever = new_ever
 
-    retired = {s.subject_pub for s in retirements if s.by_pub in ever}
-    return ever - retired
+    # Subjects with an effective retirement are out of the active set.
+    return ever - set(retired_at)
 
 
 def active_hub_endpoint(

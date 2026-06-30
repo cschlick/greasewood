@@ -218,3 +218,56 @@ def test_bundle_save_load_roundtrip(tmp_path):
     loaded = CABundle.load(p)
     assert len(loaded.statements) == 1
     assert resolve_trust({a_pub}, loaded) == {a_pub, b_pub}
+
+
+# --- retired CA cannot make new statements (symmetric guard, security) ---
+
+def test_retired_ca_cannot_retire_live_hub():
+    """A leaked, already-retired CA key must not be able to retire (un-trust)
+    the current hub fleet-wide. This is the symmetric twin of the endorsement
+    guard and a documented security property of §11 succession."""
+    a_priv, a_pub = _ca()
+    b_priv, b_pub = _ca()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    day = dt.timedelta(days=1)
+
+    endorse_b = _stmt("endorse", a_priv, a_pub, b_pub, endpoint="http://b",
+                      iat=now - 2 * day)
+    retire_a = _stmt("retire", a_priv, a_pub, a_pub, iat=now - day)  # A self-retires
+    # Attack: A's leaked key signs a *new* retirement of the live hub B.
+    attack = _stmt("retire", a_priv, a_pub, b_pub, iat=now)
+
+    active = resolve_trust({a_pub}, _bundle(endorse_b, retire_a, attack), now)
+    assert b_pub in active, "leaked retired key must not be able to retire the live hub"
+    assert a_pub not in active, "A's own retirement still stands"
+
+
+def test_live_hub_can_retire_predecessor():
+    """The legitimate path must still work: the successor (un-retired) retires
+    its predecessor, who drops out while the successor stays trusted."""
+    a_priv, a_pub = _ca()
+    b_priv, b_pub = _ca()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    day = dt.timedelta(days=1)
+
+    endorse_b = _stmt("endorse", a_priv, a_pub, b_pub, iat=now - 2 * day)
+    retire_a_by_b = _stmt("retire", b_priv, b_pub, a_pub, iat=now)
+
+    active = resolve_trust({a_pub}, _bundle(endorse_b, retire_a_by_b), now)
+    assert a_pub not in active and b_pub in active
+
+
+def test_chain_survives_predecessor_retirement():
+    """A -> B -> C, then A retires. A node rooted at A must still trust C."""
+    a_priv, a_pub = _ca()
+    b_priv, b_pub = _ca()
+    _, c_pub = _ca()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    day = dt.timedelta(days=1)
+
+    endorse_b = _stmt("endorse", a_priv, a_pub, b_pub, iat=now - 2 * day)
+    endorse_c = _stmt("endorse", b_priv, b_pub, c_pub, iat=now - day)
+    retire_a = _stmt("retire", a_priv, a_pub, a_pub, iat=now)
+
+    active = resolve_trust({a_pub}, _bundle(endorse_b, endorse_c, retire_a), now)
+    assert c_pub in active and b_pub in active and a_pub not in active
