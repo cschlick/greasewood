@@ -276,6 +276,8 @@ interface  = "gw0"
 listen_port = 51820
 seeds    = ["http://[<hub-overlay>]:7946"]   # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:7946"     # where to publish / renew
+hosts_sync  = false                          # manage /etc/hosts names (opt-in)
+mesh_domain = "internal"                     # name suffix + default TLS cert name
 
 [ca]
 trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
@@ -291,6 +293,37 @@ credential_ttl = "24h"
 - **hub** — holds the CA private key; serves the control plane and the
   enrollment door; participates in the mesh.
 - **node** — a plain mesh participant.
+
+## Names (.internal)
+
+Every node has a stable overlay address and `gw status` shows the name↔address
+map, so `ping <overlay-addr>` always works. For names, there's an **opt-in**
+managed `/etc/hosts` block: enable it with `--hosts-sync` (on `setup-hub` /
+`join`) or `hosts_sync = true` in config, and the daemon keeps a marked block
+mapping each node's address to `<hostname>.internal`, refreshed from the local
+directory cache each reconcile:
+
+```
+# BEGIN greasewood — managed, do not edit
+fd8d:e5c1:db1a:7:…  db.internal
+fd8d:e5c1:db1a:7:…  node01.internal
+# END greasewood
+```
+
+Then `ping db.internal`, `psql -h db.internal`, etc. just work — no DNS server,
+and it keeps resolving even if the hub is down (it's from the cache). It only
+ever touches the region between its markers; your own `/etc/hosts` lines are
+left alone, and disabling it (then restarting) or `gw purge` removes the block.
+
+The domain (`mesh_domain`, default `internal` — an ICANN-reserved private TLD)
+is shared with TLS: `gw cert-request` with no `--san` defaults the cert to this
+node's `<hostname>.internal` **plus** its overlay address. So the name a node is
+reached by is exactly the name its certificate is valid for — resolve
+`db.internal` → connect over WireGuard → TLS validates the `db.internal` SAN.
+
+> Names are sanitized to a DNS-safe form (`root@node01` → `root-node01`). They
+> aren't enforced unique yet, so give nodes distinct hostnames at `join` (or
+> enforce uniqueness at the hub) to avoid duplicate entries.
 
 ## TLS certificates for services
 
