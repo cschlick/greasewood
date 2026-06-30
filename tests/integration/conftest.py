@@ -167,16 +167,59 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
     return False
 
 
+def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
+                hostname: str | None = None, caps: str | None = None,
+                check: bool = True):
+    """
+    Run one `gw mint` (hub) → `gw join` (node) door enrollment against an
+    EXISTING node container. Returns the `gw join` CompletedProcess so callers
+    can inspect stdout/stderr (e.g. the re-enrollment notice).
+
+    The door is single-slot, so the whole mint→join→teardown is serialized and
+    we wait for the hub to destroy gw-door before releasing — the next mint then
+    starts clean, with no race against the door-watcher teardown.
+
+    `hostname`/`caps` are passed through as flags only when given, so omitting
+    them exercises join's "keep existing config" behavior. An explicit endpoint
+    is always passed: containers only have a ULA, which join's GUA auto-detection
+    skips (fine inside the Podman bridge, but it would leave node<->node links
+    unable to form).
+    """
+    hub_cid = gw_root["cid"]
+    extra = []
+    if hostname is not None:
+        extra += ["--hostname", hostname]
+    if caps is not None:
+        extra += ["--caps", caps]
+
+    with _ENROLL_LOCK:
+        # mint --endpoint takes a BARE address; the door port is fixed and the
+        # token carries only the host.
+        mint = pexec(hub_cid, "gw", "mint", "--endpoint", gw_root["ipv6"])
+        token = _extract_token(mint.stdout + "\n" + mint.stderr)
+
+        j = pexec(node_cid, "gw", "join", token,
+                  "--endpoint", f"[{node_ipv6}]:51820", *extra, check=False)
+        if check:
+            assert j.returncode == 0, (
+                f"gw join failed (rc={j.returncode}):\n"
+                f"stdout: {j.stdout}\nstderr: {j.stderr}"
+            )
+
+        # Wait for the hub to close the window and destroy its gw-door before
+        # releasing the lock, so the next mint doesn't race the teardown.
+        assert _wait_iface_gone(hub_cid, "gw-door"), \
+            "hub did not tear down gw-door after enrollment"
+    return j
+
+
 def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
     Enrollment uses the real `gw mint` / `gw join` flow — the only supported
-    path. Because the door is single-slot, the mint→join section is serialized
-    across concurrent callers and we wait for the hub to tear the door fully
-    down before the next mint, so each enrollment starts from a clean slate
-    (no race with the hub's door-watcher teardown). Container creation and
-    `gw run` stay parallel.
+    path (see door_enroll). Container creation and `gw run` stay parallel; only
+    the door section serializes.
 
     Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
     """
@@ -191,32 +234,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None) ->
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    hub_cid = gw_root["cid"]
-    # mint --endpoint takes a BARE address; the door port is fixed and the
-    # token carries only the host.
-    hub_endpoint = gw_root["ipv6"]
-
-    with _ENROLL_LOCK:
-        # Hub opens the door and prints a single-use token.
-        mint = pexec(hub_cid, "gw", "mint", "--endpoint", hub_endpoint)
-        token = _extract_token(mint.stdout + "\n" + mint.stderr)
-
-        # Node redeems it: stands up gw-door, enrolls, writes its own config,
-        # and door-pre-publishes its record to the hub. Blocks until enrolled.
-        # Pass an explicit endpoint: containers only have a ULA, which `join`'s
-        # GUA auto-detection skips, leaving the node unreachable for node↔node
-        # links (the ULA is fine inside the Podman bridge).
-        j = pexec(cid, "gw", "join", token, "--hostname", hostname,
-                  "--endpoint", f"[{ipv6}]:51820", check=False)
-        assert j.returncode == 0, (
-            f"gw join failed (rc={j.returncode}):\n"
-            f"stdout: {j.stdout}\nstderr: {j.stderr}"
-        )
-
-        # Wait for the hub to close the window and destroy its gw-door before
-        # releasing the lock, so the next mint doesn't race the teardown.
-        assert _wait_iface_gone(hub_cid, "gw-door"), \
-            "hub did not tear down gw-door after enrollment"
+    door_enroll(gw_root, cid, ipv6, hostname=hostname)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")

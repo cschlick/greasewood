@@ -51,6 +51,43 @@ def test_root_overlay_addr_in_directory(gw_root):
     assert root_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
 
 
+def test_rejoin_reuses_keys_and_preserves_config(gw_root, gw_image, gw_network):
+    """
+    Re-joining an already-enrolled node with a fresh token is a credential
+    refresh: it reuses the node's keys (same id_pub → same overlay address),
+    preserves the existing hostname when --hostname is omitted, and announces
+    the re-enrollment.
+    """
+    from .helpers import container_ipv6, pexec, podman
+    from .conftest import bring_up_node, door_enroll
+
+    node = None
+    try:
+        node = bring_up_node(gw_image, gw_network, gw_root, hostname="alpha")
+        id_pub_before = node["id_pub"]
+        ipv6 = container_ipv6(node["cid"], gw_network)
+
+        # Re-join with a new token and NO --hostname/--caps.
+        rj = door_enroll(gw_root, node["cid"], ipv6)
+
+        # 1. Announces the re-enrollment (notice goes to the log on stderr).
+        assert "re-enrolling existing node" in rj.stderr, \
+            f"no re-enrollment notice:\n{rj.stderr}"
+
+        # 2. Keys reused — same id_pub, hence same overlay address.
+        id_pub_after = pexec(
+            node["cid"], "cat", "/var/lib/greasewood/id_pub.hex"
+        ).stdout.strip()
+        assert id_pub_after == id_pub_before, "re-join changed the node's identity"
+
+        # 3. Prior hostname preserved (not reset to user@hostname).
+        cfg = pexec(node["cid"], "cat", "/etc/greasewood.toml").stdout
+        assert 'hostname = "alpha"' in cfg, f"hostname not preserved:\n{cfg}"
+    finally:
+        if node:
+            podman("rm", "-f", node["cid"], check=False)
+
+
 # ---------------------------------------------------------------------------
 # WireGuard connectivity tests
 # ---------------------------------------------------------------------------
