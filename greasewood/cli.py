@@ -758,16 +758,15 @@ def cmd_run(args) -> int:
     revoked: set[str] = set()
     is_hub = cfg.role in ("hub", "root")
 
-    if is_hub or cfg.role == "seed":
-        if is_hub:
-            if not cfg.ca_key_file:
-                sys.exit("hub role requires ca_key_file in [hub]")
-            ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-            ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
-            revoked = ca.load_revoked_set()
-            log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
-            # Re-apply door routing in case the machine rebooted since setup-hub
-            wgmod.setup_door_routing()
+    if is_hub:
+        if not cfg.ca_key_file:
+            sys.exit("hub role requires ca_key_file in [hub]")
+        ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+        ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
+        revoked = ca.load_revoked_set()
+        log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
+        # Re-apply door routing in case the machine rebooted since setup-hub
+        wgmod.setup_door_routing()
 
         srv = ControlServer(
             cfg.control_listen,
@@ -779,17 +778,16 @@ def cmd_run(args) -> int:
         )
         srv.start()
 
-        if is_hub and ca is not None:
-            from .enroll import DoorWatcher
-            door_watcher = DoorWatcher(
-                data_dir=cfg.data_dir,
-                ca=ca,
-                directory=directory,
-                node_keys=keys,
-                wg_iface=cfg.wg_interface,
-            )
-            door_watcher.start()
-            log.info("door watcher started")
+        from .enroll import DoorWatcher
+        door_watcher = DoorWatcher(
+            data_dir=cfg.data_dir,
+            ca=ca,
+            directory=directory,
+            node_keys=keys,
+            wg_iface=cfg.wg_interface,
+        )
+        door_watcher.start()
+        log.info("door watcher started")
 
     if cfg.seeds:
         sync = SyncLoop(directory, cfg.seeds, cfg.dir_cache_path)

@@ -5,8 +5,7 @@
 hostname = "mynode"
 data_dir = "/var/lib/greasewood"
 
-# "root"  — holds ca_priv, serves enrollment + directory, participates in mesh
-# "seed"  — serves directory, participates in mesh
+# "hub"   — holds ca_priv, serves the control plane + enrollment door, participates in mesh
 # "node"  — plain mesh participant
 role = "node"
 
@@ -41,12 +40,13 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"
 # Add both old and new keys during a migration overlap window.
 # Get this value from `greasewood init-ca` on the root node.
 trusted_pubs = [
-    "REPLACE_WITH_HEX_FROM_greasewood_init-ca",
+    "REPLACE_WITH_HEX_PRINTED_BY_gw_setup-hub",
 ]
 
 
-# Root-only section — omit entirely on non-root nodes.
-[root]
+# Hub-only section — omit entirely on plain nodes.
+# ("[root]" is accepted as an alias for backward compatibility.)
+[hub]
 ca_key_file = "/var/lib/greasewood/ca.key"
 # Optionally protect the CA key with a passphrase (env var):
 # ca_key_passphrase_env = "GREASEWOOD_CA_PASS"
@@ -64,20 +64,14 @@ credential_ttl = "24h"
 # renew around the 12h mark, giving 12h of retry window before expiry.
 renew_before = "12h"
 
-# Enrollment flow (no HTTP — all over SSH):
+# Enrollment flow (door-based — no SSH, no underlay HTTP):
 #
-#   1. On new node:
-#        greasewood init-node
-#      Copy the printed id_pub and wg_pub values.
+#   1. On the hub:    TOKEN=$(sudo gw mint)
+#                     (delivers a single-use token out of band)
+#   2. On new node:   sudo gw join "$TOKEN" --hostname newnode
+#                     sudo gw run
+#      join receives a CA-signed credential over a transient WireGuard door;
+#      run brings the node into the mesh and publishes its record to the hub.
 #
-#   2. On root (SSH in):
-#        greasewood issue \
-#            --id-pub <hex> --wg-pub <b64> \
-#            --hostname newnode --caps mesh \
-#            > /tmp/newnode.cred
-#      scp /tmp/newnode.cred newnode:
-#
-#   3. On new node:
-#        greasewood install-cred newnode.cred
-#        greasewood run
-#      The daemon pushes the node's signed record to seeds on startup.
+# Manual alternative: `gw init-node` on the node, `gw issue` on the hub over
+# SSH, then `gw install-cred` on the node.
