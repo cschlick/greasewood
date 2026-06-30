@@ -34,7 +34,7 @@ _GET_SNIPPET = (
 )
 
 
-def hub_get(hub_cid: str, path: str, port: int = 7946) -> str:
+def hub_get(hub_cid: str, path: str, port: int = 51902) -> str:
     """GET a control-plane path from inside the hub container (via ::1)."""
     r = pexec(hub_cid, "python3", "-c", _GET_SNIPPET, path, str(port), check=False)
     if r.returncode != 0:
@@ -42,7 +42,7 @@ def hub_get(hub_cid: str, path: str, port: int = 7946) -> str:
     return r.stdout
 
 
-def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 7946) -> bool:
+def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 51902) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -93,7 +93,7 @@ def wait_for_peer_count(container: str, expected: int, iface: str = "gw0",
     return last
 
 
-def directory_records(hub_cid: str, port: int = 7946) -> list:
+def directory_records(hub_cid: str, port: int = 51902) -> list:
     return json.loads(hub_get(hub_cid, "/directory", port))
 
 

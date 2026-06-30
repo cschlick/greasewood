@@ -87,7 +87,7 @@ def test_token_roundtrip():
 def test_token_default_door_port():
     token = encode_token(_HUB_DOOR_PUB, _CA_PUB, _HUB_HOST, _SEED)
     *_, door_port = decode_token(token)
-    assert door_port == 51821  # DOOR_PORT default
+    assert door_port == 51901  # DOOR_PORT default
 
 
 def test_token_prefix():

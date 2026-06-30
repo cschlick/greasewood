@@ -25,7 +25,7 @@ class Config:
     role: str              # "hub" (alias "root") | "node"
     inbound: str           # "yes" | "no" | "unknown"
     caps: list[str]
-    endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51820"]
+    endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51900"]
 
     # Network
     wg_interface: str
@@ -101,7 +101,7 @@ def load_config(path: Path) -> Config:
         endpoints=node.get("endpoints", []),
 
         wg_interface=net.get("interface", "gw0"),
-        listen_port=int(net.get("listen_port", 51820)),
+        listen_port=int(net.get("listen_port", 51900)),
 
         seeds=net.get("seeds", []),
         root_url=net.get("root_url", ""),
@@ -113,10 +113,10 @@ def load_config(path: Path) -> Config:
 
         ca_key_file=Path(root["ca_key_file"]).expanduser() if "ca_key_file" in root else None,
         ca_key_passphrase_env=root.get("ca_key_passphrase_env"),
-        control_listen=root.get("control_listen", ":7946"),
+        control_listen=root.get("control_listen", ":51902"),
         credential_ttl=_parse_duration(root.get("credential_ttl", "24h")),
         renew_before=_parse_duration(root.get("renew_before", "12h")),
         door_window=_parse_duration(root.get("door_window", "15m")),
         tls_cert_ttl=_parse_duration(root.get("tls_cert_ttl", "7d")),
-        door_port=int(root.get("door_port", 51821)),
+        door_port=int(root.get("door_port", 51901)),
     )

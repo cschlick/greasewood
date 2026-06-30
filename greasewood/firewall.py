@@ -41,7 +41,7 @@ class Rule:
         return " ".join(parts)
 
 
-def hub_rules(listen_port: int = 51820, control_port: int = 7946) -> list[Rule]:
+def hub_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Rule]:
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     return [
         Rule("udp", listen_port, None, "mesh WireGuard"),
@@ -51,11 +51,11 @@ def hub_rules(listen_port: int = 51820, control_port: int = 7946) -> list[Rule]:
     ]
 
 
-def node_rules(listen_port: int = 51820, inbound: str = "yes") -> list[Rule]:
+def node_rules(listen_port: int = 51900, inbound: str = "yes") -> list[Rule]:
     """Inbound rules a plain node needs. An outbound-only node (inbound=no)
     needs none — it dials peers (and the hub's door) outbound and relies on the
     base ct established,related rule for replies. It only opens the mesh port if
-    it accepts inbound. The door port (51821) is hub-only — a joining node
+    it accepts inbound. The door port (51901) is hub-only — a joining node
     connects to the hub's door outbound, so it never needs it inbound."""
     if inbound == "no":
         return []

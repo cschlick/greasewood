@@ -89,7 +89,7 @@ def gw_root(gw_image, gw_network):
 
         pexec(cid, "gw", "setup-hub",
               "--hostname", "root",
-              "--endpoint", f"[{ipv6}]:51820")
+              "--endpoint", f"[{ipv6}]:51900")
 
         overlay = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
         ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
@@ -170,7 +170,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
         token = _extract_token(mint.stdout + "\n" + mint.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
-                  "--endpoint", f"[{node_ipv6}]:51820", *extra, check=False)
+                  "--endpoint", f"[{node_ipv6}]:51900", *extra, check=False)
         if check:
             assert j.returncode == 0, (
                 f"gw join failed (rc={j.returncode}):\n"

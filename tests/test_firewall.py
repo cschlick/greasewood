@@ -46,16 +46,16 @@ def _ruleset(*items):
 def test_hub_rules_cover_control_and_door():
     rules = fw.hub_rules()
     ports = {(r.proto, r.port, r.iif) for r in rules}
-    assert ("udp", 51820, None) in ports
-    assert ("udp", 51821, None) in ports
-    assert ("tcp", 7946, "gw0") in ports
-    assert ("tcp", 7947, "gw-door") in ports
+    assert ("udp", 51900, None) in ports
+    assert ("udp", 51901, None) in ports
+    assert ("tcp", 51902, "gw0") in ports
+    assert ("tcp", 51903, "gw-door") in ports
 
 
 def test_node_rules_inbound_yes_is_mesh_port_only():
     rules = fw.node_rules(inbound="yes")
     assert all(r.proto == "udp" and r.iif is None for r in rules)
-    assert {r.port for r in rules} == {51820}  # door 51821 is hub-only
+    assert {r.port for r in rules} == {51900}  # door 51901 is hub-only
 
 
 def test_node_rules_inbound_no_needs_nothing():
@@ -73,37 +73,37 @@ def test_default_drop_detected():
 # --- missing-rule detection ---
 
 def test_missing_when_port_absent():
-    # ruleset has only the door port; the mesh port (51820) is missing
-    rs = _ruleset(_chain("drop"), _accept_rule("udp", 51821))
+    # ruleset has only the door port; the mesh port (51900) is missing
+    rs = _ruleset(_chain("drop"), _accept_rule("udp", 51901))
     missing = fw.missing_rules(rs, fw.node_rules(inbound="yes"))
-    assert {r.port for r in missing} == {51820}
+    assert {r.port for r in missing} == {51900}
 
 
 def test_nothing_missing_when_all_present():
     rs = _ruleset(_chain("drop"),
-                  _accept_rule("udp", 51820),
-                  _accept_rule("udp", 51821))
+                  _accept_rule("udp", 51900),
+                  _accept_rule("udp", 51901))
     assert fw.missing_rules(rs, fw.node_rules()) == []
 
 
 def test_port_in_a_set_counts_as_present():
     rs = _ruleset(_chain("drop"),
-                  _accept_rule("udp", 0, right={"set": [51820, 51821]}))
+                  _accept_rule("udp", 0, right={"set": [51900, 51901]}))
     assert fw.missing_rules(rs, fw.node_rules()) == []
 
 
 def test_iifname_scoped_rule_must_match_interface():
-    # An accept for tcp/7946 with NO iifname does NOT satisfy a rule that
+    # An accept for tcp/51902 with NO iifname does NOT satisfy a rule that
     # requires iifname gw0... actually it does (broader allow). But a rule
     # scoped to the WRONG interface must not count.
-    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 7946, iif="eth0"))
-    hub = [r for r in fw.hub_rules() if r.port == 7946]
+    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="eth0"))
+    hub = [r for r in fw.hub_rules() if r.port == 51902]
     assert fw.missing_rules(rs, hub) == hub  # gw0 rule still missing
 
 
 def test_iifname_match_satisfies():
-    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 7946, iif="gw0"))
-    hub = [r for r in fw.hub_rules() if r.port == 7946]
+    rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="gw0"))
+    hub = [r for r in fw.hub_rules() if r.port == 51902]
     assert fw.missing_rules(rs, hub) == []
 
 
@@ -120,7 +120,7 @@ def test_insert_commands_shape():
     cmds = fw.insert_commands(target, fw.node_rules())
     assert cmds[0][:6] == ["nft", "insert", "rule", "inet", "filter", "input"]
     joined = " ".join(cmds[0])
-    assert "udp dport 51820" in joined
+    assert "udp dport 51900" in joined
     assert joined.endswith('accept comment "greasewood"')
 
 
@@ -129,7 +129,7 @@ def test_insert_command_includes_iifname():
     hub = [r for r in fw.hub_rules() if r.iif == "gw0"]
     cmd = fw.insert_commands(target, hub)[0]
     joined = " ".join(cmd)
-    assert 'iifname "gw0"' in joined and "tcp dport 7946" in joined
+    assert 'iifname "gw0"' in joined and "tcp dport 51902" in joined
 
 
 # --- live nft validation (skipped where nft/root unavailable) ---
@@ -161,6 +161,6 @@ def test_generated_rules_parse_with_nft():
         listing = subprocess.run(["nft", "list", "table", "inet", table],
                                  capture_output=True, text=True).stdout
         assert "greasewood" in listing
-        assert "51820" in listing and "7946" in listing
+        assert "51900" in listing and "51902" in listing
     finally:
         subprocess.run(["nft", "delete", "table", "inet", table], check=False)

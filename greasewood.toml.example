@@ -21,19 +21,19 @@ inbound = "yes"
 caps = ["mesh"]
 
 # Explicit endpoints. Leave empty if you want WireGuard to discover via roaming.
-# endpoints = ["[2001:db8::1]:51820"]
+# endpoints = ["[2001:db8::1]:51900"]
 
 
 [network]
 interface = "greasewood0"
-listen_port = 51820
+listen_port = 51900
 
 # Seeds to pull the directory from (HTTP).
 # The root node is typically also a seed.
-seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"]
+seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"]
 
 # Where to send enroll/renew requests.
-root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"
+root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 
 # Name resolution (opt-in). When true, the daemon maintains a managed block in
 # /etc/hosts mapping overlay addresses to "<hostname>.<mesh_domain>", so you can
@@ -61,13 +61,13 @@ ca_key_file = "/var/lib/greasewood/ca.key"
 # ca_key_passphrase_env = "GREASEWOOD_CA_PASS"
 
 # Control-plane port (TCP). Bound only to the overlay + loopback, never the
-# underlay. The default collides with Docker Swarm / Serf; change it to avoid
-# that — nodes learn the value at enrollment, so it's safe to change.
-control_listen = ":7946"
+# underlay. Nodes learn the value at enrollment, so it's safe to change here
+# without touching any node config.
+control_listen = ":51902"
 
 # Enrollment door port (UDP). Carried in join tokens, so changing it just works
-# for new tokens. Default is adjacent to the mesh port (51820/51821).
-door_port = 51821
+# for new tokens. Default is adjacent to the mesh port (51900/51901).
+door_port = 51901
 
 # Credential lifetime. Revoking = not renewing; revoked node falls out
 # fleet-wide when its last credential hits exp.

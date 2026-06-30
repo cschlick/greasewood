@@ -102,7 +102,7 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
     return val.encode()
 
 
-def _print_firewall_help(listen_port: int = 51820, control_port: int = 7946) -> None:
+def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) -> None:
     """
     Print (never apply) the recommended firewall posture. greasewood binds its
     control/enroll planes only to the overlay + loopback, so nothing it runs is
@@ -602,7 +602,7 @@ def cmd_join(args) -> int:
 
     # Hub's record — pre-seeds so the daemon knows the hub immediately. The hub
     # tells us its control port (it's configurable) so we build the right URL.
-    hub_control_port = int(resp.get("control_port", 7946))
+    hub_control_port = int(resp.get("control_port", 51902))
     hub_overlay_url = ""
     if resp.get("hub_record"):
         hub_rec = NodeRecord.from_dict(resp["hub_record"])
@@ -753,11 +753,11 @@ def cmd_revoke(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _control_port(cfg) -> int:
-    """The control-plane port from cfg.control_listen (':7946' -> 7946)."""
+    """The control-plane port from cfg.control_listen (':51902' -> 51902)."""
     try:
         return int(cfg.control_listen.rsplit(":", 1)[1])
     except (ValueError, IndexError):
-        return 7946
+        return 51902
 
 
 def cmd_hub_promote(args) -> int:
@@ -1590,9 +1590,9 @@ def main(argv=None) -> int:
     sp.add_argument("--hostname", default="hub")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
-    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
-    sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
-    sp.add_argument("--door-port", dest="door_port", type=int, default=51821,
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
+    sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
+    sp.add_argument("--door-port", dest="door_port", type=int, default=51901,
                     help="UDP port for the enrollment door (carried in tokens)")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address (auto-detected if omitted)")
@@ -1623,7 +1623,7 @@ def main(argv=None) -> int:
                          "(default: keep existing, else user@hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
-    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
     sp.add_argument("--caps", default=None,
                     help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
@@ -1676,7 +1676,7 @@ def main(argv=None) -> int:
     sp = sub.add_parser("hub-promote",
                         help="[sudo] turn this enrolled node into a hub (mint CA key, set role=hub)")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
-    sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
+    sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
                     help="insert the needed nftables accept rules (opt-in)")
