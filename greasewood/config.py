@@ -31,6 +31,12 @@ class Config:
     wg_interface: str
     listen_port: int
 
+    # Name resolution: maintain a managed /etc/hosts block mapping overlay
+    # addresses to "<hostname>.<mesh_domain>". The domain is also the default
+    # TLS cert name (gw cert-request), so a node's address name == its cert SAN.
+    hosts_sync: bool
+    mesh_domain: str
+
     # Control plane
     seeds: list[str]       # http://[addr]:port — seeds to pull directory from
     root_url: str          # where to send enroll/renew requests
@@ -98,6 +104,9 @@ def load_config(path: Path) -> Config:
 
         seeds=net.get("seeds", []),
         root_url=net.get("root_url", ""),
+
+        hosts_sync=bool(net.get("hosts_sync", False)),
+        mesh_domain=net.get("mesh_domain", "internal"),
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 

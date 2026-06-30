@@ -252,6 +252,7 @@ def cmd_setup_hub(args) -> int:
     log.info("overlay addr: %s", node_keys.addr)
 
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    hosts_sync = "true" if getattr(args, "hosts_sync", False) else "false"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
@@ -265,6 +266,8 @@ interface = "gw0"
 listen_port = {listen_port}
 seeds = []
 root_url = "http://[::1]:{control_port}"
+hosts_sync = {hosts_sync}
+mesh_domain = "internal"
 
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
@@ -636,6 +639,15 @@ def cmd_join(args) -> int:
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
     seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
     root_url_val = json_mod.dumps(hub_overlay_url) if hub_overlay_url else '""'
+    # hosts sync: explicit flag wins, else keep prior setting, else off.
+    if getattr(args, "hosts_sync", False):
+        hosts_sync = "true"
+    elif prior and getattr(prior, "hosts_sync", False):
+        hosts_sync = "true"
+    else:
+        hosts_sync = "false"
+    mesh_domain = (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
+                   else "internal")
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
@@ -650,6 +662,8 @@ interface = "gw0"
 listen_port = {listen_port}
 seeds = {seeds_list}
 root_url = {root_url_val}
+hosts_sync = {hosts_sync}
+mesh_domain = "{mesh_domain}"
 
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
@@ -901,6 +915,14 @@ def cmd_cert_request(args) -> int:
         except ValueError:
             dns.append(s)
 
+    # Default to this node's own mesh name + overlay address, so the cert is
+    # valid for exactly the name peers resolve it by (the /etc/hosts block and
+    # the cert SAN use the same <hostname>.<mesh_domain>) plus its raw address.
+    if not dns and not ips:
+        from .hosts import mesh_name
+        dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
+        ips = [keys.addr]
+
     cn = args.cn or (dns[0] if dns else (ips[0] if ips else keys.addr))
     name = args.name or (dns[0] if dns else "service")
     out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
@@ -1134,6 +1156,18 @@ def cmd_run(args) -> int:
     sync = SyncLoop(directory, trust.seeds, cfg.dir_cache_path)
     sync.start()
 
+    # Name resolution via a managed /etc/hosts block (opt-in). When off, remove
+    # any block we left behind before (clean opt-out).
+    from . import hosts as _hosts
+    if cfg.hosts_sync:
+        log.info("hosts: maintaining /etc/hosts mesh block under .%s", cfg.mesh_domain)
+    else:
+        try:
+            if _hosts.remove_block():
+                log.info("hosts: removed managed /etc/hosts block (sync disabled)")
+        except Exception as e:
+            log.warning("hosts: could not clean /etc/hosts: %s", e)
+
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
         directory=directory,
@@ -1141,6 +1175,7 @@ def cmd_run(args) -> int:
         local_caps=cfg.caps,
         get_ca_pubs=trust.trusted_pubs,
         revoked=revoked,
+        hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
     )
     recon.start()
 
@@ -1313,6 +1348,14 @@ def cmd_purge(args) -> int:
         except OSError as e:
             failed.append(f"{cfg_path}: {e}")
 
+    # Remove the managed /etc/hosts block, if any
+    try:
+        from . import hosts
+        if hosts.remove_block():
+            removed.append("/etc/hosts greasewood block")
+    except Exception as e:
+        failed.append(f"/etc/hosts: {e}")
+
     for item in removed:
         print(f"removed: {item}")
     for item in failed:
@@ -1440,6 +1483,9 @@ def main(argv=None) -> int:
     sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
                     help="insert the needed nftables accept rules (opt-in; tagged "
                          "\"greasewood\"). Default: only check and warn.")
+    sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
+                    help="maintain a managed /etc/hosts block (<name>.internal "
+                         "-> overlay addr) from the directory")
     sp.set_defaults(fn=cmd_setup_hub)
 
     # mint
@@ -1466,6 +1512,9 @@ def main(argv=None) -> int:
     sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
                     help="insert the needed nftables accept rules (opt-in; tagged "
                          "\"greasewood\"). Default: only check and warn.")
+    sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
+                    help="maintain a managed /etc/hosts block (<name>.internal "
+                         "-> overlay addr) from the directory")
     sp.set_defaults(fn=cmd_join)
 
     # purge
