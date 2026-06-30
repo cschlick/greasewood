@@ -1,25 +1,22 @@
 """
 gw — CLI entry point.
 
-Enrollment flow (§10.1) — entirely over SSH, no HTTP:
+Enrollment is door-based: a transient WireGuard tunnel, no SSH, no HTTP on the
+underlay.
+
+  On the hub:
+    gw setup-hub          # one-shot: CA, door key, routing, self-credential
+    gw run                # start the daemon (serves control plane + door)
+    gw mint               # open a 15-min window, print a single-use join token
 
   On the new node:
-    gw init-node          # generate keypairs, print public material
-
-  On the root (operator SSHes in):
-    gw issue \\
-        --id-pub <hex> --wg-pub <hex> --hostname <name> --caps mesh \\
-        [--endpoint [addr]:port]  # sign + output credential JSON, update directory
-
-  Back on the new node:
-    gw install-cred cred.json   # create signed NodeRecord, seed directory
-    gw run                      # start daemon (pushes record to seeds on start)
+    gw join <token>       # enroll over the door, then:
+    gw run                # join the mesh
 
 Other subcommands:
-  init-ca             Generate CA keypair (root, run once at genesis).
-  revoke <id_pub>     Add a node to the revoke list.
-  run                 Run the daemon (all roles).
-  status              Show local directory state.
+  revoke <id_pub>     Add a node to the revoke list (on the hub).
+  status              Show local node and directory state.
+  purge               Remove all local greasewood state.
 """
 from __future__ import annotations
 
@@ -59,7 +56,7 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
-# setup-root  (one-shot root bootstrap — replaces init-ca + init-node + issue + install-cred)
+# setup-hub  (one-shot hub bootstrap: CA + door key + routing + self-credential)
 # ---------------------------------------------------------------------------
 
 def _detect_public_ipv6() -> str | None:
@@ -164,7 +161,7 @@ def cmd_setup_hub(args) -> int:
     wgmod.setup_door_routing()
 
     # If run via sudo, give data_dir to the real operator so they can
-    # run gw issue / gw mint without sudo.
+    # run gw mint without sudo.
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         import pwd
@@ -529,170 +526,6 @@ trusted_pubs = ["{ca_pub_hex}"]
     return 0
 
 
-# ---------------------------------------------------------------------------
-# init-ca  (genesis — run once on the root node)
-# ---------------------------------------------------------------------------
-
-def cmd_init_ca(args) -> int:
-    from .keys import CAKeys
-
-    key_path = Path(args.key_path)
-    if key_path.exists() and not args.force:
-        sys.exit(f"CA key already exists at {key_path} (use --force to overwrite)")
-
-    passphrase = None
-    if args.passphrase_env:
-        val = os.environ.get(args.passphrase_env)
-        if not val:
-            sys.exit(f"--passphrase-env={args.passphrase_env} is set but that env var is empty")
-        passphrase = val.encode()
-
-    ca = CAKeys.generate()
-    ca.save(key_path, passphrase)
-    print(f"CA private key : {key_path}")
-    print(f"CA public key  : {key_path.with_suffix('.pub')}")
-    print()
-    print("Add this to [ca] trusted_pubs in every node's greasewood.toml:")
-    print(f"  {ca.ca_pub_bytes.hex()}")
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# init-node  (run on the new node before calling `issue` on the root)
-# ---------------------------------------------------------------------------
-
-def cmd_init_node(args) -> int:
-    from .config import load_config
-    from .keys import NodeKeys
-
-    cfg = load_config(Path(args.config))
-    keys = NodeKeys.load_or_generate(cfg.data_dir)
-
-    print(f"id_pub  : {keys.id_pub_hex}")
-    print(f"wg_pub  : {keys.wg_pub_b64}")
-    print(f"addr    : {keys.addr}")
-    if cfg.endpoints:
-        print(f"endpoint: {cfg.endpoints[0]}")
-    else:
-        print("endpoint: (not configured — set [node] endpoints in greasewood.toml)")
-    print()
-    print("Pass id_pub and wg_pub to `gw issue` on the root node.")
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# issue  (run on the root node over SSH — signs and outputs a credential)
-# ---------------------------------------------------------------------------
-
-def cmd_issue(args) -> int:
-    from .config import load_config
-    from .keys import CAKeys
-    from .ca import CA
-    from .directory import Directory
-    from .wire import NodeRecord
-
-    cfg = load_config(Path(args.config))
-    if cfg.ca_key_file is None:
-        sys.exit("ca_key_file must be set in [root]")
-
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
-
-    try:
-        id_pub = bytes.fromhex(args.id_pub)
-    except ValueError:
-        sys.exit("--id-pub must be a 64-character hex string")
-
-    import base64
-    try:
-        wg_pub = base64.b64decode(args.wg_pub)
-        if len(wg_pub) != 32:
-            raise ValueError
-    except Exception:
-        sys.exit("--wg-pub must be the base64 WireGuard public key (32 bytes)")
-
-    caps = [c.strip() for c in args.caps.split(",")]
-    cred = ca.issue(id_pub, wg_pub, args.hostname, caps)
-
-    # The credential is output here; the new node wraps it in a NodeRecord
-    # (signed with its own id_priv) and pushes that record to the root via
-    # POST /publish on first daemon startup. Nothing is written to the root's
-    # directory here — a NodeRecord must be signed by the node's own id_priv,
-    # which only the node itself holds.
-    cred_json = json.dumps(cred.to_dict(), indent=2)
-
-    if args.output:
-        Path(args.output).write_text(cred_json)
-        print(f"credential written to {args.output}")
-    else:
-        print(cred_json)
-
-    # Print the next step for the operator
-    print(
-        f"\n# Next: copy the credential to {args.hostname} and run:\n"
-        f"#   gw install-cred <cred-file>",
-        file=sys.stderr,
-    )
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# install-cred  (run on the new node after receiving the credential from root)
-# ---------------------------------------------------------------------------
-
-def cmd_install_cred(args) -> int:
-    from .config import load_config
-    from .keys import NodeKeys
-    from .wire import Credential, NodeRecord
-    from .directory import Directory
-
-    cfg = load_config(Path(args.config))
-    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
-    if not ca_pubs:
-        sys.exit("ca.trusted_pubs is empty — add the CA public key to greasewood.toml")
-
-    cred_path = Path(args.cred_file)
-    if not cred_path.exists():
-        sys.exit(f"credential file not found: {cred_path}")
-
-    cred = Credential.from_dict(json.loads(cred_path.read_text()))
-
-    # Verify the CA signature locally before trusting the credential
-    cred.verify(ca_pubs)
-
-    keys = NodeKeys.load_or_generate(cfg.data_dir)
-
-    # Verify the credential was actually issued for this node
-    if cred.id_pub != keys.id_pub_bytes:
-        sys.exit(
-            "credential id_pub does not match this node's id_pub — wrong credential file?"
-        )
-
-    directory = Directory.load(cfg.dir_cache_path)
-    existing = directory.get(keys.id_pub_hex)
-    seq = (existing.seq + 1) if existing else 1
-
-    record = NodeRecord(
-        id_pub=keys.id_pub_bytes,
-        seq=seq,
-        endpoints=cfg.endpoints,
-        inbound=cfg.inbound,
-        hostname=cfg.hostname,
-        cred=cred,
-    ).sign(keys.id_priv)
-
-    directory.put(record)
-    directory.save(cfg.dir_cache_path)
-
-    print(f"credential installed for {cfg.hostname}")
-    print(f"  addr    : {cred.addr}")
-    print(f"  caps    : {cred.caps}")
-    print(f"  expires : {cred.exp:%Y-%m-%d %H:%M UTC}")
-    print()
-    print("Run 'gw run' to start the daemon.")
-    print("The daemon will push this node's record to seeds on startup.")
-    return 0
-
 
 # ---------------------------------------------------------------------------
 # revoke
@@ -830,7 +663,7 @@ def cmd_run(args) -> int:
         )
         renewal.start()
     elif not own_record:
-        log.warning("no credential in directory — run 'gw install-cred' first")
+        log.warning("no credential in directory — run 'gw join <token>' first")
     elif not cfg.root_url:
         log.warning("root_url not set — automatic renewal disabled")
 
@@ -891,7 +724,7 @@ def cmd_status(args) -> int:
     records = sorted(directory.all(), key=lambda r: r.hostname)
 
     if not records:
-        print("directory is empty — run 'gw install-cred' then 'gw run'")
+        print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
     fmt = "{:<20} {:<44} {:<22} {}"
@@ -1002,7 +835,6 @@ def main(argv=None) -> int:
             "\n"
             "no sudo needed:\n"
             "  gw status\n"
-            "  gw issue   (ca.key owned by you after setup-hub)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1059,41 +891,10 @@ def main(argv=None) -> int:
     sp = sub.add_parser("status", help="show local node and directory state")
     sp.set_defaults(fn=cmd_status)
 
-    # issue  (root-side, run over SSH)
-    sp = sub.add_parser("issue", help="sign a credential for a new node (run on root via SSH, no sudo needed)")
-    sp.add_argument("--id-pub", required=True, metavar="HEX",
-                    help="node identity public key (hex)")
-    sp.add_argument("--wg-pub", required=True, metavar="B64",
-                    help="node WireGuard public key (base64)")
-    sp.add_argument("--hostname", required=True, help="node hostname")
-    sp.add_argument("--caps", default="mesh", metavar="CAPS",
-                    help="comma-separated capability list (default: mesh)")
-    sp.add_argument("--output", "-o", metavar="FILE",
-                    help="write credential JSON to file instead of stdout")
-    sp.set_defaults(fn=cmd_issue)
-
-    # install-cred  (node-side)
-    sp = sub.add_parser("install-cred",
-                        help="install a credential received from root (called automatically by join)")
-    sp.add_argument("cred_file", help="path to credential JSON file")
-    sp.set_defaults(fn=cmd_install_cred)
-
     # revoke
-    sp = sub.add_parser("revoke", help="add a node to the revoke list (run on root)")
+    sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the hub)")
     sp.add_argument("id_pub_hex", help="64-char hex identity public key")
     sp.set_defaults(fn=cmd_revoke)
-
-    # init-ca
-    sp = sub.add_parser("init-ca", help="generate CA keypair (called automatically by setup-root)")
-    sp.add_argument("key_path", help="path to write the CA private key")
-    sp.add_argument("--force", action="store_true", help="overwrite existing key")
-    sp.add_argument("--passphrase-env", dest="passphrase_env", metavar="ENV",
-                    help="env var containing CA key passphrase")
-    sp.set_defaults(fn=cmd_init_ca)
-
-    # init-node
-    sp = sub.add_parser("init-node", help="generate node keypairs (called automatically by join)")
-    sp.set_defaults(fn=cmd_init_node)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
