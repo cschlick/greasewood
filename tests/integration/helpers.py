@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import subprocess
 import time
-import urllib.request
 
 
 def podman(*args: str, check: bool = True, input: str | None = None) -> subprocess.CompletedProcess:
@@ -26,11 +25,28 @@ def container_ipv6(container: str, network: str) -> str:
     return info["NetworkSettings"]["Networks"][network]["GlobalIPv6Address"]
 
 
-def wait_for_http(url: str, timeout: int = 20) -> bool:
+# The control plane binds only to the overlay address + loopback, so it is NOT
+# reachable from the host. Query it from inside the hub container over loopback.
+_GET_SNIPPET = (
+    "import sys,urllib.request;"
+    "sys.stdout.write(urllib.request.urlopen("
+    "'http://[::1]:7946'+sys.argv[1], timeout=5).read().decode())"
+)
+
+
+def hub_get(hub_cid: str, path: str) -> str:
+    """GET a control-plane path from inside the hub container (via ::1)."""
+    r = pexec(hub_cid, "python3", "-c", _GET_SNIPPET, path, check=False)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "control-plane GET failed")
+    return r.stdout
+
+
+def wait_for_control_plane(hub_cid: str, timeout: int = 20) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(url, timeout=2)
+            hub_get(hub_cid, "/health")
             return True
         except Exception:
             time.sleep(0.5)
@@ -77,32 +93,40 @@ def wait_for_peer_count(container: str, expected: int, iface: str = "gw0",
     return last
 
 
-def directory_hostnames(root_url: str) -> set[str]:
-    resp = urllib.request.urlopen(f"{root_url}/directory")
-    return {r["hostname"] for r in json.loads(resp.read())}
+def directory_records(hub_cid: str) -> list:
+    return json.loads(hub_get(hub_cid, "/directory"))
 
 
-def directory_size(root_url: str) -> int:
-    resp = urllib.request.urlopen(f"{root_url}/directory")
-    return len(json.loads(resp.read()))
+def directory_hostnames(hub_cid: str) -> set[str]:
+    return {r["hostname"] for r in directory_records(hub_cid)}
 
 
-def wait_for_directory_size(root_url: str, expected: int, timeout: int = 60) -> int:
-    """Block until root's directory holds at least `expected` records."""
+def directory_size(hub_cid: str) -> int:
+    return len(directory_records(hub_cid))
+
+
+def wait_for_directory_size(hub_cid: str, expected: int, timeout: int = 60) -> int:
+    """Block until the hub's directory holds at least `expected` records."""
     deadline = time.time() + timeout
     last = 0
     while time.time() < deadline:
-        last = directory_size(root_url)
+        try:
+            last = directory_size(hub_cid)
+        except Exception:
+            last = 0
         if last >= expected:
             return last
         time.sleep(1)
     return last
 
 
-def wait_for_hostname(root_url: str, hostname: str, timeout: int = 20) -> bool:
+def wait_for_hostname(hub_cid: str, hostname: str, timeout: int = 20) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if hostname in directory_hostnames(root_url):
-            return True
+        try:
+            if hostname in directory_hostnames(hub_cid):
+                return True
+        except Exception:
+            pass
         time.sleep(1)
     return False

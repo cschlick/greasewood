@@ -82,6 +82,9 @@ class EnrollServer:
         wg_iface: str,
         on_done: Callable[[], None],
         timeout_secs: float = 900.0,
+        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
+        get_revoked: "Callable[[], set[str]] | None" = None,
+        cache_path: "Path | None" = None,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -89,6 +92,9 @@ class EnrollServer:
         self._wg_iface = wg_iface
         self._on_done = on_done
         self._timeout = timeout_secs
+        self._get_ca_pubs = get_ca_pubs or (lambda: [])
+        self._get_revoked = get_revoked or set
+        self._cache_path = cache_path
         self._srv: socket.socket | None = None
         self._thread = threading.Thread(target=self._serve, name="enroll", daemon=True)
 
@@ -179,6 +185,34 @@ class EnrollServer:
             "hub_record": hub_record.to_dict() if hub_record else None,
         })
 
+        # Second leg: the node now builds + signs its NodeRecord (it embeds the
+        # credential we just issued) and sends it here. We merge it into the
+        # directory so the reconcile loop keeps the peer we installed above —
+        # this is the bootstrap that used to be a separate POST /publish over
+        # the door. Doing it on the door tunnel means the control plane never
+        # has to listen on the door interface. Best-effort: a node on older
+        # code simply won't send it and falls back to publishing once its
+        # overlay tunnel is up.
+        from .wire import NodeRecord
+        try:
+            rec_msg = _recv_msg(conn)
+        except Exception:
+            return  # node didn't send a record; nothing more to do
+        try:
+            record = NodeRecord.from_dict(rec_msg["record"])
+            record.verify(self._get_ca_pubs(), self._get_revoked())
+            self._directory.merge([record])
+            if self._cache_path is not None:
+                self._directory.save(self._cache_path)
+            log.info("door-published record for %s", record.hostname)
+            _send_msg(conn, {"v": 1, "ok": True})
+        except (ValueError, KeyError) as e:
+            log.warning("door record publish rejected: %s", e)
+            try:
+                _send_msg(conn, {"v": 1, "ok": False, "error": str(e)})
+            except Exception:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # DoorWatcher
@@ -198,6 +232,9 @@ class DoorWatcher:
         node_keys: "NodeKeys",
         wg_iface: str,
         poll_interval: float = 5.0,
+        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
+        get_revoked: "Callable[[], set[str]] | None" = None,
+        cache_path: "Path | None" = None,
     ) -> None:
         self._data_dir = data_dir
         self._ca = ca
@@ -205,6 +242,9 @@ class DoorWatcher:
         self._node_keys = node_keys
         self._wg_iface = wg_iface
         self._poll_interval = poll_interval
+        self._get_ca_pubs = get_ca_pubs or (lambda: [])
+        self._get_revoked = get_revoked or set
+        self._cache_path = cache_path
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -276,6 +316,9 @@ class DoorWatcher:
                 wg_iface=self._wg_iface,
                 on_done=on_done,
                 timeout_secs=remaining,
+                get_ca_pubs=self._get_ca_pubs,
+                get_revoked=self._get_revoked,
+                cache_path=self._cache_path,
             )
             srv.start()
             self._enroll = srv
