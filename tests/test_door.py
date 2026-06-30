@@ -111,3 +111,38 @@ def test_token_different_hosts():
         token = encode_token(_HUB_DOOR_PUB, _CA_PUB, host, _SEED)
         _, _, decoded_host, _ = decode_token(token)
         assert decoded_host == host
+
+
+# ── Door window slot detection (mint clobber guard) ──────────────────────────
+
+def _write_window(data_dir, delta_minutes):
+    import datetime as dt
+    import json
+    exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=delta_minutes)
+    (data_dir / "door_window.json").write_text(
+        json.dumps({"v": 1, "expires": exp.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    )
+    return exp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_active_window_none_when_absent(tmp_path):
+    from greasewood.door import active_window_expiry
+    assert active_window_expiry(tmp_path) is None
+
+
+def test_active_window_returns_expiry_when_open(tmp_path):
+    from greasewood.door import active_window_expiry
+    exp = _write_window(tmp_path, 15)
+    assert active_window_expiry(tmp_path) == exp
+
+
+def test_active_window_none_when_expired(tmp_path):
+    from greasewood.door import active_window_expiry
+    _write_window(tmp_path, -1)
+    assert active_window_expiry(tmp_path) is None
+
+
+def test_active_window_none_when_malformed(tmp_path):
+    from greasewood.door import active_window_expiry
+    (tmp_path / "door_window.json").write_text("{not valid json")
+    assert active_window_expiry(tmp_path) is None

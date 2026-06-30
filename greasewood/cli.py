@@ -260,6 +260,7 @@ def cmd_mint(args) -> int:
     from .door import (
         generate_seed, derive_door_params, encode_token,
         load_or_generate_door_key, door_pub_bytes_from_key,
+        active_window_expiry,
     )
     from . import wg as wgmod
 
@@ -270,6 +271,21 @@ def cmd_mint(args) -> int:
         sys.exit("mint requires ca_key_file in [hub]")
 
     data_dir = cfg.data_dir
+
+    # The door is a single slot: a new mint regenerates the guest key and
+    # overwrites the one window, so any previously minted-but-unused token
+    # stops working. Warn (don't fail) if we're clobbering a still-open
+    # window — for orderly provisioning, mint the next token only after the
+    # current node has joined (the window clears automatically on success).
+    open_exp = active_window_expiry(data_dir)
+    if open_exp:
+        log.warning(
+            "superseding an open door window (expires %s) — the previously "
+            "minted token is now INVALID. The door enrolls one node at a time; "
+            "mint the next token only after the current node has joined.",
+            open_exp,
+        )
+
     door_key_raw = load_or_generate_door_key(data_dir)
     hub_door_pub = door_pub_bytes_from_key(door_key_raw)
     import base64
