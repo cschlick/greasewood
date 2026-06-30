@@ -43,6 +43,7 @@ class _Handler(BaseHTTPRequestHandler):
     get_revoked: "callable" = staticmethod(set)
     get_bundle: "callable" = staticmethod(lambda: {"v": 1, "statements": []})
     cache_path: "Path | None" = None
+    tls_cert_ttl: "dt.timedelta | None" = None
 
     def log_message(self, fmt, *args) -> None:
         log.debug("http %s %s", self.command, self.path)
@@ -64,6 +65,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json([r.to_dict() for r in self.directory.all()])
         elif self.path == "/ca-bundle":
             self._send_json(self.get_bundle())
+        elif self.path == "/ca-cert":
+            if self.ca is None:
+                self.send_error(404)
+            else:
+                self._send_json({"ca_cert": self.ca.ca_cert_pem()})
         elif self.path == "/health":
             self._send_json({"status": "ok"})
         else:
@@ -83,6 +89,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_error(403, "not a root node")
             else:
                 self._handle_renew(body)
+        elif self.path == "/cert":
+            if self.ca is None:
+                self.send_error(403, "not a hub")
+            else:
+                self._handle_cert(body)
         else:
             self.send_error(404)
 
@@ -115,6 +126,49 @@ class _Handler(BaseHTTPRequestHandler):
             log.warning("renew rejected: %s", e)
             self._send_json({"error": str(e)}, 400)
 
+    def _handle_cert(self, body: dict) -> None:
+        import datetime as _dt
+        from .wire import CertRequest
+        from .keys import derive_addr
+        try:
+            req = CertRequest.from_dict(body)
+            req.verify_self_sig()  # proves id_priv possession
+        except (ValueError, KeyError) as e:
+            self._send_json({"error": f"bad cert request: {e}"}, 400)
+            return
+
+        skew = abs((_dt.datetime.now(_dt.timezone.utc) - req.ts).total_seconds())
+        if skew > 300:
+            self._send_json({"error": f"timestamp skew too large ({skew:.0f}s); check NTP"}, 400)
+            return
+
+        info = self.ca.node_info(req.id_pub)
+        if info is None:
+            self._send_json({"error": "unknown node — not enrolled"}, 403)
+            return
+        hostname, caps = info
+        if "tls" not in caps:
+            self._send_json({"error": "node lacks the 'tls' capability"}, 403)
+            return
+
+        # SANs default to the node's overlay address if none were requested, so
+        # a service reachable at the node's mesh IP works out of the box.
+        dns = list(req.dns)
+        ips = list(req.ips)
+        if not dns and not ips:
+            ips = [derive_addr(req.id_pub)]
+        cn = req.cn or hostname or derive_addr(req.id_pub)
+
+        ttl = self.tls_cert_ttl or _dt.timedelta(days=7)
+        try:
+            leaf_pem, ca_pem = self.ca.issue_tls(req.leaf_pub, cn, dns, ips, ttl)
+        except Exception as e:  # noqa: BLE001
+            log.error("tls issuance failed: %s", e)
+            self._send_json({"error": "issuance failed", "reason": str(e)}, 500)
+            return
+        log.info("issued TLS cert for %s cn=%s dns=%s ips=%s", hostname, cn, dns, ips)
+        self._send_json({"cert": leaf_pem, "ca_cert": ca_pem})
+
 
 class _IPv6Server(HTTPServer):
     address_family = socket.AF_INET6
@@ -130,6 +184,7 @@ class ControlServer:
         ca: "CA | None" = None,
         cache_path: "Path | None" = None,
         get_bundle=None,
+        tls_cert_ttl=None,
     ) -> None:
         host, _, port_str = listen.rpartition(":")
         # Strip brackets from IPv6 literals like "[fd8d::1]"
@@ -144,6 +199,7 @@ class ControlServer:
         if get_bundle is not None:
             Handler.get_bundle = staticmethod(get_bundle)
         Handler.cache_path = cache_path
+        Handler.tls_cert_ttl = tls_cert_ttl
 
         # Use AF_INET6 when binding to an IPv6 address or unspecified (":port").
         # On Linux, AF_INET6 with "::" accepts both IPv4 and IPv6 unless

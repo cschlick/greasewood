@@ -764,6 +764,180 @@ def cmd_hub_retire(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# TLS service certificates (§12) — cert-request / cert-status
+# ---------------------------------------------------------------------------
+
+def _resolve_hub_url(cfg) -> str:
+    """The control-plane URL to talk to: the current active hub (per the CA
+    bundle), falling back to the configured root_url."""
+    from .trust import CABundle, active_hub_endpoint
+    roots = {bytes.fromhex(h) for h in cfg.ca_pubs}
+    bundle = CABundle.load(cfg.ca_bundle_path)
+    return active_hub_endpoint(roots, bundle) or cfg.root_url
+
+
+def cmd_cert_request(args) -> int:
+    """Request an x509 TLS cert from the hub for a local service (e.g. Postgres).
+    Generates the leaf key locally; only its public key is sent to the hub."""
+    import json as json_mod
+    import ipaddress
+    import secrets
+    import urllib.error
+    import urllib.request
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from .config import load_config
+    from .keys import NodeKeys
+    from .wire import CertRequest
+
+    cfg = load_config(Path(args.config))
+    keys = NodeKeys.load(cfg.data_dir)
+
+    # Classify each --san as an IP or a DNS name.
+    dns, ips = [], []
+    for s in args.san:
+        try:
+            ipaddress.ip_address(s)
+            ips.append(s)
+        except ValueError:
+            dns.append(s)
+
+    cn = args.cn or (dns[0] if dns else (ips[0] if ips else keys.addr))
+    name = args.name or (dns[0] if dns else "service")
+    out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
+
+    hub_url = _resolve_hub_url(cfg)
+    if not hub_url:
+        sys.exit("no hub URL — set root_url in config or pass --hub")
+    if args.hub:
+        hub_url = args.hub
+
+    # Generate the leaf (service) keypair locally; the private key never leaves.
+    leaf = Ed25519PrivateKey.generate()
+    leaf_pub = leaf.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+    req = CertRequest(
+        id_pub=keys.id_pub_bytes,
+        leaf_pub=leaf_pub,
+        cn=cn,
+        dns=dns,
+        ips=ips,
+        nonce=secrets.token_hex(16),
+        ts=dt.datetime.now(_UTC).replace(microsecond=0),
+    ).sign(keys.id_priv)
+
+    body = json_mod.dumps(req.to_dict()).encode()
+    url = f"{hub_url.rstrip('/')}/cert"
+    # Retry a few times — the overlay tunnel to the hub may still be settling
+    # right after the node starts.
+    import time as _t
+    data = None
+    last_err = None
+    for attempt in range(5):
+        http_req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(http_req, timeout=10) as resp:
+                data = json_mod.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            # The hub answered with an error — surface its reason. 4xx (e.g. no
+            # tls capability, bad request) won't change on retry; fail fast.
+            try:
+                msg = json_mod.loads(e.read()).get("error", str(e))
+            except Exception:
+                msg = str(e)
+            if 400 <= e.code < 500:
+                sys.exit(f"cert request rejected: {msg}")
+            last_err = msg
+            if attempt < 4:
+                _t.sleep(3)
+        except urllib.error.URLError as e:
+            last_err = e
+            if attempt < 4:
+                _t.sleep(3)
+    if data is None:
+        sys.exit(f"cert request to {hub_url} failed: {last_err}")
+    if "error" in data:
+        sys.exit(f"cert request rejected: {data['error']}")
+
+    leaf_key_pem = leaf.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    key_path = out_dir / f"{name}.key"
+    crt_path = out_dir / f"{name}.crt"
+    ca_path = out_dir / "ca.crt"
+    # Private key 0600; certs world-readable.
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, leaf_key_pem)
+    finally:
+        os.close(fd)
+    crt_path.write_text(data["cert"])
+    ca_path.write_text(data["ca_cert"])
+
+    print("TLS certificate issued.")
+    print(f"  cn       : {cn}")
+    if dns:
+        print(f"  dns SANs : {', '.join(dns)}")
+    if ips:
+        print(f"  ip SANs  : {', '.join(ips)}")
+    print(f"  key      : {key_path}")
+    print(f"  cert     : {crt_path}")
+    print(f"  ca cert  : {ca_path}")
+    print()
+    print("Point your service at these (e.g. Postgres ssl_cert_file / ssl_key_file,")
+    print("clients ssl_ca_file = ca.crt). Re-run before expiry to renew.")
+    return 0
+
+
+def cmd_cert_status(args) -> int:
+    """Show the local TLS certs and their expiry."""
+    from cryptography import x509
+    from .config import load_config
+
+    cfg = load_config(Path(args.config))
+    out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
+    if not out_dir.exists():
+        print(f"no TLS certs at {out_dir}")
+        return 0
+
+    now = dt.datetime.now(_UTC)
+    found = False
+    for crt in sorted(out_dir.glob("*.crt")):
+        try:
+            cert = x509.load_pem_x509_certificate(crt.read_bytes())
+        except Exception:
+            continue
+        found = True
+        exp = getattr(cert, "not_valid_after_utc", None) or \
+            cert.not_valid_after.replace(tzinfo=_UTC)
+        cn = ""
+        try:
+            cn = cert.subject.rfc4514_string()
+        except Exception:
+            pass
+        sans = []
+        try:
+            ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            sans = [str(g.value) for g in ext.value]
+        except x509.ExtensionNotFound:
+            pass
+        left = (exp - now).days
+        print(f"{crt.name:<20} {cn:<30} expires {exp:%Y-%m-%d %H:%M} ({left}d)  "
+              f"SAN={','.join(sans) if sans else '-'}")
+    if not found:
+        print(f"no TLS certs at {out_dir}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -829,6 +1003,7 @@ def cmd_run(args) -> int:
             ca=ca,
             cache_path=cfg.dir_cache_path,
             get_bundle=trust.bundle_dict,
+            tls_cert_ttl=cfg.tls_cert_ttl,
         )
         srv.start()
 
@@ -1154,6 +1329,27 @@ def main(argv=None) -> int:
                     help="delay before the retirement takes effect, for nodes to "
                          "migrate first (default: the hub's credential TTL)")
     sp.set_defaults(fn=cmd_hub_retire)
+
+    # cert-request (on a node with the 'tls' capability)
+    sp = sub.add_parser("cert-request",
+                        help="request an x509 TLS cert from the hub for a local service")
+    sp.add_argument("--san", action="append", default=[], metavar="NAME|IP",
+                    help="subject alternative name (repeatable; DNS or IP). "
+                         "Defaults to the node's overlay address if omitted.")
+    sp.add_argument("--cn", default=None, help="subject common name")
+    sp.add_argument("--name", default=None,
+                    help="basename for the written .key/.crt (default: first SAN)")
+    sp.add_argument("--out-dir", dest="out_dir", default=None,
+                    help="where to write key/cert/ca (default: <data_dir>/tls)")
+    sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.set_defaults(fn=cmd_cert_request)
+
+    # cert-status
+    sp = sub.add_parser("cert-status", help="show local TLS certs and expiry")
+    sp.add_argument("--out-dir", dest="out_dir", default=None)
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.set_defaults(fn=cmd_cert_status)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

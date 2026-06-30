@@ -64,6 +64,10 @@ credential_ttl = "24h"
 # renew around the 12h mark, giving 12h of retry window before expiry.
 renew_before = "12h"
 
+# Lifetime of x509 TLS service certs issued via `gw cert-request` (§12).
+# Short-lived; nodes re-request to renew. Revocation is passive.
+tls_cert_ttl = "7d"
+
 # Enrollment flow (door-based — no SSH, no underlay HTTP):
 #
 #   1. On the hub:    TOKEN=$(sudo gw mint)

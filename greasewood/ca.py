@@ -104,6 +104,44 @@ class CA:
         log.info("renewing %s", hostname)
         return self.issue(req.id_pub, req.wg_pub, hostname, caps)
 
+    # --- x509 TLS certificate issuance (§12) ---
+
+    def issue_tls(
+        self,
+        leaf_pub: bytes,
+        cn: str,
+        dns: list[str],
+        ips: list[str],
+        ttl: dt.timedelta,
+    ) -> tuple[str, str]:
+        """
+        Issue an x509 TLS leaf cert (signed by the mesh CA) for a node-supplied
+        public key. Returns (leaf_cert_pem, ca_cert_pem). The CA key here is the
+        same one that signs mesh credentials — one trust root.
+        """
+        from . import tlsca
+        ca_cert = tlsca.ensure_ca_cert(
+            self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
+        )
+        leaf = tlsca.issue_tls_cert(
+            self._keys.ca_priv, ca_cert, leaf_pub, cn, dns, ips, ttl
+        )
+        log.info("issued TLS cert cn=%s dns=%s ips=%s exp=%s",
+                 cn, dns, ips, leaf.not_valid_after_utc)
+        return tlsca.cert_pem(leaf), tlsca.cert_pem(ca_cert)
+
+    def ca_cert_pem(self) -> str:
+        """The hub's self-signed x509 CA certificate (the TLS trust anchor)."""
+        from . import tlsca
+        cert = tlsca.ensure_ca_cert(
+            self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
+        )
+        return tlsca.cert_pem(cert)
+
+    def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
+        """(hostname, caps) for an enrolled node, or None if unknown."""
+        return self._load_node_info(id_pub)
+
     # --- CA succession (§11) ---
 
     def endorse(

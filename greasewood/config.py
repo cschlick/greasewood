@@ -45,6 +45,7 @@ class Config:
     credential_ttl: dt.timedelta
     renew_before: dt.timedelta
     door_window: dt.timedelta
+    tls_cert_ttl: dt.timedelta
 
     @property
     def dir_cache_path(self) -> Path:
@@ -106,4 +107,5 @@ def load_config(path: Path) -> Config:
         credential_ttl=_parse_duration(root.get("credential_ttl", "24h")),
         renew_before=_parse_duration(root.get("renew_before", "12h")),
         door_window=_parse_duration(root.get("door_window", "15m")),
+        tls_cert_ttl=_parse_duration(root.get("tls_cert_ttl", "7d")),
     )
