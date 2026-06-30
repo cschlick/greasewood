@@ -1,0 +1,51 @@
+"""
+Unit tests for the inbound/reachability CLI plumbing: set-inbound rewrites
+config, and hub-promote refuses an outbound-only node.
+"""
+import types
+
+import pytest
+
+from greasewood import cli
+
+
+def _write_cfg(path, inbound="yes", role="node"):
+    path.write_text(f"""[node]
+hostname = "n1"
+data_dir = "/var/lib/greasewood"
+role = "{role}"
+inbound = "{inbound}"
+caps = ["mesh"]
+
+[network]
+interface = "gw0"
+listen_port = 51820
+seeds = []
+root_url = ""
+""")
+
+
+def test_set_inbound_to_no_rewrites_config(tmp_path):
+    cfg = tmp_path / "gw.toml"
+    _write_cfg(cfg, "yes")
+    args = types.SimpleNamespace(config=str(cfg), value="no", open_firewall=False)
+    assert cli.cmd_set_inbound(args) == 0
+    assert 'inbound = "no"' in cfg.read_text()
+
+
+def test_set_inbound_to_yes_rewrites_config(tmp_path):
+    cfg = tmp_path / "gw.toml"
+    _write_cfg(cfg, "no")
+    args = types.SimpleNamespace(config=str(cfg), value="yes", open_firewall=False)
+    assert cli.cmd_set_inbound(args) == 0
+    assert 'inbound = "yes"' in cfg.read_text()
+
+
+def test_hub_promote_refuses_outbound_only(tmp_path):
+    cfg = tmp_path / "gw.toml"
+    _write_cfg(cfg, "no")
+    args = types.SimpleNamespace(config=str(cfg), control_port=7946,
+                                 credential_ttl="24h", open_firewall=False)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_hub_promote(args)
+    assert "outbound-only" in str(e.value)

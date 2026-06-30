@@ -52,10 +52,14 @@ def test_hub_rules_cover_control_and_door():
     assert ("tcp", 7947, "gw-door") in ports
 
 
-def test_node_rules_are_udp_only():
-    rules = fw.node_rules()
+def test_node_rules_inbound_yes_is_mesh_port_only():
+    rules = fw.node_rules(inbound="yes")
     assert all(r.proto == "udp" and r.iif is None for r in rules)
-    assert {r.port for r in rules} == {51820, 51821}
+    assert {r.port for r in rules} == {51820}  # door 51821 is hub-only
+
+
+def test_node_rules_inbound_no_needs_nothing():
+    assert fw.node_rules(inbound="no") == []
 
 
 # --- default-drop detection ---
@@ -69,9 +73,10 @@ def test_default_drop_detected():
 # --- missing-rule detection ---
 
 def test_missing_when_port_absent():
-    rs = _ruleset(_chain("drop"), _accept_rule("udp", 51820))
-    missing = fw.missing_rules(rs, fw.node_rules())
-    assert {r.port for r in missing} == {51821}  # 51820 present, 51821 missing
+    # ruleset has only the door port; the mesh port (51820) is missing
+    rs = _ruleset(_chain("drop"), _accept_rule("udp", 51821))
+    missing = fw.missing_rules(rs, fw.node_rules(inbound="yes"))
+    assert {r.port for r in missing} == {51820}
 
 
 def test_nothing_missing_when_all_present():

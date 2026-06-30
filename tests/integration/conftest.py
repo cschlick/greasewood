@@ -148,7 +148,7 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
 
 def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
-                    check: bool = True):
+                    inbound: str | None = None, check: bool = True):
     """
     Run one `gw mint` (on hub_cid) → `gw join` (on node_cid) door enrollment.
     `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
@@ -160,6 +160,8 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
         extra += ["--hostname", hostname]
     if caps is not None:
         extra += ["--caps", caps]
+    if inbound is not None:
+        extra += ["--inbound", inbound]
 
     with _ENROLL_LOCK:
         # mint --endpoint takes a BARE address; the door port is fixed and the
@@ -184,18 +186,18 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
 
 def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
-                check: bool = True):
+                inbound: str | None = None, check: bool = True):
     """Enroll an existing node container via the root hub (see door_enroll_via).
-    `hostname`/`caps` are passed only when given, so omitting them exercises
-    join's "keep existing config" behavior."""
+    `hostname`/`caps`/`inbound` are passed only when given, so omitting them
+    exercises join's "keep existing config" behavior."""
     return door_enroll_via(
         gw_root["cid"], gw_root["ipv6"], node_cid, node_ipv6,
-        hostname=hostname, caps=caps, check=check,
+        hostname=hostname, caps=caps, inbound=inbound, check=check,
     )
 
 
 def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
-                  caps: str | None = None) -> dict:
+                  caps: str | None = None, inbound: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
@@ -216,7 +218,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    door_enroll(gw_root, cid, ipv6, hostname=hostname, caps=caps)
+    door_enroll(gw_root, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
