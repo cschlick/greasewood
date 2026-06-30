@@ -278,6 +278,7 @@ control_listen = ":{control_port}"
 credential_ttl = "{args.credential_ttl}"
 renew_before = "12h"
 door_window = "15m"
+door_port = {args.door_port}
 """)
     log.info("wrote config → %s", cfg_path)
 
@@ -389,9 +390,10 @@ def cmd_mint(args) -> int:
     # Set up door routing (idempotent — survives reboots if called here too)
     wgmod.setup_door_routing()
 
-    # Bring up the hub's door WG interface
+    # Bring up the hub's door WG interface on the configured door port
     door_key_path = data_dir / "door.key"
-    wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64, params.psk_b64)
+    wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64,
+                                    params.psk_b64, cfg.door_port)
 
     # Write window file so the running gw-run daemon starts the enroll server
     expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
@@ -401,7 +403,8 @@ def cmd_mint(args) -> int:
         "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }))
 
-    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed)
+    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
+                         cfg.door_port)
     print(token)
     return 0
 
@@ -486,9 +489,9 @@ def cmd_join(args) -> int:
                 listen_port,
             )
 
-    # Decode token → hub_door_pub, ca_pub, hub_host, seed
+    # Decode token → hub_door_pub, ca_pub, hub_host, seed, door_port
     try:
-        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed = decode_token(token)
+        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port = decode_token(token)
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
 
@@ -513,9 +516,10 @@ def cmd_join(args) -> int:
         )
     log.info("overlay addr: %s", node_keys.addr)
 
-    # Bring up the local door interface
+    # Bring up the local door interface (door port comes from the token)
     wgmod.ensure_node_door_interface(
         params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64, hub_host,
+        door_port,
     )
 
     # Connect to hub's enroll daemon via the door tunnel (retry for WG handshake)
@@ -596,7 +600,9 @@ def cmd_join(args) -> int:
     dir_cache = data_dir / "directory.json"
     directory = Directory.load(dir_cache)
 
-    # Hub's record — pre-seeds so the daemon knows the hub immediately
+    # Hub's record — pre-seeds so the daemon knows the hub immediately. The hub
+    # tells us its control port (it's configurable) so we build the right URL.
+    hub_control_port = int(resp.get("control_port", 7946))
     hub_overlay_url = ""
     if resp.get("hub_record"):
         hub_rec = NodeRecord.from_dict(resp["hub_record"])
@@ -604,7 +610,7 @@ def cmd_join(args) -> int:
             hub_rec.verify([ca_pub_bytes], set())
             directory.put(hub_rec)
             log.info("pre-seeded hub record (hostname=%s)", hub_rec.hostname)
-            hub_overlay_url = f"http://[{hub_rec.cred.addr}]:7946"
+            hub_overlay_url = f"http://[{hub_rec.cred.addr}]:{hub_control_port}"
         except Exception as e:
             log.warning("hub record verify failed: %s", e)
 
@@ -825,6 +831,7 @@ control_listen = ":{control_port}"
 credential_ttl = "{args.credential_ttl}"
 renew_before = "12h"
 door_window = "15m"
+door_port = {cfg.door_port}
 """)
     log.info("promoted to hub role in %s", cfg_path)
 
@@ -1229,6 +1236,7 @@ def cmd_run(args) -> int:
             get_ca_pubs=trust.trusted_pubs,
             get_revoked=lambda: revoked,
             cache_path=cfg.dir_cache_path,
+            control_port=_control_port(cfg),
         )
         door_watcher.start()
         log.info("door watcher started")
@@ -1584,6 +1592,8 @@ def main(argv=None) -> int:
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
     sp.add_argument("--control-port", dest="control_port", type=int, default=7946)
+    sp.add_argument("--door-port", dest="door_port", type=int, default=51821,
+                    help="UDP port for the enrollment door (carried in tokens)")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address (auto-detected if omitted)")
     sp.add_argument("--caps", default="mesh")

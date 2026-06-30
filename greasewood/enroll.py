@@ -85,6 +85,7 @@ class EnrollServer:
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
+        control_port: int = 7946,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -95,6 +96,7 @@ class EnrollServer:
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
         self._get_revoked = get_revoked or set
         self._cache_path = cache_path
+        self._control_port = control_port
         self._srv: socket.socket | None = None
         self._thread = threading.Thread(target=self._serve, name="enroll", daemon=True)
 
@@ -191,6 +193,7 @@ class EnrollServer:
             "ok": True,
             "credential": cred.to_dict(),
             "hub_record": hub_record.to_dict() if hub_record else None,
+            "control_port": self._control_port,
         })
 
         # Second leg: the node now builds + signs its NodeRecord (it embeds the
@@ -243,6 +246,7 @@ class DoorWatcher:
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
+        control_port: int = 7946,
     ) -> None:
         self._data_dir = data_dir
         self._ca = ca
@@ -253,6 +257,7 @@ class DoorWatcher:
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
         self._get_revoked = get_revoked or set
         self._cache_path = cache_path
+        self._control_port = control_port
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -327,6 +332,7 @@ class DoorWatcher:
                 get_ca_pubs=self._get_ca_pubs,
                 get_revoked=self._get_revoked,
                 cache_path=self._cache_path,
+                control_port=self._control_port,
             )
             srv.start()
             self._enroll = srv

@@ -52,6 +52,7 @@ class Config:
     renew_before: dt.timedelta
     door_window: dt.timedelta
     tls_cert_ttl: dt.timedelta
+    door_port: int
 
     @property
     def dir_cache_path(self) -> Path:
@@ -117,4 +118,5 @@ def load_config(path: Path) -> Config:
         renew_before=_parse_duration(root.get("renew_before", "12h")),
         door_window=_parse_duration(root.get("door_window", "15m")),
         tls_cert_ttl=_parse_duration(root.get("tls_cert_ttl", "7d")),
+        door_port=int(root.get("door_port", 51821)),
     )

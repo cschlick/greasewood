@@ -149,19 +149,21 @@ def ensure_hub_door_interface(
     door_key_path: Path,
     guest_pub_b64: str,
     psk_b64: str,
+    door_port: "int | None" = None,
 ) -> None:
     """
     Bring up the hub's gw-door interface for one enrollment window.
     Destroys any existing gw-door first so each mint gets a clean start.
     """
     from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
+    door_port = DOOR_PORT if door_port is None else door_port
 
     destroy_interface(DOOR_IFACE)
 
     _run("ip", "link", "add", DOOR_IFACE, "type", "wireguard")
     _run("wg", "set", DOOR_IFACE,
          "private-key", str(door_key_path),
-         "listen-port", str(DOOR_PORT))
+         "listen-port", str(door_port))
 
     with _temp_key_file(psk_b64) as psk_path:
         _run("wg", "set", DOOR_IFACE,
@@ -172,7 +174,7 @@ def ensure_hub_door_interface(
     _run("ip", "-6", "addr", "add", f"{HUB_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
     _run("ip", "-6", "route", "replace", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("hub door interface %s up on port %d", DOOR_IFACE, DOOR_PORT)
+    log.info("hub door interface %s up on port %d", DOOR_IFACE, door_port)
 
 
 def ensure_node_door_interface(
@@ -180,12 +182,14 @@ def ensure_node_door_interface(
     hub_door_pub_b64: str,
     psk_b64: str,
     hub_host: str,
+    door_port: "int | None" = None,
 ) -> None:
     """
     Bring up the node's transient gw-door interface for the enrollment dance.
     """
     import base64
     from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
+    door_port = DOOR_PORT if door_port is None else door_port
 
     destroy_interface(DOOR_IFACE)
 
@@ -195,11 +199,11 @@ def ensure_node_door_interface(
     with _temp_key_file(guest_priv_b64) as key_path, _temp_key_file(psk_b64) as psk_path:
         _run("wg", "set", DOOR_IFACE,
              "private-key", key_path,
-             "listen-port", str(DOOR_PORT))
+             "listen-port", str(door_port))
         _run("wg", "set", DOOR_IFACE,
              "peer", hub_door_pub_b64,
              "preshared-key", psk_path,
-             "endpoint", f"[{hub_host}]:{DOOR_PORT}",
+             "endpoint", f"[{hub_host}]:{door_port}",
              "allowed-ips", f"{HUB_DOOR_IP}/128",
              "persistent-keepalive", "5")
 
