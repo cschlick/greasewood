@@ -1,6 +1,39 @@
 # greasewood
 
+## Provisioning many nodes
 
+Enrollment tokens are **pushed by the hub, never pulled by nodes**. A node
+cannot request admission; the hub (or an orchestrator acting on it) decides to
+admit a machine, runs `gw mint` to create a single-use token, and delivers that
+token to the node out of band (SSH, cloud-init, a secrets store, etc.). The
+node then runs `gw join <token>` to redeem it.
+
+Because of this, the door is **single-slot and orderly by construction**: one
+mint opens one enrollment window; the hub closes that window the instant the
+node finishes joining. There is no inbound request flood to arbitrate — the
+only actor that could create contention is the minting side itself.
+
+So to provision N machines, mint and join in a simple sequential loop:
+
+```bash
+for host in node01 node02 node03; do
+    TOKEN=$(ssh hub 'sudo gw mint')          # hub opens the door
+    ssh "$host" "sudo gw join '$TOKEN'"      # node joins; hub closes the door
+done                                         # next mint only runs after join returns
+```
+
+Each `gw join` blocks until the node is enrolled, so the window is always closed
+again before the next `gw mint` — no coordination, locks, or queue needed.
+
+A new `gw mint` regenerates the door's guest key and overwrites the current
+window, **invalidating any previously minted-but-unused token**. If you mint
+while a window is still open, `gw mint` prints a warning to stderr (the token
+still goes to stdout, so `TOKEN=$(gw mint)` is unaffected). Treat that warning
+as a sign your provisioner is minting ahead of itself.
+
+> The door enrolls one node at a time on the wire by design. Running the minting
+> side as parallel workers would not speed this up — it would just need a lock to
+> avoid clobbering — so the sequential loop above is the intended model.
 
 ## Getting started
 
