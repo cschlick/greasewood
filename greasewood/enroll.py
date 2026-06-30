@@ -238,7 +238,6 @@ class DoorWatcher:
         if now >= expires:
             log.info("door window expired, cleaning up")
             self._clear_enroll()
-            _destroy_door()
             window_path.unlink(missing_ok=True)
             return
 
@@ -247,10 +246,22 @@ class DoorWatcher:
                 return  # already running
 
             remaining = (expires - now).total_seconds()
+            # Capture expiry string for the on_done guard below.
+            expires_str = data["expires"]
 
             def on_done():
-                _destroy_door()
-                window_path.unlink(missing_ok=True)
+                # Only delete the window if it still belongs to this session.
+                # If gw mint ran again while we were waiting, the new window has
+                # a different expiry — leave it so the DoorWatcher can start a
+                # fresh EnrollServer for the new token.
+                try:
+                    current = json.loads(window_path.read_text())
+                    if current.get("expires") == expires_str:
+                        window_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    window_path.unlink(missing_ok=True)
                 with self._lock:
                     self._enroll = None
                 log.info("door enrollment complete, window closed")
@@ -272,6 +283,7 @@ class DoorWatcher:
             if self._enroll:
                 self._enroll.stop()
                 self._enroll = None
+        _destroy_door()
 
 
 def _destroy_door() -> None:
