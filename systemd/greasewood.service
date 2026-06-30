@@ -1,0 +1,18 @@
+[Unit]
+Description=greasewood mesh daemon
+Documentation=https://gitlab.com/cschlick/greasewood
+After=network-online.target
+Wants=network-online.target
+# Only run once this node is configured (setup-hub / join writes the config);
+# greasewood.path starts us the moment it appears.
+ConditionPathExists=/etc/greasewood.toml
+
+[Service]
+Type=simple
+# gw run creates WireGuard interfaces and edits routing → runs as root.
+ExecStart=/usr/local/bin/gw run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

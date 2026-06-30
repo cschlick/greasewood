@@ -71,6 +71,10 @@ pip install .
 This installs the `gw` command. Most subcommands need root (they create
 WireGuard interfaces and edit routing); `gw status` does not.
 
+The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
+as a managed systemd service instead — see [Running as a
+service](#running-as-a-service); then the workflow is just install → setup/join.
+
 ## Quickstart
 
 ### 1. Bootstrap the hub
@@ -115,6 +119,47 @@ mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
 gw status            # local node + directory view
 sudo wg show gw0     # live WireGuard peers
 ```
+
+## Running as a service
+
+`gw run` in a terminal is fine for trying things out, but in practice you want
+the daemon managed by systemd — survives reboots, restarts on failure, logs to
+the journal. The model is **install once, then forget `gw run`**: a path unit
+watches for `/etc/greasewood.toml` and starts the daemon the moment `setup-hub`
+or `join` writes it. So the workflow becomes just **install → setup/join**.
+
+Install the service (pip-only, no Ansible):
+
+```bash
+sudo gw install-service
+```
+
+This writes `/etc/systemd/system/greasewood.{service,path}`, enables the path
+watcher (armed immediately) and the service (for boot), and does **not** start a
+daemon until you configure the node. After it's installed:
+
+```bash
+sudo gw setup-hub --hostname hub      # on the hub        → daemon auto-starts
+sudo gw join "$TOKEN" --hostname n01  # on a node         → daemon auto-starts
+journalctl -u greasewood -f           # watch it (no live terminal anymore)
+```
+
+Opt out / undo:
+
+```bash
+sudo gw uninstall-service             # disable + remove the units
+# or just: sudo systemctl disable --now greasewood.path greasewood.service
+```
+
+Notes:
+- It runs `gw run` as root (it manages WireGuard interfaces and routing). Don't
+  also run `gw run` by hand while the service is up — both would fight over `gw0`.
+- A **config-changing re-join** (new hub, new caps) isn't auto-detected — the
+  daemon reads its config at startup, so run `sudo systemctl restart greasewood`
+  afterward.
+- Via Ansible: the `greasewood` role (in the `postinstall` repo) installs and
+  enables the same units for you, so a freshly provisioned node is service-ready
+  before you even enroll it.
 
 ## Provisioning many nodes
 
@@ -197,6 +242,8 @@ no control plane, so on a node that will never be a hub you can omit the `gw0`/
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
+| `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
+| `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
