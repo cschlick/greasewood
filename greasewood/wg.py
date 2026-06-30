@@ -142,7 +142,6 @@ def setup_door_routing() -> None:
 
 def ensure_hub_door_interface(
     door_key_path: Path,
-    door_port: int,
     guest_pub_b64: str,
     psk_b64: str,
 ) -> None:
@@ -150,14 +149,14 @@ def ensure_hub_door_interface(
     Bring up the hub's gw-door interface for one enrollment window.
     Destroys any existing gw-door first so each mint gets a clean start.
     """
-    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE
+    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
 
     destroy_interface(DOOR_IFACE)
 
     _run("ip", "link", "add", DOOR_IFACE, "type", "wireguard")
     _run("wg", "set", DOOR_IFACE,
          "private-key", str(door_key_path),
-         "listen-port", str(door_port))
+         "listen-port", str(DOOR_PORT))
 
     with _temp_key_file(psk_b64) as psk_path:
         _run("wg", "set", DOOR_IFACE,
@@ -168,7 +167,7 @@ def ensure_hub_door_interface(
     _run("ip", "-6", "addr", "add", f"{HUB_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
     _run("ip", "-6", "route", "replace", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("hub door interface %s up on port %d", DOOR_IFACE, door_port)
+    log.info("hub door interface %s up on port %d", DOOR_IFACE, DOOR_PORT)
 
 
 def ensure_node_door_interface(
@@ -176,13 +175,12 @@ def ensure_node_door_interface(
     hub_door_pub_b64: str,
     psk_b64: str,
     hub_host: str,
-    door_port: int,
 ) -> None:
     """
     Bring up the node's transient gw-door interface for the enrollment dance.
     """
     import base64
-    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE
+    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
 
     destroy_interface(DOOR_IFACE)
 
@@ -194,14 +192,14 @@ def ensure_node_door_interface(
         _run("wg", "set", DOOR_IFACE,
              "peer", hub_door_pub_b64,
              "preshared-key", psk_path,
-             "endpoint", f"[{hub_host}]:{door_port}",
+             "endpoint", f"[{hub_host}]:{DOOR_PORT}",
              "allowed-ips", f"{HUB_DOOR_IP}/128",
              "persistent-keepalive", "5")
 
     _run("ip", "-6", "addr", "add", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
     _run("ip", "-6", "route", "replace", f"{HUB_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, hub_host, door_port)
+    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, hub_host, DOOR_PORT)
 
 
 @contextlib.contextmanager
