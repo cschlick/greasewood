@@ -234,5 +234,78 @@ class TestRenewEndpoint:
             assert status == 200
             new_cred = Credential.from_dict(body)
             new_cred.verify([ca.ca_pub_bytes])
+
+            # Replaying the exact same signed request must be rejected (the
+            # nonce is now spent), not silently re-issued.
+            status2, body2 = _post(port, "/renew", req.to_dict())
+            assert status2 == 400
+            assert "replay" in body2.get("error", "").lower()
         finally:
             srv.stop()
+
+
+class TestRenewalPropagation:
+    def test_renewal_republishes_to_hub(self, tmp_path):
+        """After renewing, the node must re-publish so the hub (and thus peers,
+        which pull from the hub) sees the fresh credential — otherwise the mesh
+        tears down one credential TTL after start."""
+        from greasewood.renewal import RenewalLoop
+
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        cred = _make_cred(node, ca, ttl=3600)
+        record = _make_record(node, cred, seq=1)
+
+        hub_dir = Directory()          # the hub's directory
+        hub_dir.put(record)            # node's initial (seq=1) record on the hub
+        ca_obj = CA(ca, tmp_path)
+        ca_obj._save_node_caps(node.id_pub_bytes, "test-node", ["mesh"])
+
+        srv = ControlServer(
+            listen="[::1]:0", directory=hub_dir,
+            get_ca_pubs=lambda: [ca.ca_pub_bytes], get_revoked=set, ca=ca_obj,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            own_dir = Directory()               # node's own (separate) directory
+            own_dir.put(record)                 # the node knows its own seq=1 record
+            loop = RenewalLoop(
+                node_keys=node,
+                directory=own_dir,
+                get_root_url=lambda: f"http://[::1]:{port}",
+                current_cred=cred,
+                inbound="yes", hostname="test-node",
+                endpoints=["[2001:db8::1]:51900"],
+                cache_path=tmp_path / "dir.json",
+            )
+            loop._renew_and_publish()
+            # The hub's directory now carries the renewed (seq=2) record.
+            on_hub = hub_dir.get(node.id_pub_hex)
+            assert on_hub is not None and on_hub.seq == 2
+            on_hub.cred.verify([ca.ca_pub_bytes])  # fresh, valid credential
+        finally:
+            srv.stop()
+
+
+class TestRequestHardening:
+    def test_oversized_body_rejected(self, running_server):
+        _, port, directory, ca, node, cred = running_server
+        huge = {"junk": "A" * (300 * 1024)}  # over the 256 KiB cap
+        status, _ = _post(port, "/publish", huge)
+        assert status == 400  # rejected, not OOM
+
+    def test_forged_high_seq_record_cannot_shadow(self, running_server):
+        """A directory response carrying a forged, high-seq record for a victim
+        must not be able to evict/shadow the victim's real record: the forgery
+        fails structural verification and never enters the directory."""
+        from dataclasses import replace
+        _, port, directory, ca, node, cred = running_server
+        real = directory.get(node.id_pub_hex)
+        assert real.seq == 1
+        # Attacker lacks node.id_priv, so any record they craft for node's
+        # id_pub has a broken self-signature — even with a huge seq.
+        forged = replace(real, seq=999999, endpoints=["[2001:db8::dead]:51900"])
+        dropped = directory.merge([forged])  # not signed by node → invalid
+        assert dropped == 0
+        assert directory.get(node.id_pub_hex).seq == 1

@@ -25,6 +25,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,37 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Largest control-plane request body we will read. Records/requests are a few KB;
+# this just stops an in-mesh peer from forcing an unbounded allocation.
+_MAX_BODY = 256 * 1024
+
+
+class _ReplayGuard:
+    """
+    Thread-safe single-use nonce set with time eviction. The signature on a
+    request proves authenticity; this makes each accepted request single-use,
+    so a captured /renew or /cert cannot be replayed within the skew window.
+    Entries are kept for `window` seconds (> the 300s skew bound), after which
+    the stale-timestamp check would reject a replay anyway.
+    """
+
+    def __init__(self, window: float = 600.0) -> None:
+        self._window = window
+        self._seen: dict[str, float] = {}  # nonce -> expiry epoch
+        self._lock = threading.Lock()
+
+    def check_and_add(self, nonce: str) -> bool:
+        """True if the nonce is fresh (and records it); False if it is a replay."""
+        now = time.time()
+        with self._lock:
+            if len(self._seen) > 4096:  # bound memory; evict expired in bulk
+                self._seen = {n: e for n, e in self._seen.items() if e > now}
+            exp = self._seen.get(nonce)
+            if exp is not None and exp > now:
+                return False
+            self._seen[nonce] = now + self._window
+            return True
+
 
 class _Handler(BaseHTTPRequestHandler):
     directory: "Directory"
@@ -44,6 +76,7 @@ class _Handler(BaseHTTPRequestHandler):
     get_bundle: "callable" = staticmethod(lambda: {"v": 1, "statements": []})
     cache_path: "Path | None" = None
     tls_cert_ttl: "dt.timedelta | None" = None
+    replay: "_ReplayGuard" = _ReplayGuard()
 
     def log_message(self, fmt, *args) -> None:
         log.debug("http %s %s", self.command, self.path)
@@ -58,6 +91,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
+        if length > _MAX_BODY:
+            raise ValueError(f"request body too large ({length} bytes)")
         return json.loads(self.rfile.read(length))
 
     def do_GET(self) -> None:
@@ -120,6 +155,16 @@ class _Handler(BaseHTTPRequestHandler):
         from .wire import RenewRequest
         try:
             req = RenewRequest.from_dict(body)
+            req.verify_self_sig()  # authenticate before consuming the nonce
+        except (ValueError, KeyError) as e:
+            log.warning("renew rejected: %s", e)
+            self._send_json({"error": str(e)}, 400)
+            return
+        if not self.replay.check_and_add(req.nonce):
+            log.warning("renew rejected: replayed nonce from %s", req.id_pub.hex()[:16])
+            self._send_json({"error": "replay detected (nonce already used)"}, 400)
+            return
+        try:
             cred = self.ca.renew(req)
             self._send_json(cred.to_dict())
         except ValueError as e:
@@ -140,6 +185,10 @@ class _Handler(BaseHTTPRequestHandler):
         skew = abs((_dt.datetime.now(_dt.timezone.utc) - req.ts).total_seconds())
         if skew > 300:
             self._send_json({"error": f"timestamp skew too large ({skew:.0f}s); check NTP"}, 400)
+            return
+
+        if not self.replay.check_and_add(req.nonce):
+            self._send_json({"error": "replay detected (nonce already used)"}, 400)
             return
 
         info = self.ca.node_info(req.id_pub)
@@ -198,6 +247,7 @@ class ControlServer:
             Handler.get_bundle = staticmethod(get_bundle)
         Handler.cache_path = cache_path
         Handler.tls_cert_ttl = tls_cert_ttl
+        Handler.replay = _ReplayGuard()
 
         # Bind one socket per address — typically the hub's overlay address and
         # loopback, NOT "::". The control plane is then unreachable on the

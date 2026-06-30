@@ -13,9 +13,10 @@ NodeRecord (self-signed by id_priv, §5.2):
 Both objects use json.dumps(sort_keys=True) as the canonical signing form.
 Binary fields (keys, signatures) are standard base64.
 
-RenewRequest is sent by enrolled nodes to the root for credential renewal.
-Enrollment is SSH-only (operator runs `greasewood issue` on the root); there
-is no HTTP enrollment endpoint.
+RenewRequest is sent by enrolled nodes to the hub for credential renewal.
+Enrollment is out of band over the transient WireGuard "door" (`gw mint` /
+`gw join`, see greasewood.door / greasewood.enroll); the control plane has no
+network-reachable enrollment endpoint.
 """
 from __future__ import annotations
 
@@ -155,6 +156,36 @@ class NodeRecord:
         sig = id_priv.sign(_canonical(self._body_dict()))
         return replace(self, sig=sig)
 
+    def verify_structural(self) -> None:
+        """
+        CA- and clock-independent integrity checks: self-signature, addr
+        derivation, and id_pub/credential consistency. These hold for any
+        genuine record regardless of which CA is currently trusted or what the
+        clock says, so they are the right gate for accepting a record into the
+        directory/cache (directory.merge). A forged record fails here because
+        the attacker lacks the victim's id_priv — which is what stops a bad
+        directory response from shadowing a real record with a high-seq fake.
+        Raises ValueError on any failure.
+        """
+        # Self-signature (step 3)
+        body = _canonical(self._body_dict())
+        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
+        try:
+            pub.verify(self.sig, body)
+        except InvalidSignature:
+            raise ValueError("invalid self-signature")
+
+        # addr must derive from id_pub (step 4)
+        expected_addr = derive_addr(self.id_pub)
+        if self.cred.addr != expected_addr:
+            raise ValueError(
+                f"addr mismatch: record claims {self.cred.addr}, expected {expected_addr}"
+            )
+
+        # id_pub in record must match id_pub in credential
+        if self.id_pub != self.cred.id_pub:
+            raise ValueError("id_pub in record does not match id_pub in credential")
+
     def verify(self, ca_pubs: list[bytes], revoked: set[str]) -> None:
         """
         Full record verification — steps 1–5 of the reconcile loop (§7).
@@ -164,24 +195,8 @@ class NodeRecord:
         # Steps 1+2: CA signature + expiry
         self.cred.verify(ca_pubs)
 
-        # Step 3: self-signature
-        body = _canonical(self._body_dict())
-        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
-        try:
-            pub.verify(self.sig, body)
-        except InvalidSignature:
-            raise ValueError("invalid self-signature")
-
-        # Step 4: addr must derive from id_pub
-        expected_addr = derive_addr(self.id_pub)
-        if self.cred.addr != expected_addr:
-            raise ValueError(
-                f"addr mismatch: record claims {self.cred.addr}, expected {expected_addr}"
-            )
-
-        # Sanity: id_pub in record must match id_pub in credential
-        if self.id_pub != self.cred.id_pub:
-            raise ValueError("id_pub in record does not match id_pub in credential")
+        # Steps 3+4 + id_pub/cred consistency
+        self.verify_structural()
 
         # Step 5: not on revoke list
         if self.id_pub.hex() in revoked:

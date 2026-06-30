@@ -1196,7 +1196,10 @@ def cmd_run(args) -> int:
     door_watcher = None
     trust_sync = None
 
-    revoked: set[str] = set()
+    # Revoke list is re-read live (not snapshotted) so `gw revoke` takes effect
+    # without a daemon restart — both for control-plane refusal and local
+    # eviction. Plain nodes have no revoke list (expiry-based revocation).
+    get_revoked: "callable" = set
     is_hub = cfg.role in ("hub", "root")
 
     if is_hub:
@@ -1204,7 +1207,7 @@ def cmd_run(args) -> int:
             sys.exit("hub role requires ca_key_file in [hub]")
         ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
         ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
-        revoked = ca.load_revoked_set()
+        get_revoked = ca.load_revoked_set
         log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
         # Re-apply door routing in case the machine rebooted since setup-hub
         wgmod.setup_door_routing()
@@ -1218,7 +1221,7 @@ def cmd_run(args) -> int:
             listen_addrs,
             directory,
             get_ca_pubs=trust.trusted_pubs,
-            get_revoked=lambda: revoked,
+            get_revoked=get_revoked,
             ca=ca,
             cache_path=cfg.dir_cache_path,
             get_bundle=trust.bundle_dict,
@@ -1234,7 +1237,7 @@ def cmd_run(args) -> int:
             node_keys=keys,
             wg_iface=cfg.wg_interface,
             get_ca_pubs=trust.trusted_pubs,
-            get_revoked=lambda: revoked,
+            get_revoked=get_revoked,
             cache_path=cfg.dir_cache_path,
             control_port=_control_port(cfg),
         )
@@ -1268,7 +1271,7 @@ def cmd_run(args) -> int:
         local_id_pub=keys.id_pub_bytes,
         local_caps=cfg.caps,
         get_ca_pubs=trust.trusted_pubs,
-        revoked=revoked,
+        get_revoked=get_revoked,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
     )
     recon.start()
@@ -1404,6 +1407,189 @@ def cmd_status(args) -> int:
         ))
 
     print(f"\n{len(records)} record(s) in local directory cache")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# diagnose — explain why a peer link is or isn't forming
+# ---------------------------------------------------------------------------
+
+def _handshake_phrase(live, now_epoch: int) -> str:
+    """Human phrase for a live peer's last-handshake age."""
+    if live is None:
+        return "not installed"
+    if live.latest_handshake == 0:
+        return "no handshake yet"
+    age = now_epoch - live.latest_handshake
+    if age < 0:
+        age = 0
+    if age <= 180:
+        return f"handshook {age}s ago"
+    if age < 3600:
+        return f"stale ({age // 60}m ago)"
+    return f"stale ({age // 3600}h ago)"
+
+
+def cmd_diagnose(args) -> int:
+    """
+    Per-peer connectivity diagnosis. Runs the same 7-step reconcile checks the
+    daemon uses and prints, for each peer, exactly which step it fails — turning
+    a silent direct-or-fail link into an actionable reason. Then overlays live
+    WireGuard handshake state to separate "rejected by verification" from
+    "configured but never handshook" (an endpoint/firewall problem).
+    """
+    import base64
+    import time as _time
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from .config import load_config
+    from .keys import NodeKeys, derive_addr
+    from .directory import Directory
+    from .trust import CABundle, TrustStore
+    from .reconcile import default_policy
+    from .wire import _canonical
+    from . import wg as wgmod
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        print(f"not configured (no config file at {cfg_path})")
+        return 1
+    cfg = load_config(cfg_path)
+
+    try:
+        keys = NodeKeys.load(cfg.data_dir)
+    except FileNotFoundError:
+        print("keys not generated yet — run 'gw join <token>' or 'gw setup-hub' first")
+        return 1
+
+    trust = TrustStore(
+        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
+        bundle=CABundle.load(cfg.ca_bundle_path),
+        bundle_path=cfg.ca_bundle_path,
+        static_seeds=cfg.seeds,
+        fallback_hub_url=cfg.root_url,
+    )
+    ca_pubs = trust.trusted_pubs()
+
+    # Revoke list: only the hub maintains one (nodes are expiry-based).
+    revoked: set[str] = set()
+    rev_path = cfg.data_dir / "revoked.json"
+    if rev_path.exists():
+        try:
+            revoked = set(json.loads(rev_path.read_text()).get("revoked", []))
+        except Exception:
+            pass
+
+    # Live WireGuard state (best effort — needs root + the daemon running).
+    try:
+        live_peers = wgmod.get_peers(cfg.wg_interface)
+        wg_available = True
+    except Exception:
+        live_peers, wg_available = {}, False
+
+    directory = Directory.load(cfg.dir_cache_path)
+    now = dt.datetime.now(_UTC)
+    now_epoch = int(_time.time())
+
+    print(f"self     : {cfg.hostname}  ({keys.addr})")
+    print(f"role     : {cfg.role}   inbound={cfg.inbound}   iface={cfg.wg_interface}")
+    print(f"trusted CAs: {len(ca_pubs)}   hub: {trust.hub_url() or '(none configured)'}")
+    if not ca_pubs:
+        print("  ⚠ no trusted CA keys — check [ca] trusted_pubs; nothing will verify")
+    if not wg_available or not live_peers:
+        hint = "" if wg_available else "  (need root, or the daemon isn't running)"
+        print(f"WireGuard: {len(live_peers)} live peer(s) on {cfg.wg_interface}{hint}")
+    print()
+
+    records = sorted((r for r in directory.all() if r.id_pub != keys.id_pub_bytes),
+                     key=lambda r: r.hostname)
+    if not records:
+        print("no peer records in the directory cache yet — is sync reaching the hub?")
+        return 0
+
+    want = getattr(args, "hostname", None)
+    counts = {"linked": 0, "no-handshake": 0, "rejected": 0, "policy": 0}
+
+    for r in records:
+        if want and r.hostname != want:
+            continue
+        wg_b64 = base64.b64encode(r.cred.wg_pub).decode()
+        live = live_peers.get(wg_b64)
+        problems: list[str] = []
+
+        # Step 1: CA signature against the trusted set
+        body = _canonical(r.cred._body_dict())
+        ca_ok = False
+        for raw in ca_pubs:
+            try:
+                Ed25519PublicKey.from_public_bytes(raw).verify(r.cred.ca_sig, body)
+                ca_ok = True
+                break
+            except InvalidSignature:
+                continue
+        if not ca_ok:
+            problems.append("CA signature not from a trusted CA (succession not synced? wrong fleet?)")
+
+        # Step 2: expiry
+        left = (r.cred.exp - now).total_seconds()
+        if left < 0:
+            problems.append(f"credential EXPIRED {int(-left // 60)}m ago (renewal not propagating?)")
+
+        # Step 3: self-signature
+        try:
+            Ed25519PublicKey.from_public_bytes(r.id_pub).verify(
+                r.sig, _canonical(r._body_dict()))
+        except InvalidSignature:
+            problems.append("invalid self-signature (record tampered/corrupt)")
+
+        # Step 4: addr derivation + id/cred consistency
+        if r.cred.addr != derive_addr(r.id_pub) or r.id_pub != r.cred.id_pub:
+            problems.append("addr does not derive from id_pub (forged record)")
+
+        # Step 5: revoke list
+        if r.id_pub.hex() in revoked:
+            problems.append("node is REVOKED")
+
+        # Step 6: authorization policy
+        policy_ok = default_policy(cfg.caps, r.cred.caps)
+        if not policy_ok:
+            problems.append(f"policy denies link (local caps={cfg.caps}, peer caps={r.cred.caps})")
+
+        # Classify. Verification/policy failures (steps 1-6) come first; only if
+        # the record is acceptable do we look at the data plane (step 7).
+        only_policy = problems == [problems[-1]] if problems else False
+        if problems and not policy_ok and only_policy:
+            status, bucket = "policy-denied", "policy"
+        elif problems:
+            status, bucket = "REJECTED (won't be installed)", "rejected"
+        elif live is None:
+            status, bucket = "verified but NOT installed (reconcile not run / not root?)", "no-handshake"
+        elif live.latest_handshake and (now_epoch - live.latest_handshake) <= 180:
+            status, bucket = f"LINKED ({_handshake_phrase(live, now_epoch)})", "linked"
+        else:
+            status, bucket = f"installed, {_handshake_phrase(live, now_epoch)}", "no-handshake"
+            # Why no handshake? Endpoint / inbound-asymmetry hints.
+            no_self_ep = cfg.inbound == "no"
+            no_peer_ep = (r.inbound == "no") or (not r.endpoints)
+            if no_self_ep and no_peer_ep:
+                problems.append("both sides are outbound-only (inbound=no / no endpoint) "
+                                "— direct-or-fail can't form this link")
+            elif not live.endpoint and no_peer_ep:
+                problems.append("no endpoint to dial and the peer advertises none "
+                                "(peer is outbound-only); this side must be reachable")
+            elif live.endpoint:
+                problems.append(f"dialing {live.endpoint} but no handshake — check the peer's "
+                                "firewall (mesh UDP port open?) and that its daemon is running")
+        counts[bucket] += 1
+
+        print(f"● {r.hostname}  [{r.cred.addr}]  inbound={r.inbound}")
+        print(f"    {status}")
+        for p in problems:
+            print(f"    - {p}")
+
+    print()
+    print(f"summary: {counts['linked']} linked, {counts['no-handshake']} configured/no-handshake, "
+          f"{counts['rejected']} rejected, {counts['policy']} policy-denied")
     return 0
 
 
@@ -1666,6 +1852,14 @@ def main(argv=None) -> int:
     # status
     sp = sub.add_parser("status", help="show local node and directory state")
     sp.set_defaults(fn=cmd_status)
+
+    # diagnose
+    sp = sub.add_parser(
+        "diagnose",
+        help="explain why peer links are or aren't forming (per-peer checks + handshake state)")
+    sp.add_argument("hostname", nargs="?", default=None,
+                    help="diagnose only this peer (default: all peers)")
+    sp.set_defaults(fn=cmd_diagnose)
 
     # revoke
     sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the hub)")

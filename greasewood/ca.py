@@ -33,6 +33,16 @@ _UTC = dt.timezone.utc
 CapPolicy = Callable[[list[str]], list[str]]
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a temp file + rename so a crash mid-write can't corrupt the
+    revoke list or a node-caps file (a corrupt revoked.json would otherwise make
+    every issue/renew fail until repaired)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 class CA:
     def __init__(
         self,
@@ -228,8 +238,8 @@ class CA:
         return set(json.loads(self._revoke_path.read_text()).get("revoked", []))
 
     def _save_revoked(self, revoked: set[str]) -> None:
-        self._revoke_path.write_text(
-            json.dumps({"revoked": sorted(revoked)}, indent=2)
+        _atomic_write_text(
+            self._revoke_path, json.dumps({"revoked": sorted(revoked)}, indent=2)
         )
 
     # --- node info (for renewal) ---
@@ -240,7 +250,7 @@ class CA:
     def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str]) -> None:
         p = self._node_path(id_pub)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"hostname": hostname, "caps": caps}, indent=2))
+        _atomic_write_text(p, json.dumps({"hostname": hostname, "caps": caps}, indent=2))
 
     def _load_node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
         p = self._node_path(id_pub)
