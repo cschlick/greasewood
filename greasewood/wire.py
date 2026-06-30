@@ -257,3 +257,85 @@ class RenewRequest:
             ts=_parse_ts(d["ts"]),
             sig=_b64d(d["sig"]),
         )
+
+
+# ---------------------------------------------------------------------------
+# CAStatement — the unit of CA succession (§11)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CAStatement:
+    """
+    A signed statement by one CA about another, used to migrate hub/CA status
+    without ever moving a private key.
+
+      kind="endorse": by_pub vouches for subject_pub as a (successor) CA, and
+                      optionally advertises subject's hub control-plane endpoint.
+                      This is how a new CA enters the trusted set.
+      kind="retire":  by_pub declares subject_pub no longer a valid signer.
+                      This is how the old CA leaves the trusted set fleet-wide
+                      without editing every node's config.
+
+    Endorsements are durable facts: an endorsement signed by A while A was
+    trusted keeps making subject trusted even after A is itself retired — so a
+    successor survives its predecessor's retirement (see trust.resolve_trust).
+    """
+    kind: str            # "endorse" | "retire"
+    by_pub: bytes        # CA making + signing the statement (32-byte Ed25519)
+    subject_pub: bytes   # CA being endorsed / retired (32-byte Ed25519)
+    hub_endpoint: str     # subject's control-plane URL (endorse only); "" otherwise
+    iat: dt.datetime
+    exp: dt.datetime
+    sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "by_pub": _b64e(self.by_pub),
+            "exp": _ts(self.exp),
+            "hub_endpoint": self.hub_endpoint,
+            "iat": _ts(self.iat),
+            "kind": self.kind,
+            "subject_pub": _b64e(self.subject_pub),
+        }
+
+    def sign(self, by_priv: Ed25519PrivateKey) -> "CAStatement":
+        return replace(self, sig=by_priv.sign(_canonical(self._body_dict())))
+
+    def verify_sig(self) -> None:
+        """Verify the statement is correctly signed by by_pub. Raises ValueError."""
+        if self.kind not in ("endorse", "retire"):
+            raise ValueError(f"unknown CAStatement kind: {self.kind!r}")
+        pub = Ed25519PublicKey.from_public_bytes(self.by_pub)
+        try:
+            pub.verify(self.sig, _canonical(self._body_dict()))
+        except InvalidSignature:
+            raise ValueError("invalid CAStatement signature")
+
+    def is_valid_at(self, now: dt.datetime) -> bool:
+        """True if correctly signed and within [iat, exp)."""
+        try:
+            self.verify_sig()
+        except ValueError:
+            return False
+        return self.iat <= now < self.exp
+
+    def ident(self) -> str:
+        """Stable identity for de-duplication (the signature is unique)."""
+        return _b64e(self.sig)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["sig"] = _b64e(self.sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CAStatement":
+        return cls(
+            kind=d["kind"],
+            by_pub=_b64d(d["by_pub"]),
+            subject_pub=_b64d(d["subject_pub"]),
+            hub_endpoint=d.get("hub_endpoint", ""),
+            iat=_parse_ts(d["iat"]),
+            exp=_parse_ts(d["exp"]),
+            sig=_b64d(d["sig"]),
+        )
