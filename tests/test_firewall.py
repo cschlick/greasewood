@@ -3,7 +3,17 @@ Unit tests for greasewood.firewall — the pure logic over `nft -j` JSON.
 
 No nftables needed: we feed fixture rulesets and check the detection +
 command-generation. The side-effecting check()/apply() are thin wrappers.
+
+test_generated_rules_parse_with_nft additionally runs the real generated
+commands through `nft` when it's available (skips otherwise) to catch any
+syntax/quoting mistakes the fixtures can't.
 """
+import os
+import shutil
+import subprocess
+
+import pytest
+
 from greasewood import firewall as fw
 
 
@@ -115,3 +125,37 @@ def test_insert_command_includes_iifname():
     cmd = fw.insert_commands(target, hub)[0]
     joined = " ".join(cmd)
     assert 'iifname "gw0"' in joined and "tcp dport 7946" in joined
+
+
+# --- live nft validation (skipped where nft/root unavailable) ---
+
+def test_generated_rules_parse_with_nft():
+    """Run the exact generated insert commands through nft, against an isolated
+    hook-less throwaway table (no effect on live traffic), to validate syntax +
+    quoting on a real host with nftables."""
+    if not shutil.which("nft"):
+        pytest.skip("nft not installed")
+    if os.geteuid() != 0:
+        pytest.skip("nft needs root")
+
+    table = "greasewood_argv_test"
+    setup = subprocess.run(["nft", "add", "table", "inet", table],
+                           capture_output=True, text=True)
+    if setup.returncode != 0:
+        pytest.skip(f"cannot create nft test table: {setup.stderr.strip()}")
+    try:
+        # A regular chain (no type/hook) holds the same rule syntax but never
+        # sees packets.
+        subprocess.run(["nft", "add", "chain", "inet", table, "c"], check=True)
+        # hub_rules is the superset (udp underlay + iifname-scoped tcp).
+        for cmd in fw.insert_commands(("inet", table, "c"), fw.hub_rules()):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            assert r.returncode == 0, \
+                f"nft rejected {' '.join(cmd)}:\n{r.stderr.strip()}"
+        # The rules + comment landed.
+        listing = subprocess.run(["nft", "list", "table", "inet", table],
+                                 capture_output=True, text=True).stdout
+        assert "greasewood" in listing
+        assert "51820" in listing and "7946" in listing
+    finally:
+        subprocess.run(["nft", "delete", "table", "inet", table], check=False)

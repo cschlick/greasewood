@@ -14,6 +14,11 @@ gw = "greasewood.cli:main"
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+# Pin the package — the repo has other top-level dirs (systemd/, tests/) that
+# would otherwise confuse setuptools' flat-layout auto-discovery.
+[tool.setuptools]
+packages = ["greasewood"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--ignore=tests/integration"
