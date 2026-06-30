@@ -183,6 +183,7 @@ def _detect_public_ipv6() -> str | None:
 
 
 def cmd_setup_hub(args) -> int:
+    _require_root("setup-hub")
     import json as json_mod
     from .keys import CAKeys, NodeKeys
     from .ca import CA
@@ -229,22 +230,6 @@ def cmd_setup_hub(args) -> int:
 
     # Set up door routing (idempotent — also called in gw run for reboots)
     wgmod.setup_door_routing()
-
-    # If run via sudo, give data_dir to the real operator so they can
-    # run gw mint without sudo.
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        import pwd
-        try:
-            pw = pwd.getpwnam(sudo_user)
-            for path in [data_dir, *data_dir.rglob("*")]:
-                try:
-                    os.chown(path, pw.pw_uid, -1)
-                except OSError:
-                    pass
-            log.info("data_dir ownership → %s", sudo_user)
-        except KeyError:
-            pass
 
     ca_pub_hex = ca_keys.ca_pub_bytes.hex()
 
@@ -300,6 +285,11 @@ door_port = {args.door_port}
     directory.put(record)
     directory.save(dir_cache)
 
+    # Hand the whole data dir to the real operator (covers the keys generated
+    # above, so this runs AFTER they're written, not before). Lets them run
+    # read-only commands without sudo; secret files stay 0600.
+    _chown_data_dir_to_operator(data_dir)
+
     ep_host = endpoint.rsplit(":", 1)[0] if endpoint else None
     control_url = (
         f"http://{ep_host}:{control_port}" if ep_host
@@ -333,6 +323,7 @@ door_port = {args.door_port}
 # ---------------------------------------------------------------------------
 
 def cmd_mint(args) -> int:
+    _require_root("mint")
     import datetime as dt_mod
     import json as json_mod
     from .config import load_config
@@ -413,6 +404,7 @@ def cmd_mint(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_join(args) -> int:
+    _require_root("join")
     import json as json_mod
     import socket
     import struct
@@ -757,6 +749,48 @@ def _control_port(cfg) -> int:
         return 51902
 
 
+def _require_root(cmd: str) -> None:
+    """Exit cleanly if not root, instead of crashing partway through on EACCES.
+    For commands that create WireGuard interfaces, edit routing, write /etc, or
+    touch the firewall — all of which need privileges."""
+    if os.geteuid() != 0:
+        sys.exit(f"'gw {cmd}' needs root (it changes WireGuard/routing/system "
+                 f"files).\nTry: sudo gw {cmd}")
+
+
+def _chown_data_dir_to_operator(data_dir: "Path") -> None:
+    """When run via sudo, give the data dir (recursively) to the invoking user,
+    so they own their own state and can run read-only commands without sudo.
+    Call this AFTER all files are created, or freshly-generated keys stay
+    root-owned. File modes are unchanged — secrets remain 0600."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user:
+        return
+    import pwd
+    try:
+        uid = pwd.getpwnam(sudo_user).pw_uid
+    except KeyError:
+        return
+    for path in [data_dir, *data_dir.rglob("*")]:
+        try:
+            os.chown(path, uid, -1)
+        except OSError:
+            pass
+    log.info("data_dir ownership → %s", sudo_user)
+
+
+def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
+    """(id_pub_hex, overlay_addr) from the world-readable id_pub.hex — never the
+    private key. Read-only commands (status, diagnose) use this so they work
+    without sudo: the public id is enough to mark 'self' and derive the addr."""
+    from .keys import derive_addr
+    try:
+        h = (data_dir / "id_pub.hex").read_text().strip()
+        return h, derive_addr(bytes.fromhex(h))
+    except (FileNotFoundError, ValueError):
+        return None, None
+
+
 def _service_state() -> str:
     """How the greasewood daemon is managed on this host: 'active' (systemd
     unit installed and running), 'installed' (unit present, not yet running),
@@ -796,6 +830,7 @@ def cmd_hub_promote(args) -> int:
     """On a prospective new hub (currently a node): mint its own CA key and
     rewrite its config to role=hub, so a restart makes it serve as a hub.
     Prints the CA public key + control endpoint to hand to `gw hub-endorse`."""
+    _require_root("hub-promote")
     import json as json_mod
     from .config import load_config
     from .keys import CAKeys, NodeKeys
@@ -1148,6 +1183,7 @@ def cmd_set_inbound(args) -> int:
     means peers can dial it — so it can hold direct links to outbound-only nodes
     and be promoted to hub — but it must accept the WireGuard port; pair with
     --open-firewall to open it. Restart the daemon to advertise the change."""
+    _require_root("set-inbound")
     import re
     from .config import load_config
 
@@ -1188,6 +1224,7 @@ def cmd_set_inbound(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_run(args) -> int:
+    _require_root("run")
     from .config import load_config
     from .keys import NodeKeys, CAKeys
     from .ca import CA
@@ -1390,7 +1427,6 @@ def cmd_run(args) -> int:
 
 def cmd_status(args) -> int:
     from .config import load_config
-    from .keys import NodeKeys
     from .directory import Directory
 
     cfg_path = Path(args.config)
@@ -1400,13 +1436,9 @@ def cmd_status(args) -> int:
 
     cfg = load_config(cfg_path)
 
-    try:
-        keys = NodeKeys.load(cfg.data_dir)
-        own_id = keys.id_pub_hex
-        own_addr = keys.addr
-    except FileNotFoundError:
-        own_id = None
-        own_addr = None
+    # Read-only: use the public id (id_pub.hex), never the private key, so
+    # `gw status` works without sudo.
+    own_id, own_addr = _own_identity(cfg.data_dir)
 
     print(f"role     : {cfg.role}")
     print(f"hostname : {cfg.hostname}")
@@ -1475,7 +1507,7 @@ def cmd_diagnose(args) -> int:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from .config import load_config
-    from .keys import NodeKeys, derive_addr
+    from .keys import derive_addr
     from .directory import Directory
     from .trust import CABundle, TrustStore
     from .reconcile import default_policy
@@ -1488,11 +1520,13 @@ def cmd_diagnose(args) -> int:
         return 1
     cfg = load_config(cfg_path)
 
-    try:
-        keys = NodeKeys.load(cfg.data_dir)
-    except FileNotFoundError:
+    # Read-only: use the public id (never the private key) so non-root works;
+    # live WireGuard state still needs root, but it degrades gracefully below.
+    own_id, own_addr = _own_identity(cfg.data_dir)
+    if own_id is None:
         print("keys not generated yet — run 'gw join <token>' or 'gw setup-hub' first")
         return 1
+    own_id_bytes = bytes.fromhex(own_id)
 
     trust = TrustStore(
         roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
@@ -1523,17 +1557,20 @@ def cmd_diagnose(args) -> int:
     now = dt.datetime.now(_UTC)
     now_epoch = int(_time.time())
 
-    print(f"self     : {cfg.hostname}  ({keys.addr})")
+    print(f"self     : {cfg.hostname}  ({own_addr})")
     print(f"role     : {cfg.role}   inbound={cfg.inbound}   iface={cfg.wg_interface}")
     print(f"trusted CAs: {len(ca_pubs)}   hub: {trust.hub_url() or '(none configured)'}")
     if not ca_pubs:
         print("  ⚠ no trusted CA keys — check [ca] trusted_pubs; nothing will verify")
-    if not wg_available or not live_peers:
-        hint = "" if wg_available else "  (need root, or the daemon isn't running)"
-        print(f"WireGuard: {len(live_peers)} live peer(s) on {cfg.wg_interface}{hint}")
+    if os.geteuid() != 0:
+        print("  ⚠ not root — live WireGuard handshake state is unavailable; "
+              "re-run with sudo for link health")
+    elif not live_peers:
+        print(f"WireGuard: 0 live peer(s) on {cfg.wg_interface} "
+              f"(is the daemon running?)")
     print()
 
-    records = sorted((r for r in directory.all() if r.id_pub != keys.id_pub_bytes),
+    records = sorted((r for r in directory.all() if r.id_pub != own_id_bytes),
                      key=lambda r: r.hostname)
     if not records:
         print("no peer records in the directory cache yet — is sync reaching the hub?")
@@ -1630,6 +1667,7 @@ def cmd_diagnose(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_purge(args) -> int:
+    _require_root("purge")
     import shutil
     import subprocess
 
@@ -1792,8 +1830,9 @@ def main(argv=None) -> int:
             "  sudo gw run                  -- start the daemon\n"
             "  sudo gw purge                -- remove all local state\n"
             "\n"
-            "no sudo needed:\n"
+            "no sudo needed (read-only):\n"
             "  gw status\n"
+            "  gw diagnose   (add sudo to also see live WireGuard handshake state)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1963,7 +2002,16 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except PermissionError as e:
+        # Safety net: turn a raw EACCES traceback into a clean hint. Most
+        # greasewood data lives at 0600/root (keys) or is written by the daemon
+        # running as root, so the usual cause is "needs sudo".
+        path = getattr(e, "filename", None)
+        where = f" ({path})" if path else ""
+        sys.exit(f"permission denied{where} — this command likely needs root. "
+                 f"Try: sudo gw {args.cmd}")
 
 
 if __name__ == "__main__":

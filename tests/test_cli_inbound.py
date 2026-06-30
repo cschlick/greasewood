@@ -9,6 +9,13 @@ import pytest
 from greasewood import cli
 
 
+@pytest.fixture(autouse=True)
+def _as_root(monkeypatch):
+    """These tests exercise command logic, not the privilege guard — run them
+    as if root so _require_root() doesn't short-circuit."""
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+
+
 def _write_cfg(path, inbound="yes", role="node"):
     path.write_text(f"""[node]
 hostname = "n1"
