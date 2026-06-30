@@ -337,15 +337,41 @@ def cmd_join(args) -> int:
     from .wire import Credential, NodeRecord
     from .directory import Directory
     from .door import decode_token, derive_door_params
+    from .config import load_config
     from . import wg as wgmod
     import base64
 
     token = args.token
-    hostname = args.hostname or f"{getpass.getuser()}@{socket.gethostname()}"
-    caps = [c.strip() for c in args.caps.split(",")]
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
     listen_port = args.listen_port
+
+    # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
+    # address), so this just refreshes the credential. Detect it so we can (a)
+    # tell the operator and (b) preserve the existing config instead of silently
+    # resetting hostname/caps to defaults.
+    already_enrolled = (data_dir / "id_priv.pem").exists()
+    prior = None
+    if cfg_path.exists():
+        try:
+            prior = load_config(cfg_path)
+        except Exception:
+            prior = None
+
+    # hostname / caps: explicit flag wins, else keep the prior value, else default.
+    if args.hostname:
+        hostname = args.hostname
+    elif prior and prior.hostname:
+        hostname = prior.hostname
+    else:
+        hostname = f"{getpass.getuser()}@{socket.gethostname()}"
+
+    if args.caps is not None:
+        caps = [c.strip() for c in args.caps.split(",")]
+    elif prior and prior.caps:
+        caps = list(prior.caps)
+    else:
+        caps = ["mesh"]
 
     # Endpoint = where other nodes dial this one for a direct tunnel. If not
     # given, try to auto-detect a public IPv6. A node with no endpoint can
@@ -357,6 +383,9 @@ def cmd_join(args) -> int:
         if ip:
             endpoint = f"[{ip}]:{listen_port}"
             log.info("detected public IPv6 endpoint: %s", endpoint)
+        elif prior and prior.endpoints:
+            endpoint = prior.endpoints[0]
+            log.info("keeping existing endpoint: %s", endpoint)
         else:
             log.warning(
                 "no public IPv6 endpoint detected — this node will be reachable "
@@ -386,6 +415,11 @@ def cmd_join(args) -> int:
     except PermissionError:
         pass
     node_keys = NodeKeys.load_or_generate(data_dir)
+    if already_enrolled:
+        log.info(
+            "re-enrolling existing node %s (keys reused; refreshing credential, "
+            "hostname=%s, caps=%s)", node_keys.addr, hostname, caps,
+        )
     log.info("overlay addr: %s", node_keys.addr)
 
     # Bring up the local door interface
@@ -886,11 +920,14 @@ def main(argv=None) -> int:
     sp = sub.add_parser("join",
                         help="[sudo] enroll this machine using a token from 'gw mint'")
     sp.add_argument("token", help="join token printed by 'gw mint' on the hub")
-    sp.add_argument("--hostname", default=None, help="this node's hostname in the mesh (default: user@hostname)")
+    sp.add_argument("--hostname", default=None,
+                    help="this node's hostname in the mesh "
+                         "(default: keep existing, else user@hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51820)
-    sp.add_argument("--caps", default="mesh")
+    sp.add_argument("--caps", default=None,
+                    help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
     sp.set_defaults(fn=cmd_join)
