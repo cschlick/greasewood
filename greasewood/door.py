@@ -5,15 +5,16 @@ The door is a transient WireGuard interface the hub uses to admit a joining node
 without SSH, without exposing the main mesh, and without any HTTP reachable from
 the underlay network.  A join token is a high-entropy 32-byte seed; everything
 else — guest keypair, PSK — is derived deterministically from it by both sides
-independently.  The door UDP port is fixed (DOOR_PORT), requiring only one
-firewall rule instead of a range.
+independently.  The door UDP port is a single port (configurable per hub,
+default DOOR_PORT), carried in the token so a brand-new node can reach it.
 
 Token wire format:
   "gw1." + base64url_nopad(
       hub_door_pub : 32 bytes   (hub's persistent door WG pubkey)
       ca_pub       : 32 bytes   (CA public key — so join needs no --ca-pub flag)
+      door_port    : 2 bytes BE (hub's door UDP port)
       host_len     : 1 byte
-      hub_host     : host_len bytes  (underlay host, no port — port is fixed)
+      hub_host     : host_len bytes  (underlay host)
       seed         : 32 bytes   (the only secret)
   )
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import os
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,17 +113,31 @@ def generate_seed() -> bytes:
     return os.urandom(32)
 
 
-def encode_token(hub_door_pub_bytes: bytes, ca_pub_bytes: bytes, hub_host: str, seed: bytes) -> str:
-    """Encode a join token from its constituent parts."""
+def encode_token(
+    hub_door_pub_bytes: bytes,
+    ca_pub_bytes: bytes,
+    hub_host: str,
+    seed: bytes,
+    door_port: int = DOOR_PORT,
+) -> str:
+    """Encode a join token. Carries the hub's door UDP port so a brand-new node
+    (which has only the token) can reach the door wherever the hub configured it.
+
+    Layout: hub_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host seed[32]
+    """
     host_bytes = hub_host.encode()
-    payload = hub_door_pub_bytes + ca_pub_bytes + bytes([len(host_bytes)]) + host_bytes + seed
+    payload = (
+        hub_door_pub_bytes + ca_pub_bytes
+        + struct.pack(">H", door_port)
+        + bytes([len(host_bytes)]) + host_bytes + seed
+    )
     return TOKEN_PREFIX + base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
 
 
-def decode_token(token: str) -> tuple[bytes, bytes, str, bytes]:
+def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int]:
     """
     Decode a join token.
-    Returns (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed).
+    Returns (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port).
     Raises ValueError on malformed input.
     """
     if not token.startswith(TOKEN_PREFIX):
@@ -129,20 +145,22 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes]:
     b64 = token[len(TOKEN_PREFIX):]
     payload = base64.urlsafe_b64decode(b64 + "=" * ((-len(b64)) % 4))
 
-    if len(payload) < 64 + 1 + 32:  # hub_door_pub + ca_pub + host_len + seed (minimum)
+    # hub_door_pub + ca_pub + door_port + host_len + seed (minimum, empty host)
+    if len(payload) < 32 + 32 + 2 + 1 + 32:
         raise ValueError("token payload too short")
 
     hub_door_pub = payload[:32]
     ca_pub = payload[32:64]
-    host_len = payload[64]
-    if len(payload) < 65 + host_len + 32:
+    door_port = struct.unpack(">H", payload[64:66])[0]
+    host_len = payload[66]
+    if len(payload) < 67 + host_len + 32:
         raise ValueError("token payload truncated")
-    hub_host = payload[65:65 + host_len].decode()
-    seed = payload[65 + host_len:65 + host_len + 32]
+    hub_host = payload[67:67 + host_len].decode()
+    seed = payload[67 + host_len:67 + host_len + 32]
     if len(seed) != 32:
         raise ValueError("seed must be 32 bytes")
 
-    return hub_door_pub, ca_pub, hub_host, seed
+    return hub_door_pub, ca_pub, hub_host, seed, door_port
 
 
 # ---------------------------------------------------------------------------

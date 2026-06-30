@@ -30,23 +30,23 @@ def container_ipv6(container: str, network: str) -> str:
 _GET_SNIPPET = (
     "import sys,urllib.request;"
     "sys.stdout.write(urllib.request.urlopen("
-    "'http://[::1]:7946'+sys.argv[1], timeout=5).read().decode())"
+    "'http://[::1]:'+sys.argv[2]+sys.argv[1], timeout=5).read().decode())"
 )
 
 
-def hub_get(hub_cid: str, path: str) -> str:
+def hub_get(hub_cid: str, path: str, port: int = 7946) -> str:
     """GET a control-plane path from inside the hub container (via ::1)."""
-    r = pexec(hub_cid, "python3", "-c", _GET_SNIPPET, path, check=False)
+    r = pexec(hub_cid, "python3", "-c", _GET_SNIPPET, path, str(port), check=False)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or "control-plane GET failed")
     return r.stdout
 
 
-def wait_for_control_plane(hub_cid: str, timeout: int = 20) -> bool:
+def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 7946) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            hub_get(hub_cid, "/health")
+            hub_get(hub_cid, "/health", port)
             return True
         except Exception:
             time.sleep(0.5)
@@ -93,8 +93,8 @@ def wait_for_peer_count(container: str, expected: int, iface: str = "gw0",
     return last
 
 
-def directory_records(hub_cid: str) -> list:
-    return json.loads(hub_get(hub_cid, "/directory"))
+def directory_records(hub_cid: str, port: int = 7946) -> list:
+    return json.loads(hub_get(hub_cid, "/directory", port))
 
 
 def directory_hostnames(hub_cid: str) -> set[str]:
