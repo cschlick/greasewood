@@ -62,7 +62,7 @@ def running_server(ca_and_node, tmp_path):
     srv = ControlServer(
         listen="[::1]:0",  # OS picks a free port
         directory=directory,
-        ca_pubs=[ca.ca_pub_bytes],
+        get_ca_pubs=lambda: [ca.ca_pub_bytes],
         get_revoked=set,
         ca=None,  # no renewal in basic fixture
     )
@@ -122,7 +122,7 @@ class TestDirectoryEndpoint:
         srv = ControlServer(
             listen="[::1]:0",
             directory=Directory(),
-            ca_pubs=[],
+            get_ca_pubs=lambda: [],
             get_revoked=set,
         )
         port = srv._server.server_address[1]
@@ -175,7 +175,7 @@ class TestPublishEndpoint:
         srv = ControlServer(
             listen="[::1]:0",
             directory=directory,
-            ca_pubs=[ca.ca_pub_bytes],
+            get_ca_pubs=lambda: [ca.ca_pub_bytes],
             get_revoked=lambda: revoked,
         )
         port = srv._server.server_address[1]
@@ -216,7 +216,7 @@ class TestRenewEndpoint:
         srv = ControlServer(
             listen="[::1]:0",
             directory=directory,
-            ca_pubs=[ca.ca_pub_bytes],
+            get_ca_pubs=lambda: [ca.ca_pub_bytes],
             get_revoked=set,
             ca=ca_obj,
         )

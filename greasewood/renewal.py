@@ -20,6 +20,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 from .directory import Directory
 from .keys import NodeKeys
@@ -58,7 +59,7 @@ class RenewalLoop:
         self,
         node_keys: NodeKeys,
         directory: Directory,
-        root_url: str,
+        get_root_url: "Callable[[], str]",
         current_cred: Credential,
         inbound: str,
         hostname: str,
@@ -67,7 +68,9 @@ class RenewalLoop:
     ) -> None:
         self._keys = node_keys
         self._directory = directory
-        self._root_url = root_url
+        # Resolved each renewal — renewals must follow the active hub so creds
+        # get re-signed by the successor CA during succession (§11).
+        self._get_root_url = get_root_url
         self._cred = current_cred
         self._inbound = inbound
         self._hostname = hostname
@@ -100,7 +103,7 @@ class RenewalLoop:
         while not self._stop.wait(self._next_delay()):
             for attempt in range(5):
                 try:
-                    new_cred = _do_renew(self._root_url, self._keys)
+                    new_cred = _do_renew(self._get_root_url(), self._keys)
                     self._cred = new_cred
                     self._publish(new_cred)
                     log.info("credential renewed, expires %s", new_cred.exp)
