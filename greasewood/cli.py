@@ -346,7 +346,25 @@ def cmd_join(args) -> int:
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
     listen_port = args.listen_port
+
+    # Endpoint = where other nodes dial this one for a direct tunnel. If not
+    # given, try to auto-detect a public IPv6. A node with no endpoint can
+    # still reach the hub (it initiates outbound), but peers can't dial it, so
+    # node<->node links won't form unless the other side is reachable.
     endpoint = args.endpoint
+    if not endpoint:
+        ip = _detect_public_ipv6()
+        if ip:
+            endpoint = f"[{ip}]:{listen_port}"
+            log.info("detected public IPv6 endpoint: %s", endpoint)
+        else:
+            log.warning(
+                "no public IPv6 endpoint detected — this node will be reachable "
+                "only by initiating outbound (e.g. to the hub); other nodes "
+                "cannot dial it, so direct node-to-node links may not form. "
+                "Pass --endpoint '[ADDR]:%d' if this node is publicly reachable.",
+                listen_port,
+            )
 
     # Decode token → hub_door_pub, ca_pub, hub_host, seed
     try:
