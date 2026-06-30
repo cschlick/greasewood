@@ -46,6 +46,53 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("greasewood")
+    except Exception:
+        return "0.0.0+unknown"
+
+
+# systemd units, embedded so `gw install-service` works from a pip-only install
+# (no repo checkout needed). Kept in sync with systemd/ in the repo.
+_SERVICE_UNIT = """\
+[Unit]
+Description=greasewood mesh daemon
+Documentation=https://gitlab.com/cschlick/greasewood
+After=network-online.target
+Wants=network-online.target
+# Only run once this node is configured (setup-hub / join writes the config);
+# greasewood.path starts us the moment it appears.
+ConditionPathExists=/etc/greasewood.toml
+
+[Service]
+Type=simple
+# gw run creates WireGuard interfaces and edits routing → runs as root.
+ExecStart={exec} run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+_PATH_UNIT = """\
+[Unit]
+Description=Watch for greasewood configuration and start the daemon
+Documentation=https://gitlab.com/cschlick/greasewood
+
+[Path]
+# Start greasewood.service once /etc/greasewood.toml exists. After a
+# config-changing re-join: systemctl restart greasewood.
+PathExists=/etc/greasewood.toml
+Unit=greasewood.service
+
+[Install]
+WantedBy=paths.target
+"""
+
+
 def _get_passphrase(env_var: str | None) -> bytes | None:
     if not env_var:
         return None
@@ -1264,6 +1311,80 @@ def cmd_purge(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# service management — install-service / uninstall-service (no Ansible needed)
+# ---------------------------------------------------------------------------
+
+def cmd_install_service(args) -> int:
+    """Install + enable the systemd units so the daemon runs as a managed
+    service. After this, setup-hub / join is all you need — the service starts
+    itself when the config appears. Pip-only; no Ansible required."""
+    import shutil
+    import subprocess
+
+    if os.geteuid() != 0:
+        sys.exit("install-service must run as root (sudo gw install-service)")
+
+    gw_exec = args.exec or shutil.which("gw") or os.path.realpath(sys.argv[0])
+    units = {
+        "greasewood.service": _SERVICE_UNIT.format(exec=gw_exec),
+        "greasewood.path": _PATH_UNIT,
+    }
+    for name, body in units.items():
+        path = Path("/etc/systemd/system") / name
+        path.write_text(body)
+        print(f"wrote {path}")
+
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("\nsystemctl not found — on a systemd host, enable once with:")
+        print("  systemctl daemon-reload")
+        print("  systemctl enable --now greasewood.path")
+        print("  systemctl enable greasewood.service")
+        return 0
+
+    subprocess.run([systemctl, "daemon-reload"], check=True)
+    if not args.no_enable:
+        # The path unit (always armed) starts the daemon when config appears;
+        # enabling the service makes it also come up at boot once configured.
+        subprocess.run([systemctl, "enable", "--now", "greasewood.path"], check=True)
+        subprocess.run([systemctl, "enable", "greasewood.service"], check=True)
+        print("\nenabled: greasewood.path (armed) + greasewood.service (boot).")
+        print("Run setup-hub or join — the daemon starts on its own; no `gw run`.")
+        print("Logs: journalctl -u greasewood -f")
+        print("Opt out: sudo gw uninstall-service "
+              "(or systemctl disable --now greasewood.path greasewood.service)")
+    else:
+        print("\nunits written (not enabled). Enable with:")
+        print("  systemctl enable --now greasewood.path && systemctl enable greasewood.service")
+    return 0
+
+
+def cmd_uninstall_service(args) -> int:
+    """Disable and remove the systemd units (the daemon keeps running until the
+    next stop/reboot; this just stops it from auto-starting)."""
+    import shutil
+    import subprocess
+
+    if os.geteuid() != 0:
+        sys.exit("uninstall-service must run as root (sudo gw uninstall-service)")
+
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        subprocess.run([systemctl, "disable", "--now",
+                        "greasewood.path", "greasewood.service"], check=False)
+    for name in ("greasewood.path", "greasewood.service"):
+        p = Path("/etc/systemd/system") / name
+        if p.exists():
+            p.unlink()
+            print(f"removed {p}")
+    if systemctl:
+        subprocess.run([systemctl, "daemon-reload"], check=False)
+    print("greasewood service removed. (Run `gw run` manually, or reinstall with "
+          "`gw install-service`.)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -1286,6 +1407,7 @@ def main(argv=None) -> int:
     )
     p.add_argument("-c", "--config", default="/etc/greasewood.toml", metavar="FILE")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--version", action="version", version=f"greasewood {_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # setup-hub
@@ -1331,6 +1453,19 @@ def main(argv=None) -> int:
                         help="[sudo] remove all greasewood state from this machine (decommission or start over)")
     sp.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     sp.set_defaults(fn=cmd_purge)
+
+    # install-service / uninstall-service
+    sp = sub.add_parser("install-service",
+                        help="[sudo] install + enable the systemd units (run as a background service)")
+    sp.add_argument("--exec", default=None,
+                    help="path to the gw executable for ExecStart (default: auto-detect)")
+    sp.add_argument("--no-enable", dest="no_enable", action="store_true",
+                    help="write the unit files but don't enable/start them")
+    sp.set_defaults(fn=cmd_install_service)
+
+    sp = sub.add_parser("uninstall-service",
+                        help="[sudo] disable + remove the systemd units")
+    sp.set_defaults(fn=cmd_uninstall_service)
 
     # run
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
