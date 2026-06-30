@@ -18,7 +18,7 @@ inbound = "{inbound}"
 caps = ["mesh"]
 
 [network]
-interface = "gw0"
+interface = "gw-mesh"
 listen_port = 51900
 seeds = []
 root_url = ""
