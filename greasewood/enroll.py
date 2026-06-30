@@ -165,8 +165,16 @@ class EnrollServer:
         if len(wg_pub_bytes) != 32:
             raise ValueError("wg_pub must be 32 bytes")
 
-        # Issue CA-signed credential
-        cred = self._ca.issue(id_pub_bytes, wg_pub_bytes, hostname, caps)
+        # Issue CA-signed credential. A ValueError here is a refusal (revoked
+        # id, or hostname already taken) — report it cleanly to the joiner
+        # rather than as an internal error.
+        try:
+            cred = self._ca.issue(id_pub_bytes, wg_pub_bytes, hostname, caps)
+        except ValueError as e:
+            log.warning("enrollment refused: %s", e)
+            _send_msg(conn, {"v": 1, "ok": False, "error": "enrollment refused",
+                             "reason": str(e)})
+            return
 
         # Add new node as a peer on the main WG interface so it can establish
         # its tunnel and push its NodeRecord to the hub on first startup.
