@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from .ca import CA
     from .directory import Directory
 
@@ -40,6 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
     ca: "CA | None" = None
     ca_pubs: list[bytes] = []
     get_revoked: "callable" = staticmethod(set)
+    cache_path: "Path | None" = None
 
     def log_message(self, fmt, *args) -> None:
         log.debug("http %s %s", self.command, self.path)
@@ -86,7 +88,14 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             record = NodeRecord.from_dict(body)
             record.verify(self.ca_pubs, self.get_revoked())
-            self.directory.merge([record])
+            accepted = self.directory.merge([record])
+            # Persist so the record survives a daemon restart and shows up in
+            # `gw status` (which reads the on-disk cache, not live memory).
+            if accepted and self.cache_path is not None:
+                try:
+                    self.directory.save(self.cache_path)
+                except Exception as e:
+                    log.warning("failed to persist directory after publish: %s", e)
             log.debug("published record from %s seq=%d", record.hostname, record.seq)
             self._send_json({"status": "ok"})
         except (ValueError, KeyError) as e:
@@ -116,6 +125,7 @@ class ControlServer:
         ca_pubs: list[bytes],
         get_revoked,
         ca: "CA | None" = None,
+        cache_path: "Path | None" = None,
     ) -> None:
         host, _, port_str = listen.rpartition(":")
         # Strip brackets from IPv6 literals like "[fd8d::1]"
@@ -127,6 +137,7 @@ class ControlServer:
         Handler.ca = ca
         Handler.ca_pubs = ca_pubs
         Handler.get_revoked = staticmethod(get_revoked)
+        Handler.cache_path = cache_path
 
         # Use AF_INET6 when binding to an IPv6 address or unspecified (":port").
         # On Linux, AF_INET6 with "::" accepts both IPv4 and IPv6 unless

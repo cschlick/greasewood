@@ -759,6 +759,7 @@ def cmd_run(args) -> int:
             ca_pubs=ca_pubs,
             get_revoked=lambda: revoked,
             ca=ca,
+            cache_path=cfg.dir_cache_path,
         )
         srv.start()
 
