@@ -60,10 +60,14 @@ ca_key_file = "/var/lib/greasewood/ca.key"
 # Optionally protect the CA key with a passphrase (env var):
 # ca_key_passphrase_env = "GREASEWOOD_CA_PASS"
 
-# Address and port for the control plane HTTP server.
-# Bind to the overlay address so traffic stays inside the tunnel.
-# Example: "[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:7946"
+# Control-plane port (TCP). Bound only to the overlay + loopback, never the
+# underlay. The default collides with Docker Swarm / Serf; change it to avoid
+# that — nodes learn the value at enrollment, so it's safe to change.
 control_listen = ":7946"
+
+# Enrollment door port (UDP). Carried in join tokens, so changing it just works
+# for new tokens. Default is adjacent to the mesh port (51820/51821).
+door_port = 51821
 
 # Credential lifetime. Revoking = not renewing; revoked node falls out
 # fleet-wide when its last credential hits exp.

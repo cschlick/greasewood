@@ -225,6 +225,14 @@ iifname "gw0" tcp dport 7946 accept
 iifname "gw-door" tcp dport 7947 accept
 ```
 
+All of these ports are configurable, so you can move off the defaults if they
+clash (51820 is the WireGuard default; 7946 is Docker Swarm / Serf): mesh
+`[network] listen_port`, control `[hub] control_listen`, door `[hub] door_port`
+(or `setup-hub --control-port/--door-port`). The door port rides in join tokens
+and the control port in the enrollment response, so nodes pick up non-default
+values automatically — no client config. (The internal enrollment port lives
+inside the door tunnel and can't collide, so it isn't exposed as a knob.)
+
 Your base default-drop ruleset should also carry `ct state established,related
 accept` (almost everyone has it). It's what lets an **outbound-only** node work:
 such a node opens *no* greasewood inbound ports — it dials peers and the hub,
