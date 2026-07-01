@@ -574,6 +574,13 @@ def cmd_join(args) -> int:
         wgmod.destroy_interface("gw-door")
         sys.exit(f"could not connect to enroll daemon at [{HUB_DOOR_IP}]:{ENROLL_PORT} — is the hub daemon running and the token valid?")
 
+    # The 5s above was only for *reaching* the daemon. The exchange itself (the
+    # hub signs a credential, runs `wg set peer`, merges our record, and replies)
+    # can take much longer when the hub is under load — e.g. enrolling a burst of
+    # nodes while already serving a large mesh — so give it a generous timeout.
+    # Both legs (cred fetch + record push) share this socket.
+    conn.settimeout(30)
+
     # Send enroll request
     req = {
         "v": 1,
