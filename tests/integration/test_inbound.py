@@ -30,6 +30,12 @@ def test_outbound_only_node(gw_hub, gw_image, gw_network):
         assert rec["endpoints"] == [], f"should advertise no endpoint: {rec['endpoints']}"
         assert rec["inbound"] == "no"
 
+        # diagnose's reachability advisory: an outbound-only peer dialing in is
+        # proof the hub is inbound-reachable, so on the hub it must confirm.
+        d = pexec(gw_hub["cid"], "gw", "diagnose")
+        assert "inbound=yes CONFIRMED" in d.stdout, \
+            f"diagnose should confirm hub reachability:\n{d.stdout}"
+
         # It cannot be promoted to hub.
         r = pexec(node["cid"], "gw", "hub-promote", check=False)
         assert r.returncode != 0, "hub-promote should refuse an outbound-only node"

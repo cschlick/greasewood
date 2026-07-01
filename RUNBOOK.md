@@ -23,9 +23,16 @@ Reading the output:
 | `installed, no handshake yet` + "check the peer's firewall" | Peer configured, but no handshake. | Open the mesh UDP port on the peer; confirm its daemon is up. |
 | `installed, ...` + "both sides are outbound-only" | Neither side accepts inbound. | Set `inbound=yes` on at least one (`gw set-inbound yes`). |
 | `REJECTED` + "credential EXPIRED" | Renewal isn't propagating. | Check hub reachability and clock; see *fleet-wide teardown* below. |
-| `REJECTED` + "not from a trusted CA" | Succession not synced, or wrong fleet. | Confirm `[ca] trusted_pubs`; wait for trust sync; check the hub. |
+| `REJECTED` + "not from a trusted CA" | Wrong fleet, or `trusted_pubs` not updated after a re-root. | Confirm `[ca] trusted_pubs`; push the current CA key; check the hub. |
 | `REJECTED` + "node is REVOKED" | Intentionally revoked. | Expected, or un-revoke and re-issue. |
 | `verified but NOT installed` | Daemon not reconciling / not root. | Ensure `gw run` (or the service) is up as root. |
+
+The last line, `reachability: ...`, is an advisory about **this** node's own
+`inbound` posture, inferred from live handshakes (root only). `inbound=yes
+CONFIRMED` means an outbound-only peer dialed in, so you're provably reachable;
+`inbound=yes but no peer has handshaked` suggests your advertised endpoint may be
+firewalled (or the daemon just started). It never changes the value — use
+`gw set-inbound` for that.
 
 ## What to back up
 
