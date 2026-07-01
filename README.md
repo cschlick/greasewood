@@ -68,12 +68,18 @@ Requires Linux with the WireGuard kernel module (built into 5.6+), the
 `wireguard-tools` (`wg`) and `iproute2` (`ip`) packages, and Python 3.11+.
 
 ```bash
-git clone https://gitlab.com/cschlick/greasewood.git
-cd greasewood
-pip install .
+pip install greasewood
 ```
 
-This installs the `gw` command. Most subcommands need root (they create
+Or from source:
+
+```bash
+git clone https://gitlab.com/cschlick/greasewood.git
+cd greasewood
+pip install .              # add '.[test]' to also get pytest
+```
+
+Either installs the `gw` command. Most subcommands need root (they create
 WireGuard interfaces and edit routing); `gw status` does not.
 
 The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
