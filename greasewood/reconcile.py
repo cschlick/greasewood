@@ -123,10 +123,10 @@ class ReconcileLoop:
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
-        # Both resolved each cycle: the trusted-CA set grows/shrinks during CA
-        # succession (§11), and the revoke list changes at runtime when the
-        # operator runs `gw revoke` — capturing either once would mean a hub
-        # restart to pick up a revocation. So they are callables, not snapshots.
+        # Both callables, resolved each cycle. The trusted-CA set is static in
+        # practice (from config), but the revoke list changes at runtime when
+        # the operator runs `gw revoke` — capturing it once would mean a hub
+        # restart to pick up a revocation.
         self._get_ca_pubs = get_ca_pubs
         self._get_revoked = get_revoked
         self._interval = interval

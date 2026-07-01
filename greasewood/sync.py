@@ -60,8 +60,8 @@ class SyncLoop:
         interval: float = 20.0,
     ) -> None:
         self._directory = directory
-        # Resolved each cycle — seeds follow the active hub during CA
-        # succession (§11), so they cannot be captured once.
+        # A callable so the caller decides where seeds come from; in practice
+        # the configured seeds (the hub).
         self._get_seeds = get_seeds
         self._cache_path = cache_path
         self._interval = interval

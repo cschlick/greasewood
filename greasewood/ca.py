@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from .keys import CAKeys, derive_addr
-from .wire import CAStatement, Credential, RenewRequest
+from .wire import Credential, RenewRequest
 
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
@@ -166,64 +166,6 @@ class CA:
     def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
         """(hostname, caps) for an enrolled node, or None if unknown."""
         return self._load_node_info(id_pub)
-
-    # --- CA succession (§11) ---
-
-    def endorse(
-        self,
-        subject_pub: bytes,
-        hub_endpoint: str,
-        ttl: dt.timedelta,
-    ) -> CAStatement:
-        """
-        Sign an endorsement: this CA vouches for subject_pub as a (successor)
-        CA and advertises its hub control-plane endpoint. Long-lived by design
-        — the chain must stay intact for nodes still rooted at this CA.
-        """
-        now = dt.datetime.now(_UTC).replace(microsecond=0)
-        stmt = CAStatement(
-            kind="endorse",
-            by_pub=self._keys.ca_pub_bytes,
-            subject_pub=subject_pub,
-            hub_endpoint=hub_endpoint,
-            iat=now,
-            exp=now + ttl,
-        ).sign(self._keys.ca_priv)
-        log.info("endorsed CA %s (endpoint=%s) until %s",
-                 subject_pub.hex()[:16], hub_endpoint, stmt.exp)
-        return stmt
-
-    def retire(
-        self,
-        subject_pub: bytes,
-        ttl: dt.timedelta,
-        grace: dt.timedelta = dt.timedelta(0),
-    ) -> CAStatement:
-        """
-        Sign a retirement: subject_pub will no longer be an accepted signer.
-
-        The retirement takes effect after `grace` (it is dated now + grace), not
-        immediately. This is essential: a retirement removes trust in the old CA
-        and therefore in every still-old-signed node. If it took effect at once,
-        the new hub would drop those nodes as peers before they could learn of
-        the retirement and renew under the new CA — they'd be cut off mid-
-        migration. The grace (≈ one credential TTL) lets the statement propagate
-        and every node re-credential under the successor first, then it
-        activates. This is the "one-TTL overlap" of §11.
-        """
-        now = dt.datetime.now(_UTC).replace(microsecond=0)
-        effective = now + grace
-        stmt = CAStatement(
-            kind="retire",
-            by_pub=self._keys.ca_pub_bytes,
-            subject_pub=subject_pub,
-            hub_endpoint="",
-            iat=effective,
-            exp=effective + ttl,
-        ).sign(self._keys.ca_priv)
-        log.info("retired CA %s effective %s until %s",
-                 subject_pub.hex()[:16], effective, stmt.exp)
-        return stmt
 
     # --- revoke list ---
 

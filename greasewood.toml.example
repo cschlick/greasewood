@@ -49,9 +49,10 @@ mesh_domain = "internal"
 
 
 [ca]
-# Trusted CA public key(s) — raw Ed25519, hex-encoded.
-# Build this as a SET from day one to allow CA migration (§11).
-# Add both old and new keys during a migration overlap window.
+# Trusted CA public key(s) — raw Ed25519, hex-encoded. This is the root of
+# trust: a node accepts credentials only from a CA key listed here.
+# It's a SET so you can move the CA by "re-rooting" — add the new key alongside
+# the old during a migration overlap, then drop the old one fleet-wide.
 # `gw setup-hub` prints this value (and join tokens carry it automatically).
 trusted_pubs = [
     "REPLACE_WITH_HEX_PRINTED_BY_gw_setup-hub",

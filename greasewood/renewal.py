@@ -72,8 +72,7 @@ class RenewalLoop:
     ) -> None:
         self._keys = node_keys
         self._directory = directory
-        # Resolved each renewal — renewals must follow the active hub so creds
-        # get re-signed by the successor CA during succession (§11).
+        # A callable returning the hub URL to renew against (the configured hub).
         self._get_root_url = get_root_url
         self._cred = current_cred
         self._inbound = inbound

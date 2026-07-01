@@ -769,7 +769,7 @@ def cmd_revoke(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# hub succession (§11) — hub-promote / hub-endorse / hub-retire
+# hub-promote — turn an enrolled node into a hub (generate a CA)
 # ---------------------------------------------------------------------------
 
 def _control_port(cfg) -> int:
@@ -860,7 +860,8 @@ def _print_daemon_guidance(then: str = "") -> None:
 def cmd_hub_promote(args) -> int:
     """On a prospective new hub (currently a node): generate its own CA key and
     rewrite its config to role=hub, so a restart makes it serve as a hub.
-    Prints the CA public key + control endpoint to hand to `gw hub-endorse`."""
+    Prints the CA public key + control endpoint to add to the fleet's
+    trusted_pubs (a manual re-root — see the printed steps)."""
     _require_root("hub-promote")
     import json as json_mod
     from .config import load_config
@@ -898,7 +899,7 @@ def cmd_hub_promote(args) -> int:
     endpoint = f"http://[{keys.addr}]:{control_port}"
 
     # Trust our own CA as a root, in addition to whatever we already trust, so
-    # we accept credentials we issue even before the bundle has propagated.
+    # this hub accepts the credentials it issues.
     trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
 
     endpoint_line = (
@@ -938,85 +939,17 @@ door_port = {cfg.door_port}
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  hub endpoint : {endpoint}")
     print()
-    print("Next, on the CURRENT hub, endorse this one:")
-    print(f"  gw hub-endorse --ca-pub {ca_pub_hex} \\")
-    print(f"                 --endpoint {endpoint}")
-    print("Then restart the daemon here:  sudo gw run")
+    print("To move the fleet to this hub (manual re-root — live tunnels stay up):")
+    print("  1. Add this CA pub to [ca] trusted_pubs on EVERY node (keep the old")
+    print("     one during the overlap), e.g. via Ansible, and restart their daemons:")
+    print(f"       {ca_pub_hex}")
+    print(f"  2. Repoint nodes' root_url + seeds to this hub: {endpoint}")
+    print("  3. Once every node has renewed here, drop the old CA pub from")
+    print("     trusted_pubs fleet-wide. Then decommission the old hub.")
+    print("Start the daemon here:  sudo gw run")
     print()
     from . import firewall as _fw
     _fw.check(_fw.hub_rules(cfg.listen_port, control_port), log)
-    return 0
-
-
-def _load_ca_for_succession(cfg):
-    from .keys import CAKeys
-    from .ca import CA
-    if cfg.ca_key_file is None:
-        sys.exit("this command must run on a hub (no ca_key_file in config)")
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    return CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
-
-
-def _append_to_bundle(cfg, stmt) -> None:
-    from .trust import CABundle
-    bundle = CABundle.load(cfg.ca_bundle_path)
-    bundle.merge([stmt])
-    bundle.save(cfg.ca_bundle_path)
-
-
-def cmd_hub_endorse(args) -> int:
-    """On the current hub: endorse another CA as a successor and advertise its
-    endpoint. The endorsement enters the bundle and propagates to the fleet."""
-    from .config import load_config, _parse_duration
-
-    cfg = load_config(Path(args.config))
-    ca = _load_ca_for_succession(cfg)
-    try:
-        subject_pub = bytes.fromhex(args.ca_pub)
-        if len(subject_pub) != 32:
-            raise ValueError
-    except ValueError:
-        sys.exit("--ca-pub must be a 64-character hex Ed25519 public key")
-
-    ttl = _parse_duration(args.ttl)
-    stmt = ca.endorse(subject_pub, args.endpoint, ttl)
-    _append_to_bundle(cfg, stmt)
-
-    print(f"endorsed CA {args.ca_pub[:16]}… as successor")
-    print(f"  endpoint : {args.endpoint}")
-    print(f"  valid    : {stmt.exp:%Y-%m-%d %H:%M UTC}")
-    print()
-    print("The fleet will trust the new CA within one sync cycle. Start the new")
-    print("hub (sudo gw run there); nodes repoint to it and renew under it.")
-    print("After the overlap, run 'gw hub-retire' for the old CA.")
-    return 0
-
-
-def cmd_hub_retire(args) -> int:
-    """On a hub: retire a CA (typically the predecessor) so the fleet stops
-    accepting its signatures. Run after the successor has taken over."""
-    from .config import load_config, _parse_duration
-
-    cfg = load_config(Path(args.config))
-    ca = _load_ca_for_succession(cfg)
-    try:
-        subject_pub = bytes.fromhex(args.ca_pub)
-        if len(subject_pub) != 32:
-            raise ValueError
-    except ValueError:
-        sys.exit("--ca-pub must be a 64-character hex Ed25519 public key")
-
-    ttl = _parse_duration(args.ttl)
-    # Grace = how long the old CA stays trusted before the retirement bites, so
-    # every node migrates to the new CA first. Defaults to one credential TTL.
-    grace = _parse_duration(args.grace) if args.grace else cfg.credential_ttl
-    stmt = ca.retire(subject_pub, ttl, grace)
-    _append_to_bundle(cfg, stmt)
-
-    print(f"retired CA {args.ca_pub[:16]}… effective {stmt.iat:%Y-%m-%d %H:%M UTC}")
-    print(f"  grace    : {grace} (nodes must renew under the new CA before then)")
-    print("Until the effective time the old CA stays trusted, so the migration")
-    print("is non-disruptive. Decommission the old hub after the effective time.")
     return 0
 
 
@@ -1025,12 +958,8 @@ def cmd_hub_retire(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _resolve_hub_url(cfg) -> str:
-    """The control-plane URL to talk to: the current active hub (per the CA
-    bundle), falling back to the configured root_url."""
-    from .trust import CABundle, active_hub_endpoint
-    roots = {bytes.fromhex(h) for h in cfg.ca_pubs}
-    bundle = CABundle.load(cfg.ca_bundle_path)
-    return active_hub_endpoint(roots, bundle) or cfg.root_url
+    """The control-plane URL to talk to: the configured hub."""
+    return cfg.root_url
 
 
 def cmd_cert_request(args) -> int:
@@ -1262,7 +1191,6 @@ def cmd_rename(args) -> int:
     from .config import load_config
     from .keys import NodeKeys
     from .directory import Directory
-    from .trust import CABundle, TrustStore
     from .wire import RenewRequest, Credential, NodeRecord
 
     cfg_path = Path(args.config)
@@ -1282,14 +1210,7 @@ def cmd_rename(args) -> int:
     except FileNotFoundError:
         sys.exit("this node isn't enrolled yet (no keys) — run 'gw join' first")
 
-    trust = TrustStore(
-        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
-        bundle=CABundle.load(cfg.ca_bundle_path),
-        bundle_path=cfg.ca_bundle_path,
-        static_seeds=cfg.seeds,
-        fallback_hub_url=cfg.root_url,
-    )
-    hub_url = trust.hub_url()
+    hub_url = cfg.root_url
     if not hub_url:
         sys.exit("no hub URL known — is this node enrolled and the mesh up?")
 
@@ -1381,17 +1302,12 @@ def cmd_run(args) -> int:
 
     directory = Directory.load(cfg.dir_cache_path)
 
-    # Live trust state: static roots + the CA-succession bundle. Everything that
-    # asks "who do I trust?" / "where is the hub?" reads from here, so trust and
-    # the active hub can change at runtime as the bundle syncs (§11).
-    from .trust import CABundle, TrustStore, TrustSyncLoop
-    trust = TrustStore(
-        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
-        bundle=CABundle.load(cfg.ca_bundle_path),
-        bundle_path=cfg.ca_bundle_path,
-        static_seeds=cfg.seeds,
-        fallback_hub_url=cfg.root_url,
-    )
+    # Trust is static, straight from config: the trusted CA set, the seeds to
+    # pull the directory from, and the hub URL. (Moving the hub is a deliberate
+    # re-root — a trusted_pubs/root_url config change — not a runtime event.)
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
+    def get_ca_pubs():
+        return ca_pubs
 
     wgmod.ensure_interface(
         cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
@@ -1401,7 +1317,6 @@ def cmd_run(args) -> int:
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
     door_watcher = None
-    trust_sync = None
 
     # Revoke list is re-read live (not snapshotted) so `gw revoke` takes effect
     # without a daemon restart — both for control-plane refusal and local
@@ -1427,11 +1342,10 @@ def cmd_run(args) -> int:
         srv = ControlServer(
             listen_addrs,
             directory,
-            get_ca_pubs=trust.trusted_pubs,
+            get_ca_pubs=get_ca_pubs,
             get_revoked=get_revoked,
             ca=ca,
             cache_path=cfg.dir_cache_path,
-            get_bundle=trust.bundle_dict,
             tls_cert_ttl=cfg.tls_cert_ttl,
         )
         srv.start()
@@ -1443,7 +1357,7 @@ def cmd_run(args) -> int:
             directory=directory,
             node_keys=keys,
             wg_iface=cfg.wg_interface,
-            get_ca_pubs=trust.trusted_pubs,
+            get_ca_pubs=get_ca_pubs,
             get_revoked=get_revoked,
             cache_path=cfg.dir_cache_path,
             control_port=_control_port(cfg),
@@ -1451,13 +1365,8 @@ def cmd_run(args) -> int:
         door_watcher.start()
         log.info("door watcher started")
 
-    # Keep the trusted-CA set current (picks up succession bundle + local
-    # hub-endorse/retire writes). Runs on every role.
-    trust_sync = TrustSyncLoop(trust)
-    trust_sync.start()
-
-    # Directory sync — seeds follow the active hub via the TrustStore.
-    sync = SyncLoop(directory, trust.seeds, cfg.dir_cache_path)
+    # Directory sync — pull from the configured seeds (the hub).
+    sync = SyncLoop(directory, lambda: cfg.seeds, cfg.dir_cache_path)
     sync.start()
 
     # Name resolution via a managed /etc/hosts block (opt-in). When off, remove
@@ -1477,7 +1386,7 @@ def cmd_run(args) -> int:
         directory=directory,
         local_id_pub=keys.id_pub_bytes,
         local_caps=cfg.caps,
-        get_ca_pubs=trust.trusted_pubs,
+        get_ca_pubs=get_ca_pubs,
         get_revoked=get_revoked,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
     )
@@ -1511,19 +1420,19 @@ def cmd_run(args) -> int:
     # newly enrolled node into the hub's directory; it is also how endpoint
     # changes propagate without waiting for the next renewal cycle.
     if own_record:
-        for seed in trust.seeds():
+        for seed in cfg.seeds:
             try:
                 push_record(seed, own_record)
                 log.info("pushed own record to %s", seed)
             except Exception as e:
                 log.warning("push to %s failed (will retry on next sync): %s", seed, e)
 
-    # Renewal loop — targets the active hub (follows succession).
+    # Renewal loop — targets the configured hub.
     if own_record:
         renewal = RenewalLoop(
             node_keys=keys,
             directory=directory,
-            get_root_url=trust.hub_url,
+            get_root_url=lambda: cfg.root_url,
             current_cred=own_record.cred,
             inbound=cfg.inbound,
             hostname=cfg.hostname,
@@ -1547,8 +1456,6 @@ def cmd_run(args) -> int:
     stop_flag.wait()
 
     recon.stop()
-    if trust_sync:
-        trust_sync.stop()
     if sync:
         sync.stop()
     if renewal:
@@ -1647,7 +1554,6 @@ def cmd_diagnose(args) -> int:
     from .config import load_config
     from .keys import derive_addr
     from .directory import Directory
-    from .trust import CABundle, TrustStore
     from .reconcile import default_policy
     from .wire import _canonical
     from . import wg as wgmod
@@ -1666,14 +1572,7 @@ def cmd_diagnose(args) -> int:
         return 1
     own_id_bytes = bytes.fromhex(own_id)
 
-    trust = TrustStore(
-        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
-        bundle=CABundle.load(cfg.ca_bundle_path),
-        bundle_path=cfg.ca_bundle_path,
-        static_seeds=cfg.seeds,
-        fallback_hub_url=cfg.root_url,
-    )
-    ca_pubs = trust.trusted_pubs()
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
 
     # Revoke list: only the hub maintains one (nodes are expiry-based).
     revoked: set[str] = set()
@@ -1697,7 +1596,7 @@ def cmd_diagnose(args) -> int:
 
     print(f"self     : {cfg.hostname}  ({own_addr})")
     print(f"role     : {cfg.role}   inbound={cfg.inbound}   iface={cfg.wg_interface}")
-    print(f"trusted CAs: {len(ca_pubs)}   hub: {trust.hub_url() or '(none configured)'}")
+    print(f"trusted CAs: {len(ca_pubs)}   hub: {cfg.root_url or '(none configured)'}")
     if not ca_pubs:
         print("  ⚠ no trusted CA keys — check [ca] trusted_pubs; nothing will verify")
     if os.geteuid() != 0:
@@ -1735,7 +1634,7 @@ def cmd_diagnose(args) -> int:
             except InvalidSignature:
                 continue
         if not ca_ok:
-            problems.append("CA signature not from a trusted CA (succession not synced? wrong fleet?)")
+            problems.append("CA signature not from a trusted CA (wrong fleet? trusted_pubs not updated after a re-root?)")
 
         # Step 2: expiry
         left = (r.cred.exp - now).total_seconds()
@@ -2091,29 +1990,6 @@ def main(argv=None) -> int:
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.set_defaults(fn=cmd_hub_promote)
-
-    # hub-endorse (on the current hub)
-    sp = sub.add_parser("hub-endorse",
-                        help="endorse another CA as a successor hub (run on the current hub)")
-    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
-                    help="successor CA public key (from 'gw hub-promote')")
-    sp.add_argument("--endpoint", required=True, metavar="URL",
-                    help="successor's control-plane URL (from 'gw hub-promote')")
-    sp.add_argument("--ttl", default="3650d",
-                    help="how long the endorsement stays valid (default: 3650d)")
-    sp.set_defaults(fn=cmd_hub_endorse)
-
-    # hub-retire (on a hub, after the successor has taken over)
-    sp = sub.add_parser("hub-retire",
-                        help="retire a CA so the fleet stops accepting its signatures")
-    sp.add_argument("--ca-pub", dest="ca_pub", required=True, metavar="HEX",
-                    help="CA public key to retire")
-    sp.add_argument("--ttl", default="3650d",
-                    help="how long the retirement stays in effect (default: 3650d)")
-    sp.add_argument("--grace", default=None,
-                    help="delay before the retirement takes effect, for nodes to "
-                         "migrate first (default: the hub's credential TTL)")
-    sp.set_defaults(fn=cmd_hub_retire)
 
     # cert-request (on a node with the 'tls' capability)
     sp = sub.add_parser("cert-request",
