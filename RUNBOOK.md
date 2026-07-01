@@ -105,10 +105,24 @@ build `trusted_pubs` as a set from day one so you always have a succession path.
 
 ## SOP: hub host destroyed (disk gone)
 
-- **You have the `ca.key` backup:** restore it onto a new host, run `setup-hub`
-  with the same key and `trusted_pubs`, and the fleet reconnects as credentials
-  renew. Nodes ran from cache the whole time (up to one credential TTL).
+- **You have a backup of the data dir + config:** on the replacement host,
+  restore `/var/lib/greasewood/` (the whole dir — `ca.key`, `id_priv.pem`,
+  `wg.key`, `nodes/`, `revoked.json`) and `/etc/greasewood.toml`, then `gw run`.
+  This is a **restore, not a re-root**: same keys → same overlay address, same
+  CA, same trust. Nodes reconnect on their next sync (~20s). Because the hub
+  isn't in the data path, node↔node tunnels never went down; you just need to be
+  back within one credential TTL so nothing expired.
 - **No backup:** follow *CA key lost* (re-root).
+
+> **Give the hub a DNS name.** The one thing that makes the restore seamless is
+> the replacement being reachable **where the fleet expects it.** Set the hub's
+> endpoint to a hostname at setup (`gw setup-hub --endpoint hub.example.com:51900`
+> — `wg` accepts and re-resolves hostnames), so a hub move / hardware swap is
+> just updating one DNS record. If instead the replacement lands on a **new IP**:
+> inbound-reachable nodes self-heal (the hub dials them, WireGuard roaming fixes
+> the path), but **outbound-only (`inbound=no`) nodes** only knew the old address
+> and can't learn the new one on their own — re-join those few by hand. A stable
+> DNS name avoids the whole problem.
 
 Either way the data plane keeps running until credentials expire — the hub is not
 in the data path.
