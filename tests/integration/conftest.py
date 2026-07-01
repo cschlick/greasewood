@@ -125,6 +125,28 @@ def overlay_addr_from_id_pub(id_pub_hex: str,
     return str(ipaddress.IPv6Address(pfx + digest[:8]))
 
 
+def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
+    """Spin up a DEDICATED hub container (own CA) — for tests that must not
+    pollute the shared session `gw_hub` (revoke, short-TTL renewal, etc.) or that
+    need a second hub. Same shape as the gw_hub fixture. CALLER owns cleanup."""
+    cid = podman(
+        "run", "-d", "--privileged", "--network", gw_network,
+        "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
+        gw_image, "sleep", "infinity",
+    ).stdout.strip()
+    time.sleep(1)
+    ipv6 = container_ipv6(cid, gw_network)
+    assert ipv6, "hub container got no IPv6 address"
+    pexec(cid, "gw", "setup-hub", "--hostname", hostname,
+          "--endpoint", f"[{ipv6}]:51900", "--credential-ttl", ttl)
+    id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
+    ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
+    podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
+    assert wait_for_control_plane(cid, timeout=20), "dedicated hub daemon did not start"
+    return {"cid": cid, "ipv6": ipv6, "ca_pub": ca_pub,
+            "overlay": overlay_addr_from_id_pub(id_pub)}
+
+
 # The enrollment door is a single slot (one window, one guest key, one peer).
 # Concurrent callers — the stress tests grow the mesh from many threads — must
 # serialize the invite→join critical section, exactly like a real provisioner.

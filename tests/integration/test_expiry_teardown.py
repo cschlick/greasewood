@@ -12,39 +12,10 @@ import time
 
 import pytest
 
-from .conftest import bring_up_node, overlay_addr_from_id_pub
-from .helpers import (
-    container_ipv6, pexec, podman, wait_for_control_plane,
-    wg_peer_count, wait_for_peer_count,
-)
+from .conftest import bring_up_node, make_hub
+from .helpers import podman, wg_peer_count, wait_for_peer_count
 
 pytestmark = pytest.mark.integration
-
-
-def _short_ttl_hub(gw_image, gw_network, ttl="1m"):
-    """A hub that issues short-lived credentials. Mirrors conftest.gw_hub but
-    passes --credential-ttl. The renewal loop floors its interval at 30s, so a
-    1-minute TTL keeps running nodes alive (they renew at ~30s) while a stopped
-    node lapses within ~60s."""
-    r = podman(
-        "run", "-d", "--privileged", "--network", gw_network,
-        "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
-        gw_image, "sleep", "infinity",
-    )
-    cid = r.stdout.strip()
-    time.sleep(1)
-    ipv6 = container_ipv6(cid, gw_network)
-    assert ipv6, "ttl-hub container got no IPv6 address"
-    pexec(cid, "gw", "setup-hub", "--hostname", "ttlhub",
-          "--endpoint", f"[{ipv6}]:51900", "--credential-ttl", ttl)
-    id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-    ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
-    podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
-    assert wait_for_control_plane(cid, timeout=20), "ttl-hub daemon did not start"
-    return {
-        "cid": cid, "ipv6": ipv6, "ca_pub": ca_pub,
-        "overlay": overlay_addr_from_id_pub(id_pub),
-    }
 
 
 def _wait_peer_count_at_most(cid, at_most, iface="gw-mesh", timeout=150):
@@ -61,7 +32,7 @@ def _wait_peer_count_at_most(cid, at_most, iface="gw-mesh", timeout=150):
 def test_expired_node_is_torn_down_by_peer(gw_image, gw_network):
     cids = []
     try:
-        hub = _short_ttl_hub(gw_image, gw_network, ttl="1m")
+        hub = make_hub(gw_image, gw_network, ttl="1m", hostname="ttlhub")
         cids.append(hub["cid"])
 
         alive = bring_up_node(gw_image, gw_network, hub, hostname="alive")
