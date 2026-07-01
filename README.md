@@ -486,25 +486,30 @@ the new *public* key into every node's `trusted_pubs`. Migrating from hub **A**
 to a new node **B**:
 
 ```bash
-# 1. Enroll B as an ordinary node (gw join …) and start it.
+# 1. Enroll B as an ordinary node (gw join …) and start it — so it's a reachable
+#    mesh member every node can renew against over the overlay.
 
-# 2. On B — generate B's own CA key and flip it to role=hub:
+# 2. On B — generate B's own CA key and flip it to role=hub (keeps trusting A):
 sudo gw hub-promote                 # prints B's CA pubkey + control endpoint
+sudo gw run                         # B now serves the control plane
 
-# 3. Add B's CA pubkey to [ca] trusted_pubs on EVERY node (keep A's), and
-#    restart their daemons — the fleet now trusts A *and* B. (Ansible.)
+# 3. Add B's CA pubkey to [ca] trusted_pubs on EVERY node (keep A's), and repoint
+#    root_url + seeds to B. Restart their daemons. (Ansible.) Fleet trusts A + B.
 
-# 4. Repoint nodes' root_url + seeds to B (config push). Start B: sudo gw run
-#    Nodes renew under B over the next credential cycle.
+# 4. Nodes renew under B. B never enrolled them, but re-issues from each node's
+#    still-trusted directory record (hostname/caps are CA-attested) — nothing to
+#    copy. Re-apply any `gw revoke` on B (a fresh CA doesn't inherit A's list).
 
 # 5. After every node has a B-signed credential, drop A's CA pubkey from
 #    trusted_pubs fleet-wide, then decommission A.
 ```
 
 Throughout, existing tunnels stay up (the data plane never depends on the hub),
-so the handover is non-disruptive. This leans on your config management for the
-`trusted_pubs`/`root_url` pushes — see [RUNBOOK.md](RUNBOOK.md) for the graceful
-vs emergency (compromised-key) variants.
+so the handover is non-disruptive. Plan the overlap to last at least one
+credential TTL so every node renews under B in time. This leans on your config
+management for the `trusted_pubs`/`root_url` pushes — see
+[RUNBOOK.md](RUNBOOK.md) for the full graceful vs emergency (compromised/lost-key)
+procedures.
 
 ## Testing
 
