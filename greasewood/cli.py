@@ -458,8 +458,8 @@ def cmd_join(args) -> int:
     else:
         caps = ["mesh"]
 
-    # inbound: "yes" (reachable, advertise endpoint), "no" (outbound-only,
-    # suppress endpoint — peers won't dial it; it dials them), or "unknown".
+    # inbound: "yes" (reachable, advertise endpoint) or "no" (outbound-only,
+    # suppress endpoint — peers won't dial it; it dials them).
     if args.inbound is not None:
         node_inbound = args.inbound
     elif prior and getattr(prior, "inbound", None):
@@ -1207,7 +1207,7 @@ def cmd_cert_status(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_set_inbound(args) -> int:
-    """Change this node's reachability (yes/no/unknown). Switching to inbound
+    """Change this node's reachability (yes/no). Switching to inbound
     means peers can dial it — so it can hold direct links to outbound-only nodes
     and be promoted to hub — but it must accept the WireGuard port (this checks
     and prints the rule; open it yourself). Restart the daemon to advertise."""
@@ -2039,7 +2039,7 @@ def main(argv=None) -> int:
     sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
                     help="maintain a managed /etc/hosts block (<name>.internal "
                          "-> overlay addr) from the directory")
-    sp.add_argument("--inbound", choices=["yes", "no", "unknown"], default=None,
+    sp.add_argument("--inbound", choices=["yes", "no"], default=None,
                     help="can peers dial this node? 'no' = outbound-only "
                          "(suppress endpoint, no inbound ports). Default: keep "
                          "existing, else yes.")
@@ -2136,8 +2136,8 @@ def main(argv=None) -> int:
 
     # set-inbound
     sp = sub.add_parser("set-inbound",
-                        help="change reachability: yes (dialable) / no (outbound-only) / unknown")
-    sp.add_argument("value", choices=["yes", "no", "unknown"])
+                        help="change reachability: yes (dialable) / no (outbound-only)")
+    sp.add_argument("value", choices=["yes", "no"])
     sp.set_defaults(fn=cmd_set_inbound)
 
     # rename
