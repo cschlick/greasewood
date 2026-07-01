@@ -27,10 +27,10 @@ its features!
   lifetime — nodes run from cache.
 - **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
   you apply them.
-- **[Linux-only.](#linux-only)** In-kernel WireGuard via the stock `wg`/`ip`
-  tools. Optional systemd service.
-- **[Auditable.](#auditable)** Pure Python, one dependency, driving `wg`/`ip` over
-  subprocess. Greasy.
+- **[Linux-only.](#linux-only)** Built on the Linux kernel's own WireGuard and
+  networking — not a portable userspace/Go stack. Optional systemd service.
+- **[Auditable.](#auditable)** Pure Python, one dependency, driving it all through
+  the stock `wg`/`ip` tools over subprocess. Greasy.
 
 > Status: early but functional. The full path — enrollment, directory, the
 > reconcile loop, door-based join, credential renewal, expiry-driven revocation,
@@ -183,12 +183,14 @@ hub within that window (see [Moving the hub](#moving-the-hub-re-root) and the
 
 ## Linux-only
 
-greasewood drives **in-kernel WireGuard** through the stock `wg` and `ip`
-command-line tools, and (optionally) runs as a **systemd** service. That's the
-whole reason it's Linux-only: it leans on the kernel's WireGuard and on systemd
-for process management rather than shipping its own userspace transport or
-supervisor. A macOS/Windows port would mean a different data-plane backend and is
-out of scope.
+greasewood is built on **Linux-specific kernel interfaces** — the in-kernel
+WireGuard module and the kernel's own networking — and (optionally) runs as a
+**systemd** service. That's the whole reason it's Linux-only: it relies on the
+kernel's WireGuard and on systemd rather than shipping its own userspace
+transport (the way a Go implementation such as `wireguard-go` does) or its own
+supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
+(see [Auditable](#auditable)). A macOS/Windows port would mean a different
+data-plane backend and is out of scope.
 
 ## Auditable
 
