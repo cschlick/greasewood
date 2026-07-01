@@ -5,12 +5,42 @@ A node enrolled with --inbound no should: still link to the hub (it dials out,
 the reachable hub answers and roams to it), NOT advertise an endpoint in the
 directory, and be refused promotion to hub.
 """
+import time
+
 import pytest
 
 from .conftest import bring_up_node
-from .helpers import directory_records, pexec, podman, wait_for_ping
+from .helpers import directory_records, ping_once, pexec, podman, wait_for_ping
 
 pytestmark = pytest.mark.integration
+
+
+def test_two_outbound_only_nodes_cannot_pair(gw_hub, gw_image, gw_network):
+    """direct-or-fail asymmetry: two inbound=no nodes each reach the (reachable)
+    hub by dialing out, but cannot link to EACH OTHER — neither advertises an
+    endpoint, so neither can initiate. Proving a negative: confirm the mesh is
+    otherwise healthy, then that the X<->Y link never forms."""
+    cids = []
+    try:
+        x = bring_up_node(gw_image, gw_network, gw_hub, hostname="obx", inbound="no")
+        cids.append(x["cid"])
+        y = bring_up_node(gw_image, gw_network, gw_hub, hostname="oby", inbound="no")
+        cids.append(y["cid"])
+
+        # Each outbound-only node reaches the reachable hub (it dials out).
+        assert wait_for_ping(x["cid"], gw_hub["overlay"], timeout=40), "obx can't reach hub"
+        assert wait_for_ping(y["cid"], gw_hub["overlay"], timeout=40), "oby can't reach hub"
+
+        # Give any X<->Y handshake ample time, then confirm it NEVER forms
+        # (both advertise no endpoint, so neither side can initiate).
+        time.sleep(20)
+        for _ in range(3):
+            assert not ping_once(x["cid"], y["overlay"], timeout=2), \
+                "two outbound-only nodes must not be able to link (direct-or-fail)"
+            time.sleep(2)
+    finally:
+        for cid in cids:
+            podman("rm", "-f", cid, check=False)
 
 
 def test_outbound_only_node(gw_hub, gw_image, gw_network):
