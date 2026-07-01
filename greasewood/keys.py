@@ -25,23 +25,60 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-# One ULA /64 for the entire fleet — baked in, not configurable per node.
-# Change this only by standing up a new fleet; mixed prefixes break the mesh.
+# Default overlay /64 (8 bytes). Configurable per fleet via [network]
+# overlay_prefix; this is just the default a fresh setup-hub uses.
 OVERLAY_PREFIX_BYTES = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
 
+# Process-wide active prefix used to CONSTRUCT addresses (a node's own address,
+# the CA issuing creds). One daemon serves one mesh, so a process-global is the
+# right scope — set it from config at startup (config.load_config does this).
+# Note: address VERIFICATION is prefix-agnostic (see host_bits / derive_host),
+# so this global never gates trust; it only decides which /64 new addresses get.
+_active_prefix = OVERLAY_PREFIX_BYTES
 
-def derive_addr(id_pub_bytes: bytes) -> str:
-    """
-    addr = OVERLAY_PREFIX : truncate64(blake2s(id_pub))
 
-    The address is self-certifying: any node that claims an addr not matching
-    the blake2s of its id_pub is rejected in step 4 of the reconcile loop.
-    Routine wg_pub rotation never changes a node's address because address
-    derivation is anchored to id_pub, not wg_pub.
+def set_overlay_prefix(prefix: bytes) -> None:
+    """Set the process-wide overlay /64 (8 bytes)."""
+    global _active_prefix
+    if len(prefix) != 8:
+        raise ValueError("overlay prefix must be 8 bytes (a /64)")
+    _active_prefix = prefix
+
+
+def overlay_prefix() -> bytes:
+    """The active overlay /64 (8 bytes)."""
+    return _active_prefix
+
+
+def parse_overlay_prefix(text: str) -> bytes:
+    """8-byte /64 from 'fd8d:e5c1:db1a:7::' or 'fd8d:e5c1:db1a:7::/64'."""
+    return ipaddress.IPv6Address(text.split("/")[0].strip()).packed[:8]
+
+
+def format_overlay_prefix(prefix: bytes) -> str:
+    """'fd8d:e5c1:db1a:7::' from an 8-byte /64."""
+    return str(ipaddress.IPv6Address(prefix + bytes(8)))
+
+
+def host_bits(id_pub_bytes: bytes) -> bytes:
     """
-    digest = hashlib.blake2s(id_pub_bytes).digest()  # 32 bytes
-    addr_bytes = OVERLAY_PREFIX_BYTES + digest[:8]
-    return str(ipaddress.IPv6Address(addr_bytes))
+    The 64-bit host portion of a node's address: truncate64(blake2s(id_pub)).
+
+    This is the self-certifying part — it binds the address to the identity, and
+    it's what verification checks. Because it's independent of the network
+    prefix, different fleets can run different /64s and a node's cred is still
+    verifiable anywhere (the CA signature attests the prefix; host_bits attests
+    the identity binding). Anchored to id_pub, not wg_pub, so wg rotation never
+    changes the address.
+    """
+    return hashlib.blake2s(id_pub_bytes).digest()[:8]
+
+
+def derive_addr(id_pub_bytes: bytes, prefix: bytes | None = None) -> str:
+    """addr = prefix : host_bits(id_pub). Uses the active process prefix unless
+    one is given explicitly."""
+    p = prefix if prefix is not None else _active_prefix
+    return str(ipaddress.IPv6Address(p + host_bits(id_pub_bytes)))
 
 
 @dataclass

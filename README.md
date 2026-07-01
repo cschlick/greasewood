@@ -323,6 +323,7 @@ caps     = ["mesh"]
 [network]
 interface  = "gw-mesh"
 listen_port = 51900
+overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
 seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
 hosts_sync  = false                          # manage /etc/hosts names (opt-in)
@@ -342,6 +343,25 @@ credential_ttl = "24h"
 - **hub** — holds the CA private key; serves the control plane and the
   enrollment door; participates in the mesh.
 - **node** — a plain mesh participant.
+
+### One host on two meshes
+
+The overlay `/64` is configurable (`[network] overlay_prefix`, set at
+`setup-hub --overlay-prefix`; a node learns it from its credential at join). A
+node learns and verifies addresses prefix-agnostically — the self-certifying
+part is the host bits, `blake2s(id_pub)`, and the CA signature attests the
+prefix — so **one host can be a plain node on two independent meshes at once**.
+Give each membership its own config, data dir, interface, listen port, and mesh
+domain (hub-in-two-meshes is not supported):
+
+```bash
+sudo gw join "$TOKEN_A" --config /etc/gw-a.toml --data-dir /var/lib/gw-a \
+    --interface gw-a --listen-port 51900 --mesh-domain alpha
+sudo gw -c /etc/gw-a.toml run          # (and the same, with -b/51910/beta, for mesh B)
+```
+
+`hosts_sync` blocks are tagged per mesh domain and file-locked, so the two
+daemons don't clobber each other's `/etc/hosts` entries.
 
 ## Names (.internal)
 

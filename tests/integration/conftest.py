@@ -115,11 +115,14 @@ def gw_hub(gw_image, gw_network):
 # Function-scoped: node factory
 # ---------------------------------------------------------------------------
 
-def overlay_addr_from_id_pub(id_pub_hex: str) -> str:
-    """Derive a node's fd8d:: overlay address from its id_pub (matches keys.py)."""
-    prefix = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
+def overlay_addr_from_id_pub(id_pub_hex: str,
+                             prefix: str = "fd8d:e5c1:db1a:7::") -> str:
+    """Derive a node's overlay address from its id_pub (matches keys.py). The
+    prefix defaults to the fleet default but can be overridden for a mesh set up
+    with a custom --overlay-prefix."""
+    pfx = ipaddress.IPv6Address(prefix.split("/")[0]).packed[:8]
     digest = hashlib.blake2s(bytes.fromhex(id_pub_hex)).digest()
-    return str(ipaddress.IPv6Address(prefix + digest[:8]))
+    return str(ipaddress.IPv6Address(pfx + digest[:8]))
 
 
 # The enrollment door is a single slot (one window, one guest key, one peer).

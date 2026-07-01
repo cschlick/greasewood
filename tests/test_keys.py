@@ -9,6 +9,11 @@ from greasewood.keys import (
     CAKeys,
     NodeKeys,
     derive_addr,
+    format_overlay_prefix,
+    host_bits,
+    overlay_prefix,
+    parse_overlay_prefix,
+    set_overlay_prefix,
 )
 
 
@@ -106,6 +111,36 @@ class TestDeriveAddr:
         from dataclasses import replace
         k2 = replace(k, wg_priv=new_wg, wg_pub_bytes=new_wg_pub)
         assert k2.addr == addr_before
+
+
+class TestConfigurablePrefix:
+    def test_parse_and_format_roundtrip(self):
+        assert parse_overlay_prefix("fd8d:e5c1:db1a:7::") == OVERLAY_PREFIX_BYTES
+        assert parse_overlay_prefix("fd8d:e5c1:db1a:7::/64") == OVERLAY_PREFIX_BYTES
+        assert format_overlay_prefix(OVERLAY_PREFIX_BYTES) == "fd8d:e5c1:db1a:7::"
+
+    def test_set_overlay_prefix_changes_derivation(self):
+        k = NodeKeys.generate()
+        try:
+            set_overlay_prefix(parse_overlay_prefix("fdde:cafc:0ffe:e::"))
+            assert overlay_prefix() == parse_overlay_prefix("fdde:cafc:0ffe:e::")
+            addr = ipaddress.IPv6Address(derive_addr(k.id_pub_bytes))
+            assert addr.packed[:8] == parse_overlay_prefix("fdde:cafc:0ffe:e::")
+            # host portion is prefix-independent — same identity, same host bits
+            assert addr.packed[8:] == host_bits(k.id_pub_bytes)
+        finally:
+            set_overlay_prefix(OVERLAY_PREFIX_BYTES)  # restore process default
+
+    def test_explicit_prefix_arg_overrides_global(self):
+        k = NodeKeys.generate()
+        other = parse_overlay_prefix("fdaa:bbbb:cccc:d::")
+        addr = ipaddress.IPv6Address(derive_addr(k.id_pub_bytes, other))
+        assert addr.packed[:8] == other
+        assert addr.packed[8:] == host_bits(k.id_pub_bytes)
+
+    def test_set_overlay_prefix_rejects_bad_length(self):
+        with pytest.raises(ValueError):
+            set_overlay_prefix(b"\x00\x01")
 
 
 class TestCAKeys:

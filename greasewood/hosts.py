@@ -17,13 +17,43 @@ at the hub if that matters to you.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 from pathlib import Path
 
 DEFAULT_HOSTS = Path("/etc/hosts")
-_BEGIN = "# BEGIN greasewood — managed, do not edit"
-_END = "# END greasewood"
+
+
+def _begin(tag: str) -> str:
+    return f"# BEGIN greasewood [{tag}] — managed, do not edit"
+
+
+def _end(tag: str) -> str:
+    return f"# END greasewood [{tag}]"
+
+
+@contextlib.contextmanager
+def _lock(path: Path):
+    """Serialize read-modify-write of the hosts file across processes, so two
+    daemons (a host on two meshes) don't clobber each other's block. Best-effort
+    — if the lock file can't be created, proceed unlocked (blocks are per-tag, so
+    the worst case is a transient overwrite that self-heals next reconcile)."""
+    lockp = Path(str(path) + ".gwlock")
+    try:
+        f = open(lockp, "w")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
 
 
 def sanitize(hostname: str) -> str:
@@ -51,15 +81,17 @@ def mesh_name(hostname: str, domain: str) -> str:
     return f"{sanitize(hostname)}.{domain}"
 
 
-def _strip_managed(text: str) -> str:
-    """Return `text` with any existing greasewood block removed."""
+def _strip_managed(text: str, tag: str) -> str:
+    """Return `text` with THIS tag's greasewood block removed (only ours, so a
+    second mesh's block on the same host is left untouched)."""
+    begin, end = _begin(tag), _end(tag)
     out, skip = [], False
     for line in text.splitlines():
-        if line.strip() == _BEGIN:
+        if line.strip() == begin:
             skip = True
             continue
         if skip:
-            if line.strip() == _END:
+            if line.strip() == end:
                 skip = False
             continue
         out.append(line)
@@ -67,11 +99,12 @@ def _strip_managed(text: str) -> str:
 
 
 def render_block(records, domain: str) -> str:
-    """The managed block (between markers) for the given NodeRecords."""
-    lines = [_BEGIN]
+    """The managed block (between markers) for the given NodeRecords. The domain
+    doubles as the block tag, so each mesh gets its own block on a shared host."""
+    lines = [_begin(domain)]
     for r in sorted(records, key=lambda r: r.hostname.lower()):
         lines.append(f"{r.cred.addr}\t{mesh_name(r.hostname, domain)}")
-    lines.append(_END)
+    lines.append(_end(domain))
     return "\n".join(lines)
 
 
@@ -93,26 +126,30 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def sync(records, domain: str, path: Path = DEFAULT_HOSTS) -> bool:
-    """Ensure /etc/hosts carries the managed block for `records`. Returns True
-    if the file changed."""
-    current = path.read_text() if path.exists() else ""
-    base = _strip_managed(current).rstrip("\n")
-    block = render_block(records, domain)
-    new = f"{base}\n\n{block}\n" if base else f"{block}\n"
-    if new != current:
-        _atomic_write(path, new)
-        return True
+    """Ensure /etc/hosts carries this mesh's managed block for `records` (the
+    block is tagged by `domain`, so a host on two meshes keeps two blocks).
+    Returns True if the file changed."""
+    with _lock(path):
+        current = path.read_text() if path.exists() else ""
+        base = _strip_managed(current, domain).rstrip("\n")
+        block = render_block(records, domain)
+        new = f"{base}\n\n{block}\n" if base else f"{block}\n"
+        if new != current:
+            _atomic_write(path, new)
+            return True
     return False
 
 
-def remove_block(path: Path = DEFAULT_HOSTS) -> bool:
-    """Remove the managed block (clean opt-out). Returns True if it changed."""
-    if not path.exists():
-        return False
-    current = path.read_text()
-    base = _strip_managed(current)
-    new = base.rstrip("\n") + "\n" if base.strip() else base
-    if new != current:
-        _atomic_write(path, new)
-        return True
+def remove_block(domain: str, path: Path = DEFAULT_HOSTS) -> bool:
+    """Remove this mesh's managed block (clean opt-out). Returns True if it
+    changed. Other meshes' blocks are left untouched."""
+    with _lock(path):
+        if not path.exists():
+            return False
+        current = path.read_text()
+        base = _strip_managed(current, domain)
+        new = base.rstrip("\n") + "\n" if base.strip() else base
+        if new != current:
+            _atomic_write(path, new)
+            return True
     return False

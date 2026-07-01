@@ -28,6 +28,12 @@ caps = ["mesh"]
 interface = "gw-mesh"
 listen_port = 51900
 
+# The fleet's overlay /64 (a ULA). Must be identical on every node in a mesh —
+# a node learns it from its credential at join, so you normally only set this at
+# setup-hub (--overlay-prefix). Give a DISTINCT prefix (and interface + ports +
+# data_dir + config) to each mesh if one host is a node on two meshes at once.
+overlay_prefix = "fd8d:e5c1:db1a:7::"
+
 # Seeds to pull the directory from (HTTP).
 # The hub is typically also a seed.
 seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"]
