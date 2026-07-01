@@ -27,9 +27,17 @@ _END = "# END greasewood"
 
 
 def sanitize(hostname: str) -> str:
-    """DNS-safe form of a hostname ([a-z0-9-]); the key used for name uniqueness
-    and the label in mesh names. 'ops@node01' -> 'ops-node01'."""
+    """DNS-safe single label ([a-z0-9-], <=63 chars); the key used for name
+    uniqueness and the label in mesh names.
+
+    Linux hostnames are far more permissive than DNS (any bytes, up to 64 chars,
+    uppercase/underscores/dots/unicode all allowed), so we force a valid label:
+    lowercase, non-[a-z0-9-] runs collapsed to '-' (this includes dots, so
+    'sub.domain.com' -> 'sub-domain-com' rather than a multi-label name), no
+    leading/trailing '-', and capped at the 63-char DNS label limit.
+    'ops@node01' -> 'ops-node01'."""
     s = re.sub(r"[^a-z0-9-]+", "-", hostname.strip().lower()).strip("-")
+    s = s[:63].rstrip("-")  # DNS label max is 63; re-strip if the cut left a '-'
     return s or "node"
 
 

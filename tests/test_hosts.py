@@ -32,6 +32,29 @@ def test_mesh_name_sanitizes():
     assert hosts.mesh_name("", "internal") == "node.internal"
 
 
+def test_sanitize_collapses_dots_to_single_label():
+    # A dotted (FQDN-like) explicit name becomes one valid label, not a
+    # multi-label name that would mix with the mesh domain.
+    assert hosts.sanitize("sub.domain.com") == "sub-domain-com"
+    assert hosts.mesh_name("sub.domain.com", "internal") == "sub-domain-com.internal"
+
+
+def test_sanitize_handles_linux_hostname_oddities():
+    assert hosts.sanitize("DB_Primary") == "db-primary"   # upper + underscore
+    assert hosts.sanitize("-weird-") == "weird"           # leading/trailing hyphen
+    assert hosts.sanitize("()") == "node"                 # nothing usable -> fallback
+
+
+def test_sanitize_caps_at_dns_label_limit():
+    long_name = "a" * 80
+    out = hosts.sanitize(long_name)
+    assert out == "a" * 63 and len(out) == 63
+
+    # Truncation must not leave a trailing hyphen.
+    cut_on_hyphen = "a" * 63 + "-tail"
+    assert not hosts.sanitize(cut_on_hyphen).endswith("-")
+
+
 def test_render_block_sorted_and_suffixed():
     recs = [_rec("db", "fd8d::2"), _rec("api", "fd8d::3")]
     block = hosts.render_block(recs, "internal")
