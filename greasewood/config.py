@@ -101,8 +101,8 @@ def load_config(path: Path) -> Config:
         seeds=net.get("seeds", []),
         root_url=net.get("root_url", ""),
 
-        hosts_sync=bool(net.get("hosts_sync", False)),
-        mesh_domain=net.get("mesh_domain", "internal"),
+        hosts_sync=bool(net.get("hosts_sync", True)),
+        mesh_domain=net.get("mesh_domain", "gw.internal"),
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 

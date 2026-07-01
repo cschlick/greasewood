@@ -325,7 +325,7 @@ overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
 seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
 hosts_sync  = false                          # manage /etc/hosts names (opt-in)
-mesh_domain = "internal"                     # name suffix + default TLS cert name
+mesh_domain = "gw.internal"                  # name suffix + default TLS cert name
 
 [ca]
 trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
@@ -361,32 +361,41 @@ sudo gw -c /etc/gw-a.toml run          # (and the same, with -b/51910/beta, for 
 `hosts_sync` blocks are tagged per mesh domain and file-locked, so the two
 daemons don't clobber each other's `/etc/hosts` entries.
 
-## Names (.internal)
+## Names (.gw.internal)
 
-Every node has a stable overlay address and `gw status` shows the name↔address
-map, so `ping <overlay-addr>` always works. For names, there's an **opt-in**
-managed `/etc/hosts` block: enable it with `--hosts-sync` (on `setup-hub` /
-`join`) or `hosts_sync = true` in config, and the daemon keeps a marked block
-mapping each node's address to `<hostname>.internal`, refreshed from the local
-directory cache each reconcile:
+Every node has a stable overlay address, and `gw status` shows each node's
+resolvable name↔address map. Name resolution is **on by default**: the daemon
+keeps a marked `/etc/hosts` block mapping each node's address to
+`<hostname>.gw.internal`, refreshed from the local directory cache each reconcile:
 
 ```
 # BEGIN greasewood — managed, do not edit
-fd8d:e5c1:db1a:7:…  db.internal
-fd8d:e5c1:db1a:7:…  node01.internal
+fd8d:e5c1:db1a:7:…  db.gw.internal
+fd8d:e5c1:db1a:7:…  node01.gw.internal
 # END greasewood
 ```
 
-Then `ping db.internal`, `psql -h db.internal`, etc. just work — no DNS server,
-and it keeps resolving even if the hub is down (it's from the cache). It only
-ever touches the region between its markers; your own `/etc/hosts` lines are
-left alone, and disabling it (then restarting) or `gw purge` removes the block.
+So `ping db.gw.internal`, `psql -h db.gw.internal`, etc. just work — no DNS
+server, and it keeps resolving even if the hub is down (it's from the cache). It
+only ever touches the region between its markers; your own `/etc/hosts` lines are
+left alone, and `--no-hosts-sync` (or `hosts_sync = false` + restart) or `gw
+purge` removes the block.
 
-The domain (`mesh_domain`, default `internal` — an ICANN-reserved private TLD)
-is shared with TLS: `gw cert-request` with no `--san` defaults the cert to this
-node's `<hostname>.internal` **plus** its overlay address. So the name a node is
-reached by is exactly the name its certificate is valid for — resolve
-`db.internal` → connect over WireGuard → TLS validates the `db.internal` SAN.
+Two things make defaulting this on safe:
+- **Names are CA-attested** (the hostname lives in the signed credential), so a
+  member can't publish a record claiming another node's name to poison your hosts.
+- **Names are namespaced** under a dedicated `gw.internal` sub-label
+  (`mesh_domain`, default `gw.internal`). `/etc/hosts` shadows DNS, so a *flat*
+  `.internal` default could override names an org already resolves via internal
+  DNS — but greasewood only ever writes under `*.gw.internal`, which nothing else
+  serves. If you *do* run a `gw.internal` DNS zone, pick a different `mesh_domain`
+  or use `--no-hosts-sync`.
+
+The domain is shared with TLS: `gw cert-request` with no `--san` defaults the
+cert to this node's `<hostname>.gw.internal` **plus** its overlay address. So the
+name a node is reached by is exactly the name its certificate is valid for —
+resolve `db.gw.internal` → connect over WireGuard → TLS validates the
+`db.gw.internal` SAN.
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
 it later with `sudo gw rename <newname>` (then restart the daemon). Rename goes
@@ -413,8 +422,8 @@ traffic between nodes, so TLS here is **not** about adding encryption — that p
 would be redundant. Its value is at the layers WireGuard doesn't cover:
 
 - **Service identity by name.** WireGuard authenticates the *node* you reached,
-  not that you reached the *right* node for a name — the `db.internal`→address
-  mapping lives outside its crypto. A cert with `SAN=db.internal`, validated by
+  not that you reached the *right* node for a name — the `db.gw.internal`→address
+  mapping lives outside its crypto. A cert with `SAN=db.gw.internal`, validated by
   the client, is what proves "this endpoint is authorized for that name."
 - **Process/tenant identity.** The `gw-mesh` interface is host-global, so any
   process on a node can use the tunnel. **mTLS** (client certs) narrows a
@@ -439,8 +448,8 @@ Then, on that node:
 ```bash
 # A node may only get a cert for names it OWNS: its own <hostname>.<mesh_domain>,
 # subdomains of it, and its own overlay address. So on node "dbnode":
-sudo gw cert-request --san postgres.dbnode.internal --name postgres
-sudo gw cert-request                 # no --san → defaults to dbnode.internal + addr
+sudo gw cert-request --san postgres.dbnode.gw.internal --name postgres
+sudo gw cert-request                 # no --san → defaults to dbnode.gw.internal + addr
 # writes <data_dir>/tls/postgres.key, postgres.crt, ca.crt
 gw cert-status                       # show what's issued and when it expires
 ```

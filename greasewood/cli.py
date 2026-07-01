@@ -251,7 +251,7 @@ def cmd_setup_hub(args) -> int:
     log.info("overlay addr: %s", node_keys.addr)
 
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
-    hosts_sync = "true" if getattr(args, "hosts_sync", False) else "false"
+    hosts_sync = "true" if getattr(args, "hosts_sync", True) else "false"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
@@ -677,16 +677,17 @@ def cmd_join(args) -> int:
     endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
     seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
     root_url_val = json_mod.dumps(hub_overlay_url) if hub_overlay_url else '""'
-    # hosts sync: explicit flag wins, else keep prior setting, else off.
-    if getattr(args, "hosts_sync", False):
-        hosts_sync = "true"
-    elif prior and getattr(prior, "hosts_sync", False):
-        hosts_sync = "true"
-    else:
+    # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
+    # previously-disabled setting.
+    if getattr(args, "hosts_sync", None) is False:      # --no-hosts-sync given
         hosts_sync = "false"
+    elif prior is not None and not prior.hosts_sync:    # re-join kept disabled
+        hosts_sync = "false"
+    else:
+        hosts_sync = "true"
     # mesh_domain / interface: explicit flag wins, else keep prior, else default.
     mesh_domain = (args.mesh_domain or (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
-                   else "internal"))
+                   else "gw.internal"))
     interface = (args.interface or (prior.wg_interface if prior and getattr(prior, "wg_interface", None)
                  else "gw-mesh"))
 
@@ -1474,6 +1475,7 @@ def cmd_run(args) -> int:
 def cmd_status(args) -> int:
     from .config import load_config
     from .directory import Directory
+    from .hosts import mesh_name
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -1499,9 +1501,9 @@ def cmd_status(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<20} {:<44} {:<22} {}"
-    print(fmt.format("hostname", "addr", "expires", "state"))
-    print("-" * 92)
+    fmt = "{:<30} {:<44} {:<22} {}"
+    print(fmt.format("name", "addr", "expires", "state"))
+    print("-" * 100)
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
@@ -1512,8 +1514,11 @@ def cmd_status(args) -> int:
         else:
             state = "ok"
         marker = " ← self" if r.id_pub.hex() == own_id else ""
+        # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
+        # not the bare hostname.
         print(fmt.format(
-            r.hostname, r.cred.addr, exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker
+            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
+            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker
         ))
 
     print(f"\n{len(records)} record(s) in local directory cache")
@@ -1743,7 +1748,7 @@ def cmd_purge(args) -> int:
     # Determine interface name, data_dir, and mesh domain from config if available
     iface = "gw-mesh"
     data_dir = Path("/var/lib/greasewood")
-    mesh_domain = "internal"
+    mesh_domain = "gw.internal"
     if cfg_path.exists():
         try:
             from .config import load_config
@@ -1930,15 +1935,15 @@ def main(argv=None) -> int:
     sp.add_argument("--overlay-prefix", dest="overlay_prefix",
                     default="fd8d:e5c1:db1a:7::",
                     help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")
-    sp.add_argument("--mesh-domain", dest="mesh_domain", default="internal",
-                    help="name suffix for /etc/hosts + TLS (default: internal)")
+    sp.add_argument("--mesh-domain", dest="mesh_domain", default="gw.internal",
+                    help="name suffix for /etc/hosts + TLS (default: gw.internal)")
     sp.add_argument("--caps", default="mesh")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
-    sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
-                    help="maintain a managed /etc/hosts block (<name>.internal "
-                         "-> overlay addr) from the directory")
-    sp.set_defaults(fn=cmd_setup_hub)
+    sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
+                    help="don't maintain the managed /etc/hosts block "
+                         "(<name>.gw.internal -> overlay addr); it's on by default")
+    sp.set_defaults(fn=cmd_setup_hub, hosts_sync=True)
 
     # invite
     sp = sub.add_parser("invite",
@@ -1961,14 +1966,15 @@ def main(argv=None) -> int:
                          "gw-mesh; use a distinct name per mesh on one host)")
     sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
                     help="name suffix for /etc/hosts + TLS (default: keep "
-                         "existing, else internal)")
+                         "existing, else gw.internal)")
     sp.add_argument("--caps", default=None,
                     help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
-    sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
-                    help="maintain a managed /etc/hosts block (<name>.internal "
-                         "-> overlay addr) from the directory")
+    sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_const",
+                    const=False, default=None,
+                    help="don't maintain the managed /etc/hosts block "
+                         "(<name>.gw.internal -> overlay addr); on by default")
     sp.add_argument("--inbound", choices=["yes", "no"], default=None,
                     help="can peers dial this node? 'no' = outbound-only "
                          "(suppress endpoint, no inbound ports). Default: keep "
