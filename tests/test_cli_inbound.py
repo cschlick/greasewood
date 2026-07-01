@@ -35,7 +35,7 @@ root_url = ""
 def test_set_inbound_to_no_rewrites_config(tmp_path):
     cfg = tmp_path / "gw.toml"
     _write_cfg(cfg, "yes")
-    args = types.SimpleNamespace(config=str(cfg), value="no", open_firewall=False)
+    args = types.SimpleNamespace(config=str(cfg), value="no")
     assert cli.cmd_set_inbound(args) == 0
     assert 'inbound = "no"' in cfg.read_text()
 
@@ -43,7 +43,7 @@ def test_set_inbound_to_no_rewrites_config(tmp_path):
 def test_set_inbound_to_yes_rewrites_config(tmp_path):
     cfg = tmp_path / "gw.toml"
     _write_cfg(cfg, "no")
-    args = types.SimpleNamespace(config=str(cfg), value="yes", open_firewall=False)
+    args = types.SimpleNamespace(config=str(cfg), value="yes")
     assert cli.cmd_set_inbound(args) == 0
     assert 'inbound = "yes"' in cfg.read_text()
 
@@ -52,7 +52,7 @@ def test_hub_promote_refuses_outbound_only(tmp_path):
     cfg = tmp_path / "gw.toml"
     _write_cfg(cfg, "no")
     args = types.SimpleNamespace(config=str(cfg), control_port=51902,
-                                 credential_ttl="24h", open_firewall=False)
+                                 credential_ttl="24h")
     with pytest.raises(SystemExit) as e:
         cli.cmd_hub_promote(args)
     assert "outbound-only" in str(e.value)

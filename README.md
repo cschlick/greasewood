@@ -208,13 +208,11 @@ overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
 the underlay is WireGuard itself (UDP), which you open like for any VPN.
 
-`setup-hub` and `join` **check** the local nftables ruleset and loudly warn if a
-needed port looks blocked by a default-drop policy (printing the exact rule to
-add). They do not change anything by default. Pass **`--open-firewall`** to have
-them insert the accept rules for you (tagged with a `greasewood` comment so
-you can find/remove them) — opt-in, for hosts you aren't managing with IaC. If
-your firewall *is* IaC-managed (Ansible, etc.), put the rules below in that
-instead and ignore the flag.
+`setup-hub`, `join`, and `set-inbound` **check** the local nftables ruleset and
+loudly warn if a needed port looks blocked by a default-drop policy, printing the
+exact rule to add. That's all greasewood does — **it never modifies your
+firewall.** You apply the printed rules yourself (put them in your nftables
+config, or the Ansible `nftables` role does it for you).
 
 On a default-drop host, allow (nftables):
 
@@ -275,7 +273,7 @@ Declare a node's reachability at join (`--inbound yes|no|unknown`, default
 - **`no`** (outbound-only): the node advertises *no* endpoint, so peers don't
   waste handshakes dialing it; it opens no inbound ports. It can only pair with
   inbound-reachable nodes, and **can't be promoted to hub** (a hub must be
-  reachable). Switch it back with `sudo gw set-inbound yes --open-firewall`.
+  reachable). Switch it back with `sudo gw set-inbound yes` (then open the port).
 - **`yes` / `unknown`**: advertises its endpoint; needs the mesh UDP port open.
 
 `inbound` is an optimization + a guard, not what decides direction — WireGuard
@@ -296,7 +294,7 @@ does that on its own.
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
-| `set-inbound`      | yes   | Change reachability (yes/no/unknown); `--open-firewall`.   |
+| `set-inbound`      | yes   | Change reachability (yes/no/unknown).                     |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
