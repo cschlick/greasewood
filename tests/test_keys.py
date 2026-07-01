@@ -70,6 +70,43 @@ class TestNodeKeys:
         mode = stat.S_IMODE((d / "wg.key").stat().st_mode)
         assert mode == 0o600
 
+    def test_passphrase_roundtrip(self, tmp_path):
+        k = NodeKeys.generate()
+        k.save(tmp_path / "node", passphrase=b"s3cret")
+        loaded = NodeKeys.load(tmp_path / "node", passphrase=b"s3cret")
+        assert loaded.id_pub_bytes == k.id_pub_bytes
+        assert loaded.wg_pub_bytes == k.wg_pub_bytes
+
+    def test_wrong_passphrase_fails(self, tmp_path):
+        k = NodeKeys.generate()
+        k.save(tmp_path / "node", passphrase=b"s3cret")
+        with pytest.raises((TypeError, ValueError)):
+            NodeKeys.load(tmp_path / "node", passphrase=b"wrong")
+
+    def test_encrypted_key_needs_passphrase(self, tmp_path):
+        k = NodeKeys.generate()
+        k.save(tmp_path / "node", passphrase=b"s3cret")
+        with pytest.raises((TypeError, ValueError)):
+            NodeKeys.load(tmp_path / "node")  # encrypted, no passphrase given
+
+
+class TestCAKeysPassphrase:
+    def test_roundtrip(self, tmp_path):
+        ca = CAKeys.generate()
+        p = tmp_path / "ca.key"
+        ca.save(p, passphrase=b"rootpw")
+        loaded = CAKeys.load(p, passphrase=b"rootpw")
+        assert loaded.ca_pub_bytes == ca.ca_pub_bytes
+
+    def test_wrong_or_missing_passphrase_fails(self, tmp_path):
+        ca = CAKeys.generate()
+        p = tmp_path / "ca.key"
+        ca.save(p, passphrase=b"rootpw")
+        with pytest.raises((TypeError, ValueError)):
+            CAKeys.load(p, passphrase=b"nope")
+        with pytest.raises((TypeError, ValueError)):
+            CAKeys.load(p)  # encrypted CA root key, no passphrase
+
 
 class TestDeriveAddr:
     def test_deterministic(self):

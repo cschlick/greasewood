@@ -246,15 +246,13 @@ class ControlServer:
         # Bind one socket per address — typically the hub's overlay address and
         # loopback, NOT "::". The control plane is then unreachable on the
         # underlay by construction, no firewall rule required.
+        # greasewood is IPv6-only: every listen address is IPv6 (the overlay
+        # address + loopback). Bind one socket per address.
         self._servers = []
         for lst in listens:
             host, _, port_str = lst.rpartition(":")
             host = host.strip("[]")  # strip brackets from "[fd8d::1]"
-            is_ipv4 = "." in host    # IPv4 literals contain dots
-            if is_ipv4:
-                self._servers.append(HTTPServer((host, int(port_str)), Handler))
-            else:
-                self._servers.append(_IPv6Server((host or "::", int(port_str)), Handler))
+            self._servers.append(_IPv6Server((host or "::", int(port_str)), Handler))
         # Primary server (callers/tests read its bound port).
         self._server = self._servers[0]
 
