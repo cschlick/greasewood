@@ -256,6 +256,11 @@ connection until that node actually becomes a hub and binds it. Plain nodes run
 no control plane, so on a node that will never be a hub you can omit the `gw-mesh`/
 `gw-door` TCP rules and open only the two UDP ports.
 
+**Multi-user hosts:** the overlay is host-wide — *any* local user can use the
+tunnel once it's up (identity is per-machine, not per-user). To restrict which
+users may originate overlay traffic, add an nftables owner-match on the output
+chain; see the "Multi-user hosts" section of [SECURITY.md](SECURITY.md).
+
 ### Reachability (`inbound`)
 
 WireGuard has no client/server roles — both peers try to handshake and the
