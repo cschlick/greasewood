@@ -1,66 +1,203 @@
-# greasewood
+# Greasewood
 
-A minimal, self-hosted WireGuard mesh overlay. Nodes form a full mesh of
-direct WireGuard tunnels, authorized by a single certificate authority. There
-is nothing in the data path but WireGuard itself.
+A minimal, self-hosted WireGuard mesh overlay — by far the greasiest of them all.
 
-- **IPv6-only.** Every node gets a stable overlay address under
-  `fd8d:e5c1:db1a:7::/64`, derived from its own identity key — no allocator.
-- **Direct-or-fail.** No routing, no multi-hop, no relays, no NAT traversal. A
-  link either comes up directly or it honestly fails.
-- **CA-gated.** Membership is a CA-signed credential with an expiry.
-  "Revoking" a node means not renewing it; it falls out of the mesh fleet-wide
-  when its last credential expires. No CRL.
-- **Nothing central in the data path.** The hub serves enrollment and the
-  directory, but every node caches the directory locally and keeps its tunnels
-  running even if the hub is offline for up to one credential lifetime.
-- **Small.** Pure Python (3.11+), one dependency (`cryptography`), one binary
-  (`gw`). WireGuard is driven through the standard `wg` / `ip` tools.
+Its one priority is being **easy to reason about**. It was built by someone who
+lovingly maintained a fleet of hand-written WireGuard/networkd text files far
+past the point of practical, and wanted the smallest possible thing that turns
+those files into a real mesh.
+
+Many of its features are also limitations, chosen for simplicity. Let me show you
+its features!
+
+- **[Private.](#membership)** Membership is gated by a certificate authority;
+  revoke a node by not renewing it.
+- **[Self-contained.](#the-hub)** The hub is just a normal node with a CA — no
+  coordination service, no SaaS.
+- **[Direct-or-fail.](#direct-or-fail)** No routing, no relays. A link comes up
+  directly or it honestly fails.
+- **[IPv6-only.](#ipv6-only)** Nodes reach each other over IPv6. No NAT traversal.
+- **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
+  address is a hash of its identity key.
+- **[Segmented.](#access-control-groups)** Optional `group:` tags control who
+  talks to whom.
+- **[Named.](#names-gwinternal)** Every node gets a `<host>.gw.internal` name and
+  matching TLS certs from the same CA.
+- **[Offline-tolerant.](#offline-tolerance)** The hub can be down for a credential
+  lifetime — nodes run from cache.
+- **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
+  you apply them.
+- **[Linux-only.](#linux-only)** In-kernel WireGuard via the stock `wg`/`ip`
+  tools. Optional systemd service.
+- **[Auditable.](#auditable)** Pure Python, one dependency, driving `wg`/`ip` over
+  subprocess. Greasy.
 
 > Status: early but functional. The full path — enrollment, directory, the
 > reconcile loop, door-based join, credential renewal, expiry-driven revocation,
-> TLS service certs, and name resolution — works end to end and is covered by
-> unit + container integration tests. It's a personal project, so expect rough
-> edges. Note there's no automatic CA succession: moving the CA between hubs is a
-> deliberate manual re-root (see [Moving the hub](#moving-the-hub-re-root)).
+> segmentation groups, TLS service certs, and name resolution — works end to end
+> and is covered by unit + container integration tests. It's a personal project,
+> so expect rough edges.
 
-## How it works
+## How it compares
 
-**Two keys per node.** Identity and transport are deliberately split:
+The nearest full-featured projects are **Tailscale**, **Nebula**, and
+**innernet**. Next to greasewood they're all bigger systems that do more — and
+the "more" is consistent:
+
+- **More infrastructure to get peers connected.** Relays and hole-punching
+  (Tailscale), lighthouses and hole-punching (Nebula), a coordination server
+  (innernet) — plus an always-on control plane or registry. greasewood does none
+  of it: the hub is a normal node that can be *offline* for a credential
+  lifetime, and links are **direct-or-fail** — no traversal, no relays.
+- **They assign addresses.** A control plane hands them out, or they're baked
+  into the cert. greasewood **derives** the address from the identity key — no
+  allocator.
+- **Broader reach.** All three run beyond Linux and speak IPv4. greasewood is
+  **Linux-only and IPv6-only**.
+
+That's the whole trade — and it's why the feature list above doubles as a list of
+limitations. Everything greasewood *won't* do — traverse NAT, assign addresses,
+run on Windows, speak IPv4, keep a service always on — is a capability those
+projects add and greasewood drops on purpose, for simplicity. **The limitations
+are the features.** Reach for one of the others when you want "just works
+anywhere"; reach for greasewood when your network is already sane and you'd rather
+own and audit every piece.
+
+## Membership
+
+Membership is a **CA-signed credential with an expiry** — there is no membership
+list to push around and no CRL. Two keys and two signed objects carry it:
+
+**Two keys per node**, deliberately split:
 
 - `id_priv` / `id_pub` (Ed25519) — durable identity. It derives the node's
-  overlay address and authorizes credential renewal. Used rarely; guard it
-  hard (a leak is catastrophic).
+  overlay address and authorizes credential renewal. Used rarely; guard it hard
+  (a leak is catastrophic).
 - `wg_priv` / `wg_pub` (X25519) — the hot WireGuard tunnel key. It lives
-  unattended on disk so the node survives reboots, and it's self-limiting: a
-  leak expires with the credential.
+  unattended on disk so the node survives reboots, and it's self-limiting: a leak
+  expires with the credential.
 
-**Two signed objects.**
+**Two signed objects:**
 
 - **Credential** — signed by the CA. Binds `id_pub`, `wg_pub`, overlay address,
-  **hostname**, capabilities, and an expiry. Slow-moving (default 24 h TTL). The
-  hostname lives here (not in the record) so a node can't self-assert a name the
-  CA didn't grant it — the name is CA-attested end to end.
+  hostname, capabilities, and an expiry. Slow-moving (default 24h TTL). The
+  hostname lives here (not in the record), so a node can't self-assert a name the
+  CA didn't grant — the name is CA-attested end to end.
 - **NodeRecord** — signed by the node's own `id_priv`. Carries the credential
   plus fast-moving facts (endpoints, a sequence number); its `hostname` is read
   from the credential. This is what gets published through the directory.
 
-**Self-certifying addresses.** A node's overlay address is
-`prefix : truncate64(blake2s(id_pub))`. Any peer recomputes it from `id_pub`
-and rejects a record whose claimed address doesn't match — so addresses can't
-be spoofed and need no central allocator.
+**Revocation is just non-renewal.** To remove a node, stop renewing it (`gw
+revoke` on the hub also refuses its renewals immediately and evicts it live). Its
+credential lapses and it falls out of the mesh fleet-wide when it expires — at
+most one credential TTL. Shorten `credential_ttl` for a tighter bound.
 
-**The reconcile loop** is the only thing that touches the data plane. Every few
+## The hub
+
+The hub is **just a normal mesh node** that additionally holds the CA key and
+runs a small HTTP **control plane** — `GET /directory`, `POST /publish`, `POST
+/renew`, `GET /health` — bound to its overlay address (reachable only through the
+mesh, never the underlay). There is no separate coordination service, no SaaS,
+nothing always-on in the data path. Nodes poll `/directory`, merge records by
+highest sequence number, and cache them locally.
+
+Because trust is anchored to the CA *key* (not a machine), any node can become
+the hub — restore the key onto a replacement, or stand up a new CA and re-point
+the fleet. See [Moving the hub](#moving-the-hub-re-root).
+
+## Direct-or-fail
+
+There is no routing, no multi-hop, no relays, and no NAT traversal. Two nodes
+either form a **direct** WireGuard tunnel or the link honestly fails — it never
+silently falls back to relaying through a third party, so there's no hidden path
+to reason about.
+
+The only thing that touches the data plane is the **reconcile loop**: every few
 seconds each node walks the directory and, per peer, runs seven checks — verify
-the CA signature, check expiry, verify the record's self-signature, verify the
-address derives from `id_pub`, check the revoke list, check the authorization
-policy (`mesh` ↔ `mesh` by default) — then installs or removes that WireGuard
-peer with `wg set`. Membership changes, revocations, and key rotations all
-reduce to "add or remove a peer," computed locally with no coordinator.
+the CA signature, check expiry, verify the self-signature, verify the address
+derives from `id_pub`, check the revoke list, check the authorization policy —
+then installs or removes that peer with `wg set`. Membership changes,
+revocations, key rotations, and segmentation all reduce to "add or remove a
+peer," computed locally with no coordinator. A link forms as long as at least one
+side is reachable (see [Reachability](#reachability-inbound)); two unreachable
+nodes can't pair.
 
-**The control plane** is a small HTTP service the hub runs: `GET /directory`,
-`POST /publish`, `POST /renew`, `GET /health`. Nodes poll `/directory`, merge by
-highest sequence number, and persist a local cache.
+## IPv6-only
+
+Both the underlay endpoints and the overlay are IPv6. Nodes are expected to reach
+each other over IPv6 (typically global addresses), and there is **no NAT
+traversal** — the direct-or-fail model assumes the network already permits a
+direct connection. This is the constraint that keeps the whole thing small: no
+STUN, no hole-punching, no relay fallback, no IPv4 dual-stack logic.
+
+If you have a node that can only reach the mesh over IPv4 (a laptop behind
+carrier NAT, say), the answer is a dual-stack **bastion** — SSH to a mesh node
+that does have IPv6 — rather than teaching greasewood to traverse NAT.
+
+## Self-certifying addresses
+
+A node's overlay address is a **hash of its identity public key**:
+
+```
+fd8d:e5c1:db1a:7 : truncate64(blake2s(id_pub))
+                   └── the last 64 bits ARE the key's fingerprint ──┘
+```
+
+That function is public and deterministic, so anyone holding a node's `id_pub`
+can recompute its address and check it matches. The address *certifies itself*
+against the key — no allocator, and no authority needs to vouch that "this
+address belongs to this node." The math already says so.
+
+**Why it can't be spoofed.** To be accepted at an address you present a signed
+record, and every verifier runs two independent checks: `address == hash(id_pub)`
+(the address is the legitimate derivation of the key), and the record is
+**self-signed by `id_priv`** (you actually hold that key). To steal node `db`'s
+address `X = hash(db_id_pub)` you would need an `id_pub` that hashes to `X` — a
+~2⁶⁴ preimage search — *and* you'd still need db's `id_priv` to sign as db. Two
+independent locks. Notably, **not even the CA can reassign an address**: an
+address is `hash(your key)` by construction, so the CA can't hand db's address to
+a different key. The CA vouches for *membership*; the address vouches for itself.
+
+**How the alternatives get spoofed.** Everywhere else the address is a *number
+assigned by an authority* — a control server (Tailscale, innernet) or written
+into a signed cert (Nebula) — with no cryptographic tie to the key. That binding
+is only as strong as the authority: compromise or trick the assigner into
+remapping db's address to your key, poison the distributed mapping, or (in a flat
+network) just forge the source IP. In greasewood there's no mapping to poison and
+no authority to subvert for the address — it's derived, not granted.
+
+The cost, to keep it honest: the address is an opaque hash (no human- or
+segment-legible structure — which is why [segmentation](#access-control-groups)
+is tag-based, not CIDR), and the 64-bit host portion makes a *deliberate*
+collision ~2⁶⁴ work rather than impossible. Both are deliberate trades for "the
+address is the identity, and nobody assigns it."
+
+## Offline tolerance
+
+Every node caches the directory on disk and keeps its tunnels running from that
+cache, so the **hub can be down for up to one credential lifetime** and existing
+node↔node links are unaffected — the hub is never in the data path. Only new
+enrollments and credential renewals need a reachable hub. Restore or replace the
+hub within that window (see [Moving the hub](#moving-the-hub-re-root) and the
+[RUNBOOK](RUNBOOK.md)) and nothing ever drops.
+
+## Linux-only
+
+greasewood drives **in-kernel WireGuard** through the stock `wg` and `ip`
+command-line tools, and (optionally) runs as a **systemd** service. That's the
+whole reason it's Linux-only: it leans on the kernel's WireGuard and on systemd
+for process management rather than shipping its own userspace transport or
+supervisor. A macOS/Windows port would mean a different data-plane backend and is
+out of scope.
+
+## Auditable
+
+The entire thing is **pure Python (3.11+), one dependency (`cryptography`), one
+binary (`gw`)**, and it manages the data plane by shelling out to `wg`/`ip` via
+subprocess. That's "greasy" in the programming sense — the clean way would be
+netlink bindings — but it's a deliberate trade: you can read the exact `wg set
+peer …` commands, run them by hand, and diff them against `wg show`. Transparency
+over purity. Greasy.
 
 ## Install
 
@@ -381,7 +518,7 @@ manual credential-copy path.
 hostname = "node01"
 role     = "node"          # "hub" | "node"
 inbound  = "yes"           # can this node accept cold inbound handshakes?
-caps     = ["mesh"]
+caps     = ["mesh"]        # + "group:<x>" tags to segment; "tls" to allow certs
 
 [network]
 interface  = "gw-mesh"
@@ -389,7 +526,7 @@ listen_port = 51900
 overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
 seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
-hosts_sync  = false                          # manage /etc/hosts names (opt-in)
+hosts_sync  = true                           # manage /etc/hosts names (on by default)
 mesh_domain = "gw.internal"                  # name suffix + default TLS cert name
 
 [ca]
@@ -596,12 +733,12 @@ GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -
 
 ## Design notes & non-goals
 
-Deliberately **not** implemented (and not bugs): routing or relays, NAT
-traversal / hole-punching, gossip between nodes, lazy on-demand tunnels,
-continuous key rotation, or a mobile CA key. These are revisited only at
-specific scale or threat triggers — e.g. gossip if the network genuinely
-partitions, lazy tunnels at hundreds of nodes, a threshold CA when hub
-compromise becomes unacceptable.
+The [non-goals](#how-it-compares) — routing/relays, NAT traversal, IPv4,
+cross-platform — aren't missing, they're the point. A few internal ones are worth
+naming with their *revisit triggers*, so it's clear they're deferred rather than
+overlooked: **gossip** between nodes if the network ever genuinely partitions;
+**lazy on-demand tunnels** at hundreds of nodes; a **threshold CA** if hub
+compromise becomes unacceptable. None has been hit; until one is, they stay out.
 
 **Clock integrity is part of the security posture.** Every allow/deny is a
 timestamp comparison against a credential expiry, so run NTP/chrony on every
