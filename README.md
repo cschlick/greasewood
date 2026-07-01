@@ -17,9 +17,12 @@ is nothing in the data path but WireGuard itself.
 - **Small.** Pure Python (3.11+), one dependency (`cryptography`), one binary
   (`gw`). WireGuard is driven through the standard `wg` / `ip` tools.
 
-> Status: early. The core — enrollment, directory, reconcile loop, door-based
-> join — works end to end (see Testing). Renewal, CA migration, and a TLS
-> service-cert layer are partially built or planned.
+> Status: early but functional. The full path — enrollment, directory, the
+> reconcile loop, door-based join, credential renewal, expiry-driven revocation,
+> TLS service certs, and name resolution — works end to end and is covered by
+> unit + container integration tests. It's a personal project, so expect rough
+> edges. Note there's no automatic CA succession: moving the CA between hubs is a
+> deliberate manual re-root (see [Moving the hub](#moving-the-hub-re-root)).
 
 ## How it works
 
