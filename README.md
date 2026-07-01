@@ -292,6 +292,7 @@ does that on its own.
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `set-inbound`      | yes   | Change reachability (yes/no/unknown); `--open-firewall`.   |
+| `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
@@ -363,6 +364,12 @@ is shared with TLS: `gw cert-request` with no `--san` defaults the cert to this
 node's `<hostname>.internal` **plus** its overlay address. So the name a node is
 reached by is exactly the name its certificate is valid for — resolve
 `db.internal` → connect over WireGuard → TLS validates the `db.internal` SAN.
+
+A node's hostname defaults to the machine's own hostname at enrollment; change
+it later with `sudo gw rename <newname>` (then restart the daemon). Rename goes
+through the hub, so it's uniqueness-checked and frees the old name — the keys and
+overlay address don't change. (Editing `hostname` in the config directly is not
+enough: the hub wouldn't know, so always use `gw rename`.)
 
 > Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`). The
 > hub **enforces uniqueness at enrollment** — a `join` whose (sanitized) name is

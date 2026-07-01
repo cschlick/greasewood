@@ -86,6 +86,47 @@ def test_forget_node_missing_is_noop(tmp_path):
     assert ca.forget_node(idx) is False  # nothing to remove
 
 
+def _renew_req(k, hostname=""):
+    return RenewRequest(
+        id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, nonce="n",
+        ts=dt.datetime.now(_UTC).replace(microsecond=0), hostname=hostname,
+    ).sign(k.id_priv)
+
+
+def test_renew_with_hostname_renames_and_frees_old(tmp_path):
+    """`gw rename` path: renew carrying a new hostname re-issues under it and
+    releases the old name for another node."""
+    ca = _ca(tmp_path)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "old", ["mesh"])
+
+    ca.renew(_renew_req(k, hostname="new"))  # rename old -> new
+    assert ca.node_info(k.id_pub_bytes)[0] == "new"
+
+    # The old name is now free for a different node.
+    id2, wg2 = _node()
+    ca.issue(id2, wg2, "old", ["mesh"])  # no raise
+
+
+def test_renew_rename_to_taken_name_refused(tmp_path):
+    ca = _ca(tmp_path)
+    k1 = NodeKeys.generate()
+    id2, wg2 = _node()
+    ca.issue(k1.id_pub_bytes, k1.wg_pub_bytes, "alpha", ["mesh"])
+    ca.issue(id2, wg2, "beta", ["mesh"])
+    with pytest.raises(ValueError, match="already in use"):
+        ca.renew(_renew_req(k1, hostname="beta"))  # collides with node 2
+
+
+def test_plain_renew_wire_form_unchanged(tmp_path):
+    """A hostname-less renewal must serialize exactly as before (no 'hostname'
+    key), so it stays wire-compatible."""
+    k = NodeKeys.generate()
+    req = _renew_req(k)  # no hostname
+    assert "hostname" not in req.to_dict()
+    req.verify_self_sig()  # round-trips + verifies
+
+
 def test_renew_does_not_self_conflict(tmp_path):
     ca = _ca(tmp_path)
     k = NodeKeys.generate()
