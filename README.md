@@ -267,14 +267,14 @@ forms as long as **at least one side is reachable**: a firewalled node dials an
 open one, and the reply returns via `established,related`. Two fully-blocked
 nodes can't pair (direct-or-fail — no relays).
 
-Declare a node's reachability at join (`--inbound yes|no|unknown`, default
-`yes`) or change it later with `gw set-inbound`:
+Declare a node's reachability at join (`--inbound yes|no`, default `yes`) or
+change it later with `gw set-inbound`:
 
+- **`yes`**: advertises its endpoint; needs the mesh UDP port open.
 - **`no`** (outbound-only): the node advertises *no* endpoint, so peers don't
   waste handshakes dialing it; it opens no inbound ports. It can only pair with
   inbound-reachable nodes, and **can't be promoted to hub** (a hub must be
   reachable). Switch it back with `sudo gw set-inbound yes` (then open the port).
-- **`yes` / `unknown`**: advertises its endpoint; needs the mesh UDP port open.
 
 `inbound` is an optimization + a guard, not what decides direction — WireGuard
 does that on its own.
@@ -294,7 +294,7 @@ does that on its own.
 | `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
-| `set-inbound`      | yes   | Change reachability (yes/no/unknown).                     |
+| `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |

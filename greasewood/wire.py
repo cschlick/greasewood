@@ -138,7 +138,7 @@ class NodeRecord:
     id_pub: bytes        # 32-byte Ed25519 public key
     seq: int             # monotonic; merge takes highest per id_pub
     endpoints: list[str] # ["[v6addr]:port", ...]
-    inbound: str         # "yes" | "no" | "unknown"  (§8)
+    inbound: str         # "yes" | "no"  (§8)
     hostname: str
     cred: Credential
     sig: bytes = field(default=b"", repr=False)

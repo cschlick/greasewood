@@ -20,7 +20,7 @@ class Config:
     data_dir: Path
     hostname: str
     role: str              # "hub" | "node"
-    inbound: str           # "yes" | "no" | "unknown"
+    inbound: str           # "yes" | "no"
     caps: list[str]
     endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51900"]
 
@@ -93,7 +93,9 @@ def load_config(path: Path) -> Config:
         data_dir=Path(node.get("data_dir", "/var/lib/greasewood")).expanduser(),
         hostname=node["hostname"],
         role=node.get("role", "node"),
-        inbound=node.get("inbound", "unknown"),
+        # Only "no" means outbound-only; anything else (incl. a legacy
+        # "unknown", missing, or garbage) normalizes to the reachable default.
+        inbound=("no" if node.get("inbound") == "no" else "yes"),
         caps=node.get("caps", ["mesh"]),
         endpoints=node.get("endpoints", []),
 
