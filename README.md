@@ -355,7 +355,7 @@ Give each membership its own config, data dir, interface, listen port, and mesh
 domain (hub-in-two-meshes is not supported):
 
 ```bash
-sudo gw join "$TOKEN_A" --config /etc/gw-a.toml --data-dir /var/lib/gw-a \
+sudo gw -c /etc/gw-a.toml join "$TOKEN_A" --data-dir /var/lib/gw-a \
     --interface gw-a --listen-port 51900 --mesh-domain alpha
 sudo gw -c /etc/gw-a.toml run          # (and the same, with -b/51910/beta, for mesh B)
 ```

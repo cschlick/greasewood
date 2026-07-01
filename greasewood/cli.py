@@ -2003,7 +2003,6 @@ def main(argv=None) -> int:
                     help="this hub's hostname in the mesh "
                          "(default: the machine's hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--door-port", dest="door_port", type=int, default=51901,
@@ -2044,7 +2043,6 @@ def main(argv=None) -> int:
                     help="this node's hostname in the mesh "
                          "(default: keep existing, else the machine's hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
     sp.add_argument("--interface", default=None,
                     help="WireGuard interface name (default: keep existing, else "
@@ -2111,7 +2109,6 @@ def main(argv=None) -> int:
     # hub-promote (on the prospective new hub)
     sp = sub.add_parser("hub-promote",
                         help="[sudo] turn this enrolled node into a hub (generate CA key, set role=hub)")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
@@ -2153,13 +2150,11 @@ def main(argv=None) -> int:
     sp.add_argument("--out-dir", dest="out_dir", default=None,
                     help="where to write key/cert/ca (default: <data_dir>/tls)")
     sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_cert_request)
 
     # cert-status
     sp = sub.add_parser("cert-status", help="show local TLS certs and expiry")
     sp.add_argument("--out-dir", dest="out_dir", default=None)
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_cert_status)
 
     # set-inbound
@@ -2168,14 +2163,12 @@ def main(argv=None) -> int:
     sp.add_argument("value", choices=["yes", "no", "unknown"])
     sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
                     help="when switching to inbound, open the WireGuard port (opt-in)")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_set_inbound)
 
     # rename
     sp = sub.add_parser("rename",
                         help="[sudo] change this node's mesh hostname (hub-validated, no re-join)")
     sp.add_argument("hostname", help="the new hostname")
-    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_rename)
 
     args = p.parse_args(argv)

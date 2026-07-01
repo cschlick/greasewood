@@ -43,8 +43,8 @@ def _join(hub_cid, hub_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
     with _ENROLL_LOCK:
         res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6)
         token = _extract_token(res.stdout + "\n" + res.stderr)
-        # join defines its own --config, so pass it after the subcommand.
-        r = pexec(node_cid, "gw", "join", token, "--config", cfg,
+        # Config path is the global -c, before the subcommand.
+        r = pexec(node_cid, "gw", "-c", cfg, "join", token,
                   "--data-dir", data_dir, "--interface", iface,
                   "--listen-port", str(port), "--mesh-domain", domain,
                   "--endpoint", f"[{node_ipv6}]:{port}", check=False)
