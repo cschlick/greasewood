@@ -91,6 +91,9 @@ Unit=greasewood.service
 WantedBy=paths.target
 """
 
+# Where the systemd units live. A module constant so tests can redirect it.
+_UNIT_DIR = Path("/etc/systemd/system")
+
 
 def _get_passphrase(env_var: str | None) -> bytes | None:
     if not env_var:
@@ -827,7 +830,7 @@ def _service_state() -> str:
     unit installed and running), 'installed' (unit present, not yet running),
     or 'manual' (no unit). Used so setup-hub / join don't tell the user to run
     `gw run` when systemd already starts the daemon on its own."""
-    if not Path("/etc/systemd/system/greasewood.service").exists():
+    if not (_UNIT_DIR / "greasewood.service").exists():
         return "manual"
     import shutil
     import subprocess
@@ -1827,8 +1830,9 @@ def cmd_install_service(args) -> int:
         "greasewood.service": _SERVICE_UNIT.format(exec=gw_exec),
         "greasewood.path": _PATH_UNIT,
     }
+    _UNIT_DIR.mkdir(parents=True, exist_ok=True)
     for name, body in units.items():
-        path = Path("/etc/systemd/system") / name
+        path = _UNIT_DIR / name
         path.write_text(body)
         print(f"wrote {path}")
 
@@ -1871,7 +1875,7 @@ def cmd_uninstall_service(args) -> int:
         subprocess.run([systemctl, "disable", "--now",
                         "greasewood.path", "greasewood.service"], check=False)
     for name in ("greasewood.path", "greasewood.service"):
-        p = Path("/etc/systemd/system") / name
+        p = _UNIT_DIR / name
         if p.exists():
             p.unlink()
             print(f"removed {p}")
