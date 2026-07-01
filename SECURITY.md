@@ -77,6 +77,49 @@ Additional control-plane protections:
   comparison (expiry, skew, succession windows). Run NTP/chrony and treat it as
   part of your security posture.
 
+## Multi-user hosts
+
+**The unit of identity is the machine, not the user.** `gw-mesh` is a kernel
+interface in the host's single network namespace, so — like any VPN or route on
+a shared host — **every local user can send and receive over the overlay** once
+it's up. There is no per-user access control on the tunnel; a local user can
+reach mesh peers, be reached, and read the (non-secret) directory over `::1`.
+
+What a non-root local user still **cannot** do:
+
+- read the private keys (`id_priv.pem`, `ca.key`, `wg.key` are `0600` inside a
+  `0700` data dir) → no impersonation, no CA abuse, no TLS cert;
+- administer or tear down the interface (needs `CAP_NET_ADMIN`);
+- forge control-plane requests (`/renew`, `/cert`, `/publish` require signatures).
+
+So a co-tenant gets **network reachability to the mesh**, not the node's identity.
+If that reachability itself is unacceptable, enforce it at the OS layer (greasewood
+won't, by design — it never touches your firewall unless asked):
+
+1. **nftables owner match** — restrict which local users may originate overlay
+   traffic (egress; owner match is output-only). Combined with the base
+   `ct state established,related accept`, a denied user can't initiate anything
+   over the mesh:
+
+   ```
+   # Members of group "gwmesh" (and root, for the daemon) may use the overlay.
+   chain output {
+       type filter hook output priority 0; policy accept;
+       oifname "gw-mesh" meta skuid 0 accept
+       oifname "gw-mesh" meta skgid "gwmesh" accept
+       oifname "gw-mesh" drop
+   }
+   ```
+
+   This gates who can *initiate*. It does not gate inbound *new* connections from
+   the mesh to a local service (owner match has no input-side equivalent); for
+   that, restrict inbound `iifname "gw-mesh"` to an allowlist of dports, or use
+   option 2.
+2. **Network namespace** — run greasewood and the intended workloads in a
+   dedicated netns so `gw-mesh` isn't visible to other users' processes at all.
+   Strongest isolation; more setup.
+3. **Don't co-tenant** untrusted users on a mesh machine — the implicit default.
+
 ## Security review (2026-06-30)
 
 An adversarial review of the crypto, trust, enrollment, and renewal paths. All
