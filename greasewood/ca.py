@@ -120,7 +120,13 @@ class CA:
             raise ValueError("unknown node — issue a credential first")
 
         hostname, caps = node_info
-        log.info("renewing %s", hostname)
+        if req.hostname and req.hostname != hostname:
+            # Rename (gw rename): issue() enforces uniqueness on the new name and
+            # rewrites nodes/<id>.json, which frees the old name for reuse.
+            log.info("renaming %s -> %s", hostname, req.hostname)
+            hostname = req.hostname
+        else:
+            log.info("renewing %s", hostname)
         return self.issue(req.id_pub, req.wg_pub, hostname, caps)
 
     # --- x509 TLS certificate issuance (§12) ---

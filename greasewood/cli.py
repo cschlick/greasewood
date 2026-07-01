@@ -1236,6 +1236,119 @@ def cmd_set_inbound(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# rename — change this node's mesh hostname (hub-validated, no re-join)
+# ---------------------------------------------------------------------------
+
+def cmd_rename(args) -> int:
+    """Rename this node in the mesh without re-joining. Asks the hub to re-issue
+    the credential under the new name over the existing control plane; the hub
+    enforces uniqueness (refused if taken) and frees the old name. Keys and the
+    overlay address are unchanged. Requires the mesh to be up (the daemon
+    running) so the hub is reachable."""
+    _require_root("rename")
+    import re
+    import secrets
+    import urllib.error
+    import urllib.request
+    from .config import load_config
+    from .keys import NodeKeys
+    from .directory import Directory
+    from .trust import CABundle, TrustStore
+    from .wire import RenewRequest, Credential, NodeRecord
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"no config at {cfg_path}")
+    cfg = load_config(cfg_path)
+
+    newname = args.hostname.strip()
+    if not newname:
+        sys.exit("provide a non-empty hostname: gw rename <newname>")
+    if newname == cfg.hostname:
+        print(f"already named {newname!r} — nothing to do")
+        return 0
+
+    try:
+        keys = NodeKeys.load(cfg.data_dir)
+    except FileNotFoundError:
+        sys.exit("this node isn't enrolled yet (no keys) — run 'gw join' first")
+
+    trust = TrustStore(
+        roots=[bytes.fromhex(h) for h in cfg.ca_pubs],
+        bundle=CABundle.load(cfg.ca_bundle_path),
+        bundle_path=cfg.ca_bundle_path,
+        static_seeds=cfg.seeds,
+        fallback_hub_url=cfg.root_url,
+    )
+    hub_url = trust.hub_url()
+    if not hub_url:
+        sys.exit("no hub URL known — is this node enrolled and the mesh up?")
+
+    # Ask the hub to re-issue under the new name (same authenticated path as
+    # renewal; the hostname field turns it into a rename).
+    req = RenewRequest(
+        id_pub=keys.id_pub_bytes,
+        wg_pub=keys.wg_pub_bytes,
+        nonce=secrets.token_hex(16),
+        ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        hostname=newname,
+    ).sign(keys.id_priv)
+
+    body = json.dumps(req.to_dict()).encode()
+    url = f"{hub_url.rstrip('/')}/renew"
+    http_req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(http_req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read())
+        except Exception:
+            data = {"error": f"HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        sys.exit(f"could not reach the hub at {hub_url}: {e} — is the mesh up?")
+    if "error" in data:
+        sys.exit(f"rename rejected by hub: {data['error']}")
+
+    cred = Credential.from_dict(data)
+
+    # Re-sign our record with the new name + fresh credential and publish it, so
+    # peers and /etc/hosts pick up the rename promptly.
+    directory = Directory.load(cfg.dir_cache_path)
+    existing = directory.get(keys.id_pub_hex)
+    seq = (existing.seq + 1) if existing else 1
+    endpoints = list(existing.endpoints) if existing else (
+        [] if cfg.inbound == "no" else cfg.endpoints)
+    inbound = existing.inbound if existing else cfg.inbound
+    record = NodeRecord(
+        id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
+        inbound=inbound, hostname=newname, cred=cred,
+    ).sign(keys.id_priv)
+    directory.put(record)
+    directory.save(cfg.dir_cache_path)
+    from .sync import push_record
+    try:
+        push_record(hub_url, record)
+    except Exception as e:
+        log.warning("published locally but push to hub failed (will sync): %s", e)
+
+    # Persist the new name in config.
+    text = cfg_path.read_text()
+    new, n = re.subn(r'(?m)^\s*hostname\s*=\s*".*?"\s*$',
+                     f'hostname = "{newname}"', text, count=1)
+    if n:
+        cfg_path.write_text(new)
+    else:
+        log.warning("could not update hostname in %s — edit it by hand", cfg_path)
+
+    print(f"renamed {cfg.hostname!r} -> {newname!r} (overlay addr unchanged)")
+    print("Restart the daemon so it keeps advertising the new name: "
+          "sudo systemctl restart greasewood  (or re-run sudo gw run)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
@@ -2017,6 +2130,13 @@ def main(argv=None) -> int:
                     help="when switching to inbound, open the WireGuard port (opt-in)")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.set_defaults(fn=cmd_set_inbound)
+
+    # rename
+    sp = sub.add_parser("rename",
+                        help="[sudo] change this node's mesh hostname (hub-validated, no re-join)")
+    sp.add_argument("hostname", help="the new hostname")
+    sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
+    sp.set_defaults(fn=cmd_rename)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

@@ -231,20 +231,27 @@ class RenewRequest:
     id_priv possession is the authentication — no separate session credential.
     nonce prevents replay within the timestamp skew window.
     wg_pub may differ from the current one (free operational-key rotation).
+    hostname, when set, requests a rename (`gw rename`): the hub re-issues under
+    the new name, enforcing uniqueness. It is omitted from the signed body when
+    empty, so an ordinary renewal produces exactly the pre-rename wire form.
     """
     id_pub: bytes
     wg_pub: bytes
     nonce: str
     ts: dt.datetime
+    hostname: str = ""
     sig: bytes = field(default=b"", repr=False)
 
     def _body_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "id_pub": _b64e(self.id_pub),
             "nonce": self.nonce,
             "ts": _ts(self.ts),
             "wg_pub": _b64e(self.wg_pub),
         }
+        if self.hostname:
+            d["hostname"] = self.hostname
+        return d
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "RenewRequest":
         sig = id_priv.sign(_canonical(self._body_dict()))
@@ -270,6 +277,7 @@ class RenewRequest:
             wg_pub=_b64d(d["wg_pub"]),
             nonce=d["nonce"],
             ts=_parse_ts(d["ts"]),
+            hostname=d.get("hostname", ""),
             sig=_b64d(d["sig"]),
         )
 
