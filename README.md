@@ -193,13 +193,30 @@ finishes joining. To provision N machines, invite and join in a sequential loop:
 
 ```bash
 for host in node01 node02 node03; do
-    TOKEN=$(ssh hub 'sudo gw invite')          # hub opens the door
-    ssh "$host" "sudo gw join '$TOKEN'"      # node joins; hub closes the door
-done                                         # next invite only runs after join returns
+    TOKEN=$(ssh hub 'sudo gw invite -q')       # hub opens the door, prints just the token
+    ssh -t "$host" "sudo gw join '$TOKEN'"     # node joins; hub closes the door
+done                                           # next invite only runs after join returns
 ```
 
 Each `gw join` blocks until the node is enrolled, so the window is always closed
-again before the next `gw invite` — no locks or queue needed.
+again before the next `gw invite` — no locks or queue needed. `gw invite -q`
+prints only the token (clean for capture/piping/clipboard).
+
+**Keeping the token off the node's argv.** In the loop above the token appears in
+the node's process list (`ps`) for the duration of the join. To avoid that, feed
+it on stdin instead — `gw join -` reads the token from stdin (and tolerantly
+extracts the `gw1.…` line, so raw `gw invite` output works too):
+
+```bash
+ssh hub 'sudo gw invite -q' | ssh "$host" 'sudo -n gw join -'
+```
+
+The catch: piping the token *is* the SSH stdin, so `sudo` can't also prompt for a
+password there — this form needs passwordless privilege scoped to join on the
+node (`<user> ALL=(root) NOPASSWD: /usr/local/bin/gw join *`). Without that, use
+the interactive `ssh -t … "sudo gw join '$TOKEN'"` form above (or copy/paste the
+token by hand). Don't grant blanket `NOPASSWD: gw` — via `install-service --exec`
+that's effectively passwordless root.
 
 A new `gw invite` regenerates the door's guest key and overwrites the current
 window, **invalidating any previously issued-but-unused token**. Issuing while a

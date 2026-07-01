@@ -332,8 +332,27 @@ door_port = {args.door_port}
 # invite  (hub — generate a join token and open a door window)
 # ---------------------------------------------------------------------------
 
+def _extract_token(text: str) -> str:
+    """Pull the join token out of arbitrary text — a clean token, or the full
+    stdout of `gw invite`. Returns the first line that looks like a token so
+    `gw join -` works whether or not the producer used `invite -q`."""
+    from .door import TOKEN_PREFIX
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith(TOKEN_PREFIX):
+            return s
+    s = text.strip()
+    if s.startswith(TOKEN_PREFIX):
+        return s
+    sys.exit("no join token (gw1.…) found in input")
+
+
 def cmd_invite(args) -> int:
     _require_root("invite")
+    if getattr(args, "quiet", False):
+        # -q: emit only the token on stdout — silence the informational stderr
+        # chatter (superseding-window warning, door/wg setup logs) for scripting.
+        logging.getLogger().setLevel(logging.ERROR)
     import datetime as dt_mod
     import json as json_mod
     from .config import load_config
@@ -427,7 +446,10 @@ def cmd_join(args) -> int:
     from . import wg as wgmod
     import base64
 
-    token = args.token
+    # Token comes from the positional arg, or from stdin when it's "-". Either
+    # way we tolerantly extract the gw1.… line, so `gw invite | ssh B gw join -`
+    # works even without `invite -q`.
+    token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
     listen_port = args.listen_port
@@ -1950,12 +1972,17 @@ def main(argv=None) -> int:
                         help="[sudo] open a 15-min door window and print a single-use join token")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
+    sp.add_argument("-q", "--quiet", action="store_true",
+                    help="print only the token; silence informational messages")
     sp.set_defaults(fn=cmd_invite)
 
     # join
     sp = sub.add_parser("join",
                         help="[sudo] enroll this machine using a token from 'gw invite'")
-    sp.add_argument("token", help="join token printed by 'gw invite' on the hub")
+    sp.add_argument("token",
+                    help="join token from 'gw invite', or '-' to read it from "
+                         "stdin (raw `gw invite` output is accepted — the gw1.… "
+                         "line is extracted)")
     sp.add_argument("--hostname", default=None,
                     help="this node's hostname in the mesh "
                          "(default: keep existing, else the machine's hostname)")
