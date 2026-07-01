@@ -19,12 +19,14 @@ def make_cred(
     ca: CAKeys,
     caps: list[str] | None = None,
     ttl_seconds: int = 3600,
+    hostname: str = "test-node",
 ) -> Credential:
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     cred = Credential(
         id_pub=node.id_pub_bytes,
         wg_pub=node.wg_pub_bytes,
         addr=node.addr,
+        hostname=hostname,
         caps=caps or ["mesh"],
         iat=now,
         exp=now + dt.timedelta(seconds=ttl_seconds),
@@ -44,7 +46,6 @@ def make_record(
         seq=seq,
         endpoints=endpoints or ["[2001:db8::1]:51820"],
         inbound=inbound,
-        hostname="test-node",
         cred=cred,
     )
     return r.sign(node.id_priv)
@@ -106,7 +107,7 @@ class TestCredential:
         now = dt.datetime.now(_UTC).replace(microsecond=0)
         cred1 = Credential(
             id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
-            addr=node.addr, caps=["mesh", "db-client"],
+            addr=node.addr, hostname="n", caps=["mesh", "db-client"],
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         # Restore with reversed cap order in JSON, then verify
@@ -130,12 +131,18 @@ class TestNodeRecord:
         record.verify([ca.ca_pub_bytes], revoked=set())
 
     def test_tampered_hostname_rejected(self):
+        # hostname now lives in the CA-signed credential (level-b). Changing it
+        # alters the record body → the node's self-signature no longer matches,
+        # so a forged hostname can't enter the directory.
         ca = CAKeys.generate()
         node = NodeKeys.generate()
-        cred = make_cred(node, ca)
+        cred = make_cred(node, ca, hostname="db")
         record = make_record(node, cred)
-        bad = replace(record, hostname="evil-node")
-        with pytest.raises(ValueError, match="invalid self-signature"):
+        assert record.hostname == "db"  # property reads it from the credential
+        # Changing the hostname in the credential breaks the CA signature — the
+        # CA vouched for "db", not "evil-node".
+        bad = replace(record, cred=replace(record.cred, hostname="evil-node"))
+        with pytest.raises(ValueError, match="no trusted CA"):
             bad.verify([ca.ca_pub_bytes], revoked=set())
 
     def test_tampered_seq_rejected(self):
@@ -160,7 +167,6 @@ class TestNodeRecord:
             seq=1,
             endpoints=["[2001:db8::1]:51820"],
             inbound="yes",
-            hostname="test",
             cred=cred,  # cred belongs to node_b
         ).sign(node_a.id_priv)
         # Should fail at step 4 (addr) or the id_pub cross-check
@@ -181,7 +187,7 @@ class TestNodeRecord:
         cred = Credential(
             id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
             addr=derive_addr(node.id_pub_bytes, other_prefix),  # foreign prefix
-            caps=["mesh"], iat=now, exp=now + dt.timedelta(hours=1),
+            hostname="n", caps=["mesh"], iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         r = make_record(node, cred)
         r.verify([ca.ca_pub_bytes], revoked=set())   # no raise
@@ -303,12 +309,12 @@ class TestVerifyStructuralErrors:
         now = dt.datetime.now(_UTC).replace(microsecond=0)
         cred = Credential(
             id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
-            addr="not-an-ip", caps=["mesh"],
+            addr="not-an-ip", hostname="n1", caps=["mesh"],
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         rec = NodeRecord(
             id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
-            hostname="n1", cred=cred,
+            cred=cred,
         ).sign(node.id_priv)
         with pytest.raises(ValueError, match="not a valid IPv6"):
             rec.verify_structural()
@@ -322,12 +328,12 @@ class TestVerifyStructuralErrors:
         now = dt.datetime.now(_UTC).replace(microsecond=0)
         cred = Credential(
             id_pub=b.id_pub_bytes, wg_pub=b.wg_pub_bytes,
-            addr=derive_addr(a.id_pub_bytes), caps=["mesh"],
+            addr=derive_addr(a.id_pub_bytes), hostname="n1", caps=["mesh"],
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         rec = NodeRecord(
             id_pub=a.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
-            hostname="n1", cred=cred,
+            cred=cred,
         ).sign(a.id_priv)
         with pytest.raises(ValueError, match="does not match"):
             rec.verify_structural()

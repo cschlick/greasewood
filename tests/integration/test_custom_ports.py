@@ -65,7 +65,7 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
         deadline = time.time() + 30
         names = set()
         while time.time() < deadline:
-            names = {r["hostname"] for r in directory_records(hub, port=CONTROL_PORT)}
+            names = {r["cred"]["hostname"] for r in directory_records(hub, port=CONTROL_PORT)}
             if "cnode" in names:
                 break
             time.sleep(2)

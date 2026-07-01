@@ -89,6 +89,7 @@ class CA:
             id_pub=id_pub,
             wg_pub=wg_pub,
             addr=derive_addr(id_pub),
+            hostname=hostname,
             caps=caps,
             iat=now,
             exp=now + self._ttl,

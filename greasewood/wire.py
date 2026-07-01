@@ -71,6 +71,7 @@ class Credential:
     id_pub: bytes        # 32-byte Ed25519 public key
     wg_pub: bytes        # 32-byte X25519 public key
     addr: str            # overlay IPv6 address
+    hostname: str        # CA-attested mesh hostname (§ level-b)
     caps: list[str]
     iat: dt.datetime
     exp: dt.datetime
@@ -82,6 +83,7 @@ class Credential:
             "addr": self.addr,
             "caps": sorted(self.caps),
             "exp": _ts(self.exp),
+            "hostname": self.hostname,
             "iat": _ts(self.iat),
             "id_pub": _b64e(self.id_pub),
             "wg_pub": _b64e(self.wg_pub),
@@ -123,6 +125,7 @@ class Credential:
             id_pub=_b64d(d["id_pub"]),
             wg_pub=_b64d(d["wg_pub"]),
             addr=d["addr"],
+            hostname=d["hostname"],
             caps=d["caps"],
             iat=_parse_ts(d["iat"]),
             exp=_parse_ts(d["exp"]),
@@ -140,15 +143,19 @@ class NodeRecord:
     seq: int             # monotonic; merge takes highest per id_pub
     endpoints: list[str] # ["[v6addr]:port", ...]
     inbound: str         # "yes" | "no"  (§8)
-    hostname: str
     cred: Credential
     sig: bytes = field(default=b"", repr=False)
+
+    @property
+    def hostname(self) -> str:
+        """The mesh hostname, from the CA-signed credential (§ level-b). Not a
+        separate field, so it can't be self-asserted independently of the CA."""
+        return self.cred.hostname
 
     def _body_dict(self) -> dict[str, Any]:
         return {
             "cred": self.cred.to_dict(),
             "endpoints": self.endpoints,
-            "hostname": self.hostname,
             "id_pub": _b64e(self.id_pub),
             "inbound": self.inbound,
             "seq": self.seq,
@@ -222,7 +229,6 @@ class NodeRecord:
             seq=d["seq"],
             endpoints=d["endpoints"],
             inbound=d["inbound"],
-            hostname=d["hostname"],
             cred=Credential.from_dict(d["cred"]),
             sig=_b64d(d["sig"]),
         )

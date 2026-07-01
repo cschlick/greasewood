@@ -96,7 +96,6 @@ class RenewalLoop:
             seq=seq,
             endpoints=self._endpoints,
             inbound=self._inbound,
-            hostname=self._hostname,
             cred=cred,
         ).sign(self._keys.id_priv)
         self._directory.put(record)

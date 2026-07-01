@@ -21,12 +21,14 @@ from greasewood.wire import Credential, NodeRecord, RenewRequest, CertRequest
 _UTC = dt.timezone.utc
 
 
-def _make_cred(node: NodeKeys, ca: CAKeys, ttl: int = 3600) -> Credential:
+def _make_cred(node: NodeKeys, ca: CAKeys, ttl: int = 3600,
+               hostname: str = "test-node") -> Credential:
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes,
         wg_pub=node.wg_pub_bytes,
         addr=node.addr,
+        hostname=hostname,
         caps=["mesh"],
         iat=now,
         exp=now + dt.timedelta(seconds=ttl),
@@ -39,7 +41,6 @@ def _make_record(node: NodeKeys, cred: Credential, seq: int = 1) -> NodeRecord:
         seq=seq,
         endpoints=["[2001:db8::1]:51820"],
         inbound="yes",
-        hostname="test-node",
         cred=cred,
     ).sign(node.id_priv)
 
@@ -216,7 +217,7 @@ class TestDirectoryEndpoint:
         data = _get(port, "/directory")
         assert isinstance(data, list)
         assert len(data) == 1
-        assert data[0]["hostname"] == "test-node"
+        assert data[0]["cred"]["hostname"] == "test-node"
 
     def test_empty_directory(self, ca_and_node, tmp_path):
         srv = ControlServer(
@@ -252,7 +253,7 @@ class TestPublishEndpoint:
         node2 = NodeKeys.generate()
         cred2 = _make_cred(node2, ca)
         record2 = _make_record(node2, cred2)
-        bad = replace(record2, hostname="evil")  # invalidates self-sig
+        bad = replace(record2, endpoints=["[2001:db8::99]:1"])  # invalidates self-sig
 
         status, body = _post(port, "/publish", bad.to_dict())
         assert status == 400

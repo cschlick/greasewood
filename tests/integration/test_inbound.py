@@ -25,7 +25,7 @@ def test_outbound_only_node(gw_hub, gw_image, gw_network):
 
         # Its directory record advertises no endpoint (peers won't dial it).
         recs = directory_records(gw_hub["cid"])
-        rec = next((r for r in recs if r["hostname"] == "outbound1"), None)
+        rec = next((r for r in recs if r["cred"]["hostname"] == "outbound1"), None)
         assert rec is not None, "node not in directory"
         assert rec["endpoints"] == [], f"should advertise no endpoint: {rec['endpoints']}"
         assert rec["inbound"] == "no"

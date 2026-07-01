@@ -44,7 +44,7 @@ def test_node_appears_in_root_directory(gw_hub, gw_node):
 def test_hub_overlay_addr_in_directory(gw_hub):
     """Root's NodeRecord contains a valid fd8d:: overlay address."""
     data = directory_records(gw_hub["cid"])
-    hub_record = next(r for r in data if r["hostname"] == "hub")
+    hub_record = next(r for r in data if r["cred"]["hostname"] == "hub")
     # addr is anchored in the signed credential, not a top-level record field.
     assert hub_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
 
