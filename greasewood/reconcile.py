@@ -26,9 +26,37 @@ log = logging.getLogger(__name__)
 Policy = Callable[[list[str], list[str]], bool]
 
 
+def _groups(caps: list[str]) -> set[str]:
+    """Segmentation groups are carried as `group:<name>` capability tags, so they
+    ride the existing CA-signed caps (attested, node-requested, renewed) with no
+    separate wire field."""
+    return {c[len("group:"):] for c in caps if c.startswith("group:")}
+
+
 def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
-    """mesh↔mesh nodes may talk to each other. Extend as needed (§9)."""
-    return "mesh" in local_caps and "mesh" in peer_caps
+    """Two nodes may hold a tunnel iff both carry the `mesh` cap AND their
+    segmentation groups permit it (§9). Group rules, on `group:<name>` tags:
+
+    - `group:*` on either side  → allowed (the wildcard segment: the hub, which
+      must reach everyone, and any shared-services node).
+    - both sides ungrouped      → allowed (the default pool; also the fully
+      backward-compatible case — a fleet with no groups is one open mesh).
+    - otherwise                 → allowed only if they share a group.
+
+    So assigning a node a group isolates it from the default pool and from other
+    groups, while `group:*` peers (the hub) still reach it. Enforcement is
+    mutual: a link needs both ends to install each other, and peer groups are
+    read from the peer's CA-signed credential, so a node can't talk its way into
+    a segment it wasn't issued.
+    """
+    if "mesh" not in local_caps or "mesh" not in peer_caps:
+        return False
+    local, peer = _groups(local_caps), _groups(peer_caps)
+    if "*" in local or "*" in peer:
+        return True
+    if not local and not peer:
+        return True
+    return bool(local & peer)
 
 
 def reconcile_once(

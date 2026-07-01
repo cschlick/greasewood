@@ -307,6 +307,45 @@ change it later with `gw set-inbound`:
 `inbound` is an optimization + a guard, not what decides direction — WireGuard
 does that on its own.
 
+## Access control (groups)
+
+By default every mesh node can talk to every other — one flat segment. To
+control **who talks to whom**, put nodes in **groups**. A node peers with another
+only if they **share a group**; assigning a group isolates a node from the rest.
+
+Groups are just `group:<name>` **capability tags** — they ride the node's
+CA-signed credential (attested, node-requested, renewed) with no separate wire
+format. Set them at join:
+
+```bash
+sudo gw join "$TOKEN" --hostname web1 --groups prod,web
+sudo gw join "$TOKEN" --hostname db1  --groups prod
+sudo gw join "$TOKEN" --hostname ci1  --groups dev
+```
+
+The rules (`reconcile.default_policy`):
+
+- **share a group** → may peer (`web1`↔`db1` above, both `prod`; a node in
+  several groups peers with anyone sharing one).
+- **both ungrouped** → may peer — the *default pool*, and the backward-compatible
+  case (a fleet with no groups is one open mesh).
+- **`group:*`** on either side → reaches everyone. The hub carries it
+  automatically (it must serve the control plane to every node); enroll a
+  shared-services node with `--groups '*'` to make it universally reachable.
+- otherwise → **denied** (a grouped node and an ungrouped node don't share a
+  group, so grouping a node cuts it off from the default pool).
+
+Two properties worth knowing:
+
+- **Mutually enforced + attested.** A tunnel needs *both* ends to install each
+  other, and each side reads the *other's* groups from its CA-signed credential —
+  so a node can't talk its way into a segment it wasn't issued, and a node is
+  protected by its own policy (a peer it denies can't force a link).
+- **Node-level and symmetric**, not port-level or one-way. Groups decide whether
+  two nodes may have a tunnel *at all*; "A may reach B:5432 but not B:22" is a
+  firewall concern — use your own nftables on `gw-mesh` (see
+  [SECURITY.md](SECURITY.md)).
+
 ## Command reference
 
 | Command            | Root? | What it does                                              |

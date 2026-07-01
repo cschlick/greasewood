@@ -16,7 +16,10 @@ role = "node"
 #             `gw set-inbound yes`.
 inbound = "yes"
 
-# Capability set for this node. mesh↔mesh links are allowed by default policy.
+# Capability set for this node. "mesh" = may participate; "tls" = may request
+# TLS certs. A "group:<name>" tag segments the mesh — a node peers only with
+# nodes sharing a group (ungrouped nodes form one default pool; the hub is
+# "group:*" and reaches all). Prefer `gw join --groups prod,web` over editing.
 caps = ["mesh"]
 
 # Explicit endpoints. Leave empty if you want WireGuard to discover via roaming.
