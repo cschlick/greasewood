@@ -68,40 +68,35 @@ changes — but the door key is otherwise disposable.
 2. The next `gw invite` regenerates it. **Re-issue every outstanding token** — old
    ones no longer work.
 
-## SOP: CA key compromised — *and you still have it*
+## SOP: move the CA to a new key (re-root)
 
-Rotate via succession, no fleet-wide config edit, no downtime:
+Whether the old key is compromised, lost, or you just want to migrate hubs, the
+mechanism is the same **re-root**: get the fleet to trust a new CA key, re-issue
+under it, drop the old key. Because `trusted_pubs` is a *set*, you can trust both
+during the overlap, so it's non-disruptive when done gracefully.
 
-1. Stand up the new hub identity and CA: `sudo gw hub-promote` on node B.
-2. From the **old** hub, endorse the successor:
-   `sudo gw hub-endorse <B_ca_pub> --endpoint http://[<B-overlay>]:51902`.
-3. Let it propagate; nodes re-credential under B on their next renewal.
-4. From the old hub, retire the old CA **with a grace period** (default one
-   credential TTL — never retire immediately): `sudo gw hub-retire <A_ca_pub>`.
-5. After the grace window, destroy the old `ca.key`.
+1. On the new host, generate a CA: `sudo gw hub-promote` (or `setup-hub` on a
+   fresh host). Note the new CA public key it prints.
+2. **Add the new CA pubkey to `[ca] trusted_pubs` on every node** and restart
+   their daemons (config push — this is what Ansible is for). The fleet now
+   trusts old *and* new — this list is your overlap window.
+3. Repoint nodes' `root_url` + `seeds` to the new hub (config push). Nodes
+   re-credential under the new CA on their next renewal (or `gw join` fresh).
+4. Once every node holds a new-CA credential, **remove the old key** from
+   `trusted_pubs` fleet-wide. Then destroy the old `ca.key` / decommission A.
 
-This is the normal §11 succession flow; see the README "Moving the hub" section.
+**Graceful (planned migration, or the old key is safely retired):** keep both
+keys trusted through step 2–3, drop the old in step 4. Zero disruption.
 
-## SOP: CA key **lost or compromised-and-gone** (you do *not* have it)
+**Emergency (old key in an attacker's hands):** the attacker can mint valid
+credentials until the old key is gone from *every* node's `trusted_pubs`, and
+`gw revoke` cannot stop the CA itself. So do step 1–2 with the **new** key, then
+**immediately remove the compromised key** from `trusted_pubs` everywhere — the
+overlap window is the attacker's window, so make it short. Prioritize the push.
 
-This is the worst case: you cannot sign a succession from a key you don't hold,
-so transitive trust to a new CA is impossible. You must **re-root** the fleet.
-
-1. On a hub, generate a new CA: `sudo gw hub-promote` (or `setup-hub` on a fresh
-   host). Note the new CA public key it prints.
-2. **Add the new CA pubkey to `[ca] trusted_pubs` on every node** and reload
-   (config push — this is what Ansible is for). Keep the old key in the list only
-   if it's lost-but-not-attacker-held; **remove it immediately if compromised.**
-3. Nodes now trust the new CA. Re-issue/renew credentials under it
-   (`gw join` with a fresh token, or let renewal target the new hub).
-4. Old credentials expire on their own.
-
-> If the key is in an attacker's hands, they can issue valid credentials until
-> step 2 completes on every node — `gw revoke` cannot stop the CA itself. Treat
-> this as an emergency re-root and prioritize pushing the new `trusted_pubs`.
-
-The way to avoid ever being here: **back up `ca.key` encrypted and offline**, and
-build `trusted_pubs` as a set from day one so you always have a succession path.
+The way to avoid the lost-key version entirely: **back up `ca.key` encrypted and
+offline** (then a dead hub is a *restore*, not a re-root — see below), and keep
+`trusted_pubs` a set so you always have an overlap path.
 
 ## SOP: hub host destroyed (disk gone)
 
@@ -136,9 +131,9 @@ Usually one of:
    recovers as records re-verify.
 2. **Hub unreachable past one credential TTL.** Credentials lapse fleet-wide.
    Restore the hub (above); nodes recover on the next renewal.
-3. **Botched retirement.** A CA was retired without overlap. Re-endorse the
-   intended active CA from a still-trusted key; never `hub-retire` without the
-   default grace.
+3. **Botched re-root.** The old CA was dropped from `trusted_pubs` before every
+   node had a new-CA credential. Re-add the old key fleet-wide to restore the
+   overlap, let all nodes renew under the new CA, *then* drop the old key.
 
 `gw diagnose` on a couple of nodes will tell you which of these it is.
 

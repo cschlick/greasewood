@@ -10,7 +10,7 @@ enforced, the accepted risks, and the results of the security review.
 
 | Secret | Held by | Blast radius if leaked | Protection |
 |--------|---------|------------------------|------------|
-| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to a node. The CA key never moves — succession hands off by signing, not by copying (§11). |
+| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to a plain node. Moving the hub generates a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
 | `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | On-disk at `0600` on server VMs (the primary deployment; no TPM expected — hardware-backed identity is a v2 item, see the founding doc). Treat a leak as "that node is compromised" → revoke. |
 | `wg_priv` (X25519) | each node | **Self-limiting.** Usable only until the node's credential expires; peers tear down the stale key on the next reconcile. | On-disk at `0600`; on-disk exposure is an accepted, bounded risk. |
 | join token / door seed | transient | Enroll **one** node during a single open window. The hub still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |
@@ -52,18 +52,19 @@ Additional control-plane protections:
   clock-independent checks (self-sig, addr derivation, id/cred consistency)
   before it can enter the directory, so a malicious or compromised directory
   response cannot shadow a real record with a high-sequence forgery.
-- **Succession trust** (`trust.resolve_trust`) is the transitive closure of
-  endorsements minus retirements, with a **symmetric guard**: a retired CA's key
-  can make *no* new statements — neither endorsements nor retirements. This is
-  what makes a decommissioned (or leaked) hub key harmless to the live fleet.
+- **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
+  only from the CA keys they are configured to trust. Moving the CA is a
+  deliberate re-root (a config change to that set), not an automatic runtime
+  handoff, so a decommissioned or leaked hub key cannot inject itself into the
+  fleet's trust; it stays trusted only as long as it's in `trusted_pubs`.
 
 ## Accepted risks / non-goals
 
 - **A malicious *current* hub can deny service** (withhold directory entries,
-  mis-endorse a successor). Trust is rooted in the hub by design; succession and
-  the "hub may be offline for one credential TTL" window limit the damage, but a
-  live, malicious hub is outside the threat model. It still cannot **intercept**
-  traffic — it never holds any node's `wg_priv` or `id_priv`.
+  refuse renewals). Trust is rooted in the hub by design; the "hub may be offline
+  for one credential TTL" window limits the damage, but a live, malicious hub is
+  outside the threat model. It still cannot **intercept** traffic — it never
+  holds any node's `wg_priv` or `id_priv`.
 - **Revocation is expiry-based on nodes** (no CRL push). At the hub a revocation
   is immediate (refuses renew/publish and evicts locally, live — no restart). On
   other nodes a revoked peer falls out within at most one credential TTL as its
@@ -74,8 +75,8 @@ Additional control-plane protections:
 - **On-disk `id_priv`** on server VMs (no hardware backing). Documented and
   intentional for the primary deployment.
 - **Clock integrity is a security dependency.** Every allow/deny is a timestamp
-  comparison (expiry, skew, succession windows). Run NTP/chrony and treat it as
-  part of your security posture.
+  comparison (expiry, skew). Run NTP/chrony and treat it as part of your security
+  posture.
 
 ## Multi-user hosts
 
@@ -128,7 +129,7 @@ findings below are resolved in the current tree, each with a regression test.
 | # | Severity | Finding | Resolution |
 |---|----------|---------|------------|
 | 1 | High | **Renewed credentials never reached the hub** — `RenewalLoop` updated only the local directory, so peers (which pull from the hub) kept seeing the about-to-expire record and would evict every node ~one credential TTL after start. | Renewal now re-publishes the fresh record to the hub as part of a successful renewal (`renewal.py`); failure re-enters the retry/backoff loop. |
-| 2 | Med-High | **A retired CA's leaked key could DoS the fleet** — `resolve_trust` rejected *endorsements* by retired CAs but not *retirements*, so a decommissioned hub key could retire (un-trust) the live hub everywhere. | `resolve_trust` now applies the symmetric guard: a retirement counts only if its issuer was itself un-retired when it signed (`trust.py`). |
+| 2 | Med-High | **A retired CA's leaked key could DoS the fleet** — `resolve_trust` rejected *endorsements* by retired CAs but not *retirements*, so a decommissioned hub key could retire (un-trust) the live hub everywhere. | Originally fixed with a symmetric guard in `resolve_trust`. The entire CA-succession subsystem was **since removed** (moving the hub is now a manual re-root — a `trusted_pubs` config change), so this class of bug no longer exists in the tree. |
 | 3 | Med | **Revocation required a hub restart** — the revoke set was snapshotted at startup, so `gw revoke` had no effect on the running daemon (renew refusal *and* local eviction). | The revoke list is re-read live each cycle/request (`reconcile.py`, `server.py`, `cli.py`). |
 | 4 | Med | **Sticky directory shadow** — `directory.merge` accepted highest-seq without verification, so one forged high-seq record from a bad directory response permanently shadowed a victim's real record. | `directory.merge` structurally verifies every record before accepting it; a forgery (no valid self-signature) can never enter the directory. |
 | 5 | Med | **Replay nonces were unused** — `/renew` and `/cert` carried a nonce "to bound replay" that the hub never tracked; only the skew window applied. | Added a thread-safe single-use nonce cache consulted after signature verification. |

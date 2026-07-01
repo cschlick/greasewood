@@ -57,11 +57,6 @@ class Config:
         return self.data_dir / "directory.json"
 
     @property
-    def ca_bundle_path(self) -> Path:
-        """CA-succession bundle: served by the hub, cached by every node."""
-        return self.data_dir / "ca_bundle.json"
-
-    @property
     def wg_key_path(self) -> Path:
         return self.data_dir / "wg.key"
 

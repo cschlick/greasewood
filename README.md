@@ -247,7 +247,7 @@ and the replies come back through `established,related`.
 
 **Recommended posture: apply the same ruleset on *every* node, not just the
 current hub.** Any node can be promoted to hub ([Moving the
-hub](#moving-the-hub-ca-succession)), so a uniform ruleset means a hub handover
+hub](#moving-the-hub-re-root)), so a uniform ruleset means a hub handover
 needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
 isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
@@ -290,8 +290,6 @@ does that on its own.
 | `status`           | no    | Show local node and directory state.                      |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
 | `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
-| `hub-endorse`      | no    | Endorse a successor hub's CA (on the current hub).         |
-| `hub-retire`       | no    | Retire a CA so the fleet stops accepting its signatures.   |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
@@ -433,54 +431,41 @@ renewing and it expires.
 
 > SANs aren't otherwise constrained — the `tls` capability is the gate, so grant
 > it only to nodes that run services. The hub's CA cert is also at
-> `GET /ca-cert`. (Across a hub succession the CA changes; re-request to pick up
-> the new issuer.)
+> `GET /ca-cert`. (After a re-root the CA changes; re-request to pick up the new
+> issuer.)
 
-## Moving the hub (CA succession)
+## Moving the hub (re-root)
 
-Hub status — both the control plane and the certificate authority — can be
-handed from one node to another with no downtime and no config edit on any
-node, and this can repeat indefinitely (A → B → C → …; every node can take a
-turn). The private CA key never moves; the successor generates its own.
+No node is forever-critical: because a node trusts a CA **key**, not a machine,
+any node that holds the CA authority and serves the directory *is* the hub.
+Moving the hub is therefore a deliberate **re-root** — swap which CA key the
+fleet trusts — not an automatic handover. `trusted_pubs` is a **set**, so you
+trust the old and new CA during an overlap and the move is non-disruptive.
 
-Trust is a **set**, not a single key. Each node bootstraps from its configured
-`trusted_pubs`, then grows and shrinks that set at runtime from signed
-statements in a *CA bundle* the hub serves (`GET /ca-bundle`) and every node
-syncs. Two statement kinds, each signed by an already-trusted CA:
-
-- **endorse** — "CA X vouches for CA Y as a successor" (and advertises Y's hub
-  endpoint). Nodes resolve trust transitively: trusting A and seeing A→B→C…
-  means trusting the whole chain, so a node enrolled long ago under A follows
-  the hub all the way to the current one.
-- **retire** — "CA X is no longer an accepted signer." It is **scheduled** with
-  a grace period (default one credential TTL), so it propagates and every node
-  re-credentials under the successor *before* it takes effect — nobody is cut
-  off mid-handover. A retired CA's past endorsements stay valid (successors
-  survive), but it can't make new ones (a leaked decommissioned key can't inject
-  a rogue successor).
-
-Migrating from hub **A** to a new node **B**:
+The CA private key never moves: the new hub generates its own key, and you push
+the new *public* key into every node's `trusted_pubs`. Migrating from hub **A**
+to a new node **B**:
 
 ```bash
 # 1. Enroll B as an ordinary node (gw join …) and start it.
 
-# 2. On B — generate B's own CA key and flip it to a hub-in-waiting:
+# 2. On B — generate B's own CA key and flip it to role=hub:
 sudo gw hub-promote                 # prints B's CA pubkey + control endpoint
 
-# 3. On A — endorse B; the whole fleet now trusts A *and* B:
-gw hub-endorse --ca-pub <B-pubkey> --endpoint <B-endpoint>
+# 3. Add B's CA pubkey to [ca] trusted_pubs on EVERY node (keep A's), and
+#    restart their daemons — the fleet now trusts A *and* B. (Ansible.)
 
-# 4. On B — restart so it serves as a hub:
-sudo gw run
+# 4. Repoint nodes' root_url + seeds to B (config push). Start B: sudo gw run
+#    Nodes renew under B over the next credential cycle.
 
-# Nodes repoint to B and, over the next credential cycle, renew under B.
-
-# 5. After the overlap, on B — retire A, then decommission A:
-gw hub-retire --ca-pub <A-pubkey>   # grace defaults to one credential TTL
+# 5. After every node has a B-signed credential, drop A's CA pubkey from
+#    trusted_pubs fleet-wide, then decommission A.
 ```
 
 Throughout, existing tunnels stay up (the data plane never depends on the hub),
-so the handover is non-disruptive.
+so the handover is non-disruptive. This leans on your config management for the
+`trusted_pubs`/`root_url` pushes — see [RUNBOOK.md](RUNBOOK.md) for the graceful
+vs emergency (compromised-key) variants.
 
 ## Testing
 
@@ -494,7 +479,7 @@ containers and are skipped by the default run. They need Podman 4+ and the
 WireGuard kernel module:
 
 ```bash
-# Functional tests: mesh connectivity, re-enrollment, and hub/CA succession
+# Functional tests: mesh connectivity, re-enrollment, rename, TLS, reboot survival
 # (hub handover on real containers) — all under tests/integration/
 python -m pytest tests/integration/
 
@@ -516,9 +501,9 @@ compromise becomes unacceptable.
 timestamp comparison against a credential expiry, so run NTP/chrony on every
 node.
 
-**CA trust is a set, not a single key.** The CA (and hub) is rotated by a signed
-handoff with a one-TTL overlap, never by moving the private key — see
-[Moving the hub](#moving-the-hub-ca-succession).
+**CA trust is a set, not a single key.** The CA (and hub) is moved by a
+re-root — trust the new key alongside the old during an overlap, then drop the
+old — never by moving the private key. See [Moving the hub](#moving-the-hub-re-root).
 
 ## Security & operations
 

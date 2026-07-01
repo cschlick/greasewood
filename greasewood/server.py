@@ -73,7 +73,6 @@ class _Handler(BaseHTTPRequestHandler):
     ca: "CA | None" = None
     get_ca_pubs: "callable" = staticmethod(list)
     get_revoked: "callable" = staticmethod(set)
-    get_bundle: "callable" = staticmethod(lambda: {"v": 1, "statements": []})
     cache_path: "Path | None" = None
     tls_cert_ttl: "dt.timedelta | None" = None
     replay: "_ReplayGuard" = _ReplayGuard()
@@ -98,8 +97,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/directory":
             self._send_json([r.to_dict() for r in self.directory.all()])
-        elif self.path == "/ca-bundle":
-            self._send_json(self.get_bundle())
         elif self.path == "/ca-cert":
             if self.ca is None:
                 self.send_error(404)
@@ -232,7 +229,6 @@ class ControlServer:
         get_revoked,
         ca: "CA | None" = None,
         cache_path: "Path | None" = None,
-        get_bundle=None,
         tls_cert_ttl=None,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
@@ -243,8 +239,6 @@ class ControlServer:
         Handler.ca = ca
         Handler.get_ca_pubs = staticmethod(get_ca_pubs)
         Handler.get_revoked = staticmethod(get_revoked)
-        if get_bundle is not None:
-            Handler.get_bundle = staticmethod(get_bundle)
         Handler.cache_path = cache_path
         Handler.tls_cert_ttl = tls_cert_ttl
         Handler.replay = _ReplayGuard()

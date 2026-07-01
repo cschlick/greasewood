@@ -65,7 +65,7 @@ def ensure_ca_cert(
     if path.exists():
         return x509.load_pem_x509_certificate(path.read_bytes())
 
-    # Name the CA after its key so a succession (a different CA key) is a
+    # Name the CA after its key so a re-root (a different CA key) is a
     # visibly different issuer.
     subject = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, f"greasewood-ca-{ca_pub_hex[:16]}"),

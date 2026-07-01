@@ -33,8 +33,8 @@ class Directory:
 
         Each record is structurally verified (self-signature + addr derivation +
         id_pub/cred consistency) before it can enter the directory. This is
-        CA- and clock-independent, so it never drops a genuine record during CA
-        succession or under clock skew, but it does stop a malicious or
+        CA- and clock-independent, so it never drops a genuine record during a
+        CA re-root or under clock skew, but it does stop a malicious or
         compromised directory response from shadowing a real record with a
         high-seq forgery (which, once cached, would otherwise stick forever).
         Full trust/expiry/revocation checks still run at reconcile time.
