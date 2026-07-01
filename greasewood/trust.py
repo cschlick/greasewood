@@ -244,7 +244,15 @@ class TrustStore:
         return ep or self._fallback
 
     def seeds(self) -> list[str]:
-        """Directory seeds = static seeds plus the current hub, de-duplicated."""
+        """Directory seeds = static seeds plus the current hub, de-duplicated.
+
+        INVARIANT: seeds are hubs only — the configured hub URL(s) plus the
+        active hub advertised via SIGNED CA endorsements (a successor hub). The
+        directory (peer NodeRecords) is NEVER scraped into this list: the hub is
+        the single source of truth for the directory, and an ordinary node can
+        never become a seed. Do not add directory-derived / auto-discovered
+        endpoints here.
+        """
         hub = self.hub_url()
         out = list(self._static_seeds)
         if hub and hub not in out:
