@@ -81,6 +81,47 @@ def test_leaf_chains_to_ca_with_sans(tmp_path):
     assert leaf_spki == leaf_pub
 
 
+def _not_after(cert):
+    return getattr(cert, "not_valid_after_utc", None) or \
+        cert.not_valid_after.replace(tzinfo=_UTC)
+
+
+def _not_before(cert):
+    return getattr(cert, "not_valid_before_utc", None) or \
+        cert.not_valid_before.replace(tzinfo=_UTC)
+
+
+def test_leaf_expiry_matches_ttl(tmp_path):
+    """not_valid_after is issue_time + ttl, and the full window is ttl plus the
+    5-minute backdated skew grace — so expiry tracks the requested ttl exactly."""
+    ck = CAKeys.generate()
+    ca_cert = ensure_ca_cert(ck.ca_priv, ck.ca_pub_hex, tmp_path)
+
+    ttl = dt.timedelta(hours=6)
+    before = dt.datetime.now(_UTC)
+    leaf = issue_tls_cert(ck.ca_priv, ca_cert, _leaf_pub(), "svc",
+                          dns=["svc.mesh"], ips=[], ttl=ttl)
+    after = dt.datetime.now(_UTC)
+
+    nva, nvb = _not_after(leaf), _not_before(leaf)
+    # not_valid_after == issue_time + ttl (bracketed by the issuance window)
+    assert before + ttl - dt.timedelta(seconds=5) <= nva <= after + ttl
+    # backdated 5m for clock skew → full validity window is ttl + 5m
+    assert abs((nva - nvb) - (ttl + dt.timedelta(minutes=5))) < dt.timedelta(seconds=5)
+
+
+def test_leaf_short_ttl_is_honored(tmp_path):
+    """A very short ttl is honored, not clamped up to some minimum: a 1-second
+    cert expires ~1 second after issuance."""
+    ck = CAKeys.generate()
+    ca_cert = ensure_ca_cert(ck.ca_priv, ck.ca_pub_hex, tmp_path)
+    now = dt.datetime.now(_UTC)
+    leaf = issue_tls_cert(ck.ca_priv, ca_cert, _leaf_pub(), "svc",
+                          dns=[], ips=[], ttl=dt.timedelta(seconds=1))
+    nva = _not_after(leaf)
+    assert now <= nva <= now + dt.timedelta(seconds=6)
+
+
 def test_ca_issue_tls_roundtrip(tmp_path):
     ck = CAKeys.generate()
     ca = CA(ck, tmp_path)
