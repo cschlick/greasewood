@@ -157,9 +157,9 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int]:
     if len(payload) < 67 + host_len + 32:
         raise ValueError("token payload truncated")
     hub_host = payload[67:67 + host_len].decode()
+    # The truncation check above guarantees ≥32 trailing bytes, so this slice is
+    # always exactly the 32-byte seed.
     seed = payload[67 + host_len:67 + host_len + 32]
-    if len(seed) != 32:
-        raise ValueError("seed must be 32 bytes")
 
     return hub_door_pub, ca_pub, hub_host, seed, door_port
 

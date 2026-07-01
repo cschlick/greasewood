@@ -291,3 +291,43 @@ class TestRenewRequest:
         ).sign(node.id_priv)
         restored = RenewRequest.from_dict(req.to_dict())
         restored.verify_self_sig()
+
+
+class TestVerifyStructuralErrors:
+    """The two verify_structural deny branches that the happy-path and
+    host-bits tests don't reach."""
+
+    def test_non_ipv6_cred_addr_rejected(self):
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        cred = Credential(
+            id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
+            addr="not-an-ip", caps=["mesh"],
+            iat=now, exp=now + dt.timedelta(hours=1),
+        ).sign(ca.ca_priv)
+        rec = NodeRecord(
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            hostname="n1", cred=cred,
+        ).sign(node.id_priv)
+        with pytest.raises(ValueError, match="not a valid IPv6"):
+            rec.verify_structural()
+
+    def test_idpub_credential_mismatch_rejected(self):
+        # addr derives from record.id_pub (A), but the credential names a
+        # DIFFERENT id_pub (B) — reaches the cross-check the host-bits test shadows.
+        ca = CAKeys.generate()
+        a = NodeKeys.generate()
+        b = NodeKeys.generate()
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        cred = Credential(
+            id_pub=b.id_pub_bytes, wg_pub=b.wg_pub_bytes,
+            addr=derive_addr(a.id_pub_bytes), caps=["mesh"],
+            iat=now, exp=now + dt.timedelta(hours=1),
+        ).sign(ca.ca_priv)
+        rec = NodeRecord(
+            id_pub=a.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            hostname="n1", cred=cred,
+        ).sign(a.id_priv)
+        with pytest.raises(ValueError, match="does not match"):
+            rec.verify_structural()

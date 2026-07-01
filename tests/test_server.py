@@ -110,6 +110,30 @@ class TestServerIPv6Binding:
         assert data == {"status": "ok"}
 
 
+class TestCaCertEndpoint:
+    def test_ca_cert_served_when_hub_has_ca(self, tmp_path):
+        ca_keys = CAKeys.generate()
+        ca = CA(ca_keys, tmp_path)
+        srv = ControlServer(
+            listen="[::1]:0", directory=Directory(),
+            get_ca_pubs=lambda: [ca_keys.ca_pub_bytes], get_revoked=set, ca=ca,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            data = _get(port, "/ca-cert")
+            assert "BEGIN CERTIFICATE" in data["ca_cert"]
+        finally:
+            srv.stop()
+
+    def test_ca_cert_404_without_ca(self, running_server):
+        import urllib.error
+        _, port, *_ = running_server  # fixture builds the server with ca=None
+        with pytest.raises(urllib.error.HTTPError) as e:
+            _get(port, "/ca-cert")
+        assert e.value.code == 404
+
+
 class TestDirectoryEndpoint:
     def test_returns_records(self, running_server):
         _, port, directory, ca, node, cred = running_server
