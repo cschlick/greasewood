@@ -164,10 +164,40 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             cred = self.ca.renew(req)
-            self._send_json(cred.to_dict())
         except ValueError as e:
-            log.warning("renew rejected: %s", e)
-            self._send_json({"error": str(e)}, 400)
+            cred = self._reroot_reissue(req, e)
+            if cred is None:
+                log.warning("renew rejected: %s", e)
+                self._send_json({"error": str(e)}, 400)
+                return
+        self._send_json(cred.to_dict())
+
+    def _reroot_reissue(self, req, orig_err):
+        """Re-root fallback. This hub never enrolled the requester (no local
+        node_info), but a *manual re-root* points existing nodes at a new hub
+        that didn't issue them. If we hold a directory record for that identity
+        signed by a currently-trusted CA — the outgoing hub, during the overlap
+        window — re-issue under THIS CA using the record's CA-attested (level-b)
+        hostname + caps. Returns the new Credential, or None to surface the
+        original error.
+
+        Only fires for 'unknown node' — auth, skew, replay, and revocation were
+        already enforced above / in ca.renew. Safe because: the record's cred is
+        verified against the trusted CA set (an attacker can't forge caps/name
+        without a trusted CA key), and the requester proved id_priv possession.
+        """
+        if "unknown node" not in str(orig_err):
+            return None
+        rec = self.directory.get(req.id_pub.hex())
+        if rec is None or rec.cred.id_pub != req.id_pub:
+            return None
+        try:
+            rec.cred.verify(self.get_ca_pubs())   # signed by a currently-trusted CA
+        except ValueError:
+            return None
+        log.info("re-root: re-issuing %s (hostname=%s) from a trusted record",
+                 req.id_pub.hex()[:16], rec.hostname)
+        return self.ca.issue(req.id_pub, req.wg_pub, rec.hostname, list(rec.cred.caps))
 
     def _handle_cert(self, body: dict) -> None:
         import datetime as _dt

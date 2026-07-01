@@ -187,6 +187,74 @@ class TestCertSanAuthorization:
             srv.stop()
 
 
+class TestRerootReissue:
+    """The re-root fallback: a hub that never enrolled a node (no local
+    node_info) still renews it if it holds a directory record for that identity
+    signed by a currently-trusted CA — using the record's CA-attested
+    hostname/caps. This is what lets nodes migrate to a new hub without copying
+    the nodes/ directory."""
+
+    def _hub_b(self, tmp_path, trusted, directory):
+        """Server for hub B (its own CA) that trusts the CAs in `trusted`."""
+        b_ca = CAKeys.generate()
+        srv = ControlServer(
+            listen="[::1]:0", directory=directory,
+            get_ca_pubs=lambda: [c.ca_pub_bytes for c in trusted],
+            get_revoked=set, ca=CA(b_ca, tmp_path),
+        )
+        return srv, srv._server.server_address[1], b_ca
+
+    def _renew_req(self, node):
+        return RenewRequest(
+            id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes, nonce="rr",
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        ).sign(node.id_priv).to_dict()
+
+    def test_reissues_from_trusted_old_record(self, tmp_path):
+        a_ca = CAKeys.generate()          # the outgoing hub's CA
+        node = NodeKeys.generate()
+        # A record issued by the OLD hub (A), present in B's directory.
+        cred_a = _make_cred(node, a_ca, hostname="db")
+        directory = Directory()
+        directory.put(_make_record(node, cred_a))
+        # B trusts both its own CA and A during the overlap.
+        srv, port, b_ca = self._hub_b(tmp_path, trusted=[a_ca], directory=directory)
+        srv.start()
+        try:
+            status, body = _post(port, "/renew", self._renew_req(node))
+            assert status == 200, body
+            new = Credential.from_dict(body)
+            new.verify([b_ca.ca_pub_bytes])          # now signed by B's CA
+            assert new.hostname == "db"              # attested name carried over
+        finally:
+            srv.stop()
+
+    def test_unknown_without_record_still_refused(self, tmp_path):
+        a_ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        srv, port, _ = self._hub_b(tmp_path, trusted=[a_ca], directory=Directory())
+        srv.start()
+        try:
+            status, body = _post(port, "/renew", self._renew_req(node))
+            assert status == 400 and "unknown node" in body["error"]
+        finally:
+            srv.stop()
+
+    def test_untrusted_old_record_refused(self, tmp_path):
+        a_ca = CAKeys.generate()          # a CA B does NOT trust
+        node = NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(node, _make_cred(node, a_ca, hostname="db")))
+        # B trusts only itself — the old record's CA is not in the trusted set.
+        srv, port, _ = self._hub_b(tmp_path, trusted=[], directory=directory)
+        srv.start()
+        try:
+            status, body = _post(port, "/renew", self._renew_req(node))
+            assert status == 400 and "unknown node" in body["error"]
+        finally:
+            srv.stop()
+
+
 class TestCaCertEndpoint:
     def test_ca_cert_served_when_hub_has_ca(self, tmp_path):
         ca_keys = CAKeys.generate()
