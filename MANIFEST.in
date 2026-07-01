@@ -1,0 +1,4 @@
+include LICENSE
+include RUNBOOK.md SECURITY.md
+include greasewood.toml.example
+recursive-include systemd *

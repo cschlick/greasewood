@@ -2,16 +2,45 @@
 name = "greasewood"
 version = "0.1.0"
 description = "Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "cschlick" }]
+keywords = [
+    "wireguard", "mesh", "vpn", "overlay-network", "ipv6",
+    "certificate-authority", "self-hosted",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Security",
+]
 dependencies = [
     "cryptography>=42.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://gitlab.com/cschlick/greasewood"
+Repository = "https://gitlab.com/cschlick/greasewood"
+Issues = "https://gitlab.com/cschlick/greasewood/-/issues"
 
 [project.scripts]
 gw = "greasewood.cli:main"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 # Pin the package — the repo has other top-level dirs (systemd/, tests/) that
