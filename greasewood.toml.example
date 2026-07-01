@@ -40,12 +40,15 @@ seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"]
 # Where to send enroll/renew requests.
 root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 
-# Name resolution (opt-in). When true, the daemon maintains a managed block in
+# Name resolution (ON by default). The daemon maintains a managed block in
 # /etc/hosts mapping overlay addresses to "<hostname>.<mesh_domain>", so you can
-# `ping db.internal`. The domain is also the default TLS cert name from
+# `ping db.gw.internal`. The domain is also the default TLS cert name from
 # `gw cert-request`, so a node's address name matches its certificate SAN.
-hosts_sync = false
-mesh_domain = "internal"
+# It's namespaced under a dedicated ".gw.internal" so it can't shadow names an
+# org already resolves via internal DNS for ".internal". Set hosts_sync=false
+# (or `--no-hosts-sync`) to opt out; pick a distinct mesh_domain per fleet.
+hosts_sync = true
+mesh_domain = "gw.internal"
 
 
 [ca]

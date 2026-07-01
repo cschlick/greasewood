@@ -75,7 +75,7 @@ class _Handler(BaseHTTPRequestHandler):
     get_revoked: "callable" = staticmethod(set)
     cache_path: "Path | None" = None
     tls_cert_ttl: "dt.timedelta | None" = None
-    mesh_domain: str = "internal"
+    mesh_domain: str = "gw.internal"
     replay: "_ReplayGuard" = _ReplayGuard()
 
     def log_message(self, fmt, *args) -> None:
@@ -251,7 +251,7 @@ class ControlServer:
         ca: "CA | None" = None,
         cache_path: "Path | None" = None,
         tls_cert_ttl=None,
-        mesh_domain: str = "internal",
+        mesh_domain: str = "gw.internal",
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
