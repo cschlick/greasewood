@@ -1613,8 +1613,13 @@ def cmd_diagnose(args) -> int:
         print("no peer records in the directory cache yet — is sync reaching the hub?")
         return 0
 
+    own_rec = directory.get(own_id)  # our own published record (endpoint check)
     want = getattr(args, "hostname", None)
     counts = {"linked": 0, "no-handshake": 0, "rejected": 0, "policy": 0}
+    # Set if an outbound-only peer has a live link to us: since it advertises no
+    # endpoint, it could only have reached us by dialing OURS — proof we're
+    # actually inbound-reachable (a fact a node otherwise can't observe itself).
+    proved_inbound = False
 
     for r in records:
         if want and r.hostname != want:
@@ -1672,6 +1677,8 @@ def cmd_diagnose(args) -> int:
             status, bucket = "verified but NOT installed (reconcile not run / not root?)", "no-handshake"
         elif live.latest_handshake and (now_epoch - live.latest_handshake) <= 180:
             status, bucket = f"LINKED ({_handshake_phrase(live, now_epoch)})", "linked"
+            if r.inbound == "no" or not r.endpoints:
+                proved_inbound = True
         else:
             status, bucket = f"installed, {_handshake_phrase(live, now_epoch)}", "no-handshake"
             # Why no handshake? Endpoint / inbound-asymmetry hints.
@@ -1696,6 +1703,28 @@ def cmd_diagnose(args) -> int:
     print()
     print(f"summary: {counts['linked']} linked, {counts['no-handshake']} configured/no-handshake, "
           f"{counts['rejected']} rejected, {counts['policy']} policy-denied")
+
+    # Self inbound-reachability advisory (best-effort, from live handshakes only —
+    # never auto-changes the declared value; just surfaces evidence for/against).
+    if os.geteuid() == 0 and live_peers:
+        if cfg.inbound == "no":
+            print("reachability: inbound=no (outbound-only) — you advertise no "
+                  "endpoint; links form only when you initiate to a reachable peer.")
+        elif proved_inbound:
+            print("reachability: inbound=yes CONFIRMED — an outbound-only peer "
+                  "reached you, so your endpoint is dialable from the mesh.")
+        elif own_rec is not None and not own_rec.endpoints:
+            print("reachability: inbound=yes but you advertise NO endpoint — peers "
+                  "have nothing to dial; set [network] endpoints, or you'll only "
+                  "link when you're the initiator.")
+        elif counts["linked"] == 0:
+            print("reachability: inbound=yes but no peer has handshaked — if this "
+                  "persists, your advertised endpoint may be blocked inbound "
+                  "(firewall/NAT); verify the mesh UDP port is open. (Normal right "
+                  "after startup.)")
+        else:
+            print("reachability: inbound=yes — reachable-looking, but unconfirmed "
+                  "(no outbound-only peer has dialed in to prove it).")
     return 0
 
 
