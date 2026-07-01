@@ -167,6 +167,43 @@ class TestNodeRecord:
         with pytest.raises(ValueError):
             r.verify([ca.ca_pub_bytes], revoked=set())
 
+    def test_verify_is_prefix_agnostic(self):
+        # A cred whose addr uses a DIFFERENT overlay /64 but the correct host
+        # bits must still verify: the host portion is the self-certifying part;
+        # the prefix is attested by the CA signature. This is what lets one
+        # host be a node on two meshes with different prefixes.
+        import ipaddress
+        from greasewood.keys import derive_addr, parse_overlay_prefix, host_bits
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        other_prefix = parse_overlay_prefix("fdde:cafc:0ffe:e::")
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        cred = Credential(
+            id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
+            addr=derive_addr(node.id_pub_bytes, other_prefix),  # foreign prefix
+            caps=["mesh"], iat=now, exp=now + dt.timedelta(hours=1),
+        ).sign(ca.ca_priv)
+        r = make_record(node, cred)
+        r.verify([ca.ca_pub_bytes], revoked=set())   # no raise
+        # sanity: the addr really is on the other prefix, correct host bits
+        packed = ipaddress.IPv6Address(cred.addr).packed
+        assert packed[:8] == other_prefix
+        assert packed[8:] == host_bits(node.id_pub_bytes)
+
+    def test_wrong_host_bits_rejected(self):
+        # Same prefix but host bits not derived from id_pub → rejected.
+        import ipaddress
+        from greasewood.keys import OVERLAY_PREFIX_BYTES
+        from dataclasses import replace
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        bad_addr = str(ipaddress.IPv6Address(OVERLAY_PREFIX_BYTES + bytes(8)))  # ::0 host
+        cred = make_cred(node, ca)
+        cred = replace(cred, addr=bad_addr).sign(ca.ca_priv)
+        r = make_record(node, cred)
+        with pytest.raises(ValueError, match="host portion"):
+            r.verify([ca.ca_pub_bytes], revoked=set())
+
     def test_revoked_node_rejected(self):
         ca = CAKeys.generate()
         node = NodeKeys.generate()

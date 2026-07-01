@@ -59,7 +59,7 @@ def test_render_block_sorted_and_suffixed():
     recs = [_rec("db", "fd8d::2"), _rec("api", "fd8d::3")]
     block = hosts.render_block(recs, "internal")
     lines = block.splitlines()
-    assert lines[0] == hosts._BEGIN and lines[-1] == hosts._END
+    assert lines[0] == hosts._begin("internal") and lines[-1] == hosts._end("internal")
     # sorted by hostname → api before db
     assert lines[1] == "fd8d::3\tapi.internal"
     assert lines[2] == "fd8d::2\tdb.internal"
@@ -73,7 +73,7 @@ def test_sync_preserves_user_lines(tmp_path):
     text = p.read_text()
     assert "127.0.0.1 localhost" in text          # user lines kept
     assert "fd8d::2\tdb.internal" in text
-    assert hosts._BEGIN in text and hosts._END in text
+    assert hosts._begin("internal") in text and hosts._end("internal") in text
 
 
 def test_sync_is_idempotent(tmp_path):
@@ -90,7 +90,7 @@ def test_sync_replaces_old_block(tmp_path):
     hosts.sync([_rec("db", "fd8d::2")], "internal", path=p)
     hosts.sync([_rec("db", "fd8d::9"), _rec("api", "fd8d::3")], "internal", path=p)
     text = p.read_text()
-    assert text.count(hosts._BEGIN) == 1          # exactly one block
+    assert text.count(hosts._begin("internal")) == 1   # exactly one block
     assert "fd8d::9\tdb.internal" in text          # updated addr
     assert "fd8d::2" not in text                    # stale addr gone
     assert "api.internal" in text
@@ -100,8 +100,25 @@ def test_remove_block(tmp_path):
     p = tmp_path / "hosts"
     p.write_text("127.0.0.1 localhost\n")
     hosts.sync([_rec("db", "fd8d::2")], "internal", path=p)
-    assert hosts.remove_block(path=p) is True
+    assert hosts.remove_block("internal", path=p) is True
     text = p.read_text()
-    assert hosts._BEGIN not in text and "db.internal" not in text
+    assert hosts._begin("internal") not in text and "db.internal" not in text
     assert "127.0.0.1 localhost" in text           # user line survives
-    assert hosts.remove_block(path=p) is False      # nothing left to remove
+    assert hosts.remove_block("internal", path=p) is False   # nothing left
+
+
+def test_two_meshes_coexist_and_remove_independently(tmp_path):
+    """A host on two meshes keeps a separate, independently-managed block per
+    mesh domain — syncing/removing one must not touch the other."""
+    p = tmp_path / "hosts"
+    p.write_text("127.0.0.1 localhost\n")
+    hosts.sync([_rec("db", "fd8d::2")], "alpha", path=p)
+    hosts.sync([_rec("web", "fdcc::5")], "beta", path=p)
+    text = p.read_text()
+    assert "db.alpha" in text and "web.beta" in text          # both blocks present
+    assert hosts._begin("alpha") in text and hosts._begin("beta") in text
+
+    hosts.remove_block("alpha", path=p)                        # drop only alpha
+    text = p.read_text()
+    assert "db.alpha" not in text and hosts._begin("alpha") not in text
+    assert "web.beta" in text and hosts._begin("beta") in text  # beta untouched

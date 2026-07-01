@@ -27,6 +27,7 @@ class Config:
     # Network
     wg_interface: str
     listen_port: int
+    overlay_prefix: str    # the fleet's overlay /64, e.g. "fd8d:e5c1:db1a:7::"
 
     # Name resolution: maintain a managed /etc/hosts block mapping overlay
     # addresses to "<hostname>.<mesh_domain>". The domain is also the default
@@ -88,7 +89,7 @@ def load_config(path: Path) -> Config:
     if not node.get("hostname"):
         sys.exit("config: [node] hostname is required")
 
-    return Config(
+    cfg = Config(
         data_dir=Path(node.get("data_dir", "/var/lib/greasewood")).expanduser(),
         hostname=node["hostname"],
         role=node.get("role", "node"),
@@ -98,6 +99,7 @@ def load_config(path: Path) -> Config:
 
         wg_interface=net.get("interface", "gw-mesh"),
         listen_port=int(net.get("listen_port", 51900)),
+        overlay_prefix=net.get("overlay_prefix", "fd8d:e5c1:db1a:7::"),
 
         seeds=net.get("seeds", []),
         root_url=net.get("root_url", ""),
@@ -116,3 +118,14 @@ def load_config(path: Path) -> Config:
         tls_cert_ttl=_parse_duration(hub.get("tls_cert_ttl", "7d")),
         door_port=int(hub.get("door_port", 51901)),
     )
+
+    # Activate this config's overlay prefix process-wide, so address
+    # construction (own address, cred issuance) uses the fleet's /64. One daemon
+    # serves one mesh, so a process-global is correct. Verification is
+    # prefix-agnostic, so a bad value here never affects trust.
+    from .keys import set_overlay_prefix, parse_overlay_prefix
+    try:
+        set_overlay_prefix(parse_overlay_prefix(cfg.overlay_prefix))
+    except Exception:
+        pass  # keep the default on a malformed prefix
+    return cfg

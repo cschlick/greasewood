@@ -198,11 +198,20 @@ def cmd_setup_hub(args) -> int:
     # The role is "hub"; the hostname is just this machine's name by default
     # (short form, no domain), overridable with --hostname.
     import socket
+    from .keys import set_overlay_prefix, parse_overlay_prefix
     hostname = args.hostname or socket.gethostname().split(".")[0] or "hub"
     listen_port = args.listen_port
     control_port = args.control_port
     caps = [c.strip() for c in args.caps.split(",")]
     ttl = _parse_duration(args.credential_ttl)
+    interface = args.interface
+    overlay_prefix = args.overlay_prefix
+    mesh_domain = args.mesh_domain
+    # Activate this fleet's overlay /64 before we derive the hub's own address.
+    try:
+        set_overlay_prefix(parse_overlay_prefix(overlay_prefix))
+    except Exception:
+        sys.exit(f"invalid --overlay-prefix {overlay_prefix!r} (want e.g. fd12:3456:789a:0::)")
 
     endpoint = args.endpoint
     if not endpoint:
@@ -249,12 +258,13 @@ inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "gw-mesh"
+interface = "{interface}"
 listen_port = {listen_port}
+overlay_prefix = "{overlay_prefix}"
 seeds = []
 root_url = "http://[::1]:{control_port}"
 hosts_sync = {hosts_sync}
-mesh_domain = "internal"
+mesh_domain = "{mesh_domain}"
 
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
@@ -601,6 +611,15 @@ def cmd_join(args) -> int:
         sys.exit("credential id_pub mismatch — something went wrong")
     log.info("credential verified, expires %s", cred.exp.strftime("%Y-%m-%d %H:%M UTC"))
 
+    # Learn the fleet's overlay /64 from the credential the CA just issued (the
+    # authoritative source), and activate it so our own address / record are
+    # built under the right prefix. This is what lets a node join a mesh on any
+    # prefix without being told out of band.
+    import ipaddress as _ip
+    from .keys import set_overlay_prefix, format_overlay_prefix
+    overlay_prefix = format_overlay_prefix(_ip.IPv6Address(cred.addr).packed[:8])
+    set_overlay_prefix(_ip.IPv6Address(cred.addr).packed[:8])
+
     # Build directory with our record + hub's record
     dir_cache = data_dir / "directory.json"
     directory = Directory.load(dir_cache)
@@ -668,8 +687,11 @@ def cmd_join(args) -> int:
         hosts_sync = "true"
     else:
         hosts_sync = "false"
-    mesh_domain = (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
-                   else "internal")
+    # mesh_domain / interface: explicit flag wins, else keep prior, else default.
+    mesh_domain = (args.mesh_domain or (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
+                   else "internal"))
+    interface = (args.interface or (prior.wg_interface if prior and getattr(prior, "wg_interface", None)
+                 else "gw-mesh"))
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
@@ -680,8 +702,9 @@ inbound = "{node_inbound}"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
-interface = "gw-mesh"
+interface = "{interface}"
 listen_port = {listen_port}
+overlay_prefix = "{overlay_prefix}"
 seeds = {seeds_list}
 root_url = {root_url_val}
 hosts_sync = {hosts_sync}
@@ -900,6 +923,7 @@ caps = {json_mod.dumps(cfg.caps)}{endpoint_line}
 [network]
 interface = "{cfg.wg_interface}"
 listen_port = {cfg.listen_port}
+overlay_prefix = "{cfg.overlay_prefix}"
 seeds = {json_mod.dumps(cfg.seeds)}
 root_url = "{cfg.root_url}"
 hosts_sync = {hosts_sync}
@@ -1458,7 +1482,7 @@ def cmd_run(args) -> int:
         log.info("hosts: maintaining /etc/hosts mesh block under .%s", cfg.mesh_domain)
     else:
         try:
-            if _hosts.remove_block():
+            if _hosts.remove_block(cfg.mesh_domain):
                 log.info("hosts: removed managed /etc/hosts block (sync disabled)")
         except Exception as e:
             log.warning("hosts: could not clean /etc/hosts: %s", e)
@@ -1802,15 +1826,17 @@ def cmd_purge(args) -> int:
 
     cfg_path = Path(args.config)
 
-    # Determine interface name and data_dir from config if available
+    # Determine interface name, data_dir, and mesh domain from config if available
     iface = "gw-mesh"
     data_dir = Path("/var/lib/greasewood")
+    mesh_domain = "internal"
     if cfg_path.exists():
         try:
             from .config import load_config
             cfg = load_config(cfg_path)
             iface = cfg.wg_interface
             data_dir = cfg.data_dir
+            mesh_domain = cfg.mesh_domain
         except Exception:
             pass
 
@@ -1853,7 +1879,7 @@ def cmd_purge(args) -> int:
     # Remove the managed /etc/hosts block, if any
     try:
         from . import hosts
-        if hosts.remove_block():
+        if hosts.remove_block(mesh_domain):
             removed.append("/etc/hosts greasewood block")
     except Exception as e:
         failed.append(f"/etc/hosts: {e}")
@@ -1984,6 +2010,14 @@ def main(argv=None) -> int:
                     help="UDP port for the enrollment door (carried in tokens)")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address (auto-detected if omitted)")
+    sp.add_argument("--interface", default="gw-mesh",
+                    help="WireGuard interface name (default: gw-mesh; use a "
+                         "distinct name per mesh on a multi-homed host)")
+    sp.add_argument("--overlay-prefix", dest="overlay_prefix",
+                    default="fd8d:e5c1:db1a:7::",
+                    help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")
+    sp.add_argument("--mesh-domain", dest="mesh_domain", default="internal",
+                    help="name suffix for /etc/hosts + TLS (default: internal)")
     sp.add_argument("--caps", default="mesh")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
@@ -2012,6 +2046,12 @@ def main(argv=None) -> int:
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
+    sp.add_argument("--interface", default=None,
+                    help="WireGuard interface name (default: keep existing, else "
+                         "gw-mesh; use a distinct name per mesh on one host)")
+    sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
+                    help="name suffix for /etc/hosts + TLS (default: keep "
+                         "existing, else internal)")
     sp.add_argument("--caps", default=None,
                     help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",

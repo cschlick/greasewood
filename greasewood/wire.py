@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import ipaddress
 import json
 import secrets
 from dataclasses import dataclass, field, replace
@@ -33,7 +34,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .keys import derive_addr
+from .keys import derive_addr, host_bits
 
 _UTC = dt.timezone.utc
 
@@ -175,11 +176,17 @@ class NodeRecord:
         except InvalidSignature:
             raise ValueError("invalid self-signature")
 
-        # addr must derive from id_pub (step 4)
-        expected_addr = derive_addr(self.id_pub)
-        if self.cred.addr != expected_addr:
+        # addr must derive from id_pub (step 4) — prefix-agnostic: bind only the
+        # 64-bit HOST portion to the identity (that's the self-certifying part).
+        # The network /64 is attested by the CA signature, so different fleets
+        # can use different prefixes and a cred stays verifiable.
+        try:
+            addr_host = ipaddress.IPv6Address(self.cred.addr).packed[8:]
+        except (ValueError, ipaddress.AddressValueError):
+            raise ValueError(f"credential addr is not a valid IPv6 address: {self.cred.addr!r}")
+        if addr_host != host_bits(self.id_pub):
             raise ValueError(
-                f"addr mismatch: record claims {self.cred.addr}, expected {expected_addr}"
+                f"addr host portion of {self.cred.addr} not derived from id_pub"
             )
 
         # id_pub in record must match id_pub in credential
