@@ -21,19 +21,19 @@ from greasewood.wire import Credential, NodeRecord
 _UTC = dt.timezone.utc
 
 
-def _cred(node, ca, caps=("mesh",), ttl=3600):
+def _cred(node, ca, hostname, caps=("mesh",), ttl=3600):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
-        addr=derive_addr(node.id_pub_bytes), caps=list(caps),
+        addr=derive_addr(node.id_pub_bytes), hostname=hostname, caps=list(caps),
         iat=now, exp=now + dt.timedelta(seconds=ttl),
     ).sign(ca.ca_priv)
 
 
-def _record(node, cred, hostname):
+def _record(node, cred):
     return NodeRecord(
         id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
-        hostname=hostname, cred=cred,
+        cred=cred,
     ).sign(node.id_priv)
 
 
@@ -65,15 +65,15 @@ def test_diagnose_classifies_rejections(tmp_path, capsys, monkeypatch):
 
     directory = Directory()
     n1 = NodeKeys.generate()
-    directory.put(_record(n1, _cred(n1, evil), "untrusted"))            # untrusted CA
+    directory.put(_record(n1, _cred(n1, evil, "untrusted")))            # untrusted CA
     n2 = NodeKeys.generate()
-    directory.put(_record(n2, _cred(n2, trusted, ttl=-10), "expired"))  # expired
+    directory.put(_record(n2, _cred(n2, trusted, "expired", ttl=-10)))  # expired
     n3 = NodeKeys.generate()
-    directory.put(_record(n3, _cred(n3, trusted), "revoked-node"))      # revoked
+    directory.put(_record(n3, _cred(n3, trusted, "revoked-node")))      # revoked
     (tmp_path / "revoked.json").write_text(
         json.dumps({"revoked": [n3.id_pub_hex]}))
     n4 = NodeKeys.generate()
-    directory.put(_record(n4, _cred(n4, trusted, caps=("tls",)), "policy"))  # no mesh cap
+    directory.put(_record(n4, _cred(n4, trusted, "policy", caps=("tls",))))  # no mesh cap
     directory.save(tmp_path / "directory.json")
 
     args = types.SimpleNamespace(config=str(cfg), hostname=None)
@@ -95,9 +95,9 @@ def test_diagnose_targeted_single_peer(tmp_path, capsys, monkeypatch):
 
     directory = Directory()
     keep = NodeKeys.generate()
-    directory.put(_record(keep, _cred(keep, trusted, ttl=-10), "keep"))
+    directory.put(_record(keep, _cred(keep, trusted, "keep", ttl=-10)))
     other = NodeKeys.generate()
-    directory.put(_record(other, _cred(other, trusted, ttl=-10), "other"))
+    directory.put(_record(other, _cred(other, trusted, "other", ttl=-10)))
     directory.save(tmp_path / "directory.json")
 
     args = types.SimpleNamespace(config=str(cfg), hostname="keep")

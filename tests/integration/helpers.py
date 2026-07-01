@@ -98,7 +98,7 @@ def directory_records(hub_cid: str, port: int = 51902) -> list:
 
 
 def directory_hostnames(hub_cid: str) -> set[str]:
-    return {r["hostname"] for r in directory_records(hub_cid)}
+    return {r["cred"]["hostname"] for r in directory_records(hub_cid)}
 
 
 def directory_size(hub_cid: str) -> int:

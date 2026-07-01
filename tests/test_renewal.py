@@ -18,7 +18,7 @@ def _cred(node, ca):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes, addr=node.addr,
-        caps=["mesh"], iat=now, exp=now + dt.timedelta(hours=1),
+        hostname="n1", caps=["mesh"], iat=now, exp=now + dt.timedelta(hours=1),
     ).sign(ca.ca_priv)
 
 

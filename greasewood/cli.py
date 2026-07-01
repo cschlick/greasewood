@@ -294,7 +294,6 @@ door_port = {args.door_port}
         seq=seq,
         endpoints=[endpoint] if endpoint else [],
         inbound="yes",
-        hostname=hostname,
         cred=cred,
     ).sign(node_keys.id_priv)
     directory.put(record)
@@ -647,7 +646,6 @@ def cmd_join(args) -> int:
         seq=seq,
         endpoints=adv_endpoints,
         inbound=node_inbound,
-        hostname=hostname,
         cred=cred,
     ).sign(node_keys.id_priv)
     directory.put(record)
@@ -1256,7 +1254,7 @@ def cmd_rename(args) -> int:
     inbound = existing.inbound if existing else cfg.inbound
     record = NodeRecord(
         id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        inbound=inbound, hostname=newname, cred=cred,
+        inbound=inbound, cred=cred,
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -1412,7 +1410,6 @@ def cmd_run(args) -> int:
             seq=own_record.seq + 1,
             endpoints=eff_endpoints,
             inbound=cfg.inbound,
-            hostname=cfg.hostname,
             cred=own_record.cred,
         ).sign(keys.id_priv)
         directory.put(own_record)

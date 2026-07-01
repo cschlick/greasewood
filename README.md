@@ -35,10 +35,12 @@ is nothing in the data path but WireGuard itself.
 **Two signed objects.**
 
 - **Credential** — signed by the CA. Binds `id_pub`, `wg_pub`, overlay address,
-  capabilities, and an expiry. Slow-moving (default 24 h TTL).
+  **hostname**, capabilities, and an expiry. Slow-moving (default 24 h TTL). The
+  hostname lives here (not in the record) so a node can't self-assert a name the
+  CA didn't grant it — the name is CA-attested end to end.
 - **NodeRecord** — signed by the node's own `id_priv`. Carries the credential
-  plus mutable facts (endpoints, hostname, a sequence number). Fast-moving;
-  this is what gets published and gossiped through the directory.
+  plus fast-moving facts (endpoints, a sequence number); its `hostname` is read
+  from the credential. This is what gets published through the directory.
 
 **Self-certifying addresses.** A node's overlay address is
 `prefix : truncate64(blake2s(id_pub))`. Any peer recomputes it from `id_pub`

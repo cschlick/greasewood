@@ -58,6 +58,10 @@ Additional control-plane protections:
   clock-independent checks (self-sig, addr derivation, id/cred consistency)
   before it can enter the directory, so a malicious or compromised directory
   response cannot shadow a real record with a high-sequence forgery.
+- **Hostname is CA-attested** — the mesh hostname lives in the CA-signed
+  credential, not as a self-asserted `NodeRecord` field. A node therefore cannot
+  publish a name the CA didn't issue it, so plain name resolution (the managed
+  `/etc/hosts` block) can't be hijacked by a member claiming another's name.
 - **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
   only from the CA keys they are configured to trust. Moving the CA is a
   deliberate re-root (a config change to that set), not an automatic runtime
