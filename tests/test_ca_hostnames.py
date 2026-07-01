@@ -65,6 +65,27 @@ def test_same_node_can_rename_to_free_name(tmp_path):
     ca.issue(id1, wg1, "db2", ["mesh"])  # no raise
 
 
+def test_revoke_frees_hostname_for_reuse(tmp_path):
+    """Revoking a node releases its hostname so a different identity can take it."""
+    ca = _ca(tmp_path)
+    id1, wg1 = _node()
+    id2, wg2 = _node()
+    ca.issue(id1, wg1, "db", ["mesh"])
+    with pytest.raises(ValueError, match="already in use"):
+        ca.issue(id2, wg2, "db", ["mesh"])
+
+    freed = ca.add_revoke(id1)
+    assert freed is True  # the name was held and is now released
+
+    ca.issue(id2, wg2, "db", ["mesh"])  # no raise — name is free now
+
+
+def test_forget_node_missing_is_noop(tmp_path):
+    ca = _ca(tmp_path)
+    idx, _ = _node()
+    assert ca.forget_node(idx) is False  # nothing to remove
+
+
 def test_renew_does_not_self_conflict(tmp_path):
     ca = _ca(tmp_path)
     k = NodeKeys.generate()

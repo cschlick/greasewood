@@ -2,7 +2,7 @@
 greasewood.renewal — credential renewal loop (§10.3).
 
 Renews at ~half the remaining TTL plus ±10% jitter, giving several retry
-windows before expiry. Jitter spreads load across the fleet so the root
+windows before expiry. Jitter spreads load across the fleet so the hub
 doesn't see a thundering herd at the N-hour mark.
 
 On success: embeds the new credential in a fresh NodeRecord (seq bumped),

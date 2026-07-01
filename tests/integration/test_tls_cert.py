@@ -44,16 +44,16 @@ t.join(timeout=5)
 """
 
 
-def test_node_requests_and_uses_tls_cert(gw_root, gw_image, gw_network):
+def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
     nodes = []
     try:
         # Node enrolled WITH the tls capability.
-        node = bring_up_node(gw_image, gw_network, gw_root,
+        node = bring_up_node(gw_image, gw_network, gw_hub,
                              hostname="dbnode", caps="mesh,tls")
         nodes.append(node["cid"])
 
         # Wait for the node↔hub overlay tunnel before talking to the control plane.
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=30), \
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=30), \
             "node never reached the hub overlay"
 
         # Request a cert for a service name.
@@ -75,7 +75,7 @@ def test_node_requests_and_uses_tls_cert(gw_root, gw_image, gw_network):
         assert "postgres.crt" in st.stdout and "postgres.mesh" in st.stdout, st.stdout
 
         # A node WITHOUT the tls cap is refused.
-        plain = bring_up_node(gw_image, gw_network, gw_root, hostname="plainnode")
+        plain = bring_up_node(gw_image, gw_network, gw_hub, hostname="plainnode")
         nodes.append(plain["cid"])
         r2 = pexec(plain["cid"], "gw", "cert-request",
                    "--san", "x.mesh", "--name", "x", "--out-dir", "/tmp/tls",

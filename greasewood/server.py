@@ -13,7 +13,7 @@ by manually copying a credential from `gw issue`. This server is intended to
 run on the overlay address so all traffic goes through the WireGuard tunnel.
 
 /publish is the exception that may be called before a node is fully in the
-mesh: a newly installed node POSTs its own signed record so the root can
+mesh: a newly installed node POSTs its own signed record so the hub can
 configure a WireGuard peer for it. It is safe to expose because it requires
 a fully valid, CA-signed NodeRecord — a bad actor cannot forge one without
 ca_priv, and the worst they can do with a valid record is cause a failed
@@ -121,7 +121,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_publish(body)
         elif self.path == "/renew":
             if self.ca is None:
-                self.send_error(403, "not a root node")
+                self.send_error(403, "not a hub")
             else:
                 self._handle_renew(body)
         elif self.path == "/cert":
