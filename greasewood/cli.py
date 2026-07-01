@@ -1350,6 +1350,7 @@ def cmd_run(args) -> int:
             ca=ca,
             cache_path=cfg.dir_cache_path,
             tls_cert_ttl=cfg.tls_cert_ttl,
+            mesh_domain=cfg.mesh_domain,
         )
         srv.start()
 

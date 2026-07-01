@@ -7,11 +7,16 @@ import urllib.request
 
 import pytest
 
+import secrets
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from greasewood.ca import CA
 from greasewood.directory import Directory
 from greasewood.keys import CAKeys, NodeKeys
 from greasewood.server import ControlServer
-from greasewood.wire import Credential, NodeRecord, RenewRequest
+from greasewood.wire import Credential, NodeRecord, RenewRequest, CertRequest
 
 _UTC = dt.timezone.utc
 
@@ -108,6 +113,77 @@ class TestServerIPv6Binding:
         _, port, *_ = running_server
         data = _get(port, "/health")
         assert data == {"status": "ok"}
+
+
+class TestCertSanAuthorization:
+    """A node may only get a cert for names it owns — its <hostname>.<domain>,
+    subdomains of it, and its own overlay address. Otherwise a tls-capable node
+    could mint a cert for another node's name and impersonate it."""
+
+    def _hub_with_tls_node(self, tmp_path, hostname="db"):
+        ca_keys = CAKeys.generate()
+        ca = CA(ca_keys, tmp_path)
+        node = NodeKeys.generate()
+        ca.issue(node.id_pub_bytes, node.wg_pub_bytes, hostname, ["mesh", "tls"])
+        srv = ControlServer(
+            listen="[::1]:0", directory=Directory(),
+            get_ca_pubs=lambda: [ca_keys.ca_pub_bytes], get_revoked=set,
+            ca=ca, mesh_domain="internal",
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        return srv, port, node
+
+    def _req(self, node, dns=None, ips=None):
+        leaf = Ed25519PrivateKey.generate()
+        leaf_pub = leaf.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        return CertRequest(
+            id_pub=node.id_pub_bytes, leaf_pub=leaf_pub, cn="",
+            dns=dns or [], ips=ips or [], nonce=secrets.token_hex(8),
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        ).sign(node.id_priv).to_dict()
+
+    def test_own_name_issued(self, tmp_path):
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            status, body = _post(port, "/cert", self._req(node, dns=["db.internal"]))
+            assert status == 200 and "cert" in body
+        finally:
+            srv.stop()
+
+    def test_subdomain_of_own_name_issued(self, tmp_path):
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            status, body = _post(port, "/cert", self._req(node, dns=["pg.db.internal"]))
+            assert status == 200, body
+        finally:
+            srv.stop()
+
+    def test_foreign_name_refused(self, tmp_path):
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            status, body = _post(port, "/cert", self._req(node, dns=["other.internal"]))
+            assert status == 403 and "not authorized" in body["error"]
+        finally:
+            srv.stop()
+
+    def test_foreign_ip_refused(self, tmp_path):
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            status, body = _post(port, "/cert",
+                                 self._req(node, ips=["fd8d:e5c1:db1a:7::dead"]))
+            assert status == 403
+        finally:
+            srv.stop()
+
+    def test_default_san_is_own_name(self, tmp_path):
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            status, body = _post(port, "/cert", self._req(node))  # no SANs
+            assert status == 200 and "cert" in body
+        finally:
+            srv.stop()
 
 
 class TestCaCertEndpoint:

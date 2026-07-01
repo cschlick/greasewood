@@ -406,6 +406,25 @@ peer validates against one trust root — no second PKI. These are real x509
 certs with SANs, distinct from the mesh credential, but signed by the same
 Ed25519 CA key.
 
+**What this is for (and isn't).** WireGuard already encrypts and authenticates
+traffic between nodes, so TLS here is **not** about adding encryption — that part
+would be redundant. Its value is at the layers WireGuard doesn't cover:
+
+- **Service identity by name.** WireGuard authenticates the *node* you reached,
+  not that you reached the *right* node for a name — the `db.internal`→address
+  mapping lives outside its crypto. A cert with `SAN=db.internal`, validated by
+  the client, is what proves "this endpoint is authorized for that name."
+- **Process/tenant identity.** The `gw-mesh` interface is host-global, so any
+  process on a node can use the tunnel. **mTLS** (client certs) narrows a
+  connection to a specific identity and surfaces it into the app (e.g. Postgres
+  cert→role) for authz and audit.
+- **A free, mesh-rooted PKI.** Services that require TLS anyway (`sslmode=verify-full`,
+  HTTPS clients) get certs without you running a second CA.
+
+The value **requires the client to verify** — use `verify-full`/mTLS. Using the
+cert only for opportunistic encryption (no SAN check) *is* just redundant with
+WireGuard.
+
 A node may request certs only if its credential carries the **`tls`**
 capability — grant it at enrollment:
 
@@ -416,21 +435,27 @@ sudo gw join "$TOKEN" --hostname dbnode --caps mesh,tls
 Then, on that node:
 
 ```bash
-sudo gw cert-request --san postgres.mesh --san 2001:db8::5 --name postgres
+# A node may only get a cert for names it OWNS: its own <hostname>.<mesh_domain>,
+# subdomains of it, and its own overlay address. So on node "dbnode":
+sudo gw cert-request --san postgres.dbnode.internal --name postgres
+sudo gw cert-request                 # no --san → defaults to dbnode.internal + addr
 # writes <data_dir>/tls/postgres.key, postgres.crt, ca.crt
-gw cert-status                      # show what's issued and when it expires
+gw cert-status                       # show what's issued and when it expires
 ```
 
 The leaf private key is generated locally and never sent to the hub; only its
 public key goes in the request, which is signed by the node's identity key. The
 hub returns the leaf cert plus the CA cert. Point the service at them — e.g.
 Postgres `ssl_cert_file=postgres.crt`, `ssl_key_file=postgres.key`, and clients
-`sslrootcert=ca.crt`. Certs are short-lived (default 7 days, `[hub] tls_cert_ttl`);
-re-run `cert-request` from cron/timer to renew. Revocation is passive — stop
-renewing and it expires.
+`sslrootcert=ca.crt` with `sslmode=verify-full`. Certs are short-lived (default 7
+days, `[hub] tls_cert_ttl`); re-run `cert-request` from cron/timer to renew.
+Revocation is passive — stop renewing and it expires.
 
-> SANs aren't otherwise constrained — the `tls` capability is the gate, so grant
-> it only to nodes that run services. The hub's CA cert is also at
+> **SANs are constrained to what the node owns** (its CA-registered
+> `<hostname>.<mesh_domain>`, subdomains, and its overlay address) — the hub
+> refuses a cert for another node's name, so a `tls`-capable node can't
+> impersonate a service it doesn't run. The `tls` capability is still the gate;
+> grant it only to nodes that run services. The hub's CA cert is also at
 > `GET /ca-cert`. (After a re-root the CA changes; re-request to pick up the new
 > issuer.)
 

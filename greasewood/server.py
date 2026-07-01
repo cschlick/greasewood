@@ -75,6 +75,7 @@ class _Handler(BaseHTTPRequestHandler):
     get_revoked: "callable" = staticmethod(set)
     cache_path: "Path | None" = None
     tls_cert_ttl: "dt.timedelta | None" = None
+    mesh_domain: str = "internal"
     replay: "_ReplayGuard" = _ReplayGuard()
 
     def log_message(self, fmt, *args) -> None:
@@ -197,13 +198,33 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "node lacks the 'tls' capability"}, 403)
             return
 
-        # SANs default to the node's overlay address if none were requested, so
-        # a service reachable at the node's mesh IP works out of the box.
-        dns = list(req.dns)
-        ips = list(req.ips)
-        if not dns and not ips:
-            ips = [derive_addr(req.id_pub)]
-        cn = req.cn or hostname or derive_addr(req.id_pub)
+        # SAN authorization: a node may only obtain a cert for names it OWNS —
+        # its CA-registered name <hostname>.<mesh_domain> (from node_info, NOT
+        # from the request), subdomains of it, and its own overlay address. This
+        # is what makes a client's SAN validation meaningful: without it, any
+        # tls-capable node could mint a cert for another node's name and
+        # impersonate it to verify-full clients.
+        from .hosts import mesh_name
+        own_name = mesh_name(hostname, self.mesh_domain)
+        own_addr = derive_addr(req.id_pub)
+
+        def _owned_dns(name: str) -> bool:
+            return name == own_name or name.endswith("." + own_name)
+
+        bad = [d for d in req.dns if not _owned_dns(d)]
+        bad += [ip for ip in req.ips if ip != own_addr]
+        if bad:
+            self._send_json({
+                "error": f"not authorized for SAN(s) {bad}; a node may only get a "
+                         f"cert for {own_name!r}, its subdomains, and its own "
+                         f"address {own_addr!r}"
+            }, 403)
+            return
+
+        # Default to the node's own name + address when none were requested.
+        dns = list(req.dns) or [own_name]
+        ips = list(req.ips) or [own_addr]
+        cn = req.cn if (req.cn and _owned_dns(req.cn)) else own_name
 
         ttl = self.tls_cert_ttl or _dt.timedelta(days=7)
         try:
@@ -230,6 +251,7 @@ class ControlServer:
         ca: "CA | None" = None,
         cache_path: "Path | None" = None,
         tls_cert_ttl=None,
+        mesh_domain: str = "internal",
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -241,6 +263,7 @@ class ControlServer:
         Handler.get_revoked = staticmethod(get_revoked)
         Handler.cache_path = cache_path
         Handler.tls_cert_ttl = tls_cert_ttl
+        Handler.mesh_domain = mesh_domain
         Handler.replay = _ReplayGuard()
 
         # Bind one socket per address — typically the hub's overlay address and
