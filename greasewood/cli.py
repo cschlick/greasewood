@@ -206,6 +206,10 @@ def cmd_setup_hub(args) -> int:
     listen_port = args.listen_port
     control_port = args.control_port
     caps = [c.strip() for c in args.caps.split(",")]
+    # The hub must reach every segment (control plane + door), so it always
+    # carries the wildcard group. Harmless when no groups are in use.
+    if "group:*" not in caps:
+        caps.append("group:*")
     ttl = _parse_duration(args.credential_ttl)
     interface = args.interface
     overlay_prefix = args.overlay_prefix
@@ -481,6 +485,12 @@ def cmd_join(args) -> int:
         caps = list(prior.caps)
     else:
         caps = ["mesh"]
+
+    # Segmentation groups ride as `group:<name>` cap tags. --groups sets them
+    # (replacing any prior group tags); omitting --groups keeps the prior ones.
+    if args.groups is not None:
+        caps = [c for c in caps if not c.startswith("group:")]
+        caps += ["group:" + g.strip() for g in args.groups.split(",") if g.strip()]
 
     # inbound: "yes" (reachable, advertise endpoint) or "no" (outbound-only,
     # suppress endpoint — peers won't dial it; it dials them).
@@ -926,6 +936,12 @@ def cmd_hub_promote(args) -> int:
     # this hub accepts the credentials it issues.
     trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
 
+    # A hub must reach every segment — ensure the wildcard group. (Its own
+    # credential picks this up on the next renewal under the new CA.)
+    hub_caps = list(cfg.caps)
+    if "group:*" not in hub_caps:
+        hub_caps.append("group:*")
+
     endpoint_line = (
         f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
     )
@@ -935,7 +951,7 @@ hostname = "{cfg.hostname}"
 data_dir = "{cfg.data_dir}"
 role = "hub"
 inbound = "yes"
-caps = {json_mod.dumps(cfg.caps)}{endpoint_line}
+caps = {json_mod.dumps(hub_caps)}{endpoint_line}
 
 [network]
 interface = "{cfg.wg_interface}"
@@ -1996,6 +2012,11 @@ def main(argv=None) -> int:
                          "existing, else gw.internal)")
     sp.add_argument("--caps", default=None,
                     help="comma-separated caps (default: keep existing, else mesh)")
+    sp.add_argument("--groups", default=None, metavar="G1,G2",
+                    help="segmentation groups this node belongs to (comma-sep). "
+                         "A node only peers with nodes sharing a group; ungrouped "
+                         "nodes form one default pool; the hub reaches all. "
+                         "Sets group membership (replaces prior); omit to keep.")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_const",
