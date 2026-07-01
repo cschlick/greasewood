@@ -45,6 +45,12 @@ Additional control-plane protections:
 
 - **Request authentication** — `/renew` and `/cert` require a signature by the
   requester's `id_priv`; the leaf TLS private key never leaves the node.
+- **TLS SAN authorization** — `/cert` issues a leaf only for names the requester
+  *owns*: its CA-registered `<hostname>.<mesh_domain>`, subdomains of it, and its
+  own overlay address (`derive_addr(id_pub)`). A `tls`-capable node therefore
+  cannot obtain a cert for another node's name, so it cannot impersonate a
+  service it doesn't run to a `verify-full` client. (TLS here is for service
+  *identity*, not extra encryption — WireGuard already encrypts the tunnel.)
 - **Replay protection** — `/renew` and `/cert` are bounded by a ±300s timestamp
   skew window *and* a single-use nonce cache, so a captured request cannot be
   replayed.
