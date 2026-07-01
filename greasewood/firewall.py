@@ -1,15 +1,14 @@
 """
-greasewood.firewall — advisory firewall check + opt-in nftables rule apply.
+greasewood.firewall — advisory firewall check (read-only).
 
-greasewood never touches the firewall on its own. But setup-hub / join can
-*check* the local nftables ruleset and loudly flag ports that look blocked, and
-— only when the operator passes --open-firewall — insert the needed accept
-rules into the host's input chain (tagged with a "greasewood" comment so
-they're easy to find and remove).
+greasewood never modifies the host firewall. setup-hub / join / set-inbound
+*check* the local nftables ruleset and loudly flag ports that look blocked,
+printing the exact rules to add — but applying them is always the operator's
+job (put them in your nftables config; the Ansible `nftables` role does this).
 
-The check is advisory and conservative: it inspects `nft -j list ruleset`,
-and only warns about a port when the input chain is default-drop AND no accept
-rule for that port is found. Sets/ranges it can't parse cause a (clearly worded)
+The check is advisory and conservative: it inspects `nft -j list ruleset` and
+only warns about a port when the input chain is default-drop AND no accept rule
+for that port is found. Sets/ranges it can't parse cause a (clearly worded)
 "couldn't confirm" warning, never a false all-clear.
 
 This is nftables-only. On hosts using iptables/ufw/firewalld or no firewall,
@@ -128,36 +127,8 @@ def missing_rules(ruleset: dict, rules: list[Rule]) -> list[Rule]:
     return missing
 
 
-def find_input_chain(ruleset: dict) -> tuple[str, str, str] | None:
-    """Return (family, table, chain) of the input base chain to insert into,
-    preferring an `inet` chain. None if there isn't exactly one obvious target."""
-    chains = _input_chains(ruleset)
-    if not chains:
-        return None
-    inet = [c for c in chains if c.get("family") == "inet"]
-    chosen = inet[0] if inet else (chains[0] if len(chains) == 1 else None)
-    if chosen is None:
-        return None
-    return chosen["family"], chosen["table"], chosen["name"]
-
-
-def insert_commands(target: tuple[str, str, str], rules: list[Rule]) -> list[list[str]]:
-    """nft argv commands to insert accept rules (tagged) at the top of the
-    input chain. `insert` prepends, so our accepts win over a later drop."""
-    family, table, chain = target
-    cmds = []
-    for r in rules:
-        # nft re-joins argv with spaces and re-lexes, so quotes embedded in a
-        # token survive to the parser. The comment must be a quoted string.
-        cmds.append([
-            "nft", "insert", "rule", family, table, chain,
-            *r.nft_match().split(), "accept", "comment", '"greasewood"',
-        ])
-    return cmds
-
-
 # ---------------------------------------------------------------------------
-# Side-effecting entry points used by the CLI
+# Advisory check (read-only) used by the CLI
 # ---------------------------------------------------------------------------
 
 def _load_ruleset():
@@ -198,47 +169,7 @@ def check(rules: list[Rule], log) -> bool:
     for r in missing:
         scope = f'iifname "{r.iif}" ' if r.iif else ""
         log.warning("  missing: %s%s dport %d  (%s)", scope, r.proto, r.port, r.why)
-    log.warning("Add them with `--open-firewall`, or apply manually (nftables):")
+    log.warning("Apply them manually (nftables), then persist in your nft config:")
     for r in missing:
         log.warning("  %s accept", r.nft_match())
     return False
-
-
-def apply(rules: list[Rule], log) -> bool:
-    """Insert accept rules into the host's input chain. Returns True on success.
-    Idempotent: skips rules already present (greasewood-tagged or otherwise)."""
-    if not shutil.which("nft"):
-        log.error("firewall: nft not found — cannot --open-firewall; apply rules "
-                  "manually.")
-        return False
-    ruleset = _load_ruleset()
-    if ruleset is None:
-        log.error("firewall: could not read nftables ruleset; not applying.")
-        return False
-    target = find_input_chain(ruleset)
-    if target is None:
-        log.error("firewall: no single input base chain found; not applying. "
-                  "Add these rules to your input chain manually:")
-        for r in rules:
-            log.error("  %s accept", r.nft_match())
-        return False
-
-    to_add = missing_rules(ruleset, rules)
-    if not to_add:
-        log.info("firewall: nothing to add — all ports already allowed.")
-        return True
-
-    ok = True
-    for cmd in insert_commands(target, to_add):
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            log.error("firewall: failed to add rule (%s): %s",
-                      " ".join(cmd), r.stderr.strip())
-            ok = False
-        else:
-            log.info("firewall: added %s", " ".join(cmd[6:]))
-    if ok:
-        log.info("firewall: rules added to %s %s %s (tagged \"greasewood\"). "
-                 "Persist them in your nftables config to survive reboot.",
-                 *target)
-    return ok

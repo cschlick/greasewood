@@ -13,7 +13,7 @@ role = "node"
 # "yes"     — open firewall, publicly reachable (cloud VMs, etc.)
 # "no"      — outbound-only: advertises no endpoint, opens no inbound ports,
 #             can only pair with inbound nodes, and can't be a hub. Change with
-#             `gw set-inbound yes --open-firewall`.
+#             `gw set-inbound yes`.
 # "unknown" — unsure (homelab with churny DHCPv6-PD); advertises like "yes"
 inbound = "yes"
 

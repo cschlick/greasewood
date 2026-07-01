@@ -322,11 +322,7 @@ door_port = {args.door_port}
     _print_firewall_help(listen_port, control_port)
     print()
     from . import firewall as _fw
-    _rules = _fw.hub_rules(listen_port, control_port)
-    if getattr(args, "open_firewall", False):
-        _fw.apply(_rules, log)
-    else:
-        _fw.check(_rules, log)
+    _fw.check(_fw.hub_rules(listen_port, control_port), log)
     return 0
 
 
@@ -732,16 +728,12 @@ trusted_pubs = ["{ca_pub_hex}"]
             "your base 'ct state established,related accept' rule for replies. "
             "Note: this node can only pair with inbound-reachable nodes, not "
             "with other outbound-only nodes, and cannot be promoted to hub "
-            "without switching to inbound (gw set-inbound yes --open-firewall)."
+            "without switching to inbound (gw set-inbound yes)."
         )
     else:
         _print_firewall_help(listen_port)
         print()
-        _rules = _fw.node_rules(listen_port, node_inbound)
-        if getattr(args, "open_firewall", False):
-            _fw.apply(_rules, log)
-        else:
-            _fw.check(_rules, log)
+        _fw.check(_fw.node_rules(listen_port, node_inbound), log)
     return 0
 
 
@@ -885,7 +877,7 @@ def cmd_hub_promote(args) -> int:
         sys.exit(
             "this node is outbound-only (inbound=no); a hub must accept inbound "
             "connections. Switch it first:\n"
-            "  sudo gw set-inbound yes --open-firewall\n"
+            "  sudo gw set-inbound yes\n"
             "then re-run hub-promote."
         )
 
@@ -952,11 +944,7 @@ door_port = {cfg.door_port}
     print("Then restart the daemon here:  sudo gw run")
     print()
     from . import firewall as _fw
-    _rules = _fw.hub_rules(cfg.listen_port, control_port)
-    if getattr(args, "open_firewall", False):
-        _fw.apply(_rules, log)
-    else:
-        _fw.check(_rules, log)
+    _fw.check(_fw.hub_rules(cfg.listen_port, control_port), log)
     return 0
 
 
@@ -1221,8 +1209,8 @@ def cmd_cert_status(args) -> int:
 def cmd_set_inbound(args) -> int:
     """Change this node's reachability (yes/no/unknown). Switching to inbound
     means peers can dial it — so it can hold direct links to outbound-only nodes
-    and be promoted to hub — but it must accept the WireGuard port; pair with
-    --open-firewall to open it. Restart the daemon to advertise the change."""
+    and be promoted to hub — but it must accept the WireGuard port (this checks
+    and prints the rule; open it yourself). Restart the daemon to advertise."""
     _require_root("set-inbound")
     import re
     from .config import load_config
@@ -1250,10 +1238,7 @@ def cmd_set_inbound(args) -> int:
         is_hub = cfg.role == "hub"
         rules = (_fw.hub_rules(cfg.listen_port, _control_port(cfg))
                  if is_hub else _fw.node_rules(cfg.listen_port, value))
-        if getattr(args, "open_firewall", False):
-            _fw.apply(rules, log)
-        else:
-            _fw.check(rules, log)
+        _fw.check(rules, log)
     print("Restart the daemon to advertise the change: sudo systemctl restart "
           "greasewood  (or re-run sudo gw run)")
     return 0
@@ -2020,9 +2005,6 @@ def main(argv=None) -> int:
     sp.add_argument("--caps", default="mesh")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
-    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
-                    help="insert the needed nftables accept rules (opt-in; tagged "
-                         "\"greasewood\"). Default: only check and warn.")
     sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
                     help="maintain a managed /etc/hosts block (<name>.internal "
                          "-> overlay addr) from the directory")
@@ -2054,9 +2036,6 @@ def main(argv=None) -> int:
                     help="comma-separated caps (default: keep existing, else mesh)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
-    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
-                    help="insert the needed nftables accept rules (opt-in; tagged "
-                         "\"greasewood\"). Default: only check and warn.")
     sp.add_argument("--hosts-sync", dest="hosts_sync", action="store_true",
                     help="maintain a managed /etc/hosts block (<name>.internal "
                          "-> overlay addr) from the directory")
@@ -2111,8 +2090,6 @@ def main(argv=None) -> int:
                         help="[sudo] turn this enrolled node into a hub (generate CA key, set role=hub)")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
-    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
-                    help="insert the needed nftables accept rules (opt-in)")
     sp.set_defaults(fn=cmd_hub_promote)
 
     # hub-endorse (on the current hub)
@@ -2161,8 +2138,6 @@ def main(argv=None) -> int:
     sp = sub.add_parser("set-inbound",
                         help="change reachability: yes (dialable) / no (outbound-only) / unknown")
     sp.add_argument("value", choices=["yes", "no", "unknown"])
-    sp.add_argument("--open-firewall", dest="open_firewall", action="store_true",
-                    help="when switching to inbound, open the WireGuard port (opt-in)")
     sp.set_defaults(fn=cmd_set_inbound)
 
     # rename
