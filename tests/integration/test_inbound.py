@@ -13,18 +13,18 @@ from .helpers import directory_records, pexec, podman, wait_for_ping
 pytestmark = pytest.mark.integration
 
 
-def test_outbound_only_node(gw_root, gw_image, gw_network):
+def test_outbound_only_node(gw_hub, gw_image, gw_network):
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root,
+        node = bring_up_node(gw_image, gw_network, gw_hub,
                              hostname="outbound1", inbound="no")
 
         # It dials the hub (reachable), so the link still forms.
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=30), \
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=30), \
             "outbound-only node could not reach the hub it dials"
 
         # Its directory record advertises no endpoint (peers won't dial it).
-        recs = directory_records(gw_root["cid"])
+        recs = directory_records(gw_hub["cid"])
         rec = next((r for r in recs if r["hostname"] == "outbound1"), None)
         assert rec is not None, "node not in directory"
         assert rec["endpoints"] == [], f"should advertise no endpoint: {rec['endpoints']}"

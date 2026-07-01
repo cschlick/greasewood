@@ -29,7 +29,7 @@ interface = "gw-mesh"
 listen_port = 51900
 
 # Seeds to pull the directory from (HTTP).
-# The root node is typically also a seed.
+# The hub is typically also a seed.
 seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"]
 
 # Where to send enroll/renew requests.
@@ -54,7 +54,6 @@ trusted_pubs = [
 
 
 # Hub-only section — omit entirely on plain nodes.
-# ("[root]" is accepted as an alias for backward compatibility.)
 [hub]
 ca_key_file = "/var/lib/greasewood/ca.key"
 # Optionally protect the CA key with a passphrase (env var):

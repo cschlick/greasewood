@@ -58,13 +58,13 @@ CONVERGE_TIMEOUT = int(os.environ.get("GW_STRESS_CONVERGE_TIMEOUT", "120"))
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _grow(gw_image, gw_network, gw_root, count, workers=MAX_WORKERS):
+def _grow(gw_image, gw_network, gw_hub, count, workers=MAX_WORKERS):
     """Bring up `count` nodes concurrently. Returns the list of node dicts."""
     nodes = []
     errors = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
-            pool.submit(bring_up_node, gw_image, gw_network, gw_root)
+            pool.submit(bring_up_node, gw_image, gw_network, gw_hub)
             for _ in range(count)
         ]
         for fut in as_completed(futures):
@@ -129,14 +129,14 @@ def _all_pairs_ping(members, workers=MAX_WORKERS, per_pair_timeout=20):
 
 
 def _hostname(member):
-    return member.get("hostname", "root")
+    return member.get("hostname", "hub")
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_grow_mesh_to_n_nodes(gw_root, gw_image, gw_network):
+def test_grow_mesh_to_n_nodes(gw_hub, gw_image, gw_network):
     """
     Grow the mesh to N nodes in one shot, then assert:
       1. all N records (+ root) land in the root directory,
@@ -146,20 +146,20 @@ def test_grow_mesh_to_n_nodes(gw_root, gw_image, gw_network):
     nodes = []
     try:
         t0 = time.time()
-        nodes = _grow(gw_image, gw_network, gw_root, N_NODES)
+        nodes = _grow(gw_image, gw_network, gw_hub, N_NODES)
         bring_up_elapsed = time.time() - t0
         print(f"\n[stress] brought up {N_NODES} nodes in {bring_up_elapsed:.1f}s")
 
         # 1. Directory: root + N nodes
         expected_records = N_NODES + 1
-        got = wait_for_directory_size(gw_root["cid"], expected_records, timeout=60)
+        got = wait_for_directory_size(gw_hub["cid"], expected_records, timeout=60)
         assert got >= expected_records, (
             f"root directory has {got}/{expected_records} records"
         )
         print(f"[stress] root directory holds {got} records")
 
         # 2. Full-mesh WireGuard peer convergence
-        members = [gw_root] + nodes
+        members = [gw_hub] + nodes
         converged, elapsed = _wait_full_mesh(members)
         counts = {_hostname(m): wg_peer_count(m["cid"]) for m in members}
         assert converged, (
@@ -182,7 +182,7 @@ def test_grow_mesh_to_n_nodes(gw_root, gw_image, gw_network):
             podman("rm", "-f", n["cid"], check=False)
 
 
-def test_mesh_growth_in_waves(gw_root, gw_image, gw_network):
+def test_mesh_growth_in_waves(gw_hub, gw_image, gw_network):
     """
     Grow the mesh incrementally and re-verify full connectivity after each
     wave. Catches propagation bugs that only bite when peers are *added* to an
@@ -195,11 +195,11 @@ def test_mesh_growth_in_waves(gw_root, gw_image, gw_network):
             add = target - len(nodes)
             if add:
                 t0 = time.time()
-                nodes += _grow(gw_image, gw_network, gw_root, add)
+                nodes += _grow(gw_image, gw_network, gw_hub, add)
                 print(f"\n[stress] wave → {target} nodes "
                       f"(+{add} in {time.time() - t0:.1f}s)")
 
-            members = [gw_root] + nodes
+            members = [gw_hub] + nodes
             converged, elapsed = _wait_full_mesh(members)
             counts = {_hostname(m): wg_peer_count(m["cid"]) for m in members}
             assert converged, (

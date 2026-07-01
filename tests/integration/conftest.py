@@ -36,7 +36,7 @@ _NETWORK_SUBNET = "fd52:ba5e::/64"
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped: image, network, root node
+# Session-scoped: image, network, hub node
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
@@ -59,7 +59,7 @@ def gw_network():
 
 
 @pytest.fixture(scope="session")
-def gw_root(gw_image, gw_network):
+def gw_hub(gw_image, gw_network):
     """
     Start the hub container, run setup-hub, launch daemon.
 
@@ -85,10 +85,10 @@ def gw_root(gw_image, gw_network):
         time.sleep(1)  # wait for network address assignment
 
         ipv6 = container_ipv6(cid, gw_network)
-        assert ipv6, "root container got no IPv6 address"
+        assert ipv6, "hub container got no IPv6 address"
 
         pexec(cid, "gw", "setup-hub",
-              "--hostname", "root",
+              "--hostname", "hub",
               "--endpoint", f"[{ipv6}]:51900")
 
         overlay = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
@@ -98,7 +98,7 @@ def gw_root(gw_image, gw_network):
         podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
         assert wait_for_control_plane(cid, timeout=20), \
-            "root daemon did not start — check /tmp/gw.log in the container"
+            "hub daemon did not start — check /tmp/gw.log in the container"
 
         yield {
             "cid": cid,
@@ -152,7 +152,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
     """
     Run one `gw invite` (on hub_cid) → `gw join` (on node_cid) door enrollment.
     `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
-    over the hub so a test can enroll via a successor hub, not just the root.
+    over the hub so a test can enroll via a successor hub, not just the original one.
     Returns the `gw join` CompletedProcess.
     """
     extra = []
@@ -177,26 +177,34 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
                 f"stdout: {j.stdout}\nstderr: {j.stderr}"
             )
 
-        # Wait for the hub to close the window and destroy its gw-door before
-        # releasing the lock, so the next invite doesn't race the teardown.
-        assert _wait_iface_gone(hub_cid, "gw-door"), \
-            "hub did not tear down gw-door after enrollment"
+        if j.returncode == 0:
+            # On success the hub closes the window and destroys gw-door; wait for
+            # that before releasing the lock so the next invite doesn't race it.
+            assert _wait_iface_gone(hub_cid, "gw-door"), \
+                "hub did not tear down gw-door after enrollment"
+        else:
+            # A failed attempt deliberately leaves the door open for retries.
+            # Force-close it for test isolation: drop the window file and let
+            # the DoorWatcher tear the interface down.
+            pexec(hub_cid, "rm", "-f", "/var/lib/greasewood/door_window.json",
+                  check=False)
+            _wait_iface_gone(hub_cid, "gw-door")
     return j
 
 
-def door_enroll(gw_root, node_cid: str, node_ipv6: str, *,
+def door_enroll(gw_hub, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
                 inbound: str | None = None, check: bool = True):
-    """Enroll an existing node container via the root hub (see door_enroll_via).
+    """Enroll an existing node container via the hub (see door_enroll_via).
     `hostname`/`caps`/`inbound` are passed only when given, so omitting them
     exercises join's "keep existing config" behavior."""
     return door_enroll_via(
-        gw_root["cid"], gw_root["ipv6"], node_cid, node_ipv6,
+        gw_hub["cid"], gw_hub["ipv6"], node_cid, node_ipv6,
         hostname=hostname, caps=caps, inbound=inbound, check=check,
     )
 
 
-def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
+def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
                   caps: str | None = None, inbound: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
@@ -218,7 +226,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    door_enroll(gw_root, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound)
+    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
@@ -232,7 +240,7 @@ def bring_up_node(gw_image, gw_network, gw_root, hostname: str | None = None,
 
 
 @pytest.fixture
-def gw_node(gw_image, gw_network, gw_root):
+def gw_node(gw_image, gw_network, gw_hub):
     """
     Start a node container, enroll it into the mesh, launch daemon.
 
@@ -244,7 +252,7 @@ def gw_node(gw_image, gw_network, gw_root):
     """
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root)
+        node = bring_up_node(gw_image, gw_network, gw_hub)
         yield node
     finally:
         if node:

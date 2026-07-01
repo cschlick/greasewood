@@ -23,39 +23,39 @@ pytestmark = pytest.mark.integration
 # hub container over loopback — it's not reachable from the host by design.
 # ---------------------------------------------------------------------------
 
-def test_root_health(gw_root):
-    assert "ok" in hub_get(gw_root["cid"], "/health")
+def test_hub_health(gw_hub):
+    assert "ok" in hub_get(gw_hub["cid"], "/health")
 
 
-def test_root_in_own_directory(gw_root):
-    assert "root" in directory_hostnames(gw_root["cid"])
+def test_hub_in_own_directory(gw_hub):
+    assert "hub" in directory_hostnames(gw_hub["cid"])
 
 
 # ---------------------------------------------------------------------------
 # Node enrollment tests
 # ---------------------------------------------------------------------------
 
-def test_node_appears_in_root_directory(gw_root, gw_node):
+def test_node_appears_in_root_directory(gw_hub, gw_node):
     """Node pushes its NodeRecord to root on startup — should appear within seconds."""
-    assert wait_for_hostname(gw_root["cid"], gw_node["hostname"], timeout=20), \
+    assert wait_for_hostname(gw_hub["cid"], gw_node["hostname"], timeout=20), \
         f"{gw_node['hostname']} never appeared in root directory"
 
 
-def test_root_overlay_addr_in_directory(gw_root):
+def test_hub_overlay_addr_in_directory(gw_hub):
     """Root's NodeRecord contains a valid fd8d:: overlay address."""
-    data = directory_records(gw_root["cid"])
-    root_record = next(r for r in data if r["hostname"] == "root")
+    data = directory_records(gw_hub["cid"])
+    hub_record = next(r for r in data if r["hostname"] == "hub")
     # addr is anchored in the signed credential, not a top-level record field.
-    assert root_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
+    assert hub_record["cred"]["addr"].startswith("fd8d:e5c1:db1a:")
 
 
-def test_duplicate_hostname_refused(gw_root, gw_image, gw_network):
+def test_duplicate_hostname_refused(gw_hub, gw_image, gw_network):
     """The hub refuses to enroll a second node with a name already in use."""
     from .conftest import bring_up_node, door_enroll_via
 
     node = c2 = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root, hostname="dupename")
+        node = bring_up_node(gw_image, gw_network, gw_hub, hostname="dupename")
         c2 = podman(
             "run", "-d", "--privileged", "--network", gw_network,
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
@@ -63,7 +63,7 @@ def test_duplicate_hostname_refused(gw_root, gw_image, gw_network):
         ).stdout.strip()
         time.sleep(1)
         ipv6 = container_ipv6(c2, gw_network)
-        j = door_enroll_via(gw_root["cid"], gw_root["ipv6"], c2, ipv6,
+        j = door_enroll_via(gw_hub["cid"], gw_hub["ipv6"], c2, ipv6,
                             hostname="dupename", check=False)
         assert j.returncode != 0, "join should fail for a duplicate hostname"
         assert "already in use" in (j.stdout + j.stderr).lower(), \
@@ -74,7 +74,7 @@ def test_duplicate_hostname_refused(gw_root, gw_image, gw_network):
                 podman("rm", "-f", cid, check=False)
 
 
-def test_rejoin_reuses_keys_and_preserves_config(gw_root, gw_image, gw_network):
+def test_rejoin_reuses_keys_and_preserves_config(gw_hub, gw_image, gw_network):
     """
     Re-joining an already-enrolled node with a fresh token is a credential
     refresh: it reuses the node's keys (same id_pub → same overlay address),
@@ -86,12 +86,12 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_root, gw_image, gw_network):
 
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root, hostname="alpha")
+        node = bring_up_node(gw_image, gw_network, gw_hub, hostname="alpha")
         id_pub_before = node["id_pub"]
         ipv6 = container_ipv6(node["cid"], gw_network)
 
         # Re-join with a new token and NO --hostname/--caps.
-        rj = door_enroll(gw_root, node["cid"], ipv6)
+        rj = door_enroll(gw_hub, node["cid"], ipv6)
 
         # 1. Announces the re-enrollment (notice goes to the log on stderr).
         assert "re-enrolling existing node" in rj.stderr, \
@@ -115,29 +115,29 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_root, gw_image, gw_network):
 # WireGuard connectivity tests
 # ---------------------------------------------------------------------------
 
-def test_root_pings_node(gw_root, gw_node):
+def test_hub_pings_node(gw_hub, gw_node):
     """Root can ping the node's overlay address after enrollment."""
-    assert wait_for_ping(gw_root["cid"], gw_node["overlay"], timeout=30), \
+    assert wait_for_ping(gw_hub["cid"], gw_node["overlay"], timeout=30), \
         f"root → node ping failed (target: {gw_node['overlay']})"
 
 
-def test_node_pings_root(gw_root, gw_node):
+def test_node_pings_root(gw_hub, gw_node):
     """Node can ping root's overlay address."""
-    assert wait_for_ping(gw_node["cid"], gw_root["overlay"], timeout=30), \
-        f"node → root ping failed (target: {gw_root['overlay']})"
+    assert wait_for_ping(gw_node["cid"], gw_hub["overlay"], timeout=30), \
+        f"node → root ping failed (target: {gw_hub['overlay']})"
 
 
-def test_two_nodes_ping_each_other(gw_root, gw_node, gw_image, gw_network):
+def test_two_nodes_ping_each_other(gw_hub, gw_node, gw_image, gw_network):
     """Two independent nodes can reach each other via the overlay."""
     from .helpers import podman
     from .conftest import bring_up_node
 
     node2 = None
     try:
-        node2 = bring_up_node(gw_image, gw_network, gw_root)
+        node2 = bring_up_node(gw_image, gw_network, gw_hub)
 
         # Both nodes need to know about each other — wait for root to have both
-        assert wait_for_hostname(gw_root["cid"], node2["hostname"], timeout=20)
+        assert wait_for_hostname(gw_hub["cid"], node2["hostname"], timeout=20)
 
         # node1 → node2
         assert wait_for_ping(gw_node["cid"], node2["overlay"], timeout=30), \

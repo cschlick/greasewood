@@ -2,10 +2,10 @@
 greasewood.sync — directory pull loop.
 
 Every node pulls the full record-set from one or more seeds every ~20s
-and merges by highest seq per id_pub. The root can be offline for up to
+and merges by highest seq per id_pub. The hub can be offline for up to
 one credential TTL with no impact on live links — nodes keep running from
-their local cache (§10.2). Without local caching, the root would silently
-be a hard availability dependency; the cache is what makes "root not in
+their local cache (§10.2). Without local caching, the hub would silently
+be a hard availability dependency; the cache is what makes "hub not in
 the data path" true in practice.
 """
 from __future__ import annotations

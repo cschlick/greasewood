@@ -8,7 +8,7 @@ handshake authenticates wg_pub, bound to id_pub by a ca_sig the seed can't fake)
 Worst a bad seed can do is cause a failed connection, never an intercepted one.
 
 The local cache means nodes keep running from last-known-good state while the
-root is offline, for up to one credential TTL.
+hub is offline, for up to one credential TTL.
 """
 from __future__ import annotations
 

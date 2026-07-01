@@ -4,9 +4,6 @@ greasewood.config — TOML configuration loading.
 All nodes share one config format. Role ("hub", "node") is a runtime setting,
 not a build distinction. A hub is just a node that additionally holds ca_priv
 and serves the control plane + enrollment door.
-
-"hub" is the canonical name for the coordinating node; "root" is accepted as
-an alias in existing configs.
 """
 from __future__ import annotations
 
@@ -22,7 +19,7 @@ class Config:
     # Node identity
     data_dir: Path
     hostname: str
-    role: str              # "hub" (alias "root") | "node"
+    role: str              # "hub" | "node"
     inbound: str           # "yes" | "no" | "unknown"
     caps: list[str]
     endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51900"]
@@ -44,7 +41,7 @@ class Config:
     # CA trust set — list of hex-encoded raw Ed25519 public keys
     ca_pubs: list[str]
 
-    # Hub-only (written under [hub] section; [root] accepted as alias)
+    # Hub-only (written under the [hub] section)
     ca_key_file: Path | None
     ca_key_passphrase_env: str | None
     control_listen: str
@@ -86,8 +83,7 @@ def load_config(path: Path) -> Config:
     node = raw.get("node", {})
     net = raw.get("network", {})
     ca_sec = raw.get("ca", {})
-    # [hub] is canonical; [root] accepted for backwards compatibility
-    root = raw.get("hub", raw.get("root", {}))
+    hub = raw.get("hub", {})
 
     if not node.get("hostname"):
         sys.exit("config: [node] hostname is required")
@@ -111,12 +107,12 @@ def load_config(path: Path) -> Config:
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 
-        ca_key_file=Path(root["ca_key_file"]).expanduser() if "ca_key_file" in root else None,
-        ca_key_passphrase_env=root.get("ca_key_passphrase_env"),
-        control_listen=root.get("control_listen", ":51902"),
-        credential_ttl=_parse_duration(root.get("credential_ttl", "24h")),
-        renew_before=_parse_duration(root.get("renew_before", "12h")),
-        door_window=_parse_duration(root.get("door_window", "15m")),
-        tls_cert_ttl=_parse_duration(root.get("tls_cert_ttl", "7d")),
-        door_port=int(root.get("door_port", 51901)),
+        ca_key_file=Path(hub["ca_key_file"]).expanduser() if "ca_key_file" in hub else None,
+        ca_key_passphrase_env=hub.get("ca_key_passphrase_env"),
+        control_listen=hub.get("control_listen", ":51902"),
+        credential_ttl=_parse_duration(hub.get("credential_ttl", "24h")),
+        renew_before=_parse_duration(hub.get("renew_before", "12h")),
+        door_window=_parse_duration(hub.get("door_window", "15m")),
+        tls_cert_ttl=_parse_duration(hub.get("tls_cert_ttl", "7d")),
+        door_port=int(hub.get("door_port", 51901)),
     )

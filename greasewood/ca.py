@@ -1,20 +1,21 @@
 """
-greasewood.ca — certificate authority operations (root-node only).
+greasewood.ca — certificate authority operations (hub only).
 
 The CA signs Credentials only. It never generates or sees any private key
 other than ca_priv.
 
-Enrollment is SSH-only: the operator runs `greasewood issue` on the root node,
-which calls CA.issue() directly. No token management, no HTTP enrollment
-endpoint, no network exposure at enrollment time.
+CA.issue() is called by the hub during enrollment (over the transient door, see
+greasewood.enroll) and renewal — never directly by an operator, and never over a
+network-reachable endpoint.
 
-Revoke list: revoked.json — a set of id_pub hex strings.
-  Revoking = stopping renewal. The existing credential expires on its own.
-  For fast eviction push the updated revoke list to peers (they re-read on
-  each reconcile cycle via the reconcile loop's revoked set).
+Revoke list: revoked.json — a set of id_pub hex strings, re-read live by the
+  daemon. Revoking refuses the node's renew/publish at the hub immediately and
+  frees its hostname; its credential also expires on its own, so other nodes
+  evict it within one credential TTL (expiry-based revocation, no CRL).
 
-Node caps: stored in nodes/<id_pub_hex>.json so renewal can re-use them
-  without a separate config lookup. Written at issue time.
+Node caps: stored in nodes/<id_pub_hex>.json so renewal can re-use them without
+  a separate config lookup. Written at issue time; removed on revoke (which is
+  what frees the hostname for reuse).
 """
 from __future__ import annotations
 
@@ -67,7 +68,7 @@ class CA:
         caps: list[str],
     ) -> Credential:
         """
-        Sign a credential for a node. Call from `greasewood issue` on the root.
+        Sign a credential for a node (hub-side; called during enrollment/renewal).
         Persists node caps so renewal can re-use them without operator input.
         Raises ValueError if id_pub is revoked or the hostname is already taken
         by a different node (enforced on the sanitized name, so db/DB collide).
@@ -223,11 +224,29 @@ class CA:
     def is_revoked(self, id_pub: bytes) -> bool:
         return id_pub.hex() in self._load_revoked()
 
-    def add_revoke(self, id_pub: bytes) -> None:
+    def add_revoke(self, id_pub: bytes) -> bool:
+        """Revoke an identity and release its hostname. Returns True if the
+        node's caps record existed and was removed (i.e. a hostname was freed)."""
         revoked = self._load_revoked()
         revoked.add(id_pub.hex())
         self._save_revoked(revoked)
-        log.info("revoked %s", id_pub.hex()[:16])
+        freed = self.forget_node(id_pub)
+        log.info("revoked %s%s", id_pub.hex()[:16],
+                 " (hostname freed)" if freed else "")
+        return freed
+
+    def forget_node(self, id_pub: bytes) -> bool:
+        """Remove the node's caps record (nodes/<id>.json). This is what holds
+        the hostname for uniqueness, so deleting it frees the name for reuse by
+        a different identity. Returns True if a record was actually removed.
+        Safe alongside revocation: a revoked id can't renew anyway, and without
+        a caps record renewal would refuse it regardless."""
+        p = self._node_path(id_pub)
+        try:
+            p.unlink()
+            return True
+        except FileNotFoundError:
+            return False
 
     def load_revoked_set(self) -> set[str]:
         return self._load_revoked()

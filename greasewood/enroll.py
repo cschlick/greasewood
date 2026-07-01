@@ -23,6 +23,7 @@ import logging
 import socket
 import struct
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -70,8 +71,13 @@ def _send_msg(sock: socket.socket, data: dict) -> None:
 
 class EnrollServer:
     """
-    One-shot TCP server bound to [HUB_DOOR_IP]:ENROLL_PORT.
-    Processes exactly one enrollment per door window, then calls on_done().
+    TCP server bound to [HUB_DOOR_IP]:ENROLL_PORT for one door window.
+
+    Closes the window (calls on_done) on the FIRST successful enrollment, OR
+    after `max_attempts` failed attempts, OR when the window times out —
+    whichever comes first. Allowing a few failed attempts means a recoverable
+    mistake (e.g. a hostname already taken) doesn't burn the whole invite: the
+    joiner is told how many attempts remain and can retry on the same token.
     """
 
     def __init__(
@@ -86,6 +92,7 @@ class EnrollServer:
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
         control_port: int = 51902,
+        max_attempts: int = 3,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -97,13 +104,20 @@ class EnrollServer:
         self._get_revoked = get_revoked or set
         self._cache_path = cache_path
         self._control_port = control_port
+        self._max_attempts = max_attempts
         self._srv: socket.socket | None = None
+        self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._serve, name="enroll", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
     def stop(self) -> None:
+        # Signal the accept loop (which polls with a short timeout, so this is
+        # honored within ~1 poll) AND close the socket. Closing alone does not
+        # reliably wake a blocked accept() on Linux, so the flag is what makes
+        # stop responsive — e.g. when the DoorWatcher clears a consumed window.
+        self._stopped.set()
         if self._srv:
             try:
                 self._srv.close()
@@ -114,27 +128,53 @@ class EnrollServer:
         try:
             srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.settimeout(self._timeout)
             srv.bind((HUB_DOOR_IP, ENROLL_PORT))
             srv.listen(1)
             self._srv = srv
-            log.info("enroll server ready on [%s]:%d (window %.0fs)", HUB_DOOR_IP, ENROLL_PORT, self._timeout)
+            log.info("enroll server ready on [%s]:%d (window %.0fs, up to %d attempt(s))",
+                     HUB_DOOR_IP, ENROLL_PORT, self._timeout, self._max_attempts)
 
-            conn, addr = srv.accept()
-            log.info("enroll connection from %s", addr[0])
-            with conn:
-                conn.settimeout(30)
+            # One shared deadline across all attempts; each accept() waits only
+            # for the time still left in the window.
+            deadline = time.monotonic() + self._timeout
+            attempts_left = self._max_attempts
+            success = False
+            while attempts_left > 0 and not success and not self._stopped.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.info("enroll window expired")
+                    break
+                # Poll accept() with a SHORT timeout instead of blocking for the
+                # whole window, so stop() / window-consumed is honored promptly
+                # (a blocked accept() can't be reliably interrupted by close()).
+                srv.settimeout(min(2.0, remaining))
                 try:
-                    self._handle(conn)
-                except Exception as e:
-                    log.error("enroll error: %s", e)
+                    conn, addr = srv.accept()
+                except socket.timeout:
+                    continue  # re-check stop flag + deadline, then keep waiting
+                except OSError:
+                    break  # socket closed by stop()
+                log.info("enroll connection from %s", addr[0])
+                with conn:
+                    conn.settimeout(30)
                     try:
-                        _send_msg(conn, {"v": 1, "ok": False, "error": "internal", "reason": str(e)})
-                    except Exception:
-                        pass
+                        success = self._handle(conn, attempts_left)
+                    except Exception as e:
+                        log.error("enroll error: %s", e)
+                        try:
+                            _send_msg(conn, {"v": 1, "ok": False, "error": "internal",
+                                             "reason": str(e),
+                                             "attempts_remaining": attempts_left - 1})
+                        except Exception:
+                            pass
+                        success = False
+                if not success:
+                    attempts_left -= 1
+                    if attempts_left > 0:
+                        log.info("enrollment attempt failed; %d attempt(s) left", attempts_left)
+                    else:
+                        log.info("enrollment attempts exhausted; closing the door")
 
-        except socket.timeout:
-            log.info("enroll window expired (no connection received)")
         except OSError as e:
             if "Errno 9" in str(e) or "closed" in str(e).lower():
                 pass  # stopped via stop()
@@ -148,7 +188,10 @@ class EnrollServer:
                     pass
             self._on_done()
 
-    def _handle(self, conn: socket.socket) -> None:
+    def _handle(self, conn: socket.socket, attempts_left: int) -> bool:
+        """Process one enrollment attempt. Returns True if it succeeded (the
+        window should close), False if it was refused (the joiner may retry
+        while attempts remain)."""
         import base64
         from . import wg as wgmod
         from .keys import derive_addr
@@ -175,8 +218,9 @@ class EnrollServer:
         except ValueError as e:
             log.warning("enrollment refused: %s", e)
             _send_msg(conn, {"v": 1, "ok": False, "error": "enrollment refused",
-                             "reason": str(e)})
-            return
+                             "reason": str(e),
+                             "attempts_remaining": attempts_left - 1})
+            return False
 
         # Add new node as a peer on the main WG interface so it can establish
         # its tunnel and push its NodeRecord to the hub on first startup.
@@ -208,7 +252,12 @@ class EnrollServer:
         try:
             rec_msg = _recv_msg(conn)
         except Exception:
-            return  # node didn't send a record; nothing more to do
+            # The credential was already issued, the peer installed, and the
+            # response sent — enrollment SUCCEEDED. The second leg is best-effort
+            # (older nodes skip it; under load the recv may lag), so this is a
+            # successful attempt: return True so the window closes, not False
+            # (which would wrongly keep the door open for a "retry").
+            return True
         try:
             record = NodeRecord.from_dict(rec_msg["record"])
             record.verify(self._get_ca_pubs(), self._get_revoked())
@@ -223,6 +272,10 @@ class EnrollServer:
                 _send_msg(conn, {"v": 1, "ok": False, "error": str(e)})
             except Exception:
                 pass
+
+        # The credential was issued and the peer installed, so the enrollment
+        # itself succeeded — the second-leg record publish above is best-effort.
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +362,10 @@ class DoorWatcher:
                 # Only delete the window if it still belongs to this session.
                 # If gw invite ran again while we were waiting, the new window has
                 # a different expiry — leave it so the DoorWatcher can start a
-                # fresh EnrollServer for the new token.
+                # fresh EnrollServer for the new token. The DoorWatcher's next
+                # tick destroys the (now window-less) gw-door — we deliberately
+                # do NOT destroy it here, to avoid racing a fresh invite that may
+                # have just recreated the interface.
                 try:
                     current = json.loads(window_path.read_text())
                     if current.get("expires") == expires_str:

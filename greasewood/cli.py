@@ -195,7 +195,10 @@ def cmd_setup_hub(args) -> int:
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
     ca_key_path = data_dir / "ca.key"
-    hostname = args.hostname
+    # The role is "hub"; the hostname is just this machine's name by default
+    # (short form, no domain), overridable with --hostname.
+    import socket
+    hostname = args.hostname or socket.gethostname().split(".")[0] or "hub"
     listen_port = args.listen_port
     control_port = args.control_port
     caps = [c.strip() for c in args.caps.split(",")]
@@ -334,7 +337,7 @@ def cmd_invite(args) -> int:
     from . import wg as wgmod
 
     cfg = load_config(Path(args.config))
-    if cfg.role not in ("hub", "root"):
+    if cfg.role != "hub":
         sys.exit("gw invite must be run on the hub node (role = hub)")
     if cfg.ca_key_file is None:
         sys.exit("invite requires ca_key_file in [hub]")
@@ -573,7 +576,18 @@ def cmd_join(args) -> int:
 
     if not resp.get("ok"):
         wgmod.destroy_interface("gw-door")
-        sys.exit(f"enrollment rejected: {resp.get('error')} — {resp.get('reason')}")
+        msg = f"enrollment rejected: {resp.get('error')} — {resp.get('reason')}"
+        left = resp.get("attempts_remaining")
+        if isinstance(left, int) and left > 0:
+            # The hub keeps the door open for a few attempts — retry on the SAME
+            # token (it rebuilds the door tunnel and reconnects).
+            plural = "s" if left != 1 else ""
+            msg += (f"\n{left} attempt{plural} left in this window — fix it and retry:\n"
+                    f"  sudo gw join <token> --hostname <unique-name>")
+        else:
+            msg += ("\nNo attempts left — run 'sudo gw invite' on the hub for a "
+                    "fresh token.")
+        sys.exit(msg)
 
     # Verify and install the credential (gw-door still up — needed for door publish below)
     cred = Credential.from_dict(resp["credential"])
@@ -720,7 +734,7 @@ def cmd_revoke(args) -> int:
 
     cfg = load_config(Path(args.config))
     if cfg.ca_key_file is None:
-        sys.exit("ca_key_file must be set in [root]")
+        sys.exit("ca_key_file must be set in [hub]")
 
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
     ca = CA(ca_keys, cfg.data_dir)
@@ -730,10 +744,12 @@ def cmd_revoke(args) -> int:
     except ValueError:
         sys.exit("id_pub_hex must be a 64-character hex string")
 
-    ca.add_revoke(id_pub_bytes)
+    freed = ca.add_revoke(id_pub_bytes)
     print(f"revoked: {args.id_pub_hex}")
-    print("The node's existing credential will expire naturally.")
-    print("Restart the daemon to reload the revoke list into the reconcile loop.")
+    if freed:
+        print("Its hostname is now free for reuse by a different node.")
+    print("Takes effect live — the running daemon refuses its renew/publish and "
+          "evicts it on the next reconcile; its credential also expires naturally.")
     return 0
 
 
@@ -1207,7 +1223,7 @@ def cmd_set_inbound(args) -> int:
               "'ct state established,related accept' for replies. (Open ports left "
               "in place are harmless; remove them yourself if you like.)")
     else:
-        is_hub = cfg.role in ("hub", "root")
+        is_hub = cfg.role == "hub"
         rules = (_fw.hub_rules(cfg.listen_port, _control_port(cfg))
                  if is_hub else _fw.node_rules(cfg.listen_port, value))
         if getattr(args, "open_firewall", False):
@@ -1269,7 +1285,7 @@ def cmd_run(args) -> int:
     # without a daemon restart — both for control-plane refusal and local
     # eviction. Plain nodes have no revoke list (expiry-based revocation).
     get_revoked: "callable" = set
-    is_hub = cfg.role in ("hub", "root")
+    is_hub = cfg.role == "hub"
 
     if is_hub:
         if not cfg.ca_key_file:
@@ -1844,7 +1860,9 @@ def main(argv=None) -> int:
     # setup-hub
     sp = sub.add_parser("setup-hub",
                         help="[sudo] one-shot hub bootstrap: CA + door key + routing + self-credential")
-    sp.add_argument("--hostname", default="hub")
+    sp.add_argument("--hostname", default=None,
+                    help="this hub's hostname in the mesh "
+                         "(default: the machine's hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
     sp.add_argument("--config", default="/etc/greasewood.toml", dest="config")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)

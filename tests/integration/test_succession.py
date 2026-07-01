@@ -122,20 +122,20 @@ def _ca_pub_hex(cid) -> str:
     return pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
 
 
-def test_ca_and_hub_succession(gw_root, gw_image, gw_network):
+def test_ca_and_hub_succession(gw_hub, gw_image, gw_network):
     extra_cids = []
     try:
-        a_cid = gw_root["cid"]
+        a_cid = gw_hub["cid"]
         a_pub = _ca_pub_hex(a_cid)
 
         # N: an ordinary node, enrolled under A and rooted at A. It never has
         # its config touched again — our witness for trust propagation.
-        n = bring_up_node(gw_image, gw_network, gw_root, hostname="oldnode")
+        n = bring_up_node(gw_image, gw_network, gw_hub, hostname="oldnode")
         extra_cids.append(n["cid"])
         assert a_pub in _trusted_set(n["cid"]), "node should start trusting A"
 
         # B: another node under A, which we promote to a successor hub.
-        b = bring_up_node(gw_image, gw_network, gw_root, hostname="newhub")
+        b = bring_up_node(gw_image, gw_network, gw_hub, hostname="newhub")
         extra_cids.append(b["cid"])
         b_ipv6 = container_ipv6(b["cid"], gw_network)
 

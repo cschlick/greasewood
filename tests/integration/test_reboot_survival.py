@@ -40,12 +40,12 @@ def _start_daemon(cid: str) -> None:
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
 
 
-def test_node_reconnects_after_reboot(gw_root, gw_image, gw_network):
+def test_node_reconnects_after_reboot(gw_hub, gw_image, gw_network):
     """A node reboots; it must rejoin the mesh from disk alone — no new token."""
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root, hostname="rebooter")
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=40), \
+        node = bring_up_node(gw_image, gw_network, gw_hub, hostname="rebooter")
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=40), \
             "mesh never formed before reboot"
 
         id_before = pexec(node["cid"], "cat",
@@ -53,11 +53,11 @@ def test_node_reconnects_after_reboot(gw_root, gw_image, gw_network):
 
         _simulate_reboot(node["cid"])
         # With the interface gone the overlay is unreachable (sanity check).
-        assert not wait_for_ping(node["cid"], gw_root["overlay"], timeout=3)
+        assert not wait_for_ping(node["cid"], gw_hub["overlay"], timeout=3)
 
         _start_daemon(node["cid"])  # cold start — no `gw join`, same data dir
 
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=45), \
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=45), \
             "node did not reconnect after reboot"
         # Identity persisted (same id_pub → same overlay addr), proving it
         # rehydrated rather than re-enrolled.
@@ -69,25 +69,25 @@ def test_node_reconnects_after_reboot(gw_root, gw_image, gw_network):
             podman("rm", "-f", node["cid"], check=False)
 
 
-def test_hub_reconnects_after_reboot(gw_root, gw_image, gw_network):
+def test_hub_reconnects_after_reboot(gw_hub, gw_image, gw_network):
     """The hub reboots; it must come back from disk (CA key, directory cache,
     door routing, control plane) and the node link must recover."""
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_root, hostname="hubreb-node")
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=40), \
+        node = bring_up_node(gw_image, gw_network, gw_hub, hostname="hubreb-node")
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=40), \
             "mesh never formed before reboot"
 
-        _simulate_reboot(gw_root["cid"])
-        _start_daemon(gw_root["cid"])
+        _simulate_reboot(gw_hub["cid"])
+        _start_daemon(gw_hub["cid"])
 
         # Control plane comes back up on the overlay/loopback...
-        assert wait_for_control_plane(gw_root["cid"], timeout=30), \
+        assert wait_for_control_plane(gw_hub["cid"], timeout=30), \
             "hub control plane did not return after reboot"
         # ...the hub still knows the node from its persisted directory cache...
-        assert wait_for_hostname(gw_root["cid"], "hubreb-node", timeout=30)
+        assert wait_for_hostname(gw_hub["cid"], "hubreb-node", timeout=30)
         # ...and the data-plane link recovers without operator action.
-        assert wait_for_ping(node["cid"], gw_root["overlay"], timeout=45), \
+        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=45), \
             "node link did not recover after hub reboot"
     finally:
         if node:
