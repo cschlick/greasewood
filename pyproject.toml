@@ -54,4 +54,5 @@ addopts = "--ignore=tests/integration"
 markers = [
     "integration: requires podman + WireGuard kernel module (run with: pytest tests/integration/)",
     "stress: many-node scale tests, slow + resource-heavy (gated behind GW_STRESS=1)",
+    "soak: long-running renewal-cycle endurance test (gated behind GW_SOAK=1)",
 ]
