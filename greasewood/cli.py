@@ -2509,8 +2509,10 @@ def main(argv=None) -> int:
                     help="where to write key/cert/ca (default: <data_dir>/tls)")
     sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
     sp.add_argument("--reload-cmd", dest="reload_cmd", default=None, metavar="CMD",
-                    help="shell command the daemon runs after auto-renewing this "
-                         "cert (e.g. 'systemctl reload postgresql')")
+                    help="command the daemon runs after auto-renewing this cert, "
+                         "e.g. 'systemctl reload postgresql'. Run as an argv, not "
+                         "through a shell — for pipes/redirects wrap it: "
+                         "\"sh -c '...'\"")
     sp.add_argument("--no-auto-renew", dest="no_auto_renew", action="store_true",
                     help="do not auto-renew this cert in the daemon (one-shot; "
                          "re-run manually before expiry)")
