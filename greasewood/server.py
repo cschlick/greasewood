@@ -26,7 +26,7 @@ import logging
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -274,8 +274,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"cert": leaf_pem, "ca_cert": ca_pem})
 
 
-class _IPv6Server(HTTPServer):
+class _IPv6Server(ThreadingHTTPServer):
+    """Threaded so one stalled or slow client can't wedge the control plane
+    for the whole fleet — requests are handled concurrently, and the handler's
+    `timeout` (set from ControlServer.request_timeout) drops any connection
+    that stops sending mid-request."""
     address_family = socket.AF_INET6
+    daemon_threads = True
 
 
 class ControlServer:
@@ -290,11 +295,16 @@ class ControlServer:
         tls_cert_ttl=None,
         mesh_domain: str = "gw.internal",
         get_renew_after=lambda: None,
+        request_timeout: float = 30.0,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
         class Handler(_Handler):
             pass
+        # Per-connection socket timeout (socketserver applies it in setup()):
+        # a client that stops sending mid-request is dropped instead of holding
+        # its handler thread forever.
+        Handler.timeout = request_timeout
         Handler.directory = directory
         Handler.ca = ca
         Handler.get_ca_pubs = staticmethod(get_ca_pubs)

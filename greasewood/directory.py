@@ -73,11 +73,14 @@ class Directory:
             return len(self._records)
 
     def save(self, path: Path) -> None:
+        # The lock covers the file write too: concurrent saves (publish handler
+        # threads, the sync loop) share one .tmp path, and interleaved writes to
+        # it would corrupt the cache that replaces directory.json.
         with self._lock:
             data = [r.to_dict() for r in self._records.values()]
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(path)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "Directory":

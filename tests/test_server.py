@@ -500,6 +500,65 @@ class TestRenewalPropagation:
             srv.stop()
 
 
+class TestControlServerConcurrency:
+    """The control plane serves the whole fleet from one process. A single
+    stalled or malicious client (mesh-authenticated or on loopback) must not be
+    able to wedge /renew, /publish, and /directory for everyone: requests are
+    handled concurrently, and a connection that stops sending is dropped after
+    request_timeout."""
+
+    def _stalled_conn(self, port: int) -> socket.socket:
+        """Open a connection that sends headers claiming a body, then stalls."""
+        s = socket.create_connection(("::1", port), timeout=5)
+        s.sendall(
+            b"POST /publish HTTP/1.1\r\n"
+            b"Host: [::1]\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 4096\r\n"
+            b"\r\n"
+        )  # ...and never send the body
+        return s
+
+    def test_stalled_client_does_not_block_others(self, running_server):
+        _, port, *_ = running_server
+        stall = self._stalled_conn(port)
+        try:
+            import time
+            time.sleep(0.3)  # let the server start reading the stalled request
+            # A concurrent request must still be answered promptly.
+            data = _get(port, "/health")
+            assert data == {"status": "ok"}
+        finally:
+            stall.close()
+
+    def test_stalled_connection_is_dropped_after_timeout(self, ca_and_node):
+        ca, node, cred, record = ca_and_node
+        srv = ControlServer(
+            listen="[::1]:0",
+            directory=Directory(),
+            get_ca_pubs=lambda: [ca.ca_pub_bytes],
+            get_revoked=set,
+            request_timeout=1.0,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        stall = self._stalled_conn(port)
+        try:
+            stall.settimeout(5)
+            # The server must give up on the stalled read and close the
+            # connection (it may send a 400 first) rather than holding it open
+            # forever. If it never closes, recv times out and the test fails.
+            try:
+                while stall.recv(4096):
+                    pass  # drain any error response until EOF
+            except socket.timeout:
+                pytest.fail("server kept the stalled connection open past its "
+                            "request_timeout")
+        finally:
+            stall.close()
+            srv.stop()
+
+
 class TestRequestHardening:
     def test_oversized_body_rejected(self, running_server):
         _, port, directory, ca, node, cred = running_server
