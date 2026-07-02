@@ -353,6 +353,13 @@ set, and live tunnels, so every verdict means "can **this** node reach that peer
 tunnel to it) — not the peer's status everywhere. See [RUNBOOK.md](RUNBOOK.md)
 for how to read it and what to do next.
 
+For each `LINKED` peer it also runs a **path-MTU probe** — a don't-fragment ping
+at the tunnel's interface MTU. WireGuard-over-cloud MTU blackholes are nasty:
+small traffic and SSH work, but TLS handshakes and large transfers hang because
+full-size tunnel packets exceed the underlay path MTU. If the small ping passes
+but the full-size one is dropped, diagnose flags it and suggests lowering the
+tunnel MTU. Pass `--no-mtu-probe` to skip the extra pings.
+
 ## Running as a service
 
 `gw run` in a terminal is fine for trying things out, but in practice you want

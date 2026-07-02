@@ -25,8 +25,10 @@ import datetime as dt
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1883,6 +1885,63 @@ def _hub_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
         return None
 
 
+# IPv6 header (40) + ICMPv6 echo header (8): the fixed overhead an ICMP echo
+# adds on top of its -s payload, so payload = iface_mtu - 48 fills exactly one
+# interface-MTU packet.
+_ICMP6_OVERHEAD = 48
+
+
+def _iface_mtu(iface: str) -> "int | None":
+    """The MTU of the WireGuard interface, or None if it can't be read."""
+    r = subprocess.run(["ip", "-o", "link", "show", iface],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    parts = r.stdout.split()
+    for i, tok in enumerate(parts):
+        if tok == "mtu" and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
+
+
+def _ping6_df(addr: str, payload: int, timeout: int = 1) -> "bool | None":
+    """Send one DF (don't-fragment) ICMPv6 echo of `payload` bytes across the
+    overlay. True if a reply came back, False if not, None if ping is missing.
+    -M do forbids fragmentation, so an oversized packet is dropped rather than
+    split — which is exactly what a full-size tunnel packet does over a
+    too-small underlay path."""
+    ping = shutil.which("ping")
+    if not ping:
+        return None
+    r = subprocess.run(
+        [ping, "-6", "-M", "do", "-c", "1", "-W", str(timeout),
+         "-s", str(payload), addr],
+        capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _mtu_probe(iface: str, addr: str, iface_mtu: "int | None") -> "str | None":
+    """Detect a path-MTU blackhole to a linked peer: a small DF ping succeeds
+    but a full-interface-MTU one is dropped. Returns a warning string, or None
+    if the path is clean, ping is unavailable, or the result is inconclusive
+    (small ping already failing means the link is just down, not an MTU issue)."""
+    if iface_mtu is None:
+        return None
+    small = _ping6_df(addr, 100)
+    if not small:  # None (no ping) or False (link down) → don't cry wolf
+        return None
+    payload = iface_mtu - _ICMP6_OVERHEAD
+    if _ping6_df(addr, payload):
+        return None  # full-size packets pass → no blackhole
+    return (f"PATH MTU BLACKHOLE: {payload}-byte (full {iface_mtu}-MTU) packets "
+            f"to {addr} are dropped though small ones pass — TLS handshakes and "
+            f"other large transfers will hang. Lower the tunnel MTU "
+            f"(ip link set {iface} mtu 1280) or fix the underlay path MTU.")
+
+
 def cmd_diagnose(args) -> int:
     """
     Per-peer connectivity diagnosis, **from THIS node's point of view — not a
@@ -1946,6 +2005,12 @@ def cmd_diagnose(args) -> int:
     directory = Directory.load(cfg.dir_cache_path)
     now = dt.datetime.now(_UTC)
     now_epoch = int(_time.time())
+
+    # MTU blackhole probe for LINKED peers: on by default when we have live WG
+    # state (needs root anyway), off with --no-mtu-probe. Reads the tunnel MTU
+    # once; the per-peer DF pings happen in the loop below.
+    do_mtu_probe = wg_available and not getattr(args, "no_mtu_probe", False)
+    iface_mtu = _iface_mtu(cfg.wg_interface) if do_mtu_probe else None
 
     print(f"self     : {cfg.hostname}  ({own_addr})")
     print(f"role     : {cfg.role}   inbound={cfg.inbound}   iface={cfg.wg_interface}")
@@ -2046,6 +2111,12 @@ def cmd_diagnose(args) -> int:
             status, bucket = f"LINKED ({_handshake_phrase(live, now_epoch)})", "linked"
             if r.inbound == "no" or not r.endpoints:
                 proved_inbound = True
+            # A LINKED peer can still silently blackhole large packets (WG-over-
+            # cloud MTU mismatch): small traffic works, TLS handshakes hang.
+            if do_mtu_probe:
+                warn = _mtu_probe(cfg.wg_interface, r.cred.addr, iface_mtu)
+                if warn:
+                    problems.append(warn)
         else:
             status, bucket = f"installed, {_handshake_phrase(live, now_epoch)}", "no-handshake"
             # Why no handshake? Endpoint / inbound-asymmetry hints.
@@ -2604,6 +2675,9 @@ def main(argv=None) -> int:
     sp.add_argument("hostname", nargs="?", default=None,
                     help="diagnose only this peer (default: every peer in this "
                          "node's directory cache)")
+    sp.add_argument("--no-mtu-probe", dest="no_mtu_probe", action="store_true",
+                    help="skip the DF-ping path-MTU check on linked peers "
+                         "(which sends a couple of pings per linked peer)")
     sp.set_defaults(fn=cmd_diagnose)
 
     # revoke
