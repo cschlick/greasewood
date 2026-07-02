@@ -153,3 +153,54 @@ def test_active_window_none_when_malformed(tmp_path):
     from greasewood.door import active_window_expiry
     (tmp_path / "door_window.json").write_text("{not valid json")
     assert active_window_expiry(tmp_path) is None
+
+
+# ── Door status/history (surfaced by `gw status`) ────────────────────────────
+
+class TestDoorStatus:
+    def test_lifecycle_open_attempt_enroll_close(self, tmp_path):
+        from greasewood import door
+        assert door.read_door_status(tmp_path) is None      # never opened
+
+        door.mark_door_opened(tmp_path, "2026-07-02T10:00:00+00:00",
+                              caps=["segment:mesh", "tls"], max_attempts=3)
+        st = door.read_door_status(tmp_path)
+        assert st["state"] == "open" and st["caps"] == ["segment:mesh", "tls"]
+        assert st["attempts"] == [] and st["enrolled"] is None
+
+        door.mark_door_attempt(tmp_path, "fd52::9", "hostname already in use")
+        door.mark_door_attempt(tmp_path, "fd52::9", "revoked")
+        st = door.read_door_status(tmp_path)
+        assert [a["ip"] for a in st["attempts"]] == ["fd52::9", "fd52::9"]
+        assert st["attempts"][0]["reason"] == "hostname already in use"
+
+        door.mark_door_enrolled(tmp_path, "fd52::a", "db01")
+        door.mark_door_closed(tmp_path, "enrolled")
+        st = door.read_door_status(tmp_path)
+        assert st["state"] == "closed" and st["close_reason"] == "enrolled"
+        assert st["enrolled"] == {"ts": st["enrolled"]["ts"], "ip": "fd52::a",
+                                  "hostname": "db01"}
+        assert len(st["attempts"]) == 2                     # history preserved
+
+    def test_close_is_idempotent_keeps_first_reason(self, tmp_path):
+        from greasewood import door
+        door.mark_door_opened(tmp_path, "2026-07-02T10:00:00+00:00")
+        door.mark_door_closed(tmp_path, "expired")
+        door.mark_door_closed(tmp_path, "superseded")       # second close ignored
+        assert door.read_door_status(tmp_path)["close_reason"] == "expired"
+
+    def test_reopen_resets_per_window_counters(self, tmp_path):
+        from greasewood import door
+        door.mark_door_opened(tmp_path, "2026-07-02T10:00:00+00:00")
+        door.mark_door_attempt(tmp_path, "fd52::9", "x")
+        door.mark_door_closed(tmp_path, "expired")
+        door.mark_door_opened(tmp_path, "2026-07-02T11:00:00+00:00")   # new window
+        st = door.read_door_status(tmp_path)
+        assert st["state"] == "open" and st["attempts"] == [] and st["enrolled"] is None
+
+    def test_status_file_is_0600(self, tmp_path):
+        import stat
+        from greasewood import door
+        door.mark_door_opened(tmp_path, "2026-07-02T10:00:00+00:00")
+        mode = stat.S_IMODE((tmp_path / "door_status.json").stat().st_mode)
+        assert mode == 0o600, oct(mode)   # contains source IPs

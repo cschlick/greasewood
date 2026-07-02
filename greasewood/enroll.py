@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from . import door
 from .door import ENROLL_PORT, HUB_DOOR_IP, DOOR_IFACE
 
 if TYPE_CHECKING:
@@ -95,6 +96,7 @@ class EnrollServer:
         max_attempts: int = 3,
         caps: "list[str] | None" = None,
         pinned_hostname: "str | None" = None,
+        data_dir: "Path | None" = None,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -102,6 +104,9 @@ class EnrollServer:
         self._wg_iface = wg_iface
         self._on_done = on_done
         self._timeout = timeout_secs
+        # Where to persist door status/history for `gw status` (best-effort;
+        # None disables it). Observability only — never blocks enrollment.
+        self._data_dir = data_dir
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
         self._get_revoked = get_revoked or set
         self._cache_path = cache_path
@@ -116,6 +121,16 @@ class EnrollServer:
         self._srv: socket.socket | None = None
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._serve, name="enroll", daemon=True)
+
+    def _status(self, fn, *args) -> None:
+        """Best-effort door-status update — observability must never break the
+        enrollment path, so swallow everything."""
+        if self._data_dir is None:
+            return
+        try:
+            fn(self._data_dir, *args)
+        except Exception as e:  # noqa: BLE001
+            log.debug("door status update failed: %s", e)
 
     def start(self) -> None:
         self._thread.start()
@@ -133,6 +148,7 @@ class EnrollServer:
                 pass
 
     def _serve(self) -> None:
+        close_reason = "superseded"   # if we bail before the accept loop
         try:
             srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -151,6 +167,7 @@ class EnrollServer:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     log.info("enroll window expired")
+                    close_reason = "expired"
                     break
                 # Poll accept() with a SHORT timeout instead of blocking for the
                 # whole window, so stop() / window-consumed is honored promptly
@@ -162,13 +179,15 @@ class EnrollServer:
                     continue  # re-check stop flag + deadline, then keep waiting
                 except OSError:
                     break  # socket closed by stop()
-                log.info("enroll connection from %s", addr[0])
+                peer_ip = addr[0]
+                log.info("enroll connection from %s", peer_ip)
                 with conn:
                     conn.settimeout(30)
                     try:
-                        success = self._handle(conn, attempts_left)
+                        success = self._handle(conn, peer_ip, attempts_left)
                     except Exception as e:
                         log.error("enroll error: %s", e)
+                        self._status(door.mark_door_attempt, peer_ip, f"internal: {e}")
                         try:
                             _send_msg(conn, {"v": 1, "ok": False, "error": "internal",
                                              "reason": str(e),
@@ -176,12 +195,15 @@ class EnrollServer:
                         except Exception:
                             pass
                         success = False
-                if not success:
+                if success:
+                    close_reason = "enrolled"
+                else:
                     attempts_left -= 1
                     if attempts_left > 0:
                         log.info("enrollment attempt failed; %d attempt(s) left", attempts_left)
                     else:
                         log.info("enrollment attempts exhausted; closing the door")
+                        close_reason = "attempts_exhausted"
 
         except OSError as e:
             if "Errno 9" in str(e) or "closed" in str(e).lower():
@@ -189,6 +211,7 @@ class EnrollServer:
             else:
                 log.error("enroll server OSError: %s", e)
         finally:
+            self._status(door.mark_door_closed, close_reason)
             if self._srv:
                 try:
                     self._srv.close()
@@ -196,7 +219,7 @@ class EnrollServer:
                     pass
             self._on_done()
 
-    def _handle(self, conn: socket.socket, attempts_left: int) -> bool:
+    def _handle(self, conn: socket.socket, peer_ip: str, attempts_left: int) -> bool:
         """Process one enrollment attempt. Returns True if it succeeded (the
         window should close), False if it was refused (the joiner may retry
         while attempts remain)."""
@@ -230,6 +253,7 @@ class EnrollServer:
             cred = self._ca.issue(id_pub_bytes, wg_pub_bytes, hostname, caps)
         except ValueError as e:
             log.warning("enrollment refused: %s", e)
+            self._status(door.mark_door_attempt, peer_ip, str(e))
             _send_msg(conn, {"v": 1, "ok": False, "error": "enrollment refused",
                              "reason": str(e),
                              "attempts_remaining": attempts_left - 1})
@@ -241,6 +265,7 @@ class EnrollServer:
         wg_pub_b64 = base64.b64encode(wg_pub_bytes).decode()
         wgmod.set_peer(self._wg_iface, wg_pub_b64, overlay_addr)
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
+        self._status(door.mark_door_enrolled, peer_ip, hostname)
 
         # Send back the credential + hub's own NodeRecord so the new node can
         # pre-seed its directory and configure seeds using the overlay address.
@@ -361,6 +386,10 @@ class DoorWatcher:
             log.info("door window expired, cleaning up")
             self._clear_enroll()
             window_path.unlink(missing_ok=True)
+            try:
+                door.mark_door_closed(self._data_dir, "expired")
+            except Exception as e:  # noqa: BLE001
+                log.debug("door status update failed: %s", e)
             return
 
         with self._lock:
@@ -408,7 +437,13 @@ class DoorWatcher:
                 control_port=self._control_port,
                 caps=window_caps,
                 pinned_hostname=window_hostname,
+                data_dir=self._data_dir,
             )
+            try:
+                door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,
+                                      pinned_hostname=window_hostname)
+            except Exception as e:  # noqa: BLE001
+                log.debug("door status update failed: %s", e)
             srv.start()
             self._enroll = srv
             log.info("door window detected, enroll server started (%.0fs remaining)", remaining)
