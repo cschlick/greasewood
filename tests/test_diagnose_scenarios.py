@@ -121,6 +121,7 @@ def test_diagnose_mixed_fleet(tmp_path, monkeypatch, capsys):
     print(out)   # visible under `pytest -s`
 
     assert "db" in out and "LINKED" in out
+    assert "v4=203.0.113.7" in out and "v6=2001:db8::9" in out         # per-node underlay
     assert "dialing [2001:db8::9]:51900 but no handshake" in out       # firewall hint
     assert "verified but NOT installed" in out                         # cache
     assert "not from a trusted CA" in out                             # oldhub

@@ -52,26 +52,23 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     cfg = load_config(tmp_path / "gw.toml")
 
     directory = Directory()
-    directory.put(_rec(me, _cred(ca, me, "api1", ["prod"]),
-                       endpoints=["[2001:db8::a1]:51900"]))            # ← self (v6)
-    # (name, segments, underlay endpoints, cred-kwargs) — endpoints show the
-    # underlay-family mix: v6-only, v4-only, dual-stack, and outbound-only ([]).
+    directory.put(_rec(me, _cred(ca, me, "api1", ["prod"])))          # ← self
     fleet = [
-        ("hub",       ["*"],           ["[2001:db8::1]:51900", "203.0.113.1:51900"], {}),  # dual
-        ("monitor",   ["*"],           ["[2001:db8::5]:51900"], {}),                        # v6
-        ("db1",       ["prod"],        ["203.0.113.7:51900"], {}),                          # v4
-        ("db2",       ["prod"],        ["203.0.113.8:51900"], {"secs": 22 * 60}),           # expiring
-        ("web1",      ["prod", "web"], ["[2001:db8::11]:51900", "203.0.113.11:51900"], {}), # bridge, dual
-        ("web2",      ["web"],         ["203.0.113.12:51900"], {}),
-        ("cache1",    ["mesh"],        ["[2001:db8::c1]:51900"], {}),                        # v6
-        ("bastion",   ["mesh"],        [], {}),                                              # outbound-only
-        ("ci-runner", ["dev"],         ["203.0.113.20:51900"], {}),
-        ("build1",    ["dev"],         ["203.0.113.21:51900"], {}),
-        ("legacy",    ["prod"],        ["203.0.113.99:51900"], {"secs": -120}),             # EXPIRED
+        ("hub",       ["*"],           {}),                          # reach-all
+        ("monitor",   ["*"],           {}),                          # shared services
+        ("db1",       ["prod"],        {}),
+        ("db2",       ["prod"],        {"secs": 22 * 60}),           # expiring
+        ("web1",      ["prod", "web"], {}),                          # bridge (2 segments)
+        ("web2",      ["web"],         {}),
+        ("cache1",    ["mesh"],        {}),                          # default pool
+        ("bastion",   ["mesh"],        {}),
+        ("ci-runner", ["dev"],         {}),
+        ("build1",    ["dev"],         {}),
+        ("legacy",    ["prod"],        {"secs": -120}),              # EXPIRED
     ]
-    for name, segs, eps, kw in fleet:
+    for name, segs, kw in fleet:
         k = NodeKeys.generate()
-        directory.put(_rec(k, _cred(ca, k, name, segs, **kw), endpoints=eps))
+        directory.put(_rec(k, _cred(ca, k, name, segs, **kw)))
     directory.save(cfg.dir_cache_path)
 
     print("\n$ gw nodes")
@@ -82,9 +79,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert "role     : node" in out and "hostname : api1" in out     # self header
     assert "← self" in out                                            # self row marked
     assert "name" in out and "segments" in out                       # column header
-    assert "underlay v6" in out and "underlay v4" in out             # the new columns
     assert "12 record(s) in local directory cache" in out            # self + 11
     assert "prod,web" in out                                          # multi-segment bridge
     assert "*" in out                                                 # reach-all segment
     assert "expiring" in out and "EXPIRED" in out                     # varied states
-    assert "2001:db8::1" in out and "203.0.113.7" in out             # v6 + v4 underlay shown

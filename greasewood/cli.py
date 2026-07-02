@@ -1784,10 +1784,9 @@ def cmd_nodes(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<22} {:<40} {:<40} {:<16} {:<20} {:<22} {}"
-    print(fmt.format("name", "overlay", "underlay v6", "underlay v4",
-                     "expires", "state", "segments"))
-    print("-" * 175)
+    fmt = "{:<24} {:<40} {:<20} {:<22} {}"
+    print(fmt.format("name", "addr", "expires", "state", "segments"))
+    print("-" * 120)
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
@@ -1801,12 +1800,11 @@ def cmd_nodes(args) -> int:
         segments = ",".join(
             c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
         ) or "-"
-        u6, u4 = _underlay_addrs(r.endpoints)
         # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
-        # not the bare hostname. "overlay" is the in-mesh IPv6 address; "underlay
-        # v6/v4" are the real endpoints peers dial (empty for outbound-only nodes).
+        # not the bare hostname. (Underlay endpoints are shown per-node by
+        # `gw diagnose`, where a block is more compact than table columns.)
         print(fmt.format(
-            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr, u6, u4,
+            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
             exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, segments
         ))
 
@@ -1999,7 +1997,9 @@ def cmd_diagnose(args) -> int:
                                 "firewall (mesh UDP port open?) and that its daemon is running")
         counts[bucket] += 1
 
+        u6, u4 = _underlay_addrs(r.endpoints)
         print(f"● {r.hostname}  [{r.cred.addr}]  inbound={r.inbound}")
+        print(f"    underlay  v6={u6}  v4={u4}")
         print(f"    {status}")
         for p in problems:
             print(f"    - {p}")
