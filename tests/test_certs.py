@@ -83,7 +83,7 @@ def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
                                  get_hub_url=lambda: "http://hub", data_dir=tmp_path)
     loop.check_all()
     assert issued == ["db"]                        # only the auto-renew cert
-    assert reloads == ["systemctl reload pg"]      # its reload hook ran
+    assert reloads == [["systemctl", "reload", "pg"]]  # ran as argv, no shell
 
 
 def test_cert_request_records_manifest(tmp_path, monkeypatch):

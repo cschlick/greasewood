@@ -166,3 +166,23 @@ def test_cert_request_tamper_detected():
     req.dns = ["evil.mesh"]  # tamper after signing
     with pytest.raises(ValueError):
         req.verify_self_sig()
+
+
+# --- daemon-run reload command: argv, not shell ---
+
+def test_reload_cmd_runs_argv_without_shell(tmp_path):
+    """reload_cmd runs as root inside the daemon. It is executed as an argv
+    (shlex.split, no shell), so shell metacharacters in the manifest are inert
+    data, not evaluated syntax — operators who genuinely need shell can say so
+    explicitly with `sh -c '...'`."""
+    from greasewood.certs import CertRenewalLoop
+
+    loop = CertRenewalLoop(node_keys=None, get_hub_url=lambda: "",
+                           data_dir=tmp_path)
+    marker = tmp_path / "ran"
+    loop._run_reload(f"touch {marker}")
+    assert marker.exists()                   # plain argv commands still work
+
+    evil = tmp_path / "evil"
+    loop._run_reload(f"echo > {evil}")       # a shell would create this file
+    assert not evil.exists()                 # argv exec: '>' is just an argument

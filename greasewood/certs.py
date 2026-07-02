@@ -153,7 +153,11 @@ class CertRenewalLoop:
         if not reload_cmd:
             return
         try:
-            r = subprocess.run(reload_cmd, shell=True, capture_output=True, text=True)
+            # argv exec, no shell: this runs as root, so metacharacters in the
+            # manifest string stay inert data. Operators who genuinely need
+            # shell say so explicitly: --reload-cmd "sh -c '...'"
+            r = subprocess.run(shlex.split(reload_cmd),
+                               capture_output=True, text=True)
             if r.returncode != 0:
                 log.warning("cert reload_cmd %r exited %d: %s",
                             reload_cmd, r.returncode, (r.stderr or "").strip())
