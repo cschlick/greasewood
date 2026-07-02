@@ -63,6 +63,15 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 2. (Optional) free its hostname: delete `/var/lib/greasewood/nodes/<id_pub_hex>.json`.
 3. Re-provision a replacement with a **fresh identity** (`gw join <new-token>`).
 
+> `gw renew-all` does **not** speed this up. Renewal refreshes each node's *own*
+> credential and carries no information about *other* nodes — a peer drops the
+> revoked node only when *its* credential expires (nodes hold no revoke list; only
+> the hub does). Revocation is deliberately anchored to expiry, a property every
+> verifier checks independently, rather than to a signal nodes must choose to act
+> on — so it's guaranteed regardless of who is online or cooperating. Coupling it
+> to `renew-all` would make it only as strong as the least-cooperative node. To
+> tighten the window, shorten `credential_ttl`.
+
 `gw nodes` on the hub shows identities; `gw diagnose` confirms the peer drops.
 
 ## SOP: node lost / decommissioned (not compromised)
@@ -102,11 +111,15 @@ exactly what `hub-promote` gives you (promote an enrolled node — don't
 3. **On every node** (Ansible): add B's CA pubkey to `[ca] trusted_pubs` (keep
    A's), and repoint `root_url` + `seeds` to B's overlay control URL. Restart the
    daemon. The fleet now trusts A *and* B — this is the overlap window.
-4. **Nodes renew under B** on their next cycle. B never enrolled them, so it has
-   no local `nodes/` info — but it **re-issues from each node's still-trusted
-   directory record** (the hostname/caps are CA-attested in the credential), so
-   there's nothing to copy. Renewal is at ~half the TTL, so plan the overlap to
-   last **at least one credential TTL** for every node to migrate.
+4. **Nodes renew under B.** B never enrolled them, so it has no local `nodes/`
+   info — but it **re-issues from each node's still-trusted directory record** (the
+   hostname/caps are CA-attested in the credential), so there's nothing to copy.
+   Left alone, nodes renew at ~half the TTL, so the overlap would have to last
+   **at least one credential TTL**. To compress that, run **`sudo gw renew-all` on
+   B**: it advertises `renew_after=now`, and every cooperating node re-issues under
+   B within a poll interval + jitter (the jitter window scales with fleet size, so
+   size the overlap to comfortably exceed it). An offline node re-issues when it
+   returns — so still confirm every node holds a B-signed credential before step 6.
 5. **Carry over revocations:** a fresh CA doesn't inherit A's revoke list. Re-run
    `gw revoke <id>` on B for anything revoked on A **before** dropping A (else the
    re-issue-from-record fallback would revive it).
