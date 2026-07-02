@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from greasewood.keys import CAKeys, NodeKeys, derive_addr
-from greasewood.wire import Credential, NodeRecord, RenewRequest
+from greasewood.wire import CertRequest, Credential, NodeRecord, RenewRequest
 
 _UTC = dt.timezone.utc
 
@@ -337,3 +337,44 @@ class TestVerifyStructuralErrors:
         ).sign(a.id_priv)
         with pytest.raises(ValueError, match="does not match"):
             rec.verify_structural()
+
+
+# ---------------------------------------------------------------------------
+# Timestamp hygiene: naive (timezone-less) timestamps are rejected at parse
+# ---------------------------------------------------------------------------
+
+class TestNaiveTimestampRejected:
+    """A wire timestamp without a timezone must be refused when the object is
+    parsed (ValueError → the server's clean 400 path). Left to parse, a naive
+    ts survives until the skew check compares it against an aware clock and
+    raises TypeError — an unhandled 500 an attacker can trigger by signing the
+    canonical (Z-rendered) body while sending a naive ts string."""
+
+    def test_renew_request_naive_ts(self):
+        node = NodeKeys.generate()
+        d = RenewRequest(
+            id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes, nonce="n",
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        ).sign(node.id_priv).to_dict()
+        d["ts"] = "2026-07-01T12:00:00"          # no Z / offset
+        with pytest.raises(ValueError, match="timezone"):
+            RenewRequest.from_dict(d)
+
+    def test_cert_request_naive_ts(self):
+        node = NodeKeys.generate()
+        d = CertRequest(
+            id_pub=node.id_pub_bytes, leaf_pub=bytes(32), cn="db",
+            dns=[], ips=[], nonce="n",
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        ).sign(node.id_priv).to_dict()
+        d["ts"] = "2026-07-01T12:00:00"
+        with pytest.raises(ValueError, match="timezone"):
+            CertRequest.from_dict(d)
+
+    def test_credential_naive_exp(self):
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        d = make_cred(node, ca).to_dict()
+        d["exp"] = d["exp"].rstrip("Z")          # strip the timezone
+        with pytest.raises(ValueError, match="timezone"):
+            Credential.from_dict(d)
