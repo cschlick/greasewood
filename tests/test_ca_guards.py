@@ -63,3 +63,41 @@ def test_renew_unknown_node_rejected(tmp_path):
     k = NodeKeys.generate()  # never issued a credential
     with pytest.raises(ValueError, match="unknown node"):
         ca.renew(_req(k))
+
+
+def test_rename_refused_when_hostname_pinned(tmp_path):
+    # A node enrolled with `gw invite --hostname` carries `host:pinned`; it may
+    # renew, but a rename (renew with a changed hostname) must be refused.
+    ca = _ca(tmp_path)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "pinned1", ["mesh", "host:pinned"])
+    # Plain renewal (no hostname change) still works.
+    ca.renew(_req(k))
+    # Rename attempt is rejected.
+    with pytest.raises(ValueError, match="hub-pinned"):
+        ca.renew(_req(k, hostname="newname"))
+
+
+def test_rename_allowed_when_not_pinned(tmp_path):
+    # Without the marker, rename (renew with a new hostname) succeeds.
+    ca = _ca(tmp_path)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "free1", ["mesh"])
+    cred = ca.renew(_req(k, hostname="renamed"))
+    assert cred.hostname == "renamed"
+
+
+def test_hostname_owner_and_collision(tmp_path):
+    # hostname_owner backs `gw invite --hostname`'s pre-check; issue() enforces
+    # the same uniqueness at enrollment.
+    ca = _ca(tmp_path)
+    a = NodeKeys.generate()
+    b = NodeKeys.generate()
+    ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "web1", ["mesh"])
+    assert ca.hostname_owner("web1") == a.id_pub_bytes.hex()
+    assert ca.hostname_owner("WEB1") == a.id_pub_bytes.hex()  # sanitized match
+    assert ca.hostname_owner("free") is None
+    # A different node can't take the name; the same node re-issuing it is fine.
+    with pytest.raises(ValueError, match="already in use"):
+        ca.issue(b.id_pub_bytes, b.wg_pub_bytes, "web1", ["mesh"])
+    ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "web1", ["mesh"])

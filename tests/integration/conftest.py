@@ -173,29 +173,37 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
 
 def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
-                    inbound: str | None = None, check: bool = True):
+                    inbound: str | None = None, invite_hostname: str | None = None,
+                    check: bool = True):
     """
     Run one `gw invite` (on hub_cid) → `gw join` (on node_cid) door enrollment.
     `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
     over the hub so a test can enroll via a successor hub, not just the original one.
+    `invite_hostname` pins the name at invite (`gw invite --hostname`), which
+    overrides any node-side `--hostname` and locks rename.
     Returns the `gw join` CompletedProcess.
     """
-    extra = []
+    # caps/groups are decided by the hub at invite (no self-assertion); hostname
+    # and inbound remain node-side join flags.
+    join_extra = []
     if hostname is not None:
-        extra += ["--hostname", hostname]
-    if caps is not None:
-        extra += ["--caps", caps]
+        join_extra += ["--hostname", hostname]
     if inbound is not None:
-        extra += ["--inbound", inbound]
+        join_extra += ["--inbound", inbound]
+    invite_extra = []
+    if caps is not None:
+        invite_extra += ["--caps", caps]
+    if invite_hostname is not None:
+        invite_extra += ["--hostname", invite_hostname]
 
     with _ENROLL_LOCK:
         # invite --endpoint takes a BARE address; the door port is fixed and the
         # token carries only the host.
-        res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6)
+        res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6, *invite_extra)
         token = _extract_token(res.stdout + "\n" + res.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
-                  "--endpoint", f"[{node_ipv6}]:51900", *extra, check=False)
+                  "--endpoint", f"[{node_ipv6}]:51900", *join_extra, check=False)
         if check:
             assert j.returncode == 0, (
                 f"gw join failed (rc={j.returncode}):\n"
@@ -219,24 +227,29 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
 
 def door_enroll(gw_hub, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
-                inbound: str | None = None, check: bool = True):
+                inbound: str | None = None, invite_hostname: str | None = None,
+                check: bool = True):
     """Enroll an existing node container via the hub (see door_enroll_via).
     `hostname`/`caps`/`inbound` are passed only when given, so omitting them
-    exercises join's "keep existing config" behavior."""
+    exercises join's "keep existing config" behavior. `invite_hostname` pins the
+    name at the hub."""
     return door_enroll_via(
         gw_hub["cid"], gw_hub["ipv6"], node_cid, node_ipv6,
-        hostname=hostname, caps=caps, inbound=inbound, check=check,
+        hostname=hostname, caps=caps, inbound=inbound,
+        invite_hostname=invite_hostname, check=check,
     )
 
 
 def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
-                  caps: str | None = None, inbound: str | None = None) -> dict:
+                  caps: str | None = None, inbound: str | None = None,
+                  invite_hostname: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
     Enrollment uses the real `gw invite` / `gw join` flow — the only supported
     path (see door_enroll). Container creation and `gw run` stay parallel; only
-    the door section serializes. `caps` (e.g. "mesh,tls") is passed to join.
+    the door section serializes. `caps` (e.g. "mesh,tls" or "mesh,group:prod")
+    is granted by the hub at `gw invite` — the joiner can't self-assert caps.
 
     Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
     """
@@ -251,7 +264,8 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound)
+    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound,
+                invite_hostname=invite_hostname)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")

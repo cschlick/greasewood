@@ -10,7 +10,7 @@ enforced, the accepted risks, and the results of the security review.
 
 | Secret | Held by | Blast radius if leaked | Protection |
 |--------|---------|------------------------|------------|
-| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to a plain node. Moving the hub generates a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
+| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to another node. Moving the hub should generate a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
 | `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | On-disk at `0600` on server VMs (the primary deployment; no TPM expected — hardware-backed identity is a v2 item, see the founding doc). Treat a leak as "that node is compromised" → revoke. |
 | `wg_priv` (X25519) | each node | **Self-limiting.** Usable only until the node's credential expires; peers tear down the stale key on the next reconcile. | On-disk at `0600`; on-disk exposure is an accepted, bounded risk. |
 | join token / door seed | transient | Enroll **one** node during a single open window. The hub still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |
@@ -62,6 +62,14 @@ Additional control-plane protections:
   credential, not as a self-asserted `NodeRecord` field. A node therefore cannot
   publish a name the CA didn't issue it, so plain name resolution (the managed
   `/etc/hosts` block) can't be hijacked by a member claiming another's name.
+- **Caps/groups are hub-decided, not self-asserted** — a node's capabilities and
+  segmentation groups (`group:<name>` tags) are chosen by the hub at `gw invite`
+  and bound into the CA-signed credential; the enroll server issues from the door
+  window and ignores any caps the joiner sends. A member cannot grant itself a
+  capability (e.g. `tls`) or place itself in a segment it wasn't issued (e.g.
+  `group:prod`, or the reach-all `group:*`). Renewal re-issues from the caps the
+  hub already recorded, so they can't drift upward at renew either. This is what
+  makes segmentation a real boundary and not just honest-node configuration.
 - **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
   only from the CA keys they are configured to trust. Moving the CA is a
   deliberate re-root (a config change to that set), not an automatic runtime
@@ -80,8 +88,7 @@ Additional control-plane protections:
   other nodes a revoked peer falls out within at most one credential TTL as its
   credential expires. Shorten `credential_ttl` if you need a tighter bound.
 - **64-bit address host portion.** A deliberate address collision needs ~2⁶⁴
-  work *and* still requires the victim's `id_priv` to be useful — acceptable for
-  the fleet sizes this targets.
+  work *and* still requires the victim's `id_priv` to be useful — that should be acceptable.
 - **On-disk `id_priv`** on server VMs (no hardware backing). Documented and
   intentional for the primary deployment.
 - **Clock integrity is a security dependency.** Every allow/deny is a timestamp
@@ -105,7 +112,7 @@ What a non-root local user still **cannot** do:
 
 So a co-tenant gets **network reachability to the mesh**, not the node's identity.
 If that reachability itself is unacceptable, enforce it at the OS layer (greasewood
-won't, by design — it never touches your firewall unless asked):
+won't, by design — it never touches your firewall):
 
 1. **nftables owner match** — restrict which local users may originate overlay
    traffic (egress; owner match is output-only). Combined with the base
@@ -130,22 +137,6 @@ won't, by design — it never touches your firewall unless asked):
    dedicated netns so `gw-mesh` isn't visible to other users' processes at all.
    Strongest isolation; more setup.
 3. **Don't co-tenant** untrusted users on a mesh machine — the implicit default.
-
-## Security review (2026-06-30)
-
-An adversarial review of the crypto, trust, enrollment, and renewal paths. All
-findings below are resolved in the current tree, each with a regression test.
-
-| # | Severity | Finding | Resolution |
-|---|----------|---------|------------|
-| 1 | High | **Renewed credentials never reached the hub** — `RenewalLoop` updated only the local directory, so peers (which pull from the hub) kept seeing the about-to-expire record and would evict every node ~one credential TTL after start. | Renewal now re-publishes the fresh record to the hub as part of a successful renewal (`renewal.py`); failure re-enters the retry/backoff loop. |
-| 2 | Med-High | **A retired CA's leaked key could DoS the fleet** — `resolve_trust` rejected *endorsements* by retired CAs but not *retirements*, so a decommissioned hub key could retire (un-trust) the live hub everywhere. | Originally fixed with a symmetric guard in `resolve_trust`. The entire CA-succession subsystem was **since removed** (moving the hub is now a manual re-root — a `trusted_pubs` config change), so this class of bug no longer exists in the tree. |
-| 3 | Med | **Revocation required a hub restart** — the revoke set was snapshotted at startup, so `gw revoke` had no effect on the running daemon (renew refusal *and* local eviction). | The revoke list is re-read live each cycle/request (`reconcile.py`, `server.py`, `cli.py`). |
-| 4 | Med | **Sticky directory shadow** — `directory.merge` accepted highest-seq without verification, so one forged high-seq record from a bad directory response permanently shadowed a victim's real record. | `directory.merge` structurally verifies every record before accepting it; a forgery (no valid self-signature) can never enter the directory. |
-| 5 | Med | **Replay nonces were unused** — `/renew` and `/cert` carried a nonce "to bound replay" that the hub never tracked; only the skew window applied. | Added a thread-safe single-use nonce cache consulted after signature verification. |
-| 6 | Low | **Unbounded control-plane request body** (memory DoS by an in-mesh peer). | Bodies are capped at 256 KiB. |
-| 7 | Low | **Non-atomic writes** for `revoked.json` / `nodes/*.json` (corruption on crash). | Both write via temp-file + rename. |
-| 8 | Low | Stale docstrings claiming SSH-only enrollment. | Updated to describe door-only enrollment. |
 
 ## Reporting
 

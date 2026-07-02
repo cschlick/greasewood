@@ -90,7 +90,7 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_hub, gw_image, gw_network):
         id_pub_before = node["id_pub"]
         ipv6 = container_ipv6(node["cid"], gw_network)
 
-        # Re-join with a new token and NO --hostname/--caps.
+        # Re-join with a new token and NO --hostname (caps come from the hub).
         rj = door_enroll(gw_hub, node["cid"], ipv6)
 
         # 1. Announces the re-enrollment (notice goes to the log on stderr).

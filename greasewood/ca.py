@@ -123,7 +123,14 @@ class CA:
         hostname, caps = node_info
         if req.hostname and req.hostname != hostname:
             # Rename (gw rename): issue() enforces uniqueness on the new name and
-            # rewrites nodes/<id>.json, which frees the old name for reuse.
+            # rewrites nodes/<id>.json, which frees the old name for reuse. But a
+            # hub-pinned node (enrolled via `gw invite --hostname`) may not rename
+            # itself — the name is the hub's to set.
+            if "host:pinned" in caps:
+                raise ValueError(
+                    "hostname is hub-pinned for this node; rename disabled "
+                    "(re-invite with a new --hostname to change it)"
+                )
             log.info("renaming %s -> %s", hostname, req.hostname)
             hostname = req.hostname
         else:
@@ -226,6 +233,12 @@ class CA:
             return None
         d = json.loads(p.read_text())
         return d.get("hostname", ""), d.get("caps", [])
+
+    def hostname_owner(self, hostname: str) -> str | None:
+        """Public: id_pub hex already using this (sanitized) hostname, or None.
+        Used by `gw invite --hostname` to verify a pinned name is free before
+        issuing the token, so a pinned name can't collide at enrollment."""
+        return self._hostname_owner(hostname)
 
     def _hostname_owner(self, hostname: str) -> str | None:
         """id_pub hex of the node already using this (sanitized) hostname among

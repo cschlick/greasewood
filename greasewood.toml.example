@@ -2,6 +2,10 @@
 # Copy to greasewood.toml and edit before running.
 
 [node]
+# The node's mesh name. Chosen at `gw join` (defaults to the machine hostname)
+# and changeable later with `gw rename` — UNLESS the hub pinned it at invite
+# (`gw invite --hostname …`), in which case this reflects the hub's choice and
+# rename is disabled. Either way it's CA-attested in the credential.
 hostname = "mynode"
 data_dir = "/var/lib/greasewood"
 
@@ -19,7 +23,11 @@ inbound = "yes"
 # Capability set for this node. "mesh" = may participate; "tls" = may request
 # TLS certs. A "group:<name>" tag segments the mesh — a node peers only with
 # nodes sharing a group (ungrouped nodes form one default pool; the hub is
-# "group:*" and reaches all). Prefer `gw join --groups prod,web` over editing.
+# "group:*" and reaches all).
+# Caps/groups are decided by the HUB at `gw invite [--groups …] [--caps …]` and
+# bound into the CA-signed credential — the joining node cannot choose its own.
+# This line just reflects what the hub issued; editing it grants nothing (peers
+# enforce against your credential, not this file). To change: re-invite + re-join.
 caps = ["mesh"]
 
 # Explicit endpoints. Leave empty if you want WireGuard to discover via roaming.
