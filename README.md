@@ -893,8 +893,9 @@ containers and are skipped by the default run. They need Podman 4+ and the
 WireGuard kernel module:
 
 ```bash
-# Functional tests: mesh connectivity, re-enrollment, rename, TLS, reboot survival
-# (hub handover on real containers) — all under tests/integration/
+# Functional tests: mesh connectivity, re-enrollment, rename, TLS, reboot
+# survival, and a full hub re-root A→B (two live hubs, fleet migrates to B's CA) —
+# all on real containers, under tests/integration/
 python -m pytest tests/integration/
 
 # Scale tests — grow the mesh to many nodes and verify full convergence.

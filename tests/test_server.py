@@ -254,6 +254,30 @@ class TestRerootReissue:
         finally:
             srv.stop()
 
+    def test_revoked_node_not_reissued_via_fallback(self, tmp_path):
+        # A node revoked on B must NOT slip back in through the re-root fallback,
+        # even with a still-trusted old record (the RUNBOOK's "re-apply revokes on
+        # B before dropping A"). The revoke check in ca.renew fires before the
+        # unknown-node path, so the fallback never runs.
+        a_ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(node, _make_cred(node, a_ca, hostname="db")))
+        b_ca = CAKeys.generate()
+        b = CA(b_ca, tmp_path)
+        b.add_revoke(node.id_pub_bytes)                 # revoked on the new hub
+        srv = ControlServer(listen="[::1]:0", directory=directory,
+                            get_ca_pubs=lambda: [a_ca.ca_pub_bytes],
+                            get_revoked=set, ca=b)
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            status, body = _post(port, "/renew", self._renew_req(node))
+            assert status == 400
+            assert "revoke" in body["error"].lower()    # refused, not re-issued
+        finally:
+            srv.stop()
+
 
 class TestCaCertEndpoint:
     def test_ca_cert_served_when_hub_has_ca(self, tmp_path):
