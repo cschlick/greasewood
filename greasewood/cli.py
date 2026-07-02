@@ -72,6 +72,31 @@ ExecStart={exec} run
 Restart=on-failure
 RestartSec=5
 
+# --- sandboxing ---------------------------------------------------------
+# The daemon runs as root only for CAP_NET_ADMIN (WireGuard + routing). It
+# shells out to ip/wg/nft and, when hosts_sync is on, rewrites /etc/hosts.
+# These directives keep an RCE in the daemon from owning the host, without
+# breaking any of that. Deliberately NOT set:
+#   ProtectSystem=strict/full — the daemon writes /etc/hosts (+ its temp and
+#     lock siblings in /etc); strict would EROFS them. 'yes' still makes
+#     /usr + /boot read-only.
+#   ProtectKernelModules — `ip link add type wireguard` may autoload the
+#     module on first use; blocking that would break interface creation.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+SystemCallArchitectures=native
+
 [Install]
 WantedBy=multi-user.target
 """
