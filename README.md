@@ -16,7 +16,8 @@ its features!
   coordination service, no SaaS.
 - **[Direct-or-fail.](#direct-or-fail)** No routing, no relays. A link comes up
   directly or it honestly fails.
-- **[IPv6-only.](#ipv6-only)** Nodes reach each other over IPv6. No NAT traversal.
+- **[IPv6 overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
+  IPv4 or IPv6. No NAT traversal.
 - **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
   address is a hash of its identity key.
 - **[Segmented.](#access-control-segments)** Optional `segment:` tags control who
@@ -52,14 +53,14 @@ the "more" is consistent:
 - **They assign addresses.** A control plane hands them out, or they're baked
   into the cert. greasewood **derives** the address from the identity key — no
   allocator.
-- **Broader reach.** All three run beyond Linux and speak IPv4. greasewood is
-  **Linux-only and IPv6-only**.
+- **Broader reach.** All three run beyond Linux. greasewood is **Linux-only**,
+  with an **IPv6-only overlay** (the underlay may be v4 or v6).
 
 That's the whole trade — and it's why the feature list above doubles as a list of
 limitations. Everything greasewood *won't* do — traverse NAT, assign addresses,
-run on Windows, speak IPv4, keep a service always on — is a capability those
-projects add and greasewood drops on purpose, for simplicity. **The limitations
-are the features.** Reach for one of the others when you want "just works
+route, run on Windows, keep a service always on — is a capability those projects
+add and greasewood drops on purpose, for simplicity. **The limitations are the
+features.** Reach for one of the others when you want "just works
 anywhere"; reach for greasewood when your network is already sane and you'd rather
 own and audit every piece.
 
@@ -126,20 +127,30 @@ peer," computed locally with no coordinator. A link forms as long as at least on
 side is reachable (see [Reachability](#reachability-inbound)); two unreachable
 nodes can't pair.
 
-## IPv6-only
+## IPv6 overlay
 
-Both the underlay endpoints and the overlay are IPv6. Nodes are expected to reach
-each other over IPv6 (typically global addresses), and there is **no NAT
-traversal** — the direct-or-fail model assumes the network already permits a
-direct connection. This is the constraint that keeps the whole thing small: no
-STUN, no hole-punching, no relay fallback, no IPv4 dual-stack logic.
+The **overlay is IPv6-only** — every node's mesh address is a hash of its
+identity key under the ULA prefix, and all in-tunnel traffic is IPv6. That's a
+deliberate identity choice, and it stays.
 
-If you have a node that can only reach the mesh over IPv4 (a laptop behind
-carrier NAT), the answer is probably a dual-stack **bastion** — SSH to a mesh node
-that does have IPv6 — rather than teaching greasewood to traverse NAT.
+The **underlay** (the real network each WireGuard endpoint lives on) can be
+**IPv4 or IPv6**. A node advertises whatever public endpoint(s) it has, and each
+node dials a peer over a family they share — so greasewood runs on v4-only cloud
+VMs (EC2, Vultr — both IPv4-by-default) just as well as on IPv6 GUAs. The overlay
+is v6 either way; only the transport underneath differs. (Managing backend cloud
+instances was the motivating use, which is exactly why the v4 underlay matters.)
 
-Part of the motivating use for this project was managing backend cloud instances on a provider which reliably
-gives stable IPv6 GUAs.
+Still deliberately absent — **no NAT traversal, no routing, no relays**. The
+direct-or-fail model assumes the network already permits a direct connection (no
+STUN, no hole-punching). A NAT'd node is simply `inbound=no`: it dials out to
+reachable peers and the hub, but two unreachable nodes can't pair — and a v4-only
+node and a v6-only node share no underlay family, so they can't pair either
+(direct-or-fail across address families).
+
+Inbound v4 nodes behind 1:1 NAT (e.g. EC2, whose interface holds only a private
+v4) can't autodetect their public address — pass `--endpoint <public-v4>:<port>`
+at `setup-hub`/`join`. Outbound-only (NAT'd) nodes need nothing: they advertise
+no endpoint and dial out.
 
 ## Self-certifying addresses
 
