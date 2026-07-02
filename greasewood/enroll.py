@@ -107,9 +107,9 @@ class EnrollServer:
         self._cache_path = cache_path
         self._control_port = control_port
         self._max_attempts = max_attempts
-        # Caps/groups the hub authorized for this window (from `gw invite`).
+        # Caps the hub authorized for this window (from `gw invite`).
         # The joiner does NOT choose these — the window is authoritative.
-        self._caps = list(caps) if caps else ["mesh"]
+        self._caps = list(caps) if caps else ["segment:mesh"]
         # If set (`gw invite --hostname`), the hub pins the name: the joiner's
         # requested hostname is ignored and it can't rename later.
         self._pinned_hostname = pinned_hostname
@@ -213,7 +213,7 @@ class EnrollServer:
         # Hostname: if the hub pinned one at invite, it wins and the joiner's
         # requested name is ignored; otherwise the joiner names itself.
         hostname = self._pinned_hostname or str(req["hostname"])
-        # Caps/groups are decided by the hub at `gw invite` and carried in the
+        # Caps are decided by the hub at `gw invite` and carried in the
         # door window — NOT self-asserted by the joiner. Any caps in the request
         # are ignored; the window's caps are authoritative.
         caps = list(self._caps)
@@ -370,8 +370,8 @@ class DoorWatcher:
             remaining = (expires - now).total_seconds()
             # Capture expiry string for the on_done guard below.
             expires_str = data["expires"]
-            # Caps/groups the hub authorized at `gw invite` for this window.
-            window_caps = data.get("caps") or ["mesh"]
+            # Caps the hub authorized at `gw invite` for this window.
+            window_caps = data.get("caps") or ["segment:mesh"]
             # Pinned hostname, if the hub set one (`gw invite --hostname`).
             window_hostname = data.get("hostname")
 

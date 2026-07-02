@@ -19,7 +19,7 @@ its features!
 - **[IPv6-only.](#ipv6-only)** Nodes reach each other over IPv6. No NAT traversal.
 - **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
   address is a hash of its identity key.
-- **[Segmented.](#access-control-groups)** Optional `group:` tags control who
+- **[Segmented.](#access-control-segments)** Optional `segment:` tags control who
   talks to whom.
 - **[Named.](#names-gwinternal)** Every node gets a `<host>.gw.internal` name and
   matching TLS certs from the same CA.
@@ -34,7 +34,7 @@ its features!
 
 > Status: early but functional. The full path — enrollment, directory, the
 > reconcile loop, door-based join, credential renewal, expiry-driven revocation,
-> segmentation groups, TLS service certs, and name resolution — works end to end
+> segmentation, TLS service certs, and name resolution — works end to end
 > and is covered by unit + container integration tests. It's a personal project,
 > so expect rough edges.
 
@@ -182,7 +182,7 @@ network) just forge the source IP. In greasewood there's no mapping to poison an
 no authority to subvert for the address — it's derived, not granted.
 
 The cost, to keep it honest: the address is an opaque hash (no human- or
-segment-legible structure — which is why [segmentation](#access-control-groups)
+segment-legible structure — which is why [segmentation](#access-control-segments)
 is tag-based, not CIDR), and the 64-bit host portion makes a *deliberate*
 collision ~2⁶⁴ work rather than impossible. Both are deliberate trades for "the
 address is the identity, and nobody assigns it."
@@ -527,47 +527,62 @@ break connectivity (you still dial out); peers just waste handshake attempts on
 your dead endpoint and converge slower — and `gw diagnose` will flag those as
 "configured but no handshake."
 
-## Access control (groups)
+## Access control (segments)
 
 By default every mesh node can talk to every other — one flat segment. To
-control **who talks to whom**, put nodes in **groups**. A node peers with another
-only if they **share a group**; assigning a group isolates a node from the rest.
+control **who talks to whom**, put nodes in different **segments**. Two nodes peer
+only if they **share a segment**; every node is in `segment:mesh` by default (the
+flat default pool), and putting a node in another segment isolates it.
 
-Groups are `group:<name>` **capability tags** that ride the node's CA-signed
-credential. Crucially, **the hub assigns them at `gw invite` — a joining node
-cannot choose its own** (no self-assertion). Whoever you hand a token to gets
-exactly the groups that invite specified:
+Segments are `segment:<name>` tags in the node's CA-signed credential. Crucially,
+**the hub assigns them at `gw invite` — a joining node cannot choose its own** (no
+self-assertion). Whoever you hand a token to gets exactly the segments that invite
+specified:
 
 ```bash
-# On the hub — the invite decides the node's groups:
-TOKEN=$(sudo gw invite --groups prod,web)   # a token for a node in prod + web
-# On the new node — join takes no group flags; it gets what the token granted:
+# On the hub — the invite decides the node's segments:
+TOKEN=$(sudo gw invite --segments prod,web)   # a token for a node in prod + web
+# On the new node — join takes no segment flags; it gets what the token granted:
 sudo gw join "$TOKEN" --hostname web1
 ```
 
-A node's groups show up in `gw status` (a `groups` column), so you can see the
-segmentation at a glance. To change a node's groups, re-invite it with different
-`--groups` and re-join (renewal preserves whatever the hub last issued).
+A node's segments show up in `gw status` (a `segments` column). To change them
+later **without re-joining**, run `gw set-segments <node> prod,web` on the hub —
+it takes effect at the node's next renewal (or re-invite + re-join for an
+immediate change).
 
-The rules (`reconcile.default_policy`):
+The rule is one line — **share a segment** (`reconcile.default_policy`):
 
-- **share a group** → may peer (a node in several groups peers with anyone
-  sharing one).
-- **both ungrouped** → may peer — the default pool (a fleet with no groups is one open mesh).
-- **`group:*`** on either side → reaches everyone. The hub carries it
-  automatically (it must serve the control plane to every node); grant it to a
-  shared-services node with `gw invite --groups '*'`.
-- otherwise → **denied** (a grouped node and an ungrouped node don't share a
-  group, so grouping a node cuts it off from the default pool).
+- **share a segment** → may peer (a node in several segments peers with anyone
+  sharing one — a "bridge" node).
+- **default** → every node gets `segment:mesh`, so a fleet with no segments set is
+  one open mesh (everyone shares `mesh`).
+- **`segment:*`** on either side → reaches everyone. The hub carries it
+  automatically (it must serve every node); grant it to a shared-services node
+  with `gw invite --segments '*'`.
+- **no shared segment** → **denied** (putting a node in `segment:prod` drops it
+  from `mesh`, isolating it from the default pool; a node in *no* segment peers
+  with no one).
+
+**`mesh` vs `*`:** `mesh` is just the default segment every node lands in — an
+ordinary name that reaches only other `mesh` nodes; `*` is the reach-all wildcard
+(special-cased), so a `segment:*` node reaches *every* segment:
+
+| node A | node B | peer? | why |
+|--------|--------|-------|-----|
+| `segment:mesh` | `segment:mesh` | ✅ | share `mesh` |
+| `segment:mesh` | `segment:prod` | ❌ | no shared segment |
+| `segment:*`    | `segment:prod` | ✅ | `*` reaches all |
+| `segment:*`    | `segment:mesh` | ✅ | `*` reaches all |
 
 Two properties worth knowing:
 
-- **Hub-assigned, attested, mutually enforced.** Groups are decided by the hub at
-  admission and bound into the CA-signed credential — a node **can't self-assert**
-  a group it wasn't granted. A tunnel needs *both* ends to install each other, and
-  each side reads the *other's* groups from its credential, so a node can neither
-  talk its way into a segment nor be forced into a link it denies.
-- **Node-level and symmetric**, not port-level or one-way. Groups decide whether
+- **Hub-assigned, attested, mutually enforced.** Segments are decided by the hub
+  at admission and bound into the CA-signed credential — a node **can't
+  self-assert** a segment it wasn't granted. A tunnel needs *both* ends to install
+  each other, and each side reads the *other's* segments from its credential, so a
+  node can neither talk its way into a segment nor be forced into a link it denies.
+- **Node-level and symmetric**, not port-level or one-way. Segments decide whether
   two nodes may have a tunnel *at all*; "A may reach B:5432 but not B:22" is a
   firewall concern — use your own nftables on `gw-mesh` (see
   [SECURITY.md](SECURITY.md)).
@@ -582,6 +597,8 @@ Two properties worth knowing:
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `status`           | no    | Show local node and directory state.                      |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
+| `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
+| `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |
 | `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
@@ -607,7 +624,7 @@ manual credential-copy path.
 hostname = "node01"
 role     = "node"          # "hub" | "node"
 inbound  = "yes"           # can this node accept cold inbound handshakes?
-caps     = ["mesh"]        # + "group:<x>" tags to segment; "tls" to allow certs
+caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
 
 [network]
 interface  = "gw-mesh"
@@ -692,7 +709,8 @@ The domain is shared with TLS: `gw cert-request` with no `--san` defaults the
 cert to this node's `<hostname>.gw.internal` **plus** its overlay address. So the
 name a node is reached by is exactly the name its certificate is valid for —
 resolve `db.gw.internal` → connect over WireGuard → TLS validates the
-`db.gw.internal` SAN.
+`db.gw.internal` SAN (Subject Alternative Name — the x509 field listing the
+name(s) a certificate is valid for).
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
 it later with `sudo gw rename <newname>` (then restart the daemon). Rename goes
@@ -715,9 +733,9 @@ enough: the hub wouldn't know, so always use `gw rename`.)
 
 The same CA that gates the mesh also issues ordinary **x509 TLS certificates**,
 so a service on a node (Postgres, an internal API, …) gets a cert that every
-peer validates against one trust root — no second PKI. These are real x509
-certs with SANs, distinct from the mesh credential, but signed by the same
-Ed25519 CA key.
+peer validates against one trust root — no second PKI (public-key
+infrastructure). These are real x509 certs with SANs, distinct from the mesh
+credential, but signed by the same Ed25519 CA key.
 
 **What this is for (and isn't).** WireGuard already encrypts and authenticates
 traffic between nodes, so TLS here is **not** about adding encryption — that part
@@ -739,10 +757,14 @@ cert only for opportunistic encryption (no SAN check) *is* just redundant with
 WireGuard.
 
 A node may request certs only if its credential carries the **`tls`**
-capability — grant it at enrollment:
+capability. Like all caps it's granted by the hub at invite (the default is
+`mesh` only, so `tls` is off unless you add it):
 
 ```bash
-sudo gw join "$TOKEN" --hostname dbnode --caps mesh,tls
+# On the hub — grant tls in the invite:
+TOKEN=$(sudo gw invite --caps mesh,tls)
+# On the node — join takes no caps flags:
+sudo gw join "$TOKEN" --hostname dbnode
 ```
 
 Then, on that node:

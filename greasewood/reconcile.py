@@ -26,35 +26,34 @@ log = logging.getLogger(__name__)
 Policy = Callable[[list[str], list[str]], bool]
 
 
-def _groups(caps: list[str]) -> set[str]:
-    """Segmentation groups are carried as `group:<name>` capability tags, so they
-    ride the existing CA-signed caps (attested, node-requested, renewed) with no
-    separate wire field."""
-    return {c[len("group:"):] for c in caps if c.startswith("group:")}
+def _segments(caps: list[str]) -> set[str]:
+    """A node's segments, carried as `segment:<name>` tags in its CA-signed caps
+    (attested, hub-assigned, renewed) — no separate wire field. Every node is in
+    `segment:mesh` by default; `segment:*` is the reach-all wildcard (the hub)."""
+    return {c[len("segment:"):] for c in caps if c.startswith("segment:")}
 
 
 def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
-    """Two nodes may hold a tunnel iff both carry the `mesh` cap AND their
-    segmentation groups permit it (§9). Group rules, on `group:<name>` tags:
+    """Two nodes may hold a tunnel iff they **share a segment** (§9). Segments
+    are `segment:<name>` tags; the single rule is set intersection:
 
-    - `group:*` on either side  → allowed (the wildcard segment: the hub, which
-      must reach everyone, and any shared-services node).
-    - both sides ungrouped      → allowed (the default pool; also the fully
-      backward-compatible case — a fleet with no groups is one open mesh).
-    - otherwise                 → allowed only if they share a group.
+    - `segment:*` on either side → allowed (the reach-all wildcard: the hub,
+      which must reach every node, and any shared-services node).
+    - otherwise                  → allowed iff their segment sets intersect.
+    - a node in no segment at all → allowed with no one.
 
-    So assigning a node a group isolates it from the default pool and from other
-    groups, while `group:*` peers (the hub) still reach it. Enforcement is
-    mutual: a link needs both ends to install each other, and peer groups are
-    read from the peer's CA-signed credential, so a node can't talk its way into
-    a segment it wasn't issued.
+    Every node gets `segment:mesh` at enrollment, so by default the whole fleet
+    shares one segment and is a flat mesh. Putting a node in a different segment
+    (e.g. `segment:prod`) drops it from `mesh` and isolates it; a node can sit in
+    several segments to bridge them. Enforcement is mutual: a link needs both
+    ends to install each other, and peer segments are read from the peer's
+    CA-signed credential, so a node can't talk its way into a segment it wasn't
+    issued.
     """
-    if "mesh" not in local_caps or "mesh" not in peer_caps:
+    local, peer = _segments(local_caps), _segments(peer_caps)
+    if not local or not peer:
         return False
-    local, peer = _groups(local_caps), _groups(peer_caps)
     if "*" in local or "*" in peer:
-        return True
-    if not local and not peer:
         return True
     return bool(local & peer)
 

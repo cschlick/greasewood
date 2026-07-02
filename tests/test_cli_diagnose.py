@@ -21,7 +21,7 @@ from greasewood.wire import Credential, NodeRecord
 _UTC = dt.timezone.utc
 
 
-def _cred(node, ca, hostname, caps=("mesh",), ttl=3600):
+def _cred(node, ca, hostname, caps=("segment:mesh",), ttl=3600):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
@@ -43,7 +43,7 @@ def _write_cfg(tmp_path, ca_hex):
 hostname = "self"
 data_dir = "{tmp_path}"
 role = "node"
-caps = ["mesh"]
+caps = ["segment:mesh"]
 [network]
 interface = "gw-mesh"
 seeds = []
@@ -73,7 +73,8 @@ def test_diagnose_classifies_rejections(tmp_path, capsys, monkeypatch):
     (tmp_path / "revoked.json").write_text(
         json.dumps({"revoked": [n3.id_pub_hex]}))
     n4 = NodeKeys.generate()
-    directory.put(_record(n4, _cred(n4, trusted, "policy", caps=("tls",))))  # no mesh cap
+    directory.put(_record(n4, _cred(n4, trusted, "policy",
+                                    caps=("segment:prod",))))  # different segment
     directory.save(tmp_path / "directory.json")
 
     args = types.SimpleNamespace(config=str(cfg), hostname=None)

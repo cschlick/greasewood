@@ -173,6 +173,7 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
 
 def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
+                    segments: str | None = None,
                     inbound: str | None = None, invite_hostname: str | None = None,
                     check: bool = True):
     """
@@ -183,7 +184,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
     overrides any node-side `--hostname` and locks rename.
     Returns the `gw join` CompletedProcess.
     """
-    # caps/groups are decided by the hub at invite (no self-assertion); hostname
+    # caps/segments are decided by the hub at invite (no self-assertion); hostname
     # and inbound remain node-side join flags.
     join_extra = []
     if hostname is not None:
@@ -193,6 +194,8 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
     invite_extra = []
     if caps is not None:
         invite_extra += ["--caps", caps]
+    if segments is not None:
+        invite_extra += ["--segments", segments]
     if invite_hostname is not None:
         invite_extra += ["--hostname", invite_hostname]
 
@@ -227,29 +230,32 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
 
 def door_enroll(gw_hub, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
+                segments: str | None = None,
                 inbound: str | None = None, invite_hostname: str | None = None,
                 check: bool = True):
     """Enroll an existing node container via the hub (see door_enroll_via).
-    `hostname`/`caps`/`inbound` are passed only when given, so omitting them
-    exercises join's "keep existing config" behavior. `invite_hostname` pins the
-    name at the hub."""
+    `hostname`/`caps`/`segments`/`inbound` are passed only when given, so omitting
+    them exercises join's "keep existing config" behavior. `invite_hostname` pins
+    the name at the hub; `segments` sets the node's segments at invite."""
     return door_enroll_via(
         gw_hub["cid"], gw_hub["ipv6"], node_cid, node_ipv6,
-        hostname=hostname, caps=caps, inbound=inbound,
+        hostname=hostname, caps=caps, segments=segments, inbound=inbound,
         invite_hostname=invite_hostname, check=check,
     )
 
 
 def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
-                  caps: str | None = None, inbound: str | None = None,
+                  caps: str | None = None, segments: str | None = None,
+                  inbound: str | None = None,
                   invite_hostname: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
     Enrollment uses the real `gw invite` / `gw join` flow — the only supported
     path (see door_enroll). Container creation and `gw run` stay parallel; only
-    the door section serializes. `caps` (e.g. "mesh,tls" or "mesh,group:prod")
-    is granted by the hub at `gw invite` — the joiner can't self-assert caps.
+    the door section serializes. `caps` (abilities, e.g. "tls") and `segments`
+    (e.g. "prod,web") are granted by the hub at `gw invite` — the joiner can't
+    self-assert either.
 
     Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
     """
@@ -264,8 +270,8 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_ipv6(cid, gw_network)
-    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, inbound=inbound,
-                invite_hostname=invite_hostname)
+    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
+                inbound=inbound, invite_hostname=invite_hostname)
 
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")

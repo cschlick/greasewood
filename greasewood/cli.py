@@ -205,11 +205,11 @@ def cmd_setup_hub(args) -> int:
     hostname = args.hostname or socket.gethostname().split(".")[0] or "hub"
     listen_port = args.listen_port
     control_port = args.control_port
-    caps = [c.strip() for c in args.caps.split(",")]
-    # The hub must reach every segment (control plane + door), so it always
-    # carries the wildcard group. Harmless when no groups are in use.
-    if "group:*" not in caps:
-        caps.append("group:*")
+    # The hub must reach every segment (it serves the control plane + door), so
+    # it carries the reach-all wildcard segment. Plus any ability caps (--caps).
+    caps = ["segment:*"]
+    if args.caps:
+        caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     ttl = _parse_duration(args.credential_ttl)
     interface = args.interface
     overlay_prefix = args.overlay_prefix
@@ -407,18 +407,19 @@ def cmd_invite(args) -> int:
 
     window = cfg.door_window
 
-    # Caps/groups are decided HERE, by the hub, and issued to whoever redeems
-    # this token — the joiner does not get to choose (no self-assertion). "mesh"
-    # is always included; --groups add group:<name> tags; --caps adds others
-    # (e.g. tls). These are stored in the door window and the enroll server
-    # issues the credential from them, ignoring anything the joiner sends.
-    caps = [c.strip() for c in (args.caps or "mesh").split(",") if c.strip()]
-    if "mesh" not in caps:
-        caps.insert(0, "mesh")
-    if args.groups:
-        caps += ["group:" + g.strip() for g in args.groups.split(",") if g.strip()]
+    # The hub decides caps + segments HERE and issues them to whoever redeems the
+    # token — the joiner does not choose (no self-assertion). They're stored in
+    # the door window; the enroll server issues from them, ignoring the joiner's.
+    #   segments (segment:<name>) control who-talks-to-whom; the default
+    #     segment:mesh is the flat default pool. --segments replaces it (isolates
+    #     the node); list several to bridge them.
+    #   --caps grants abilities, e.g. tls.
+    segments = [s.strip() for s in (args.segments or "mesh").split(",") if s.strip()]
+    caps = ["segment:" + s for s in segments]
+    if args.caps:
+        caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     # --hostname pins the name: the hub fixes it at enrollment (the joiner's
-    # requested name is ignored) and marks the credential `host:pinned` so the
+    # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
     # join and may `gw rename` later (today's behavior).
     pinned_hostname = args.hostname
@@ -435,7 +436,7 @@ def cmd_invite(args) -> int:
                 "Free it first (revoke + remove the old node on the hub) or pin a "
                 "different name."
             )
-        caps.append("host:pinned")
+        caps.append("hostname-pinned")
     _seen: set[str] = set()
     caps = [c for c in caps if not (c in _seen or _seen.add(c))]
     log.info("this token grants caps=%s%s", caps,
@@ -515,7 +516,7 @@ def cmd_join(args) -> int:
         # Default to the machine's short hostname (first label, no domain).
         hostname = socket.gethostname().split(".")[0] or "node"
 
-    # Caps/groups are NOT chosen here. The hub decides them at `gw invite` and
+    # Caps/segments are NOT chosen here. The hub decides them at `gw invite` and
     # binds them into the credential issued over the door; we read them back
     # from that credential below and write them to config. (No self-assertion:
     # whatever a joiner might request is ignored by the hub.)
@@ -847,6 +848,76 @@ def cmd_revoke(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# set-caps / set-segments — change an enrolled node's caps on the hub
+# ---------------------------------------------------------------------------
+
+def _load_hub_ca(args, cmd: str):
+    """Shared setup for hub-side registry commands: load config + CA."""
+    from .config import load_config
+    from .keys import CAKeys
+    from .ca import CA
+    cfg = load_config(Path(args.config))
+    if cfg.role != "hub":
+        sys.exit(f"gw {cmd} must be run on the hub (role = hub)")
+    if cfg.ca_key_file is None:
+        sys.exit(f"{cmd} requires ca_key_file in [hub]")
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    return cfg, CA(ca_keys, cfg.data_dir)
+
+
+def _resolve_node(ca, cfg, handle: str):
+    """Resolve a node handle — a hostname (with or without the `.<mesh_domain>`
+    suffix) or a full 64-char id_pub hex — to (id_pub_bytes, hostname)."""
+    s = handle.strip()
+    if len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s):
+        info = ca.node_info(bytes.fromhex(s))
+        if info is None:
+            sys.exit(f"no enrolled node with id {s[:16]}…")
+        return bytes.fromhex(s), info[0]
+    suffix = "." + cfg.mesh_domain
+    if s.endswith(suffix):
+        s = s[: -len(suffix)]
+    owner = ca.hostname_owner(s)
+    if owner is None:
+        sys.exit(f"no node named {handle!r} on this hub (see `gw status`)")
+    return bytes.fromhex(owner), s
+
+
+_NEXT_RENEWAL_NOTE = (
+    "Takes effect at the node's next renewal (~half the credential TTL); no "
+    "re-join needed. For an immediate change, re-invite + re-join the node."
+)
+
+
+def cmd_set_caps(args) -> int:
+    cfg, ca = _load_hub_ca(args, "set-caps")
+    id_pub, name = _resolve_node(ca, cfg, args.node)
+    caps = [c.strip() for c in args.caps.split(",") if c.strip()]
+    if not any(c.startswith("segment:") for c in caps):
+        log.warning("caps %s include no segment — %r will peer with no one "
+                    "(add e.g. segment:mesh)", caps, name)
+    ca.set_caps(id_pub, caps)
+    print(f"caps for {name!r} → {caps}")
+    print(_NEXT_RENEWAL_NOTE)
+    return 0
+
+
+def cmd_set_segments(args) -> int:
+    cfg, ca = _load_hub_ca(args, "set-segments")
+    id_pub, name = _resolve_node(ca, cfg, args.node)
+    _, current = ca.node_info(id_pub)
+    # Replace only the segment: tags; keep tls/hostname-pinned and anything else.
+    kept = [c for c in current if not c.startswith("segment:")]
+    segs = [s.strip() for s in args.segments.split(",") if s.strip()] or ["mesh"]
+    segments = ["segment:" + s for s in segs]
+    caps = kept + segments
+    ca.set_caps(id_pub, caps)
+    print(f"segments for {name!r} → {segs}  (caps now {caps})")
+    print(_NEXT_RENEWAL_NOTE)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # hub-promote — turn an enrolled node into a hub (generate a CA)
 # ---------------------------------------------------------------------------
 
@@ -980,11 +1051,11 @@ def cmd_hub_promote(args) -> int:
     # this hub accepts the credentials it issues.
     trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
 
-    # A hub must reach every segment — ensure the wildcard group. (Its own
+    # A hub must reach every segment — ensure the wildcard segment. (Its own
     # credential picks this up on the next renewal under the new CA.)
     hub_caps = list(cfg.caps)
-    if "group:*" not in hub_caps:
-        hub_caps.append("group:*")
+    if "segment:*" not in hub_caps:
+        hub_caps.append("segment:*")
 
     endpoint_line = (
         f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
@@ -1291,7 +1362,7 @@ def cmd_rename(args) -> int:
 
     # Hub-pinned nodes (enrolled via `gw invite --hostname`) can't rename. Fail
     # fast locally; the hub enforces this too (defense in depth).
-    if "host:pinned" in cfg.caps:
+    if "hostname-pinned" in cfg.caps:
         sys.exit("this node's hostname is hub-pinned; rename is disabled. "
                  "To change it, re-invite the node with a new --hostname on the hub.")
 
@@ -1590,7 +1661,7 @@ def cmd_status(args) -> int:
         return 0
 
     fmt = "{:<24} {:<40} {:<20} {:<22} {}"
-    print(fmt.format("name", "addr", "expires", "state", "groups"))
+    print(fmt.format("name", "addr", "expires", "state", "segments"))
     print("-" * 120)
     for r in records:
         exp = r.cred.exp
@@ -1602,14 +1673,14 @@ def cmd_status(args) -> int:
         else:
             state = "ok"
         marker = " ← self" if r.id_pub.hex() == own_id else ""
-        groups = ",".join(
-            c[len("group:"):] for c in r.cred.caps if c.startswith("group:")
+        segments = ",".join(
+            c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
         ) or "-"
         # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
         # not the bare hostname.
         print(fmt.format(
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, groups
+            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, segments
         ))
 
     print(f"\n{len(records)} record(s) in local directory cache")
@@ -2028,7 +2099,9 @@ def main(argv=None) -> int:
                     help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")
     sp.add_argument("--mesh-domain", dest="mesh_domain", default="gw.internal",
                     help="name suffix for /etc/hosts + TLS (default: gw.internal)")
-    sp.add_argument("--caps", default="mesh")
+    sp.add_argument("--caps", default="",
+                    help="extra ability caps for the hub (it always carries "
+                         "segment:* to reach every segment), e.g. 'tls'")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
@@ -2043,14 +2116,15 @@ def main(argv=None) -> int:
                     help="pin the invited node's mesh hostname (the hub fixes it; "
                          "the joiner can't choose or later `gw rename` it). Omit "
                          "to let the node name itself at join.")
-    sp.add_argument("--groups", default=None, metavar="G1,G2",
-                    help="segmentation groups the invited node will belong to "
-                         "(comma-sep). The hub decides this — the joiner cannot. "
-                         "It peers only with nodes sharing a group; ungrouped "
-                         "nodes form one default pool; the hub reaches all.")
-    sp.add_argument("--caps", default="mesh",
-                    help="capability tags granted to the invited node (comma-sep; "
-                         "'mesh' is always included), e.g. 'mesh,tls'.")
+    sp.add_argument("--segments", default=None, metavar="S1,S2",
+                    help="segments the invited node belongs to (comma-sep). The "
+                         "hub decides this — the joiner cannot. A node peers only "
+                         "with nodes sharing a segment. Default: 'mesh' (the flat "
+                         "default pool everyone's in). Naming other segments "
+                         "isolates the node; list several to bridge them.")
+    sp.add_argument("--caps", default="",
+                    help="ability caps granted to the invited node (comma-sep), "
+                         "e.g. 'tls'. Segmentation is set with --segments.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
     sp.add_argument("-q", "--quiet", action="store_true",
@@ -2126,6 +2200,23 @@ def main(argv=None) -> int:
     sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the hub)")
     sp.add_argument("id_pub_hex", help="64-char hex identity public key")
     sp.set_defaults(fn=cmd_revoke)
+
+    # set-caps (hub) — change an enrolled node's full tag set
+    sp = sub.add_parser("set-caps",
+                        help="[hub] change an enrolled node's caps (effective next renewal)")
+    sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
+    sp.add_argument("caps", help="comma-separated full tag set, e.g. "
+                                 "'segment:prod,tls' (replaces the node's current caps)")
+    sp.set_defaults(fn=cmd_set_caps)
+
+    # set-segments (hub) — change only a node's segments
+    sp = sub.add_parser("set-segments",
+                        help="[hub] change an enrolled node's segments "
+                             "(effective next renewal)")
+    sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
+    sp.add_argument("segments", help="comma-separated segments, e.g. 'prod,web' "
+                                     "(replaces segment tags; keeps tls; empty = mesh default)")
+    sp.set_defaults(fn=cmd_set_segments)
 
     # hub-promote (on the prospective new hub)
     sp = sub.add_parser("hub-promote",

@@ -126,7 +126,7 @@ class CA:
             # rewrites nodes/<id>.json, which frees the old name for reuse. But a
             # hub-pinned node (enrolled via `gw invite --hostname`) may not rename
             # itself — the name is the hub's to set.
-            if "host:pinned" in caps:
+            if "hostname-pinned" in caps:
                 raise ValueError(
                     "hostname is hub-pinned for this node; rename disabled "
                     "(re-invite with a new --hostname to change it)"
@@ -174,6 +174,16 @@ class CA:
     def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
         """(hostname, caps) for an enrolled node, or None if unknown."""
         return self._load_node_info(id_pub)
+
+    def set_caps(self, id_pub: bytes, caps: list[str]) -> None:
+        """Rewrite a known node's caps in the registry. Takes effect at the
+        node's NEXT renewal — `renew` re-issues from the registry, so the node
+        picks up the change with no re-join. Raises ValueError if unknown."""
+        info = self._load_node_info(id_pub)
+        if info is None:
+            raise ValueError("unknown node — enroll it first")
+        hostname, _ = info
+        self._save_node_caps(id_pub, hostname, caps)
 
     # --- revoke list ---
 

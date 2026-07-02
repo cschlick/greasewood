@@ -20,15 +20,17 @@ role = "node"
 #             `gw set-inbound yes`.
 inbound = "yes"
 
-# Capability set for this node. "mesh" = may participate; "tls" = may request
-# TLS certs. A "group:<name>" tag segments the mesh — a node peers only with
-# nodes sharing a group (ungrouped nodes form one default pool; the hub is
-# "group:*" and reaches all).
-# Caps/groups are decided by the HUB at `gw invite [--groups …] [--caps …]` and
-# bound into the CA-signed credential — the joining node cannot choose its own.
-# This line just reflects what the hub issued; editing it grants nothing (peers
-# enforce against your credential, not this file). To change: re-invite + re-join.
-caps = ["mesh"]
+# The node's tag set. Two kinds of tag live here:
+#   segments — "segment:<name>" controls who-talks-to-whom. Two nodes peer only
+#     if they share a segment. Every node is in "segment:mesh" by default (the
+#     flat default pool); "segment:*" (the hub) reaches all.
+#   abilities — e.g. "tls" (may request TLS certs).
+# Both are decided by the HUB at `gw invite [--segments …] [--caps …]` and bound
+# into the CA-signed credential — the joining node cannot choose its own. This
+# line just reflects what the hub issued; editing it grants nothing (peers
+# enforce against your credential, not this file). To change: `gw set-segments`/
+# `gw set-caps` on the hub, or re-invite + re-join.
+caps = ["segment:mesh"]
 
 # Explicit endpoints. Leave empty if you want WireGuard to discover via roaming.
 # endpoints = ["[2001:db8::1]:51900"]

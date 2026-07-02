@@ -110,10 +110,10 @@ def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
         port = "8443"
 
         server = bring_up_node(gw_image, gw_network, gw_hub,
-                               hostname="webserver", caps="mesh,tls")
+                               hostname="webserver", caps="tls")
         cids.append(server["cid"])
         client = bring_up_node(gw_image, gw_network, gw_hub,
-                               hostname="webclient", caps="mesh,tls")
+                               hostname="webclient", caps="tls")
         cids.append(client["cid"])
 
         # The two nodes must have a direct overlay tunnel before we talk TLS.
@@ -150,7 +150,7 @@ def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
     try:
         # Node enrolled WITH the tls capability.
         node = bring_up_node(gw_image, gw_network, gw_hub,
-                             hostname="dbnode", caps="mesh,tls")
+                             hostname="dbnode", caps="tls")
         nodes.append(node["cid"])
 
         # Wait for the node↔hub overlay tunnel before talking to the control plane.
