@@ -232,17 +232,34 @@ sudo gw cert-request --san db.gw.internal \
 # writes <data_dir>/tls/db.key, db.crt, ca.crt; point the service at them
 ```
 
+The three files need not share a directory — override any of them with
+`--key-out` / `--cert-out` / `--ca-out` (e.g. key under `/etc/ssl/private`, CA in
+the system trust store).
+
+**Three files, don't conflate them:**
+- the **key/cert/ca** go wherever you point them (the `--*-out` flags, else
+  `<data_dir>/tls/`);
+- **`greasewood.toml`** is the daemon config — `cert-request` only *reads* it (for
+  `data_dir` + the default SAN), never writes it; it lives wherever you pass
+  `gw -c …`;
+- **`<data_dir>/tls/managed.json`** is the **renewal source of truth** — it
+  records each managed cert's three paths, and the daemon reads it to know where
+  to re-issue. Its location follows `data_dir` (no separate flag). `cert-request`
+  prints both the config and the manifest path so you know where the renewal
+  record lives.
+
 **Auto-renewal is automatic and lives in the daemon** — no cron, no extra unit.
-`cert-request` records the cert in `<data_dir>/tls/managed.json`, and the running
-daemon re-issues it at ~half its TTL, rewrites the same files in place, then runs
-`--reload-cmd`. So the one systemd service that keeps the mesh credential fresh
-keeps service certs fresh too.
+The daemon re-issues each managed cert at ~half its TTL into its recorded paths,
+then runs `--reload-cmd`. So the one systemd service that keeps the mesh
+credential fresh keeps service certs fresh too.
 
 - **Check state:** `gw cert-status` (shows each local cert + expiry). Renewals log
   to `journalctl -u greasewood` as `auto-renewed TLS cert` / `cert reload_cmd ran`.
-- **Change SANs, out-dir, or the reload command:** just re-run `gw cert-request`
-  with the new flags — it replaces that cert's manifest entry (keyed by name +
-  out-dir).
+- **Change SANs, paths, or the reload command:** just re-run `gw cert-request`
+  with the new flags — the manifest entry is keyed by `--name`, so it's replaced
+  in place. Changing the paths **relocates** it: the daemon renews into the new
+  locations and `cert-request` flags the old files as orphaned (remove them once
+  nothing reads them — greasewood won't delete key material for you).
 - **One-shot (no auto-renewal):** `gw cert-request --no-auto-renew`, then renew by
   hand before expiry.
 
