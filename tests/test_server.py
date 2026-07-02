@@ -113,7 +113,7 @@ class TestServerIPv6Binding:
     def test_health_reachable(self, running_server):
         _, port, *_ = running_server
         data = _get(port, "/health")
-        assert data == {"status": "ok"}
+        assert data["status"] == "ok"
 
 
 class TestCertSanAuthorization:
@@ -303,6 +303,27 @@ class TestCaCertEndpoint:
         assert e.value.code == 404
 
 
+class TestHubClock:
+    """The hub stamps its own UTC time into /health and /directory so nodes
+    (sync loop, gw diagnose) can detect clock skew — the silent killer of an
+    expiry-based trust system — instead of mis-diagnosing it as bad creds."""
+
+    def _assert_recent_utc(self, raw: str):
+        ts = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        assert ts.tzinfo is not None
+        assert abs((dt.datetime.now(_UTC) - ts).total_seconds()) < 30
+
+    def test_health_carries_hub_time(self, running_server):
+        _, port, *_ = running_server
+        data = _get(port, "/health")
+        self._assert_recent_utc(data["now"])
+
+    def test_directory_carries_hub_time(self, running_server):
+        _, port, *_ = running_server
+        data = _get(port, "/directory")
+        self._assert_recent_utc(data["now"])
+
+
 class TestDirectoryEndpoint:
     def test_returns_records(self, running_server):
         _, port, directory, ca, node, cred = running_server
@@ -324,7 +345,7 @@ class TestDirectoryEndpoint:
         srv.start()
         try:
             data = _get(port, "/directory")
-            assert data == {"records": [], "renew_after": None}
+            assert data["records"] == [] and data["renew_after"] is None
         finally:
             srv.stop()
 
@@ -527,7 +548,7 @@ class TestControlServerConcurrency:
             time.sleep(0.3)  # let the server start reading the stalled request
             # A concurrent request must still be answered promptly.
             data = _get(port, "/health")
-            assert data == {"status": "ok"}
+            assert data["status"] == "ok"
         finally:
             stall.close()
 
