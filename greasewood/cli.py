@@ -39,12 +39,17 @@ log = logging.getLogger("greasewood")
 
 
 def _setup_logging(verbose: bool) -> None:
+    from .audit import _UTCFormatter
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        level=level,
-    )
+    handler = logging.StreamHandler()
+    # Full ISO-8601 UTC timestamps: a command trail spanning days must be
+    # unambiguous (the old format was time-only).
+    handler.setFormatter(_UTCFormatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
 
 
 def _version() -> str:
@@ -627,8 +632,11 @@ def cmd_invite(args) -> int:
 
     # Bring up the hub's door WG interface on the configured door port
     door_key_path = data_dir / "door.key"
-    wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64,
-                                    params.psk_b64, cfg.door_port)
+    from . import audit
+    audit.attach_file(data_dir / "audit.log")   # one-shot door commands → the trail
+    with audit.context("invite: bring up hub door interface"):
+        wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64,
+                                        params.psk_b64, cfg.door_port)
 
     # Write window file so the running gw-run daemon starts the enroll server
     expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
@@ -757,10 +765,13 @@ def cmd_join(args) -> int:
     log.info("overlay addr: %s", node_keys.addr)
 
     # Bring up the local door interface (door port comes from the token)
-    wgmod.ensure_node_door_interface(
-        params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64, hub_host,
-        door_port,
-    )
+    from . import audit
+    audit.attach_file(data_dir / "audit.log")   # one-shot door commands → the trail
+    with audit.context("join: bring up node door interface"):
+        wgmod.ensure_node_door_interface(
+            params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64, hub_host,
+            door_port,
+        )
 
     # Connect to hub's enroll daemon via the door tunnel (retry for WG handshake)
     from .door import HUB_DOOR_IP, ENROLL_PORT
@@ -1626,6 +1637,14 @@ def cmd_run(args) -> int:
     from . import wg as wgmod
 
     cfg = load_config(Path(args.config))
+
+    # Durable data-plane command trail: attach the rotating audit file so every
+    # ip/wg command the daemon issues is recorded independently of the journal.
+    if cfg.audit_log is not None:
+        from . import audit
+        if audit.attach_file(cfg.audit_log):
+            log.info("data-plane command audit → %s", cfg.audit_log)
+
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
     # Peering is decided by shared segment:<name> tags. A caps list without one
@@ -1648,9 +1667,11 @@ def cmd_run(args) -> int:
     def get_ca_pubs():
         return ca_pubs
 
-    wgmod.ensure_interface(
-        cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
-    )
+    from . import audit
+    with audit.context(f"startup: ensure interface {cfg.wg_interface} [{keys.addr}]"):
+        wgmod.ensure_interface(
+            cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
+        )
 
     ca: CA | None = None
     sync: SyncLoop | None = None

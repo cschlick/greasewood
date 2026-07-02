@@ -263,7 +263,9 @@ class EnrollServer:
         # its tunnel and push its NodeRecord to the hub on first startup.
         overlay_addr = derive_addr(id_pub_bytes)
         wg_pub_b64 = base64.b64encode(wg_pub_bytes).decode()
-        wgmod.set_peer(self._wg_iface, wg_pub_b64, overlay_addr)
+        from . import audit
+        with audit.context(f"enroll: +peer {hostname} [{overlay_addr}] from {peer_ip}"):
+            wgmod.set_peer(self._wg_iface, wg_pub_b64, overlay_addr)
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
         self._status(door.mark_door_enrolled, peer_ip, hostname)
 

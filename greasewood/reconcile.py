@@ -19,6 +19,7 @@ import time
 from typing import Callable
 
 from .directory import Directory
+from . import audit
 from . import wg as wgmod
 
 log = logging.getLogger(__name__)
@@ -163,6 +164,7 @@ def reconcile_once(
 
     # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)
     desired: dict[str, tuple[str, str | None]] = {}
+    meta: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
     for record in directory.all():
@@ -190,15 +192,23 @@ def reconcile_once(
         else:
             endpoint = candidates[0] if candidates else None
         desired[wg_pub_b64] = (record.cred.addr, endpoint)
+        # Context for the audit trail: name + segments, so every peer command
+        # says WHO and WHY, not just a bare pubkey.
+        segs = ",".join(sorted(_segments(record.cred.caps))) or "-"
+        meta[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] seg={segs}"
 
     # Diff against live kernel state and apply
     live_set = set(live)
     desired_set = set(desired)
 
+    def _who(pub: str) -> str:
+        return meta.get(pub, f"...{pub[-8:]}")
+
     for pub in desired_set - live_set:
         addr, ep = desired[pub]
         try:
-            wgmod.set_peer(iface, pub, addr, ep)
+            with audit.context(f"reconcile: +peer {_who(pub)}"):
+                wgmod.set_peer(iface, pub, addr, ep)
         except Exception as e:
             log.warning("add peer ...%s failed: %s", pub[-8:], e)
 
@@ -212,7 +222,9 @@ def reconcile_once(
         route_missing = not live[pub].allowed_ips or addr not in live[pub].allowed_ips
         if endpoint_changed or route_missing:
             try:
-                wgmod.set_peer(iface, pub, addr, ep)
+                why = "endpoint" if endpoint_changed else "route"
+                with audit.context(f"reconcile: ~peer {_who(pub)} ({why})"):
+                    wgmod.set_peer(iface, pub, addr, ep)
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", pub[-8:], e)
 
@@ -220,7 +232,8 @@ def reconcile_once(
         try:
             # Pass allowed_ip so the kernel route is also removed
             peer_ip = live[pub].allowed_ips.split("/")[0] if live[pub].allowed_ips else None
-            wgmod.remove_peer(iface, pub, peer_ip)
+            with audit.context(f"reconcile: -peer {_who(pub)}"):
+                wgmod.remove_peer(iface, pub, peer_ip)
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", pub[-8:], e)
 

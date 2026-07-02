@@ -24,10 +24,19 @@ log = logging.getLogger(__name__)
 
 
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    log.debug("$ %s", " ".join(args))
+    # Every ip/wg mutation greasewood makes passes through here, so this is the
+    # one place that records the data-plane command trail (greasewood.audit).
+    import time
+    from . import audit
+    t0 = time.monotonic()
     try:
-        return subprocess.run(list(args), capture_output=True, text=True, check=check)
+        r = subprocess.run(list(args), capture_output=True, text=True, check=check)
+        audit.record_command(args, r.returncode, int((time.monotonic() - t0) * 1000),
+                             r.stdout, r.stderr)
+        return r
     except subprocess.CalledProcessError as e:
+        audit.record_command(args, e.returncode, int((time.monotonic() - t0) * 1000),
+                             e.stdout or "", e.stderr or "")
         if e.stderr:
             log.error("command failed: %s\nstderr: %s", " ".join(args), e.stderr.strip())
         raise

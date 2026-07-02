@@ -38,6 +38,9 @@ class Config:
     # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
     # `gw cert-request` appends one automatically for a subdomain --san.
     aliases: list[str]
+    # Durable data-plane command trail (the daemon appends every ip/wg command
+    # here). Default <data_dir>/audit.log; set audit_log = "" to disable.
+    audit_log: Path | None
 
     # Control plane
     seeds: list[str]       # http://[addr]:port — seeds to pull directory from
@@ -115,6 +118,12 @@ def load_config(path: Path) -> Config:
         hosts_sync=bool(net.get("hosts_sync", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
         aliases=list(net.get("aliases", [])),
+        # Default to <data_dir>/audit.log; "" (explicitly empty) disables it.
+        audit_log=(
+            None if net.get("audit_log") == ""
+            else Path(net["audit_log"]).expanduser() if "audit_log" in net
+            else Path(node.get("data_dir", "/var/lib/greasewood")).expanduser() / "audit.log"
+        ),
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 
