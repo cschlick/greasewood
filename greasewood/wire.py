@@ -59,7 +59,13 @@ def _ts(t: dt.datetime) -> str:
 
 
 def _parse_ts(s: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        # Reject here, at parse: a naive timestamp survives until the skew
+        # check compares it against an aware clock and raises TypeError — an
+        # unhandled 500 instead of the clean ValueError → 400 path.
+        raise ValueError(f"timestamp {s!r} lacks a timezone (want RFC 3339, e.g. ...Z)")
+    return t
 
 
 # ---------------------------------------------------------------------------
