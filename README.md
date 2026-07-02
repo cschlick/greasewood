@@ -690,10 +690,20 @@ Give each membership its own config, data dir, interface, listen port, and mesh
 domain (hub-in-two-meshes is not supported):
 
 ```bash
+# Mesh A
 sudo gw -c /etc/gw-a.toml join "$TOKEN_A" --data-dir /var/lib/gw-a \
     --interface gw-a --listen-port 51900 --mesh-domain alpha
-sudo gw -c /etc/gw-a.toml run          # (and the same, with -b/51910/beta, for mesh B)
+sudo gw -c /etc/gw-a.toml run
+
+# Mesh B — the same two commands, with every A-specific value swapped for a B one:
+# its own config, token, data dir, interface, UDP port, and mesh domain.
+sudo gw -c /etc/gw-b.toml join "$TOKEN_B" --data-dir /var/lib/gw-b \
+    --interface gw-b --listen-port 51910 --mesh-domain beta
+sudo gw -c /etc/gw-b.toml run
 ```
+
+(Run each daemon as its own systemd service in practice — `gw run` stays in the
+foreground.)
 
 `hosts_sync` blocks are tagged per mesh domain and file-locked, so the two
 daemons don't clobber each other's `/etc/hosts` entries.
