@@ -627,7 +627,7 @@ Two properties worth knowing:
 | `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |
 | `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
-| `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
+| `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service. The daemon then auto-renews it at ~half its TTL; `--reload-cmd` runs a command (e.g. `systemctl reload postgresql`) after each renewal, `--no-auto-renew` opts out. |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
