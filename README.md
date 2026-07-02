@@ -152,6 +152,13 @@ v4) can't autodetect their public address — pass `--endpoint <public-v4>:<port
 at `create`/`join`. Outbound-only (NAT'd) nodes need nothing: they advertise
 no endpoint and dial out.
 
+A dual-stack peer advertises **both** its v6 and v4 endpoints (v6 first). If the
+preferred one produces no handshake for ~20s, the reconcile loop rotates to the
+next advertised endpoint and keeps round-robining until one connects — so a peer
+reachable on v4 but with a broken v6 path still links, with no manual
+intervention. This is still direct-or-fail: only endpoints the *peer* advertised
+are ever tried, never a relay.
+
 ## Self-certifying addresses
 
 A node's overlay address is a **hash of its identity public key**:
