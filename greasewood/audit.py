@@ -57,18 +57,31 @@ def _q(s: str) -> str:
     return s if s and all(c not in s for c in ' "=\t\n') else '"' + s.replace('"', '\\"') + '"'
 
 
+def is_readonly(argv) -> bool:
+    """A state-query, not a change: `wg show …`, `ip … show`. These run every
+    reconcile cycle (get_peers, existence probes), so they'd drown a change log
+    — they go to debug, and the durable trail keeps only mutations."""
+    return bool(argv) and argv[0] in ("wg", "ip") and "show" in argv
+
+
 def record_command(argv, rc: int, elapsed_ms: int,
-                   stdout: str = "", stderr: str = "") -> None:
-    """Log one executed ip/wg (or other data-plane) command as a logfmt line."""
+                   stdout: str = "", stderr: str = "", failed: bool = False) -> None:
+    """Log one executed ip/wg command as a logfmt line.
+
+    `failed` is set only when the command was expected to succeed and didn't
+    (a check=True raise) — NOT for a tolerated nonzero rc (check=False probes /
+    idempotent cleanups), which are normal control flow and would otherwise
+    cry wolf."""
+    read = is_readonly(argv)
     ctx = _ctx.get()
     cmd = " ".join(shlex.quote(a) for a in argv)
-    line = (f"cmd rc={rc} t={elapsed_ms}ms "
-            f"ctx={_q(ctx or '-')} argv={_q(cmd)}")
-    if rc != 0 and stderr:
+    line = f"cmd rc={rc} t={elapsed_ms}ms ctx={_q(ctx or '-')} argv={_q(cmd)}"
+    if failed and stderr:
         line += f" stderr={_q(stderr.strip())}"
-    # rc!=0 is an ERROR so failures stand out; successes are INFO but always
-    # present (the whole point is a complete trail, not just failures).
-    log.log(logging.ERROR if rc != 0 else logging.INFO, line)
+    # Reads → DEBUG (not in the durable trail). Mutations → INFO, or ERROR when
+    # a command that had to succeed didn't.
+    level = logging.DEBUG if read else (logging.ERROR if failed else logging.INFO)
+    log.log(level, line)
 
 
 # ---------------------------------------------------------------------------
