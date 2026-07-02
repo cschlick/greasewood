@@ -59,6 +59,10 @@ def _ts(t: dt.datetime) -> str:
 
 
 def _parse_ts(s: str) -> dt.datetime:
+    if not isinstance(s, str):
+        # A non-string (e.g. JSON null/number) would raise AttributeError on
+        # .replace below — a 500. Normalize to the clean ValueError → 400 path.
+        raise ValueError(f"timestamp must be an RFC 3339 string, got {type(s).__name__}")
     t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
     if t.tzinfo is None:
         # Reject here, at parse: a naive timestamp survives until the skew
