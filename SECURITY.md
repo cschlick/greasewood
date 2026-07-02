@@ -62,14 +62,16 @@ Additional control-plane protections:
   credential, not as a self-asserted `NodeRecord` field. A node therefore cannot
   publish a name the CA didn't issue it, so plain name resolution (the managed
   `/etc/hosts` block) can't be hijacked by a member claiming another's name.
-- **Caps/groups are hub-decided, not self-asserted** — a node's capabilities and
-  segmentation groups (`group:<name>` tags) are chosen by the hub at `gw invite`
-  and bound into the CA-signed credential; the enroll server issues from the door
-  window and ignores any caps the joiner sends. A member cannot grant itself a
-  capability (e.g. `tls`) or place itself in a segment it wasn't issued (e.g.
-  `group:prod`, or the reach-all `group:*`). Renewal re-issues from the caps the
-  hub already recorded, so they can't drift upward at renew either. This is what
-  makes segmentation a real boundary and not just honest-node configuration.
+- **Caps/segments are hub-decided, not self-asserted** — a node's capabilities
+  (e.g. `tls`) and segments (`segment:<name>` tags) are chosen by the hub at
+  `gw invite` and bound into the CA-signed credential; the enroll server issues
+  from the door window and ignores anything the joiner sends. A member cannot
+  grant itself a capability or place itself in a segment it wasn't issued (e.g.
+  `segment:prod`, or the reach-all `segment:*`). Renewal re-issues from the tags
+  the hub already recorded, so they can't drift upward at renew either — and
+  `gw set-segments`/`gw set-caps` let the hub change them later (effective next
+  renewal). This is what makes segmentation a real boundary, not just
+  honest-node configuration.
 - **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
   only from the CA keys they are configured to trust. Moving the CA is a
   deliberate re-root (a config change to that set), not an automatic runtime

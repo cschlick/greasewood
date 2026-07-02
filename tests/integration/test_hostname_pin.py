@@ -3,7 +3,7 @@ Integration test: hub-pinned hostnames (`gw invite --hostname`).
 
 When the hub pins a name at invite, the joiner's requested `--hostname` is
 ignored (the credential carries the hub's name), and the node cannot
-`gw rename` itself afterward (the `host:pinned` marker). Dedicated hub so the
+`gw rename` itself afterward (the `hostname-pinned` marker). Dedicated hub so the
 shared session hub isn't polluted.
 """
 import pytest

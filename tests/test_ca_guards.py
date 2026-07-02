@@ -66,11 +66,11 @@ def test_renew_unknown_node_rejected(tmp_path):
 
 
 def test_rename_refused_when_hostname_pinned(tmp_path):
-    # A node enrolled with `gw invite --hostname` carries `host:pinned`; it may
+    # A node enrolled with `gw invite --hostname` carries `hostname-pinned`; it may
     # renew, but a rename (renew with a changed hostname) must be refused.
     ca = _ca(tmp_path)
     k = NodeKeys.generate()
-    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "pinned1", ["mesh", "host:pinned"])
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "pinned1", ["segment:mesh", "hostname-pinned"])
     # Plain renewal (no hostname change) still works.
     ca.renew(_req(k))
     # Rename attempt is rejected.
@@ -85,6 +85,22 @@ def test_rename_allowed_when_not_pinned(tmp_path):
     ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "free1", ["mesh"])
     cred = ca.renew(_req(k, hostname="renamed"))
     assert cred.hostname == "renamed"
+
+
+def test_set_caps_takes_effect_at_renewal(tmp_path):
+    # `gw set-caps`/`set-segments` rewrite the registry; the change lands at the
+    # node's next renewal (renew re-issues from the registry), no re-join.
+    ca = _ca(tmp_path)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["segment:mesh"])
+    ca.set_caps(k.id_pub_bytes, ["segment:prod", "tls"])
+    cred = ca.renew(_req(k))          # no hostname change → plain renewal
+    assert set(cred.caps) == {"segment:prod", "tls"}
+    assert cred.hostname == "n1"      # name preserved
+    # Unknown node → error.
+    other = NodeKeys.generate()
+    with pytest.raises(ValueError, match="unknown node"):
+        ca.set_caps(other.id_pub_bytes, ["segment:mesh"])
 
 
 def test_hostname_owner_and_collision(tmp_path):
