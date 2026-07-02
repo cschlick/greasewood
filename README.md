@@ -839,31 +839,30 @@ The CA private key never moves: the new hub generates its own key, and you push
 the new *public* key into every node's `trusted_pubs`. Migrating from hub **A**
 to a new node **B**:
 
-```bash
-# 1. Enroll B as an ordinary node (gw join …) and start it — so it's a reachable
-#    mesh member every node can renew against over the overlay.
+1. **Enroll B as an ordinary node** (`gw join …`) and start it — so it's a
+   reachable mesh member every node can renew against over the overlay.
+2. **Promote B:** `sudo gw hub-promote` generates B's own CA key and flips it to
+   `role=hub` (keeping trust in A), printing B's CA pubkey + control endpoint;
+   then `sudo gw run`, and B serves the control plane on its own overlay address.
+3. **On every node** (Ansible): add B's CA pubkey to `[ca] trusted_pubs` (keep
+   A's) and repoint `root_url` + `seeds` to B; restart the daemon. The fleet now
+   trusts A **and** B — this is the overlap.
+4. **Nodes renew under B.** B never enrolled them, but re-issues from each node's
+   still-trusted directory record (hostname/caps are CA-attested) — nothing to
+   copy. `sudo gw renew-all` on B pulls the fleet over promptly. Re-apply any
+   `gw revoke` on B first (a fresh CA doesn't inherit A's revoke list).
+5. **Once every node holds a B-signed credential,** drop A's CA pubkey from
+   `trusted_pubs` fleet-wide, then decommission A.
 
-# 2. On B — generate B's own CA key and flip it to role=hub (keeps trusting A):
-sudo gw hub-promote                 # prints B's CA pubkey + control endpoint
-sudo gw run                         # B now serves the control plane
-
-# 3. Add B's CA pubkey to [ca] trusted_pubs on EVERY node (keep A's), and repoint
-#    root_url + seeds to B. Restart their daemons. (Ansible.) Fleet trusts A + B.
-
-# 4. Nodes renew under B. B never enrolled them, but re-issues from each node's
-#    still-trusted directory record (hostname/caps are CA-attested) — nothing to
-#    copy. Re-apply any `gw revoke` on B (a fresh CA doesn't inherit A's list).
-
-# 5. After every node has a B-signed credential, drop A's CA pubkey from
-#    trusted_pubs fleet-wide, then decommission A.
-```
-
-Throughout, existing tunnels stay up (the data plane never depends on the hub),
-so the handover is non-disruptive. Plan the overlap to last at least one
-credential TTL so every node renews under B in time. This leans on your config
-management for the `trusted_pubs`/`root_url` pushes — see
-[RUNBOOK.md](RUNBOOK.md) for the full graceful vs emergency (compromised/lost-key)
-procedures.
+Throughout, **A and B both run as hubs** — that's the point of the overlap, and
+there's no clash: each hub's control plane binds to its *own* overlay address
+(the hash of its own identity key), the fleet trusts both CAs at once, and the
+directory is eventually-consistent (records merge by highest sequence number, and
+each node renews against the one hub its `root_url` points at). Existing tunnels
+stay up throughout (the data plane never depends on the hub), so the handover is
+non-disruptive. Plan the overlap to last at least one credential TTL so every node
+renews under B in time. See [RUNBOOK.md](RUNBOOK.md) for the full graceful vs
+emergency (compromised/lost-key) procedures.
 
 ## Testing
 
