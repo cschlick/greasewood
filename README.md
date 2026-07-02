@@ -844,6 +844,13 @@ sudo gw cert-request --san postgres.dbnode.gw.internal --name postgres
 # With no --san, the cert defaults to the node's own name + overlay address:
 sudo gw cert-request                 # SAN = dbnode.gw.internal (and its addr)
 
+# The three files need not share a directory — override any of them, e.g. put
+# the key where the service expects it and the CA in the system trust store:
+sudo gw cert-request --name postgres \
+     --key-out  /etc/postgresql/ssl/postgres.key \
+     --cert-out /etc/postgresql/ssl/postgres.crt \
+     --ca-out   /usr/local/share/ca-certificates/mesh-ca.crt
+
 gw cert-status                       # list issued certs and their expiry
 ```
 
@@ -853,9 +860,12 @@ hub returns the leaf cert plus the CA cert. Point the service at them — e.g.
 Postgres `ssl_cert_file=postgres.crt`, `ssl_key_file=postgres.key`, and clients
 `sslrootcert=ca.crt` with `sslmode=verify-full`. Certs are short-lived (default 7
 days, `[hub] tls_cert_ttl`), and **the daemon auto-renews each one at ~half its
-TTL** — pass `--reload-cmd "systemctl reload postgresql"` so the service picks up
-the rotation (or `--no-auto-renew` for a one-shot). See [RUNBOOK.md](RUNBOOK.md).
-Revocation is passive — stop renewing and it expires.
+TTL** into whatever paths you chose — pass `--reload-cmd "systemctl reload
+postgresql"` so the service picks up the rotation (or `--no-auto-renew` for a
+one-shot). Managed certs are keyed by `--name`, so re-running `cert-request` with
+the same name **relocates** it (the daemon renews into the new paths and flags
+the old files as orphaned) rather than leaving a duplicate. See
+[RUNBOOK.md](RUNBOOK.md). Revocation is passive — stop renewing and it expires.
 
 > **SANs are constrained to what the node owns** (its CA-registered
 > `<hostname>.<mesh_domain>`, subdomains, and its overlay address) — the hub

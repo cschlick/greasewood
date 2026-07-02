@@ -7,6 +7,13 @@ runs a CertRenewalLoop that re-issues each managed cert at ~half its lifetime �
 the same "short-lived + rotate" model the mesh credential already uses — and runs
 an optional per-cert reload command so the consuming service picks up the new
 files. This removes the need to cron `gw cert-request`.
+
+A managed entry stores the three destination paths independently (key_path /
+crt_path / ca_path), so a service that wants its key under /etc/ssl/private and
+its cert elsewhere is supported — the three need not share a directory. Entries
+are keyed by `name`, so re-requesting the same name relocates it in place.
+Legacy entries (an `out_dir` + `name`, no explicit paths) still renew via the
+derived <out_dir>/<name>.{key,crt} + <out_dir>/ca.crt layout.
 """
 from __future__ import annotations
 
@@ -32,12 +39,13 @@ class CertRejected(RuntimeError):
 
 
 def issue_cert(hub_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
-               name: str, out_dir: Path, timeout: float = 10.0,
+               key_path, crt_path, ca_path, timeout: float = 10.0,
                attempts: int = 5) -> "tuple[Path, Path, Path]":
-    """Request a leaf TLS cert from the hub and write <name>.key/<name>.crt +
-    ca.crt into out_dir (leaf private key 0600, generated locally and never sent).
-    Returns (key_path, crt_path, ca_path). Raises CertRejected on a hub 4xx (no
-    retry) or RuntimeError after exhausting retries."""
+    """Request a leaf TLS cert from the hub and write the leaf key, leaf cert,
+    and CA cert to their three (independent) paths — they need not share a
+    directory. The leaf private key is generated locally, written 0600, and
+    never sent. Returns (key_path, crt_path, ca_path). Raises CertRejected on a
+    hub 4xx (no retry) or RuntimeError after exhausting retries."""
     import time as _t
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -86,10 +94,9 @@ def issue_cert(hub_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    key_path, crt_path, ca_path = (out_dir / f"{name}.key", out_dir / f"{name}.crt",
-                                   out_dir / "ca.crt")
+    key_path, crt_path, ca_path = Path(key_path), Path(crt_path), Path(ca_path)
+    for p in (key_path, crt_path, ca_path):
+        p.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, leaf_key_pem)
@@ -114,14 +121,26 @@ def load_manifest(data_dir) -> list:
 
 
 def record_managed(data_dir, entry: dict) -> None:
-    """Add/replace a managed-cert entry (keyed by name + out_dir)."""
-    certs = [c for c in load_manifest(data_dir)
-             if not (c.get("name") == entry["name"]
-                     and c.get("out_dir") == entry["out_dir"])]
+    """Add/replace a managed-cert entry, keyed by NAME alone. Re-requesting the
+    same name therefore RELOCATES its entry (new paths replace the old) instead
+    of adding a duplicate that would keep renewing into the old location."""
+    certs = [c for c in load_manifest(data_dir) if c.get("name") != entry["name"]]
     certs.append(entry)
     p = manifest_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(certs, indent=2))
+
+
+def entry_paths(entry: dict) -> "tuple[Path, Path, Path]":
+    """The (key, cert, ca) destinations for a managed-cert entry. Prefers the
+    explicit per-file paths; falls back to the legacy out_dir + name scheme so a
+    manifest written by an older greasewood keeps renewing after an upgrade."""
+    if entry.get("key_path"):
+        return (Path(entry["key_path"]), Path(entry["crt_path"]),
+                Path(entry["ca_path"]))
+    out = Path(entry["out_dir"])
+    name = entry["name"]
+    return out / f"{name}.key", out / f"{name}.crt", out / "ca.crt"
 
 
 def cert_due_for_renewal(crt_path) -> bool:
@@ -171,13 +190,13 @@ class CertRenewalLoop:
         for entry in load_manifest(self._data_dir):
             if not entry.get("auto_renew", True):
                 continue
-            crt = Path(entry["out_dir"]) / f"{entry['name']}.crt"
-            if not cert_due_for_renewal(crt):
+            key_path, crt_path, ca_path = entry_paths(entry)
+            if not cert_due_for_renewal(crt_path):
                 continue
             try:
                 issue_cert(hub_url, self._keys, dns=entry.get("dns", []),
                            ips=entry.get("ips", []), cn=entry["cn"],
-                           name=entry["name"], out_dir=Path(entry["out_dir"]))
+                           key_path=key_path, crt_path=crt_path, ca_path=ca_path)
                 log.info("auto-renewed TLS cert %r", entry["name"])
                 self._run_reload(entry.get("reload_cmd"))
             except Exception as e:
