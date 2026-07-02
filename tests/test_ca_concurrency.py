@@ -81,3 +81,13 @@ def test_atomic_write_survives_concurrent_writers(tmp_path):
         # Whatever won, the file must be exactly one writer's payload.
         text = target.read_text()
         assert text in payloads, "file content is not any single writer's payload"
+
+
+def test_concurrent_ca_cert_pem_generates_one_cert(tmp_path):
+    """Concurrent first-issuance of the x509 CA cert must produce exactly ONE
+    cert, not a different one per thread (a check-then-create race). Every
+    caller must see identical bytes."""
+    ca = CA(CAKeys.generate(), tmp_path)
+    results = _run_barrier(16, lambda i: ca.ca_cert_pem())
+    pems = {r[1] for r in results if r[0] == "ok"}
+    assert len(pems) == 1, f"{len(pems)} distinct CA certs generated (want 1)"

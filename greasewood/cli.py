@@ -2323,6 +2323,12 @@ def cmd_hub_backup(args) -> int:
     out = Path(args.out) if args.out else \
         cfg.data_dir / f"greasewood-hub-backup-{cfg.hostname}.gwbk"
     passphrase = _backup_passphrase(confirm=True)
+    # This passphrase is the ONLY thing protecting the CA key (and hub id_priv)
+    # at rest — a weak one undoes the whole backup. Warn, but don't block.
+    if len(passphrase) < 12:
+        print(f"⚠ warning: backup passphrase is short ({len(passphrase)} chars). "
+              "This one secret guards your entire fleet's root key — use a long, "
+              "high-entropy passphrase (a diceware phrase is ideal).")
     blob = bak.pack(files, passphrase)
 
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

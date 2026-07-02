@@ -187,9 +187,12 @@ class CA:
         same one that signs mesh credentials — one trust root.
         """
         from . import tlsca
-        ca_cert = tlsca.ensure_ca_cert(
-            self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
-        )
+        # ensure_ca_cert is check-then-create; serialize it so concurrent first
+        # issuances don't each build (and race-write) a different CA cert.
+        with self._lock:
+            ca_cert = tlsca.ensure_ca_cert(
+                self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
+            )
         leaf = tlsca.issue_tls_cert(
             self._keys.ca_priv, ca_cert, leaf_pub, cn, dns, ips, ttl
         )
@@ -200,9 +203,10 @@ class CA:
     def ca_cert_pem(self) -> str:
         """The hub's self-signed x509 CA certificate (the TLS trust anchor)."""
         from . import tlsca
-        cert = tlsca.ensure_ca_cert(
-            self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
-        )
+        with self._lock:
+            cert = tlsca.ensure_ca_cert(
+                self._keys.ca_priv, self._keys.ca_pub_hex, self._data_dir
+            )
         return tlsca.cert_pem(cert)
 
     def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
