@@ -31,7 +31,8 @@ its features!
 - **[Linux-only.](#linux-only)** Built on the Linux kernel's own WireGuard and
   networking — not a portable userspace/Go stack. Best run as a systemd service.
 - **[Auditable.](#auditable)** Pure Python, one dependency, driving it all through
-  the stock `wg`/`ip` tools over subprocess. Greasy.
+  the stock `wg`/`ip` tools over subprocess — and logging **every one of those
+  commands**, with context, to a durable trail. Greasy.
 
 > Status: early but functional. The full path — enrollment, directory, the
 > reconcile loop, door-based join, credential renewal, expiry-driven revocation,
@@ -234,6 +235,28 @@ subprocess. That's greasy. The clean way would be
 netlink bindings — but it's a deliberate trade: you can read the exact `wg set
 peer …` commands, run them by hand, and compare them against what `wg show`
 reports.
+
+That trade pays off in the **command trail**. Because every data-plane change is
+a subprocess, greasewood records *every `ip`/`wg` command it issues* — always
+(not behind a verbose flag), with the exit code, how long it took, and **why it
+ran** — to a durable, rotating `<data_dir>/audit.log` (0600), and to the journal.
+One greppable [logfmt](https://brandur.org/logfmt) line per command:
+
+```
+ts=2026-07-02T10:15:03Z INFO greasewood.audit: cmd rc=0 t=12ms \
+  ctx="reconcile: +peer db01 [fd8d:e5c1:db1a:7::a1] seg=prod" \
+  argv="wg set gw-mesh peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
+```
+
+So months later you can answer "when did db01 get added, why, and did it
+succeed?" by grepping one file — `grep db01 audit.log`. Failures are logged at
+ERROR with the command's stderr. It's safe to record verbatim because the argv
+only ever contains **public** keys and key-file *paths* — the `wg` tool reads
+private keys from files, so no secret is ever on a command line. Point it
+elsewhere with `[network] audit_log = "/var/log/greasewood/audit.log"`, or
+`audit_log = ""` to disable. This is the sharpest edge of the auditability
+claim: **you can reconstruct every change greasewood ever made to your kernel's
+network state, with context, from a plain-text log.**
 
 ## Install
 

@@ -73,6 +73,12 @@ mesh_domain = "gw.internal"
 # pg.<hostname>.<mesh_domain> adds "pg"). Restart the daemon to advertise a change.
 # aliases = ["pg", "metrics"]
 
+# Durable data-plane command trail: the daemon appends every ip/wg command it
+# issues (with exit code, timing, and why) to this rotating file, 0600. Default
+# is <data_dir>/audit.log; set to "" to disable, or point it wherever you keep
+# audit logs.
+# audit_log = "/var/lib/greasewood/audit.log"
+
 
 [ca]
 # Trusted CA public key(s) — raw Ed25519, hex-encoded. This is the root of
