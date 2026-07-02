@@ -11,9 +11,14 @@ Before any recovery, find out what's actually wrong. `gw diagnose` runs the same
 state — turning a silent "direct-or-fail" link into a reason:
 
 ```
-sudo gw diagnose            # all peers
+sudo gw diagnose            # every peer in this node's directory cache
 sudo gw diagnose db01       # just one
 ```
+
+It reports **from the node you run it on** — its directory cache, its trusted-CA
+set, its live tunnels — **not** a fleet-wide status. Each verdict means "can
+*this* node link to that peer." So run it **on the node that's misbehaving**;
+running it elsewhere tells you about *that* node's links, which may be fine.
 
 Reading the output:
 

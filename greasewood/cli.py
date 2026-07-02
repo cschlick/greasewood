@@ -1820,11 +1820,20 @@ def _handshake_phrase(live, now_epoch: int) -> str:
 
 def cmd_diagnose(args) -> int:
     """
-    Per-peer connectivity diagnosis. Runs the same 7-step reconcile checks the
-    daemon uses and prints, for each peer, exactly which step it fails — turning
-    a silent direct-or-fail link into an actionable reason. Then overlays live
-    WireGuard handshake state to separate "rejected by verification" from
-    "configured but never handshook" (an endpoint/firewall problem).
+    Per-peer connectivity diagnosis, **from THIS node's point of view — not a
+    global fleet dashboard.** It reads only this node's own directory cache,
+    trusted-CA set, and live WireGuard state, and reports, for each peer this node
+    knows about, whether *this* node can form a link to it. Every verdict is about
+    a link *from here* (e.g. "REJECTED" = this node won't install that peer under
+    its trust set; "LINKED" = this node has a live tunnel to it) — not the peer's
+    health elsewhere. So run it on the node that's actually having trouble, and
+    it only sees peers already in its local directory cache.
+
+    Runs the same 7-step reconcile checks the daemon uses and prints, per peer,
+    exactly which step it fails — turning a silent direct-or-fail link into an
+    actionable reason. Then overlays live WireGuard handshake state to separate
+    "rejected by verification" from "configured but never handshook" (an
+    endpoint/firewall problem).
     """
     import base64
     import time as _time
@@ -2304,9 +2313,11 @@ def main(argv=None) -> int:
     # diagnose
     sp = sub.add_parser(
         "diagnose",
-        help="explain why peer links are or aren't forming (per-peer checks + handshake state)")
+        help="explain why THIS node's links to its peers are/aren't forming "
+             "(per-peer checks + live handshake, from this node's view — not a fleet dashboard)")
     sp.add_argument("hostname", nargs="?", default=None,
-                    help="diagnose only this peer (default: all peers)")
+                    help="diagnose only this peer (default: every peer in this "
+                         "node's directory cache)")
     sp.set_defaults(fn=cmd_diagnose)
 
     # revoke
