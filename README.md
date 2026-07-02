@@ -622,7 +622,7 @@ Two properties worth knowing:
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `nodes`            | no    | List the mesh nodes (this node's directory) + who you are. |
+| `nodes`            | no    | List the mesh nodes (this node's directory) + who you are. `--by-segment` groups into one table per segment (a node appears under each of its segments; `segment:*` nodes under all). |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
 | `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |
