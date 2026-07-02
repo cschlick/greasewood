@@ -935,7 +935,7 @@ sudo gw cert-request --name pg-server \
   --cert-out /etc/ssl/certs/gw-postgres.crt \
   --ca-out   /etc/ssl/certs/gw-mesh-ca.crt \
   --reload-cmd /usr/local/sbin/gw-pg-reload
-# CN + SAN default to THIS node's mesh name — no --san/--cn needed.
+# CN + SAN default to THIS node's mesh name — no --san needed.
 # --name is just the manifest key (so cert-status is readable and a re-request
 # relocates in place); it does NOT affect the cert's identity.
 ```
