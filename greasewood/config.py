@@ -51,6 +51,11 @@ class Config:
     door_window: dt.timedelta
     tls_cert_ttl: dt.timedelta
     door_port: int
+    # Defaults granted to NEW nodes at `gw invite` when the operator doesn't pass
+    # --segments / --caps. Read fresh at each invite, so editing them changes what
+    # future enrollments get (no restart). `default_caps` ships with "tls" on.
+    default_segments: list[str]
+    default_caps: list[str]
 
     @property
     def dir_cache_path(self) -> Path:
@@ -114,6 +119,8 @@ def load_config(path: Path) -> Config:
         door_window=_parse_duration(hub.get("door_window", "15m")),
         tls_cert_ttl=_parse_duration(hub.get("tls_cert_ttl", "7d")),
         door_port=int(hub.get("door_port", 51901)),
+        default_segments=list(hub.get("default_segments", ["mesh"])),
+        default_caps=list(hub.get("default_caps", ["tls"])),
     )
 
     # Activate this config's overlay prefix process-wide, so address

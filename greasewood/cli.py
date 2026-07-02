@@ -283,6 +283,10 @@ credential_ttl = "{args.credential_ttl}"
 renew_before = "12h"
 door_window = "15m"
 door_port = {args.door_port}
+# Defaults granted to new nodes at `gw invite` (when --segments/--caps are
+# omitted). Edit anytime — the next invite reads them fresh, no restart.
+default_segments = ["mesh"]
+default_caps = ["tls"]
 """)
     log.info("wrote config → %s", cfg_path)
 
@@ -410,14 +414,21 @@ def cmd_invite(args) -> int:
     # The hub decides caps + segments HERE and issues them to whoever redeems the
     # token — the joiner does not choose (no self-assertion). They're stored in
     # the door window; the enroll server issues from them, ignoring the joiner's.
-    #   segments (segment:<name>) control who-talks-to-whom; the default
-    #     segment:mesh is the flat default pool. --segments replaces it (isolates
-    #     the node); list several to bridge them.
+    #   segments (segment:<name>) control who-talks-to-whom.
     #   --caps grants abilities, e.g. tls.
-    segments = [s.strip() for s in (args.segments or "mesh").split(",") if s.strip()]
+    # When a flag is omitted, fall back to the hub's configured defaults for new
+    # nodes ([hub] default_segments / default_caps, read fresh each invite — so
+    # editing them changes what future enrollments get). --segments/--caps
+    # override for this one token.
+    if args.segments is not None:
+        segments = [s.strip() for s in args.segments.split(",") if s.strip()]
+    else:
+        segments = list(cfg.default_segments)
     caps = ["segment:" + s for s in segments]
-    if args.caps:
+    if args.caps is not None:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
+    else:
+        caps += list(cfg.default_caps)
     # --hostname pins the name: the hub fixes it at enrollment (the joiner's
     # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
@@ -1087,6 +1098,9 @@ credential_ttl = "{args.credential_ttl}"
 renew_before = "12h"
 door_window = "15m"
 door_port = {cfg.door_port}
+# Defaults granted to new nodes at `gw invite` (edit anytime; read fresh).
+default_segments = ["mesh"]
+default_caps = ["tls"]
 """)
     log.info("promoted to hub role in %s", cfg_path)
 
@@ -2119,12 +2133,14 @@ def main(argv=None) -> int:
     sp.add_argument("--segments", default=None, metavar="S1,S2",
                     help="segments the invited node belongs to (comma-sep). The "
                          "hub decides this — the joiner cannot. A node peers only "
-                         "with nodes sharing a segment. Default: 'mesh' (the flat "
-                         "default pool everyone's in). Naming other segments "
-                         "isolates the node; list several to bridge them.")
-    sp.add_argument("--caps", default="",
+                         "with nodes sharing a segment. Omitted → the hub's "
+                         "[hub] default_segments (ships as 'mesh', the flat default "
+                         "pool). Naming other segments isolates the node; list "
+                         "several to bridge them.")
+    sp.add_argument("--caps", default=None,
                     help="ability caps granted to the invited node (comma-sep), "
-                         "e.g. 'tls'. Segmentation is set with --segments.")
+                         "e.g. 'tls'. Omitted → the hub's [hub] default_caps "
+                         "(ships as 'tls'). Segmentation is set with --segments.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
     sp.add_argument("-q", "--quiet", action="store_true",

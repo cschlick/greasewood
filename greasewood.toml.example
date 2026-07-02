@@ -102,6 +102,16 @@ renew_before = "12h"
 # Short-lived; nodes re-request to renew. Revocation is passive.
 tls_cert_ttl = "7d"
 
+# What NEW nodes get at `gw invite` when --segments/--caps are omitted. Read
+# fresh at each invite, so editing these changes future enrollments with no
+# restart (a per-invite --segments/--caps still overrides).
+#   default_segments — the segment(s) a new node lands in. "mesh" is the flat
+#     default pool; rename it (e.g. ["core"]) to change what "the default" means.
+#   default_caps     — abilities. Ships with "tls" ON. Set [] for TLS off-by-
+#     default (a node can still be granted it later with `gw set-caps`).
+default_segments = ["mesh"]
+default_caps = ["tls"]
+
 # Enrollment flow (door-based — no SSH, no underlay HTTP):
 #
 #   1. On the hub:    TOKEN=$(sudo gw invite)
