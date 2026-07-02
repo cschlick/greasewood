@@ -54,10 +54,15 @@ Additional control-plane protections:
 - **Replay protection** — `/renew` and `/cert` are bounded by a ±300s timestamp
   skew window *and* a single-use nonce cache, so a captured request cannot be
   replayed.
-- **Structural verification on ingest** — a record must pass the CA- and
-  clock-independent checks (self-sig, addr derivation, id/cred consistency)
-  before it can enter the directory, so a malicious or compromised directory
-  response cannot shadow a real record with a high-sequence forgery.
+- **Structural verification on ingest** — the directory merges by highest
+  sequence number, so before a record is cached it must pass the checks that
+  depend only on the record itself, not on the CA or the clock: self-signature,
+  address-derives-from-`id_pub`, and `id_pub`↔credential match. Forging these
+  needs the target's `id_priv`, so a malicious or tampered `/directory` response
+  can't slip in a high-`seq` fake to evict ("shadow") a node's real record — a
+  cache-poisoning DoS. The CA-signature and expiry checks run later, at reconcile,
+  where they're re-evaluated against the current trust set and time (and the cache
+  may legitimately hold expired records).
 - **Hostname is CA-attested** — the mesh hostname lives in the CA-signed
   credential, not as a self-asserted `NodeRecord` field. A node therefore cannot
   publish a name the CA didn't issue it, so plain name resolution (the managed
