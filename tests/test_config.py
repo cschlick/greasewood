@@ -48,6 +48,9 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.wg_interface == "gw-mesh"       # default
     assert cfg.hosts_sync is True              # /etc/hosts sync on by default
     assert cfg.mesh_domain == "gw.internal"    # namespaced under reserved TLD
+    # The default caps must place the node in the default segment — a bare
+    # "mesh" tag is NOT a segment, and default_policy would peer it with nobody.
+    assert cfg.caps == ["segment:mesh"]
 
 
 def test_new_node_defaults_fallback(tmp_path):

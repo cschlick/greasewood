@@ -96,7 +96,9 @@ def load_config(path: Path) -> Config:
         # Only "no" means outbound-only; anything else (incl. a legacy
         # "unknown", missing, or garbage) normalizes to the reachable default.
         inbound=("no" if node.get("inbound") == "no" else "yes"),
-        caps=node.get("caps", ["mesh"]),
+        # Default must be a segment: tag — peering is decided by shared
+        # segments, so a bare "mesh" cap would silently peer with nobody.
+        caps=node.get("caps", ["segment:mesh"]),
         endpoints=node.get("endpoints", []),
 
         wg_interface=net.get("interface", "gw-mesh"),
