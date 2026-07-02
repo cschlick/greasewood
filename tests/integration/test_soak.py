@@ -19,8 +19,9 @@ the full timeline, so an intermittent teardown can't hide.
 
 Gated behind GW_SOAK=1 (long-running). Tunables:
   GW_SOAK_SECS    total run time in seconds        (default 300)
-  GW_SOAK_TTL     credential TTL                    (default 60s — the proven
-                  floor given the 30s renewal floor + ~20s sync propagation)
+  GW_SOAK_TTL     credential TTL                    (default 1m — the shortest
+                  duration the config parser accepts, and the proven floor given
+                  the 30s renewal floor + ~20s sync propagation)
   GW_SOAK_N       number of non-hub nodes           (default 3)
   GW_SOAK_SAMPLE  seconds between samples            (default 10)
 
@@ -48,7 +49,7 @@ if not os.environ.get("GW_SOAK"):
                 allow_module_level=True)
 
 DURATION = int(os.environ.get("GW_SOAK_SECS", "300"))
-TTL = os.environ.get("GW_SOAK_TTL", "60s")
+TTL = os.environ.get("GW_SOAK_TTL", "1m")
 N = int(os.environ.get("GW_SOAK_N", "3"))
 SAMPLE = int(os.environ.get("GW_SOAK_SAMPLE", "10"))
 
