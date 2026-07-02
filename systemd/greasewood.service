@@ -3,7 +3,7 @@ Description=greasewood mesh daemon
 Documentation=https://gitlab.com/cschlick/greasewood
 After=network-online.target
 Wants=network-online.target
-# Only run once this node is configured (setup-hub / join writes the config);
+# Only run once this node is configured (create / join writes the config);
 # greasewood.path starts us the moment it appears.
 ConditionPathExists=/etc/greasewood.toml
 

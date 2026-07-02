@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 # Default overlay /64 (8 bytes). Configurable per fleet via [network]
-# overlay_prefix; this is just the default a fresh setup-hub uses.
+# overlay_prefix; this is just the default a fresh create uses.
 OVERLAY_PREFIX_BYTES = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
 
 # Process-wide active prefix used to CONSTRUCT addresses (a node's own address,

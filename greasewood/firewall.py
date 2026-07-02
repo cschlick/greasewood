@@ -1,7 +1,7 @@
 """
 greasewood.firewall — advisory firewall check (read-only).
 
-greasewood never modifies the host firewall. setup-hub / join / set-inbound
+greasewood never modifies the host firewall. create / join / set-inbound
 *check* the local nftables ruleset and loudly flag ports that look blocked,
 printing the exact rules to add — but applying them is always the operator's
 job (put them in your nftables config; the Ansible `nftables` role does this).

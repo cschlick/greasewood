@@ -91,7 +91,7 @@ trust both during an overlap window and it's non-disruptive.
 The key requirement: **B must be a reachable mesh member and must trust A during
 the overlap**, so existing nodes can renew against it over the overlay. That's
 exactly what `hub-promote` gives you (promote an enrolled node — don't
-`setup-hub` a fresh, unreachable host for this).
+`create` a fresh, unreachable host for this).
 
 1. **Enroll B as an ordinary node** in the current mesh (`gw join …`) and start
    it. It now has an overlay address every node can reach.
@@ -116,7 +116,7 @@ exactly what `hub-promote` gives you (promote an enrolled node — don't
 ### Emergency (old CA lost or compromised)
 
 You can't rely on the old trust (lost), or must eject the old key fast
-(compromised). Stand up a new CA (`gw setup-hub` fresh, or `hub-promote`), add
+(compromised). Stand up a new CA (`gw create` fresh, or `hub-promote`), add
 its key to `trusted_pubs` fleet-wide, and:
 
 - **Compromised:** the attacker can mint valid creds until the old key is gone
@@ -144,7 +144,7 @@ set so you always have an overlap path.
 
 > **Give the hub a DNS name.** The one thing that makes the restore seamless is
 > the replacement being reachable **where the fleet expects it.** Set the hub's
-> endpoint to a hostname at setup (`gw setup-hub --endpoint hub.example.com:51900`
+> endpoint to a hostname at setup (`gw create --endpoint hub.example.com:51900`
 > — `wg` accepts and re-resolves hostnames), so a hub move / hardware swap is
 > just updating one DNS record. If instead the replacement lands on a **new IP**:
 > inbound-reachable nodes self-heal (the hub dials them, WireGuard roaming fixes

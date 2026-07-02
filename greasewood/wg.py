@@ -127,7 +127,7 @@ def destroy_interface(iface: str) -> None:
 def setup_door_routing() -> None:
     """
     One-time idempotent setup of the door subnet's policy routing.
-    Call from setup-hub and from gw-run (hub role) to survive reboots.
+    Call from create and from gw-run (hub role) to survive reboots.
 
     Isolation mechanism: packets sourced from GUEST_DOOR_IP consult DOOR_TABLE,
     which contains only a blackhole default.  This prevents a joining node from

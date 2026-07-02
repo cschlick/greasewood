@@ -29,7 +29,7 @@ def _run_container(gw_image, gw_network):
 
 
 def _bring_up_hub(cid, ipv6, hostname, prefix):
-    pexec(cid, "gw", "setup-hub", "--hostname", hostname,
+    pexec(cid, "gw", "create", "--hostname", hostname,
           "--endpoint", f"[{ipv6}]:51900", "--overlay-prefix", prefix)
     overlay = overlay_addr_from_id_pub(
         pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip(), prefix)
