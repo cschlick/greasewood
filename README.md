@@ -337,7 +337,14 @@ mesh is direct-or-fail, a link that doesn't form is otherwise silent; diagnose
 runs the full verification chain per peer and overlays the live WireGuard
 handshake state, so it tells you *which* step failed — expired credential,
 untrusted CA, policy denial, or "configured but no handshake, check the peer's
-firewall." See [RUNBOOK.md](RUNBOOK.md) for how to read it and what to do next.
+firewall."
+
+It's a **local view, not a fleet dashboard** — run it *on the node that's having
+trouble*. It judges each link from *that* node's own directory cache, trusted-CA
+set, and live tunnels, so every verdict means "can **this** node reach that peer"
+(e.g. `REJECTED` = this node won't install it; `LINKED` = this node has a live
+tunnel to it) — not the peer's status everywhere. See [RUNBOOK.md](RUNBOOK.md)
+for how to read it and what to do next.
 
 ## Running as a service
 
