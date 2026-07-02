@@ -233,6 +233,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"bad cert request: {e}"}, 400)
             return
 
+        # Validate the leaf key length up front: it isn't touched until
+        # issuance, where a non-32-byte value makes Ed25519PublicKey raise —
+        # which the broad except there would surface as a 500. Reject as a 400.
+        if len(req.leaf_pub) != 32:
+            self._send_json(
+                {"error": "leaf_pub must be a 32-byte Ed25519 public key"}, 400)
+            return
+
         skew = abs((_dt.datetime.now(_dt.timezone.utc) - req.ts).total_seconds())
         if skew > 300:
             self._send_json({"error": f"timestamp skew too large ({skew:.0f}s); check NTP"}, 400)

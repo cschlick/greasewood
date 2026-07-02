@@ -186,6 +186,24 @@ class TestCertSanAuthorization:
         finally:
             srv.stop()
 
+    def test_wrong_length_leaf_pub_is_400_not_500(self, tmp_path):
+        """A validly-signed cert request carrying a non-32-byte leaf_pub must be
+        a clean 400 — not a 500 from Ed25519PublicKey.from_public_bytes blowing
+        up deep inside issuance. (The fuzz suite can't reach this: it mutates
+        after signing, so a bad leaf_pub breaks the self-sig first.)"""
+        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        try:
+            req = CertRequest(
+                id_pub=node.id_pub_bytes, leaf_pub=b"short", cn="",
+                dns=[], ips=[], nonce=secrets.token_hex(8),
+                ts=dt.datetime.now(_UTC).replace(microsecond=0),
+            ).sign(node.id_priv).to_dict()
+            status, body = _post(port, "/cert", req)
+            assert status == 400, f"expected 400, got {status}: {body}"
+            assert "leaf_pub" in body["error"]
+        finally:
+            srv.stop()
+
 
 class TestRerootReissue:
     """The re-root fallback: a hub that never enrolled a node (no local
