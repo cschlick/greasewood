@@ -88,6 +88,28 @@ def wg_peer_count(container: str, iface: str = "gw-mesh") -> int:
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
+def wg_handshake_ages(container: str, iface: str = "gw-mesh") -> list[int]:
+    """Age in seconds of each peer's most recent handshake (now - latest). A
+    peer that has never handshaked is reported as a very large age. Empty list
+    if the interface/daemon isn't up. Used by the soak test to assert tunnels
+    stay warm across renewal cycles."""
+    r = pexec(container, "wg", "show", iface, "latest-handshakes", check=False)
+    if r.returncode != 0:
+        return []
+    now = int(time.time())
+    ages = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            hs = int(parts[1])
+        except ValueError:
+            continue
+        ages.append(now - hs if hs > 0 else 10 ** 9)  # never handshaked → huge
+    return ages
+
+
 def wait_for_peer_count(container: str, expected: int, iface: str = "gw-mesh",
                         timeout: int = 90) -> int:
     """
