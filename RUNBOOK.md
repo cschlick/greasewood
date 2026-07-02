@@ -95,7 +95,7 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 > to `renew-all` would make it only as strong as the least-cooperative node. To
 > tighten the window, shorten `credential_ttl`.
 
-`gw nodes` on the hub shows identities; `gw diagnose` confirms the peer drops.
+`gw ls` on the hub shows identities; `gw diagnose` confirms the peer drops.
 
 ## SOP: node lost / decommissioned (not compromised)
 
@@ -268,7 +268,7 @@ Troubleshooting:
   be running and the hub reachable over the overlay, and the node must still hold
   the `tls` cap. Check `journalctl -u greasewood` for `TLS cert auto-renewal
   for … failed`; run `gw diagnose` to confirm the link to the hub; confirm the cap
-  with `gw nodes` on the hub. A renewal failure is retried on the next cycle.
+  with `gw ls` on the hub. A renewal failure is retried on the next cycle.
 - **Cert renewed but the service still serves the old one:** the reload hook
   didn't take. The new files *are* on disk — check `journalctl` for `cert
   reload_cmd … exited`, and test the command by hand (e.g. `systemctl reload
