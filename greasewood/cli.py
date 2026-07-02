@@ -1610,6 +1610,15 @@ def cmd_run(args) -> int:
         # This keeps it off the underlay structurally, no firewall rule needed.
         port = _control_port(cfg)
         listen_addrs = [f"[{keys.addr}]:{port}", f"[::1]:{port}"]
+
+        # Fleet-wide renew hint (gw renew-all): served in /directory, re-read
+        # per request so a bump takes effect without restarting the hub.
+        def _read_renew_after():
+            try:
+                return (cfg.data_dir / "renew_after").read_text().strip() or None
+            except FileNotFoundError:
+                return None
+
         srv = ControlServer(
             listen_addrs,
             directory,
@@ -1619,6 +1628,7 @@ def cmd_run(args) -> int:
             cache_path=cfg.dir_cache_path,
             tls_cert_ttl=cfg.tls_cert_ttl,
             mesh_domain=cfg.mesh_domain,
+            get_renew_after=_read_renew_after,
         )
         srv.start()
 
@@ -1637,8 +1647,13 @@ def cmd_run(args) -> int:
         door_watcher.start()
         log.info("door watcher started")
 
-    # Directory sync — pull from the configured seeds (the hub).
-    sync = SyncLoop(directory, lambda: cfg.seeds, cfg.dir_cache_path)
+    # Directory sync — pull from the configured seeds (the hub). The renewal loop
+    # is built below; the callback reads it lazily (the first pull is one interval
+    # out), so acting on the hub's fleet renew hint needs no reordering.
+    sync = SyncLoop(
+        directory, lambda: cfg.seeds, cfg.dir_cache_path,
+        on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
+    )
     sync.start()
 
     # Name resolution via a managed /etc/hosts block (opt-in). When off, remove
@@ -2117,6 +2132,37 @@ def cmd_renew(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# renew-all  (hub: advertise a fleet-wide "renew asap" hint)
+# ---------------------------------------------------------------------------
+
+def cmd_renew_all(args) -> int:
+    """
+    [hub] Request a fleet-wide credential renewal. Writes renew_after = now, which
+    the hub advertises in GET /directory; every cooperating node whose credential
+    was issued before that timestamp renews after a jittered delay. The jitter
+    window scales with the mesh size (window = N * spread), so the hub's
+    renewals/sec stays roughly constant no matter how big the fleet is.
+
+    Pull-based, not a push: nodes act on their next directory poll, and a node
+    that's offline now renews when it returns — renew_after is a level, not an
+    edge. Handy after a re-root (pull the fleet onto the new CA before the overlap
+    window closes) or any fleet-wide policy change.
+    """
+    from .config import load_config
+    cfg = load_config(Path(args.config))
+    if cfg.role != "hub":
+        sys.exit("gw renew-all must be run on the hub (role = hub)")
+
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    (cfg.data_dir / "renew_after").write_text(now.isoformat())
+    print(f"fleet renewal requested: renew_after = {now:%Y-%m-%d %H:%M UTC}")
+    print("Cooperating nodes whose credential predates this will renew within a "
+          "poll interval + jitter; offline nodes renew when they return.")
+    print(f"(To stop advertising it later, delete {cfg.data_dir / 'renew_after'}.)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # purge  (decommission or start-over — removes all local greasewood state)
 # ---------------------------------------------------------------------------
 
@@ -2488,6 +2534,13 @@ def main(argv=None) -> int:
                              "node (applies a hub-side set-caps/set-segments now, "
                              "instead of waiting ~half the TTL)")
     sp.set_defaults(fn=cmd_renew)
+
+    # renew-all
+    sp = sub.add_parser("renew-all",
+                        help="[hub] request a fleet-wide renewal — advertise "
+                             "renew_after=now so cooperating nodes renew (jittered, "
+                             "rate ~constant with mesh size)")
+    sp.set_defaults(fn=cmd_renew_all)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

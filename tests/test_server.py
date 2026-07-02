@@ -283,9 +283,11 @@ class TestDirectoryEndpoint:
     def test_returns_records(self, running_server):
         _, port, directory, ca, node, cred = running_server
         data = _get(port, "/directory")
-        assert isinstance(data, list)
-        assert len(data) == 1
-        assert data[0]["cred"]["hostname"] == "test-node"
+        assert isinstance(data, dict)
+        assert "renew_after" in data          # fleet renew hint (None unless set)
+        recs = data["records"]
+        assert len(recs) == 1
+        assert recs[0]["cred"]["hostname"] == "test-node"
 
     def test_empty_directory(self, ca_and_node, tmp_path):
         srv = ControlServer(
@@ -298,7 +300,24 @@ class TestDirectoryEndpoint:
         srv.start()
         try:
             data = _get(port, "/directory")
-            assert data == []
+            assert data == {"records": [], "renew_after": None}
+        finally:
+            srv.stop()
+
+    def test_serves_renew_after_hint(self, ca_and_node, tmp_path):
+        # The fleet renew hint is read fresh per request via get_renew_after.
+        srv = ControlServer(
+            listen="[::1]:0",
+            directory=Directory(),
+            get_ca_pubs=lambda: [],
+            get_revoked=set,
+            get_renew_after=lambda: "2026-07-01T12:00:00+00:00",
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        try:
+            data = _get(port, "/directory")
+            assert data["renew_after"] == "2026-07-01T12:00:00+00:00"
         finally:
             srv.stop()
 

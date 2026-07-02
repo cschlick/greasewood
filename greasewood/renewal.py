@@ -69,6 +69,7 @@ class RenewalLoop:
         hostname: str,
         endpoints: list[str],
         cache_path: Path,
+        renew_spread: float = 2.0,
     ) -> None:
         self._keys = node_keys
         self._directory = directory
@@ -80,6 +81,40 @@ class RenewalLoop:
         self._endpoints = endpoints
         self._cache_path = cache_path
         self._stop = threading.Event()
+        # Fleet-wide renew hint (see gw renew-all): setting _renew_now wakes the
+        # loop early. renew_spread is the jitter window PER NODE — the actual
+        # window scales with the mesh size (window = N * renew_spread) so a
+        # uniform pick keeps the hub's renewals/sec roughly constant as the fleet
+        # grows, instead of an N-proportional spike.
+        self._renew_now = threading.Event()
+        self._renew_spread = renew_spread
+        self._acted_renew_after: "dt.datetime | None" = None
+
+    def maybe_renew_after(self, ts: "dt.datetime | None") -> None:
+        """Act on the hub's fleet-wide renew hint. If our current credential was
+        issued before `ts`, schedule a renewal after a jittered delay drawn
+        uniformly from [0, N * renew_spread] (N = mesh size), so the fleet's
+        renewals spread at a size-independent rate. Self-clearing: once we renew,
+        our iat passes `ts` and this no-ops; an offline node acts when it returns."""
+        if ts is None:
+            return
+        iat = self._cred.iat
+        if iat.tzinfo is None:
+            iat = iat.replace(tzinfo=_UTC)
+        if iat >= ts:
+            return                         # our credential already postdates the hint
+        if self._acted_renew_after == ts:
+            return                         # already scheduled for this hint
+        self._acted_renew_after = ts
+        n = max(1, self._directory.size())
+        window = n * self._renew_spread
+        delay = random.uniform(0.0, window)
+        log.info("hub requested fleet renewal (renew_after=%s); our cred predates "
+                 "it — renewing in %.0fs (window %.0fs over %d nodes)",
+                 ts, delay, window, n)
+        timer = threading.Timer(delay, self._renew_now.set)
+        timer.daemon = True
+        timer.start()
 
     def _next_delay(self) -> float:
         """Sleep until ~half the remaining TTL, with ±10% jitter."""
@@ -116,7 +151,14 @@ class RenewalLoop:
         return new_cred
 
     def run(self) -> None:
-        while not self._stop.wait(self._next_delay()):
+        # Wait until EITHER the scheduled ~half-TTL time OR an early wake from a
+        # fleet renew hint (maybe_renew_after) — then renew. stop() also sets
+        # _renew_now so shutdown doesn't block on the long timeout.
+        while not self._stop.is_set():
+            self._renew_now.wait(timeout=self._next_delay())
+            if self._stop.is_set():
+                return
+            self._renew_now.clear()
             for attempt in range(5):
                 try:
                     new_cred = self._renew_and_publish()
@@ -137,3 +179,4 @@ class RenewalLoop:
 
     def stop(self) -> None:
         self._stop.set()
+        self._renew_now.set()   # wake run() out of its wait for a prompt shutdown
