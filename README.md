@@ -810,15 +810,20 @@ the next invite) and grant it per-node with `gw invite --caps tls` or later with
 `gw set-caps <node> …`. Either way `tls` is bounded by SAN authorization (below),
 so a cert-capable node can still only get certs for its *own* names.
 
-Then, on that node:
+Then, on that node. A node can only get a cert for names it **owns**: its own
+`<hostname>.<mesh_domain>`, any **subdomain** of that, and its own overlay
+address. The hub (the CA) enforces this, so a node can never obtain a valid cert
+for *another* node's name and impersonate its service to TLS clients.
 
 ```bash
-# A node may only get a cert for names it OWNS: its own <hostname>.<mesh_domain>,
-# subdomains of it, and its own overlay address. So on node "dbnode":
+# On node "dbnode" — postgres.dbnode.gw.internal is a subdomain it owns:
 sudo gw cert-request --san postgres.dbnode.gw.internal --name postgres
-sudo gw cert-request                 # no --san → defaults to dbnode.gw.internal + addr
-# writes <data_dir>/tls/postgres.key, postgres.crt, ca.crt
-gw cert-status                       # show what's issued and when it expires
+#   → writes <data_dir>/tls/postgres.key, postgres.crt, and ca.crt
+
+# With no --san, the cert defaults to the node's own name + overlay address:
+sudo gw cert-request                 # SAN = dbnode.gw.internal (and its addr)
+
+gw cert-status                       # list issued certs and their expiry
 ```
 
 The leaf private key is generated locally and never sent to the hub; only its
@@ -826,7 +831,9 @@ public key goes in the request, which is signed by the node's identity key. The
 hub returns the leaf cert plus the CA cert. Point the service at them — e.g.
 Postgres `ssl_cert_file=postgres.crt`, `ssl_key_file=postgres.key`, and clients
 `sslrootcert=ca.crt` with `sslmode=verify-full`. Certs are short-lived (default 7
-days, `[hub] tls_cert_ttl`); re-run `cert-request` from cron/timer to renew.
+days, `[hub] tls_cert_ttl`), and **the daemon auto-renews each one at ~half its
+TTL** — pass `--reload-cmd "systemctl reload postgresql"` so the service picks up
+the rotation (or `--no-auto-renew` for a one-shot). See [RUNBOOK.md](RUNBOOK.md).
 Revocation is passive — stop renewing and it expires.
 
 > **SANs are constrained to what the node owns** (its CA-registered
