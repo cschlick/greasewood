@@ -343,6 +343,20 @@ class _IPv6Server(HTTPServer):
         super().server_close()
         self._pool.shutdown(wait=False)
 
+    def handle_error(self, request, client_address) -> None:
+        # A client that hangs up mid-response (or a connection dropped at
+        # shutdown) raises BrokenPipe/ConnectionReset in the handler — expected
+        # for a network service, not worth a stderr traceback. Log those at
+        # debug; keep the full report only for genuinely unexpected errors.
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError,
+                            socket.timeout)):
+            log.debug("client %s connection dropped: %r",
+                      client_address[0] if client_address else "?", exc)
+            return
+        super().handle_error(request, client_address)
+
 
 class ControlServer:
     def __init__(

@@ -1,10 +1,12 @@
 """
 Unit tests for TLS service-cert auto-renewal (greasewood.certs + gw cert-request):
 
-  - the managed-cert manifest round-trips and dedups by (name, out_dir);
+  - the managed-cert manifest round-trips and keys on name (re-request relocates);
+  - entry_paths honours explicit per-file paths and derives legacy out_dir ones;
   - cert_due_for_renewal fires when a cert is missing or past its half-life;
   - CertRenewalLoop renews only due auto-renew certs and runs their reload_cmd;
-  - `gw cert-request` records the cert (with reload_cmd) for the daemon.
+  - `gw cert-request` records the cert (with reload_cmd) for the daemon;
+  - key/cert/ca can target three different directories; re-request relocates.
 """
 import datetime as dt
 import types
@@ -36,16 +38,38 @@ def _write_cert(path, *, age_days, life_days):
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def test_manifest_roundtrip_and_dedup(tmp_path):
+def test_manifest_roundtrip_and_keys_on_name(tmp_path):
     e1 = {"name": "db", "cn": "db", "dns": ["db"], "ips": [],
-          "out_dir": str(tmp_path / "tls"), "reload_cmd": None, "auto_renew": True}
+          "key_path": str(tmp_path / "a" / "db.key"),
+          "crt_path": str(tmp_path / "a" / "db.crt"),
+          "ca_path": str(tmp_path / "a" / "ca.crt"),
+          "reload_cmd": None, "auto_renew": True}
     certs.record_managed(tmp_path, e1)
-    certs.record_managed(tmp_path, {**e1, "reload_cmd": "reload pg"})  # same key → replace
-    certs.record_managed(tmp_path, {**e1, "name": "api"})             # different → add
+    # Same name, DIFFERENT paths → relocate (replace), not a duplicate.
+    certs.record_managed(tmp_path, {**e1, "key_path": str(tmp_path / "b" / "db.key"),
+                                    "reload_cmd": "reload pg"})
+    certs.record_managed(tmp_path, {**e1, "name": "api"})   # different name → add
     m = certs.load_manifest(tmp_path)
     assert len(m) == 2
     db = [c for c in m if c["name"] == "db"][0]
-    assert db["reload_cmd"] == "reload pg"        # replaced, not duplicated
+    assert db["reload_cmd"] == "reload pg"                  # replaced
+    assert db["key_path"] == str(tmp_path / "b" / "db.key")  # relocated
+
+
+def test_entry_paths_explicit_and_legacy(tmp_path):
+    # Explicit per-file paths are honoured verbatim.
+    explicit = {"name": "svc", "key_path": "/etc/ssl/private/svc.key",
+                "crt_path": "/etc/svc/svc.crt", "ca_path": "/usr/share/ca.crt"}
+    k, c, a = certs.entry_paths(explicit)
+    assert (str(k), str(c), str(a)) == (
+        "/etc/ssl/private/svc.key", "/etc/svc/svc.crt", "/usr/share/ca.crt")
+
+    # Legacy entry (out_dir + name, no explicit paths) → derived layout.
+    legacy = {"name": "db", "out_dir": "/var/lib/greasewood/tls"}
+    k, c, a = certs.entry_paths(legacy)
+    assert str(k).endswith("/tls/db.key")
+    assert str(c).endswith("/tls/db.crt")
+    assert str(a).endswith("/tls/ca.crt")
 
 
 def test_cert_due_for_renewal(tmp_path):
@@ -64,8 +88,10 @@ def test_cert_due_for_renewal(tmp_path):
 def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
     certs.record_managed(tmp_path, {
         "name": "db", "cn": "db", "dns": ["db"], "ips": [],
-        "out_dir": str(tmp_path / "tls"), "reload_cmd": "systemctl reload pg",
-        "auto_renew": True})
+        "key_path": str(tmp_path / "priv" / "db.key"),
+        "crt_path": str(tmp_path / "certs" / "db.crt"),
+        "ca_path": str(tmp_path / "certs" / "ca.crt"),
+        "reload_cmd": "systemctl reload pg", "auto_renew": True})
     certs.record_managed(tmp_path, {
         "name": "api", "cn": "api", "dns": ["api"], "ips": [],
         "out_dir": str(tmp_path / "tls"), "reload_cmd": None,
@@ -74,7 +100,7 @@ def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
     issued, reloads = [], []
     monkeypatch.setattr(certs, "cert_due_for_renewal", lambda p: True)
     monkeypatch.setattr(certs, "issue_cert",
-                        lambda hub, keys, **kw: issued.append(kw["name"]))
+                        lambda hub, keys, **kw: issued.append(kw))
     monkeypatch.setattr(certs.subprocess, "run",
                         lambda cmd, **kw: reloads.append(cmd) or
                         types.SimpleNamespace(returncode=0, stderr=""))
@@ -82,11 +108,16 @@ def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
     loop = certs.CertRenewalLoop(node_keys=object(),
                                  get_hub_url=lambda: "http://hub", data_dir=tmp_path)
     loop.check_all()
-    assert issued == ["db"]                        # only the auto-renew cert
+    # Only the auto-renew cert, re-issued to its explicit per-file paths.
+    assert len(issued) == 1
+    kw = issued[0]
+    assert str(kw["key_path"]) == str(tmp_path / "priv" / "db.key")
+    assert str(kw["crt_path"]) == str(tmp_path / "certs" / "db.crt")
+    assert str(kw["ca_path"]) == str(tmp_path / "certs" / "ca.crt")
     assert reloads == [["systemctl", "reload", "pg"]]  # ran as argv, no shell
 
 
-def test_cert_request_records_manifest(tmp_path, monkeypatch):
+def test_cert_request_records_manifest(tmp_path, monkeypatch, capsys):
     NodeKeys.load_or_generate(tmp_path)
     (tmp_path / "gw.toml").write_text(f"""[node]
 hostname = "n1"
@@ -101,13 +132,15 @@ mesh_domain = "gw.internal"
 trusted_pubs = []
 """)
     from greasewood import cli
-    monkeypatch.setattr(certs, "issue_cert", lambda *a, **k: (
-        tmp_path / "tls" / "db.key", tmp_path / "tls" / "db.crt",
-        tmp_path / "tls" / "ca.crt"))
+    # issue_cert echoes back the paths it was told to write (the CLI resolves
+    # them), so the manifest records exactly those.
+    monkeypatch.setattr(certs, "issue_cert",
+                        lambda *a, **k: (k["key_path"], k["crt_path"], k["ca_path"]))
 
     ns = types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                san=["db.gw.internal"], cn=None, name="db",
-                               out_dir=None, hub=None,
+                               out_dir=None, key_out=None, cert_out=None,
+                               ca_out=None, hub=None,
                                reload_cmd="systemctl reload pg", no_auto_renew=False)
     assert cli.cmd_cert_request(ns) == 0
     m = certs.load_manifest(tmp_path)
@@ -115,3 +148,69 @@ trusted_pubs = []
     assert m[0]["name"] == "db"
     assert m[0]["reload_cmd"] == "systemctl reload pg"
     assert m[0]["auto_renew"] is True
+    # Default layout: all three under <data_dir>/tls.
+    assert m[0]["key_path"] == str(tmp_path / "tls" / "db.key")
+    assert m[0]["crt_path"] == str(tmp_path / "tls" / "db.crt")
+    assert m[0]["ca_path"] == str(tmp_path / "tls" / "ca.crt")
+    # The output names the config file (and the manifest) so the operator knows
+    # where the managed-cert record lives.
+    out = capsys.readouterr().out
+    assert str(tmp_path / "gw.toml") in out
+    assert str(certs.manifest_path(tmp_path)) in out
+
+
+def test_cert_request_per_file_paths_and_relocate(tmp_path, monkeypatch, capsys):
+    """key/cert/ca can each target a different directory, and re-requesting the
+    same name relocates the entry (single manifest row) and flags the orphaned
+    old files."""
+    NodeKeys.load_or_generate(tmp_path)
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "n1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-mesh"
+seeds = []
+root_url = "http://[fd8d:e5c1:db1a:7::1]:51902"
+mesh_domain = "gw.internal"
+[ca]
+trusted_pubs = []
+""")
+    from greasewood import cli
+
+    def fake_issue(*a, **k):
+        # Actually create the files so the orphan check sees them on relocate.
+        for p in (k["key_path"], k["crt_path"], k["ca_path"]):
+            from pathlib import Path as _P
+            _P(p).parent.mkdir(parents=True, exist_ok=True)
+            _P(p).write_text("x")
+        return k["key_path"], k["crt_path"], k["ca_path"]
+    monkeypatch.setattr(certs, "issue_cert", fake_issue)
+
+    def ns(**over):
+        base = dict(config=str(tmp_path / "gw.toml"), san=["db.gw.internal"],
+                    cn=None, name="db", out_dir=None, key_out=None, cert_out=None,
+                    ca_out=None, hub=None, reload_cmd=None, no_auto_renew=False)
+        base.update(over)
+        return types.SimpleNamespace(**base)
+
+    # 1. Three different directories.
+    assert cli.cmd_cert_request(ns(
+        key_out=str(tmp_path / "priv" / "db.key"),
+        cert_out=str(tmp_path / "pub" / "db.crt"),
+        ca_out=str(tmp_path / "trust" / "ca.crt"))) == 0
+    m = certs.load_manifest(tmp_path)
+    assert len(m) == 1
+    assert m[0]["key_path"] == str(tmp_path / "priv" / "db.key")
+    assert m[0]["crt_path"] == str(tmp_path / "pub" / "db.crt")
+    assert m[0]["ca_path"] == str(tmp_path / "trust" / "ca.crt")
+    assert (tmp_path / "priv" / "db.key").exists()
+
+    # 2. Re-request same name at new paths → one entry (relocated) + orphan note.
+    assert cli.cmd_cert_request(ns(out_dir=str(tmp_path / "newtls"))) == 0
+    m = certs.load_manifest(tmp_path)
+    assert len(m) == 1
+    assert m[0]["key_path"] == str(tmp_path / "newtls" / "db.key")
+    out = capsys.readouterr().out
+    assert "orphaned" in out
+    assert str(tmp_path / "priv" / "db.key") in out

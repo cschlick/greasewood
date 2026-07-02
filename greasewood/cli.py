@@ -1280,7 +1280,19 @@ def cmd_cert_request(args) -> int:
 
     cn = args.cn or (dns[0] if dns else (ips[0] if ips else keys.addr))
     name = args.name or (dns[0] if dns else "service")
+
+    # Resolve the three destinations. Default is <out-dir>/<name>.{key,crt} +
+    # <out-dir>/ca.crt; each can be overridden independently so the key, cert,
+    # and CA cert may live in different directories.
     out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
+    key_path = Path(args.key_out) if args.key_out else out_dir / f"{name}.key"
+    crt_path = Path(args.cert_out) if args.cert_out else out_dir / f"{name}.crt"
+    ca_path = Path(args.ca_out) if args.ca_out else out_dir / "ca.crt"
+
+    # Re-requesting an existing name RELOCATES it (record_managed keys on name).
+    # Capture the prior destinations so we can flag any that are now orphaned.
+    prior = [c for c in certmod.load_manifest(cfg.data_dir) if c.get("name") == name]
+    old_paths = set(certmod.entry_paths(prior[0])) if prior else set()
 
     hub_url = args.hub or _resolve_hub_url(cfg)
     if not hub_url:
@@ -1288,7 +1300,8 @@ def cmd_cert_request(args) -> int:
 
     try:
         key_path, crt_path, ca_path = certmod.issue_cert(
-            hub_url, keys, dns=dns, ips=ips, cn=cn, name=name, out_dir=out_dir)
+            hub_url, keys, dns=dns, ips=ips, cn=cn,
+            key_path=key_path, crt_path=crt_path, ca_path=ca_path)
     except certmod.CertRejected as e:
         sys.exit(f"cert request rejected: {e}")
     except RuntimeError as e:
@@ -1298,7 +1311,9 @@ def cmd_cert_request(args) -> int:
     auto = not args.no_auto_renew
     certmod.record_managed(cfg.data_dir, {
         "name": name, "cn": cn, "dns": dns, "ips": ips,
-        "out_dir": str(out_dir), "reload_cmd": args.reload_cmd, "auto_renew": auto,
+        "key_path": str(key_path), "crt_path": str(crt_path),
+        "ca_path": str(ca_path),
+        "reload_cmd": args.reload_cmd, "auto_renew": auto,
     })
 
     print("TLS certificate issued.")
@@ -1310,6 +1325,8 @@ def cmd_cert_request(args) -> int:
     print(f"  key      : {key_path}")
     print(f"  cert     : {crt_path}")
     print(f"  ca cert  : {ca_path}")
+    print(f"  config   : {args.config}  (managed-cert manifest: "
+          f"{certmod.manifest_path(cfg.data_dir)})")
     print()
     print("Point your service at these (e.g. Postgres ssl_cert_file / ssl_key_file,")
     print("clients ssl_ca_file = ca.crt).")
@@ -1320,6 +1337,19 @@ def cmd_cert_request(args) -> int:
         print(note + ".")
     else:
         print("Auto-renewal disabled (--no-auto-renew) — re-run before expiry.")
+
+    # If re-requesting relocated the cert, the daemon now renews into the paths
+    # above; the old files won't be touched again. Point them out rather than
+    # deleting key material a service might still be reading.
+    orphans = sorted(str(p) for p in old_paths - {key_path, crt_path, ca_path}
+                     if p.exists())
+    if orphans:
+        print()
+        print(f"note: {name!r} was previously managed at other paths — these "
+              "old files are no longer updated; remove them once nothing reads "
+              "them:")
+        for p in orphans:
+            print(f"  orphaned: {p}")
     return 0
 
 
@@ -2725,7 +2755,15 @@ def main(argv=None) -> int:
     sp.add_argument("--name", default=None,
                     help="basename for the written .key/.crt (default: first SAN)")
     sp.add_argument("--out-dir", dest="out_dir", default=None,
-                    help="where to write key/cert/ca (default: <data_dir>/tls)")
+                    help="directory for key/cert/ca (default: <data_dir>/tls). "
+                         "The per-file flags below override individual paths.")
+    sp.add_argument("--key-out", dest="key_out", default=None, metavar="PATH",
+                    help="exact path for the private key (overrides --out-dir; "
+                         "e.g. /etc/ssl/private/pg.key)")
+    sp.add_argument("--cert-out", dest="cert_out", default=None, metavar="PATH",
+                    help="exact path for the leaf certificate (overrides --out-dir)")
+    sp.add_argument("--ca-out", dest="ca_out", default=None, metavar="PATH",
+                    help="exact path for the CA certificate (overrides --out-dir)")
     sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
     sp.add_argument("--reload-cmd", dest="reload_cmd", default=None, metavar="CMD",
                     help="command the daemon runs after auto-renewing this cert, "
