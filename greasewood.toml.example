@@ -32,8 +32,11 @@ inbound = "yes"
 # `gw set-caps` on the hub, or re-invite + re-join.
 caps = ["segment:mesh"]
 
-# Explicit endpoints. Leave empty if you want WireGuard to discover via roaming.
-# endpoints = ["[2001:db8::1]:51900"]
+# Underlay endpoint(s) other nodes dial to reach this one. The overlay is always
+# IPv6, but the underlay may be IPv4 or IPv6 — list v4 and/or v6 (v6 bracketed).
+# Usually set at join via --endpoint (needed for inbound v4 behind 1:1 NAT, which
+# can't be autodetected); leave empty for outbound-only nodes.
+# endpoints = ["203.0.113.5:51900", "[2001:db8::1]:51900"]
 
 
 [network]

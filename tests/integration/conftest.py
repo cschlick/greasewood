@@ -28,7 +28,12 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import container_ipv6, pexec, podman, wait_for_control_plane
+from .helpers import container_addr, container_ipv6, pexec, podman, wait_for_control_plane
+
+
+def _ep(addr: str, port: int) -> str:
+    """Format an underlay endpoint, bracketing IPv6 (v4 has no brackets)."""
+    return f"[{addr}]:{port}" if ":" in addr else f"{addr}:{port}"
 
 IMAGE_TAG = "greasewood-test:latest"
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -84,12 +89,12 @@ def gw_hub(gw_image, gw_network):
         cid = r.stdout.strip()
         time.sleep(1)  # wait for network address assignment
 
-        ipv6 = container_ipv6(cid, gw_network)
-        assert ipv6, "hub container got no IPv6 address"
+        ipv6 = container_addr(cid, gw_network)
+        assert ipv6, "hub container got no underlay address"
 
         pexec(cid, "gw", "setup-hub",
               "--hostname", "hub",
-              "--endpoint", f"[{ipv6}]:51900")
+              "--endpoint", _ep(ipv6, 51900))
 
         overlay = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
         ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
@@ -135,10 +140,10 @@ def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
         gw_image, "sleep", "infinity",
     ).stdout.strip()
     time.sleep(1)
-    ipv6 = container_ipv6(cid, gw_network)
-    assert ipv6, "hub container got no IPv6 address"
+    ipv6 = container_addr(cid, gw_network)
+    assert ipv6, "hub container got no underlay address"
     pexec(cid, "gw", "setup-hub", "--hostname", hostname,
-          "--endpoint", f"[{ipv6}]:51900", "--credential-ttl", ttl)
+          "--endpoint", _ep(ipv6, 51900), "--credential-ttl", ttl)
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
@@ -206,7 +211,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
         token = _extract_token(res.stdout + "\n" + res.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
-                  "--endpoint", f"[{node_ipv6}]:51900", *join_extra, check=False)
+                  "--endpoint", _ep(node_ipv6, 51900), *join_extra, check=False)
         if check:
             assert j.returncode == 0, (
                 f"gw join failed (rc={j.returncode}):\n"
@@ -269,7 +274,7 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     cid = r.stdout.strip()
     time.sleep(1)  # wait for network address assignment
 
-    ipv6 = container_ipv6(cid, gw_network)
+    ipv6 = container_addr(cid, gw_network)
     door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
                 inbound=inbound, invite_hostname=invite_hostname)
 

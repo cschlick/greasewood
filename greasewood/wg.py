@@ -60,6 +60,18 @@ def ensure_interface(
     log.info("interface %s up, addr %s, port %d", iface, overlay_addr, listen_port)
 
 
+def format_endpoint(host: str, port: "int") -> str:
+    """Format a wg endpoint, bracketing IPv6. `host` is a bare address (a ':' in
+    it means IPv6). v4 → 'host:port'; v6 → '[host]:port'. The underlay may be
+    either family; only the overlay is IPv6-only."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def endpoint_family(endpoint: str) -> int:
+    """4 or 6 for an already-formatted endpoint ('host:port' / '[v6]:port')."""
+    return 6 if endpoint.startswith("[") else 4
+
+
 def set_peer(
     iface: str,
     wg_pub_b64: str,
@@ -70,7 +82,7 @@ def set_peer(
     """
     Add or update a single WireGuard peer. Idempotent.
     allowed_ip is the peer's overlay address (will be installed as /128).
-    endpoint is "[v6addr]:port" or None (peer must initiate if missing).
+    endpoint is "host:port" (v4) or "[v6]:port", or None (peer must initiate).
     """
     cmd = [
         "wg", "set", iface,
@@ -206,7 +218,7 @@ def ensure_node_door_interface(
         _run("wg", "set", DOOR_IFACE,
              "peer", hub_door_pub_b64,
              "preshared-key", psk_path,
-             "endpoint", f"[{hub_host}]:{door_port}",
+             "endpoint", format_endpoint(hub_host, door_port),
              "allowed-ips", f"{HUB_DOOR_IP}/128",
              "persistent-keepalive", "5")
 

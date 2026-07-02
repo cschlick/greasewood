@@ -58,6 +58,24 @@ def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
     return bool(local & peer)
 
 
+def _select_endpoint(endpoints: list[str],
+                     local_families: "set[int] | None") -> "str | None":
+    """Pick a peer endpoint of an underlay family this node can originate on.
+    Endpoints are formatted ('host:port' / '[v6]:port') and listed v6-first, so a
+    dual-stack node prefers v6. Returns None if the peer advertises none, or only
+    a family we can't reach (→ installed endpoint-less, so the link won't form —
+    direct-or-fail across address families, no special case)."""
+    if not endpoints:
+        return None
+    if not local_families:            # unknown families → keep it simple (first)
+        return endpoints[0]
+    for ep in endpoints:
+        fam = 6 if ep.startswith("[") else 4
+        if fam in local_families:
+            return ep
+    return None
+
+
 def reconcile_once(
     iface: str,
     directory: Directory,
@@ -66,6 +84,7 @@ def reconcile_once(
     ca_pubs: list[bytes],
     revoked: set[str],
     policy: Policy = default_policy,
+    local_families: "set[int] | None" = None,
 ) -> None:
     """
     Single reconcile pass against the full directory.
@@ -99,7 +118,7 @@ def reconcile_once(
             continue
 
         wg_pub_b64 = base64.b64encode(record.cred.wg_pub).decode()
-        endpoint = record.endpoints[0] if record.endpoints else None
+        endpoint = _select_endpoint(record.endpoints, local_families)
         desired[wg_pub_b64] = (record.cred.addr, endpoint)
 
     # Diff against live kernel state and apply
@@ -145,11 +164,15 @@ class ReconcileLoop:
         interval: float = 5.0,
         policy: Policy = default_policy,
         hosts_domain: str | None = None,
+        local_families: "set[int] | None" = None,
     ) -> None:
         self._iface = iface
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
+        # Underlay families this node can originate on, for peer-endpoint
+        # selection (v4/v6). None → pick the first advertised endpoint.
+        self._local_families = local_families
         # Both callables, resolved each cycle. The trusted-CA set is static in
         # practice (from config), but the revoke list changes at runtime when
         # the operator runs `gw revoke` — capturing it once would mean a hub
@@ -173,6 +196,7 @@ class ReconcileLoop:
                     self._get_ca_pubs(),
                     self._get_revoked(),
                     self._policy,
+                    self._local_families,
                 )
             except Exception as e:
                 log.error("reconcile error: %s", e)

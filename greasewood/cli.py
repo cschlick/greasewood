@@ -184,6 +184,98 @@ def _detect_public_ipv6() -> str | None:
     return (stable or temporary or any_gua or [None])[0]
 
 
+def _detect_public_ipv4() -> str | None:
+    """Best-effort public IPv4 on this machine — a global, non-private, non-
+    loopback v4 on an interface. Behind 1:1 NAT (e.g. EC2, where the interface
+    holds only a private v4) this returns None, so inbound v4 nodes should pass
+    `--endpoint <public-v4>` explicitly. Only the underlay may be v4; the overlay
+    stays IPv6."""
+    import ipaddress
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        try:
+            addr = ipaddress.IPv4Address(parts[3].split("/")[0])
+        except ValueError:
+            continue
+        if not (addr.is_private or addr.is_loopback or addr.is_link_local):
+            return str(addr)
+    return None
+
+
+def _local_families() -> set[int]:
+    """Which underlay families this node can originate connections on, by
+    default-route presence. Used to pick a reachable peer endpoint. Falls back to
+    assuming both if detection fails."""
+    import subprocess
+    fams: set[int] = set()
+    for fam, flag in ((6, "-6"), (4, "-4")):
+        try:
+            r = subprocess.run(["ip", flag, "route", "show", "default"],
+                               capture_output=True, text=True, check=False)
+            if r.stdout.strip():
+                fams.add(fam)
+        except FileNotFoundError:
+            pass
+    return fams or {4, 6}
+
+
+def _pick_reachable_host(hosts: list[str]) -> str:
+    """From candidate bare underlay hosts (v6 and/or v4), pick one this node can
+    originate on. Order matters — callers list v6 first — so a dual-stack node
+    prefers v6. Falls back to the first host if no family matches."""
+    fams = _local_families()
+    for h in hosts:
+        fam = 6 if ":" in h else 4
+        if fam in fams:
+            return h
+    return hosts[0]
+
+
+def _endpoint_with_port(explicit: str, listen_port: int) -> str:
+    """Normalize an operator-supplied --endpoint to a formatted wg endpoint.
+    Accepts a bare address ('1.2.3.4', 'fd8d::1'), a bracketed v6 ('[fd8d::1]'),
+    or a full endpoint ('1.2.3.4:51900', '[fd8d::1]:51900')."""
+    from . import wg as wgmod
+    s = explicit.strip()
+    if s.startswith("["):
+        return s if "]:" in s else wgmod.format_endpoint(s[1:-1], listen_port)
+    # v4:port  (a dot in the host and exactly one colon)
+    if "." in s and s.count(":") == 1:
+        return s
+    # bare address (v4 like 1.2.3.4, or v6 like fd8d::1)
+    return wgmod.format_endpoint(s, listen_port)
+
+
+def _advertised_endpoints(explicit: "str | None", listen_port: int,
+                          prior: "list[str] | None" = None) -> list[str]:
+    """The underlay endpoint(s) this node advertises. Explicit --endpoint wins;
+    else best-effort detect a public v6 and/or v4. Empty = unreachable
+    (outbound-only). May return both families for a dual-stack node."""
+    from . import wg as wgmod
+    if explicit:
+        return [_endpoint_with_port(explicit, listen_port)]
+    eps: list[str] = []
+    v6 = _detect_public_ipv6()
+    if v6:
+        eps.append(wgmod.format_endpoint(v6, listen_port))
+    v4 = _detect_public_ipv4()
+    if v4:
+        eps.append(wgmod.format_endpoint(v4, listen_port))
+    if not eps and prior:
+        return list(prior)
+    return eps
+
+
 def cmd_setup_hub(args) -> int:
     _require_root("setup-hub")
     import json as json_mod
@@ -220,12 +312,9 @@ def cmd_setup_hub(args) -> int:
     except Exception:
         sys.exit(f"invalid --overlay-prefix {overlay_prefix!r} (want e.g. fd12:3456:789a:0::)")
 
-    endpoint = args.endpoint
-    if not endpoint:
-        ip = _detect_public_ipv6()
-        if ip:
-            endpoint = f"[{ip}]:{listen_port}"
-            log.info("detected public IPv6 endpoint: %s", endpoint)
+    endpoints = _advertised_endpoints(args.endpoint, listen_port)
+    if endpoints:
+        log.info("advertising underlay endpoint(s): %s", ", ".join(endpoints))
 
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -254,7 +343,7 @@ def cmd_setup_hub(args) -> int:
     node_keys = NodeKeys.load_or_generate(data_dir)
     log.info("overlay addr: %s", node_keys.addr)
 
-    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    endpoint_line = f'\nendpoints = {json_mod.dumps(endpoints)}' if endpoints else ""
     hosts_sync = "true" if getattr(args, "hosts_sync", True) else "false"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
@@ -300,7 +389,7 @@ default_caps = ["tls"]
     record = NodeRecord(
         id_pub=node_keys.id_pub_bytes,
         seq=seq,
-        endpoints=[endpoint] if endpoint else [],
+        endpoints=endpoints,
         inbound="yes",
         cred=cred,
     ).sign(node_keys.id_priv)
@@ -312,11 +401,9 @@ default_caps = ["tls"]
     # read-only commands without sudo; secret files stay 0600.
     _chown_data_dir_to_operator(data_dir)
 
-    ep_host = endpoint.rsplit(":", 1)[0] if endpoint else None
-    control_url = (
-        f"http://{ep_host}:{control_port}" if ep_host
-        else f"http://[{node_keys.addr}]:{control_port}"
-    )
+    # The control plane binds the OVERLAY address (+loopback), so that's the URL
+    # nodes use — not the underlay endpoint.
+    control_url = f"http://[{node_keys.addr}]:{control_port}"
 
     print(f"\nHub setup complete.")
     print(f"  overlay addr : {node_keys.addr}")
@@ -401,13 +488,23 @@ def cmd_invite(args) -> int:
     from .keys import CAKeys
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
 
-    # Detect hub's underlay endpoint for the token (nodes need it to reach gw-door)
-    endpoint = args.endpoint
-    if not endpoint:
-        ip = _detect_public_ipv6()
-        if not ip:
-            sys.exit("could not detect a public IPv6 address; use --endpoint")
-        endpoint = ip
+    # Hub underlay host(s) for the token (bare addresses; the joiner adds the
+    # door port). Carry v6 and/or v4 so a joiner reaches the hub over whichever
+    # family it has — stored comma-separated in the token's single host field
+    # (a v6 literal has colons but never commas, so the split is unambiguous).
+    if args.endpoint:
+        hub_hosts = [args.endpoint]
+    else:
+        hub_hosts = []
+        v6 = _detect_public_ipv6()
+        if v6:
+            hub_hosts.append(v6)
+        v4 = _detect_public_ipv4()
+        if v4:
+            hub_hosts.append(v4)
+        if not hub_hosts:
+            sys.exit("could not detect a public address; use --endpoint <addr>")
+    endpoint = ",".join(hub_hosts)
 
     window = cfg.door_window
 
@@ -542,33 +639,32 @@ def cmd_join(args) -> int:
     else:
         node_inbound = "yes"
 
-    # Endpoint = where other nodes dial this one for a direct tunnel. If not
-    # given, try to auto-detect a public IPv6. A node with no endpoint can
-    # still reach the hub (it initiates outbound), but peers can't dial it, so
-    # node<->node links won't form unless the other side is reachable.
-    endpoint = args.endpoint
-    if not endpoint:
-        ip = _detect_public_ipv6()
-        if ip:
-            endpoint = f"[{ip}]:{listen_port}"
-            log.info("detected public IPv6 endpoint: %s", endpoint)
-        elif prior and prior.endpoints:
-            endpoint = prior.endpoints[0]
-            log.info("keeping existing endpoint: %s", endpoint)
-        else:
-            log.warning(
-                "no public IPv6 endpoint detected — this node will be reachable "
-                "only by initiating outbound (e.g. to the hub); other nodes "
-                "cannot dial it, so direct node-to-node links may not form. "
-                "Pass --endpoint '[ADDR]:%d' if this node is publicly reachable.",
-                listen_port,
-            )
+    # Endpoint(s) = where other nodes dial this one for a direct tunnel. If not
+    # given, best-effort detect a public v6 and/or v4. A node with no endpoint
+    # can still reach the hub (it initiates outbound), but peers can't dial it,
+    # so node<->node links won't form unless the other side is reachable.
+    node_endpoints = _advertised_endpoints(
+        args.endpoint, listen_port,
+        prior.endpoints if prior else None,
+    )
+    if node_endpoints:
+        log.info("advertising underlay endpoint(s): %s", ", ".join(node_endpoints))
+    else:
+        log.warning(
+            "no public endpoint detected — this node will be reachable only by "
+            "initiating outbound (e.g. to the hub); other nodes cannot dial it, "
+            "so direct node-to-node links may not form. Pass --endpoint <addr> "
+            "if this node is publicly reachable.")
 
-    # Decode token → hub_door_pub, ca_pub, hub_host, seed, door_port
+    # Decode token → hub_door_pub, ca_pub, hub_host(s), seed, door_port
     try:
         hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port = decode_token(token)
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
+
+    # The token may carry several hub underlay hosts (v4 and/or v6, comma-sep);
+    # dial one this node can actually reach.
+    hub_host = _pick_reachable_host(hub_host.split(","))
 
     hub_door_pub_b64 = base64.b64encode(hub_door_pub_bytes).decode()
     ca_pub_hex = ca_pub_bytes.hex()
@@ -728,7 +824,7 @@ def cmd_join(args) -> int:
     # don't waste handshakes dialing an address they can't reach.
     existing = directory.get(node_keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
-    adv_endpoints = [endpoint] if (endpoint and node_inbound != "no") else []
+    adv_endpoints = list(node_endpoints) if node_inbound != "no" else []
     record = NodeRecord(
         id_pub=node_keys.id_pub_bytes,
         seq=seq,
@@ -762,7 +858,7 @@ def cmd_join(args) -> int:
     # Tear down the door interface
     wgmod.destroy_interface("gw-door")
 
-    endpoint_line = f'\nendpoints = ["{endpoint}"]' if endpoint else ""
+    endpoint_line = f'\nendpoints = {json_mod.dumps(node_endpoints)}' if node_endpoints else ""
     seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
     root_url_val = json_mod.dumps(hub_overlay_url) if hub_overlay_url else '""'
     # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
@@ -1565,6 +1661,7 @@ def cmd_run(args) -> int:
         get_ca_pubs=get_ca_pubs,
         get_revoked=get_revoked,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
+        local_families=_local_families(),
     )
     recon.start()
 

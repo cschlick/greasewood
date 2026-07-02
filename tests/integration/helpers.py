@@ -25,6 +25,17 @@ def container_ipv6(container: str, network: str) -> str:
     return info["NetworkSettings"]["Networks"][network]["GlobalIPv6Address"]
 
 
+def container_ipv4(container: str, network: str) -> str:
+    info = json.loads(podman("inspect", container).stdout)[0]
+    return info["NetworkSettings"]["Networks"][network]["IPAddress"]
+
+
+def container_addr(container: str, network: str) -> str:
+    """The container's underlay address on `network` — IPv6 if the network has
+    one, else IPv4. Lets the harness run over either underlay family."""
+    return container_ipv6(container, network) or container_ipv4(container, network)
+
+
 # The control plane binds only to the overlay address + loopback, so it is NOT
 # reachable from the host. Query it from inside the hub container over loopback.
 _GET_SNIPPET = (
