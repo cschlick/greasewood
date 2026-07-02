@@ -189,3 +189,45 @@ Low urgency (the key is self-limiting). Regenerate `wg.key` and restart the
 daemon; renewal carries the new `wg_pub` to the hub, and peers pick it up on
 their next reconcile. No CA action needed — the address is anchored to `id_pub`,
 not `wg_pub`, so it doesn't change.
+
+## SOP: TLS service certs (`gw cert-request`) + auto-renewal
+
+`gw cert-request` gets an x509 leaf cert from the hub for a local service (e.g.
+Postgres). The leaf key is generated locally and never leaves the node; the cert
+is short-lived (`[hub] tls_cert_ttl`, default 7d). The node needs the `tls`
+capability (grant it with `gw set-caps` on the hub).
+
+Request once, with a reload hook so the service picks up rotations:
+
+```
+sudo gw cert-request --san db.gw.internal \
+     --reload-cmd "systemctl reload postgresql"
+# writes <data_dir>/tls/db.key, db.crt, ca.crt; point the service at them
+```
+
+**Auto-renewal is automatic and lives in the daemon** — no cron, no extra unit.
+`cert-request` records the cert in `<data_dir>/tls/managed.json`, and the running
+daemon re-issues it at ~half its TTL, rewrites the same files in place, then runs
+`--reload-cmd`. So the one systemd service that keeps the mesh credential fresh
+keeps service certs fresh too.
+
+- **Check state:** `gw cert-status` (shows each local cert + expiry). Renewals log
+  to `journalctl -u greasewood` as `auto-renewed TLS cert` / `cert reload_cmd ran`.
+- **Change SANs, out-dir, or the reload command:** just re-run `gw cert-request`
+  with the new flags — it replaces that cert's manifest entry (keyed by name +
+  out-dir).
+- **One-shot (no auto-renewal):** `gw cert-request --no-auto-renew`, then renew by
+  hand before expiry.
+
+Troubleshooting:
+- **Cert not renewing** (expiry creeping up in `gw cert-status`): the daemon must
+  be running and the hub reachable over the overlay, and the node must still hold
+  the `tls` cap. Check `journalctl -u greasewood` for `TLS cert auto-renewal
+  for … failed`; run `gw diagnose` to confirm the link to the hub; confirm the cap
+  with `gw nodes` on the hub. A renewal failure is retried on the next cycle.
+- **Cert renewed but the service still serves the old one:** the reload hook
+  didn't take. The new files *are* on disk — check `journalctl` for `cert
+  reload_cmd … exited`, and test the command by hand (e.g. `systemctl reload
+  postgresql`). The reload runs only after a successful renewal and is non-fatal,
+  so a bad hook never blocks renewal; fix it and it runs next cycle (or reload
+  the service manually now).
