@@ -21,12 +21,13 @@ connection, not an intercepted one.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -289,13 +290,50 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"cert": leaf_pem, "ca_cert": ca_pem})
 
 
-class _IPv6Server(ThreadingHTTPServer):
-    """Threaded so one stalled or slow client can't wedge the control plane
-    for the whole fleet — requests are handled concurrently, and the handler's
-    `timeout` (set from ControlServer.request_timeout) drops any connection
-    that stops sending mid-request."""
+class _IPv6Server(HTTPServer):
+    """IPv6 control plane with a BOUNDED worker pool.
+
+    Concurrent (so one stalled client can't wedge the plane for the fleet — each
+    handler also has a socket `timeout` that drops a client which stops sending),
+    but capped: at most `max_workers` requests run at once. Over that, further
+    connections are shed immediately rather than spawning threads/sockets without
+    bound — so a connection flood from a mesh member can't exhaust the hub. The
+    nodes' renew/publish/cert loops already retry with backoff, so a shed
+    connection is retried, not lost."""
     address_family = socket.AF_INET6
-    daemon_threads = True
+
+    def __init__(self, addr, handler, max_workers: int = 32) -> None:
+        super().__init__(addr, handler)
+        self._max_workers = max_workers
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="gw-http")
+        # In-flight admission bound == pool size: at most max_workers requests
+        # are ever accepted at once; the rest are dropped, not queued.
+        self._slots = threading.BoundedSemaphore(max_workers)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            log.warning("control plane at worker capacity (%d) — dropping a "
+                        "connection from %s", self._max_workers,
+                        client_address[0] if client_address else "?")
+            self.shutdown_request(request)
+            return
+        self._pool.submit(self._run, request, client_address)
+
+    def _run(self, request, client_address) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            try:
+                self.shutdown_request(request)
+            finally:
+                self._slots.release()
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._pool.shutdown(wait=False)
 
 
 class ControlServer:
@@ -311,6 +349,7 @@ class ControlServer:
         mesh_domain: str = "gw.internal",
         get_renew_after=lambda: None,
         request_timeout: float = 30.0,
+        max_workers: int = 32,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -339,7 +378,8 @@ class ControlServer:
         for lst in listens:
             host, _, port_str = lst.rpartition(":")
             host = host.strip("[]")  # strip brackets from "[fd8d::1]"
-            self._servers.append(_IPv6Server((host or "::", int(port_str)), Handler))
+            self._servers.append(
+                _IPv6Server((host or "::", int(port_str)), Handler, max_workers))
         # Primary server (callers/tests read its bound port).
         self._server = self._servers[0]
 
@@ -355,3 +395,4 @@ class ControlServer:
     def stop(self) -> None:
         for srv in self._servers:
             srv.shutdown()
+            srv.server_close()   # close the socket AND shut the worker pool

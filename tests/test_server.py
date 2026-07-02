@@ -552,6 +552,51 @@ class TestControlServerConcurrency:
         finally:
             stall.close()
 
+    def test_bounded_pool_sheds_load_at_capacity(self, ca_and_node):
+        """The worker pool is capped: with all workers occupied by stalled
+        clients, a further connection is dropped promptly (not queued forever
+        and not spawning an unbounded thread) — and capacity returns once the
+        stalls clear. This is the load-shedding backstop for the threaded
+        server: a connection flood can't exhaust the hub."""
+        import socket as _socket
+        ca, node, cred, record = ca_and_node
+        srv = ControlServer(
+            listen="[::1]:0", directory=Directory(),
+            get_ca_pubs=lambda: [ca.ca_pub_bytes], get_revoked=set,
+            request_timeout=10.0, max_workers=2,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        stalls = []
+        try:
+            import time
+            # Occupy both workers with stalled requests.
+            for _ in range(2):
+                stalls.append(self._stalled_conn(port))
+            time.sleep(0.5)  # let the server admit both into the pool
+
+            # A further connection must be dropped fast (server closes it),
+            # not hang for the full 10s request timeout.
+            over = _socket.create_connection(("::1", port), timeout=5)
+            try:
+                over.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+                over.settimeout(3)
+                # Dropped → EOF (b"") promptly, well under the 10s timeout.
+                assert over.recv(64) == b"", "over-capacity connection was not shed"
+            finally:
+                over.close()
+
+            # Free the workers; the plane serves again.
+            for s in stalls:
+                s.close()
+            stalls.clear()
+            time.sleep(0.5)
+            assert _get(port, "/health")["status"] == "ok"
+        finally:
+            for s in stalls:
+                s.close()
+            srv.stop()
+
     def test_stalled_connection_is_dropped_after_timeout(self, ca_and_node):
         ca, node, cred, record = ca_and_node
         srv = ControlServer(
