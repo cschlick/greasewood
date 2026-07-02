@@ -27,7 +27,7 @@ def test_hub_pinned_hostname_overrides_and_locks_rename(gw_image, gw_network):
 
         # 1. The hub's pin wins — the issued name is "pinned-db", and the name
         #    the joiner requested never takes effect.
-        status = pexec(node["cid"], "gw", "status").stdout
+        status = pexec(node["cid"], "gw", "nodes").stdout
         assert "pinned-db" in status, f"pinned name not applied:\n{status}"
         assert "attacker-name" not in status, \
             f"joiner's requested name leaked through:\n{status}"
