@@ -85,3 +85,43 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert "expiring" in out and "EXPIRED" in out                     # varied states
     assert "hrs" in out                                               # relative expiry (N hrs)
     assert "<1 hr" in out                                             # expiring node's expires col
+
+
+def test_nodes_by_segment(tmp_path, capsys):
+    ca = CAKeys.generate()
+    me = NodeKeys.load_or_generate(tmp_path)
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "api1"
+data_dir = "{tmp_path}"
+role = "node"
+caps = ["segment:prod"]
+[network]
+interface = "gw-mesh"
+seeds = []
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    cfg = load_config(tmp_path / "gw.toml")
+    directory = Directory()
+    directory.put(_rec(me, _cred(ca, me, "api1", ["prod"])))
+    for name, segs in [
+        ("hub", ["*"]), ("monitor", ["*"]),          # reach-all
+        ("db1", ["prod"]), ("web1", ["prod", "web"]),  # web1 is in two segments
+        ("web2", ["web"]), ("ci-runner", ["dev"]), ("build1", ["dev"]),
+    ]:
+        k = NodeKeys.generate()
+        directory.put(_rec(k, _cred(ca, k, name, segs)))
+    directory.save(cfg.dir_cache_path)
+
+    import types as _types
+    cli.cmd_nodes(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
+                                         by_segment=True))
+    out = capsys.readouterr().out
+    print(out)   # visible under `pytest -s`
+
+    for s in ("dev", "prod", "web"):                 # one table per named segment
+        assert f"segment: {s}" in out
+    assert "segment: *" not in out                   # * isn't a group, it's ubiquitous
+    assert out.count("hub.gw.internal") >= 3         # reach-all appears under every segment
+    assert out.count("web1.gw.internal") >= 2        # a 2-segment node under both
+    assert "8 record(s) in local directory cache" in out

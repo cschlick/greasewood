@@ -1764,10 +1764,43 @@ def _underlay_addrs(endpoints: list[str]) -> tuple[str, str]:
     return v6, v4
 
 
+def _record_segments(r) -> list[str]:
+    """The segment names a record belongs to (from its `segment:` caps)."""
+    return [c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")]
+
+
+def _print_node_table(records, cfg, now, own_id) -> None:
+    """Print the name/addr/expires/state/segments table for `records`. The name
+    column is right-justified and sized to the longest FQDN so the
+    `.<mesh_domain>` suffixes line up."""
+    from .hosts import mesh_name
+    names = {r.id_pub.hex(): mesh_name(r.hostname, cfg.mesh_domain) for r in records}
+    namew = max(len("name"), *(len(v) for v in names.values()))
+    fmt = f"{{:>{namew}}} {{:<40}} {{:<9}} {{:<22}} {{}}"
+    header = fmt.format("name", "addr", "expires", "state", "segments")
+    print(header)
+    print("-" * len(header))
+    for r in records:
+        left = (r.cred.exp - now).total_seconds()
+        if left < 0:
+            state, expires = "EXPIRED", "expired"
+        elif left < 3600:
+            state, expires = f"expiring ({int(left / 60)}m)", "<1 hr"
+        else:
+            state = "ok"
+            h = int(left // 3600)
+            expires = f"{h} hr" if h == 1 else f"{h} hrs"
+        marker = " ← self" if r.id_pub.hex() == own_id else ""
+        segs = ",".join(_record_segments(r)) or "-"
+        # `expires` is a coarse hours-remaining; `gw diagnose` shows the exact
+        # timestamp (and the underlay endpoints).
+        print(fmt.format(names[r.id_pub.hex()], r.cred.addr,
+                         expires, state + marker, segs))
+
+
 def cmd_nodes(args) -> int:
     from .config import load_config
     from .directory import Directory
-    from .hosts import mesh_name
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -1793,36 +1826,33 @@ def cmd_nodes(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    # Resolvable FQDNs (what /etc/hosts maps + what you can ping), not bare
-    # hostnames. Right-justify the name column, sized to the longest name, so
-    # every ".<mesh_domain>" suffix lines up down the table.
-    names = {r.id_pub.hex(): mesh_name(r.hostname, cfg.mesh_domain) for r in records}
-    namew = max(len("name"), *(len(v) for v in names.values()))
-    fmt = f"{{:>{namew}}} {{:<40}} {{:<9}} {{:<22}} {{}}"
-    header = fmt.format("name", "addr", "expires", "state", "segments")
-    print(header)
-    print("-" * len(header))
-    for r in records:
-        exp = r.cred.exp
-        left = (exp - now).total_seconds()
-        if left < 0:
-            state, expires = "EXPIRED", "expired"
-        elif left < 3600:
-            state, expires = f"expiring ({int(left / 60)}m)", "<1 hr"
-        else:
-            state = "ok"
-            h = int(left // 3600)
-            expires = f"{h} hr" if h == 1 else f"{h} hrs"
-        marker = " ← self" if r.id_pub.hex() == own_id else ""
-        segments = ",".join(
-            c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
-        ) or "-"
-        # `expires` is a coarse hours-remaining; `gw diagnose` shows the exact
-        # timestamp (and the underlay endpoints).
-        print(fmt.format(names[r.id_pub.hex()], r.cred.addr,
-                         expires, state + marker, segments))
+    if getattr(args, "by_segment", False):
+        # One table per named segment. A node appears under every segment it's in,
+        # and a reach-all (segment:*) node appears under ALL of them — so many
+        # nodes show up in more than one table.
+        named = sorted({s for r in records for s in _record_segments(r) if s != "*"})
+        shown: set[str] = set()
+        for s in named:
+            members = [r for r in records
+                       if s in _record_segments(r) or "*" in _record_segments(r)]
+            shown.update(r.id_pub.hex() for r in members)
+            print(f"segment: {s}  ({len(members)} node{'' if len(members) == 1 else 's'})")
+            _print_node_table(members, cfg, now, own_id)
+            print()
+        # Anything not shown above — unsegmented nodes (can't peer), or reach-all
+        # nodes with no named segment to fall under — so the grouped view drops
+        # nobody.
+        leftover = [r for r in records if r.id_pub.hex() not in shown]
+        if leftover:
+            print(f"(no segment)  ({len(leftover)} node{'' if len(leftover) == 1 else 's'}) "
+                  f"— unsegmented, can't peer until given a segment")
+            _print_node_table(leftover, cfg, now, own_id)
+            print()
+    else:
+        _print_node_table(records, cfg, now, own_id)
+        print()
 
-    print(f"\n{len(records)} record(s) in local directory cache")
+    print(f"{len(records)} record(s) in local directory cache")
     return 0
 
 
@@ -2456,6 +2486,9 @@ def main(argv=None) -> int:
     sp = sub.add_parser("nodes",
                         help="list the mesh nodes in this node's directory (name, "
                              "addr, expiry, state, segments) + who you are")
+    sp.add_argument("--by-segment", action="store_true",
+                    help="group into one table per segment (a node appears under "
+                         "each of its segments; segment:* nodes appear under all)")
     sp.set_defaults(fn=cmd_nodes)
 
     # diagnose
