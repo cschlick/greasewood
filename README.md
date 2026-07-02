@@ -632,6 +632,7 @@ Two properties worth knowing:
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
 | `renew`            | yes   | Force an immediate credential renewal for this node (applies a hub-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
+| `renew-all`        | no    | On the hub: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the hub's rate stays ~constant with mesh size). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |

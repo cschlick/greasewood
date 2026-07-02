@@ -105,7 +105,10 @@ def wait_for_peer_count(container: str, expected: int, iface: str = "gw-mesh",
 
 
 def directory_records(hub_cid: str, port: int = 51902) -> list:
-    return json.loads(hub_get(hub_cid, "/directory", port))
+    raw = json.loads(hub_get(hub_cid, "/directory", port))
+    # /directory is now {"records": [...], "renew_after": ...}; tolerate the old
+    # bare-list shape too.
+    return raw["records"] if isinstance(raw, dict) else raw
 
 
 def directory_hostnames(hub_cid: str) -> set[str]:

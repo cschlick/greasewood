@@ -10,6 +10,7 @@ the data path" true in practice.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import threading
@@ -22,15 +23,34 @@ from .directory import Directory
 from .wire import NodeRecord
 
 log = logging.getLogger(__name__)
+_UTC = dt.timezone.utc
 
 
-def pull_directory(seed_url: str, timeout: float = 10.0) -> list[NodeRecord]:
-    """Fetch the record list from a seed's /directory endpoint."""
+def _parse_renew_after(raw) -> "dt.datetime | None":
+    if not raw:
+        return None
+    try:
+        ts = dt.datetime.fromisoformat(raw)
+        return ts if ts.tzinfo else ts.replace(tzinfo=_UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def pull_directory(seed_url: str, timeout: float = 10.0):
+    """Fetch (records, renew_after) from a seed's /directory endpoint.
+
+    Accepts both the current object shape {"records": [...], "renew_after": ...}
+    and a bare list (older hubs), so a mixed-version mesh still syncs. renew_after
+    is the fleet-wide renew hint (see gw renew-all), parsed to a UTC datetime or
+    None."""
     url = f"{seed_url.rstrip('/')}/directory"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             raw = json.loads(resp.read())
-            return [NodeRecord.from_dict(r) for r in raw]
+        if isinstance(raw, dict):
+            records = [NodeRecord.from_dict(r) for r in raw.get("records", [])]
+            return records, _parse_renew_after(raw.get("renew_after"))
+        return [NodeRecord.from_dict(r) for r in raw], None
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
@@ -58,6 +78,7 @@ class SyncLoop:
         get_seeds: "Callable[[], list[str]]",
         cache_path: Path,
         interval: float = 20.0,
+        on_renew_after: "Callable[[dt.datetime], None] | None" = None,
     ) -> None:
         self._directory = directory
         # A callable so the caller decides where seeds come from; in practice
@@ -65,6 +86,9 @@ class SyncLoop:
         self._get_seeds = get_seeds
         self._cache_path = cache_path
         self._interval = interval
+        # Called with the hub's fleet-wide renew hint (renew_after) after each
+        # successful pull; the renewal loop decides whether/when to act on it.
+        self._on_renew_after = on_renew_after
         self._stop = threading.Event()
 
     def _pull_once(self) -> None:
@@ -76,11 +100,13 @@ class SyncLoop:
 
         for seed in self._get_seeds():
             try:
-                records = pull_directory(seed)
+                records, renew_after = pull_directory(seed)
                 n = self._directory.merge(records)
                 if n:
                     self._directory.save(self._cache_path)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
+                if self._on_renew_after and renew_after is not None:
+                    self._on_renew_after(renew_after)
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)

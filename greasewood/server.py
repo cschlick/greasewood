@@ -2,7 +2,7 @@
 greasewood.server — HTTP control plane (hub role).
 
 Endpoints:
-  GET  /directory   → JSON array of NodeRecords
+  GET  /directory   → {"records": [NodeRecord, ...], "renew_after": <iso ts|null>}
   POST /publish     → accept a self-signed, CA-credentialed NodeRecord
   POST /renew       → RenewRequest → Credential  (hub only)
   GET  /health      → {"status": "ok"}
@@ -76,6 +76,10 @@ class _Handler(BaseHTTPRequestHandler):
     cache_path: "Path | None" = None
     tls_cert_ttl: "dt.timedelta | None" = None
     mesh_domain: str = "gw.internal"
+    # Fleet-wide renew hint (see gw renew-all): a callable returning an ISO
+    # timestamp string (or None). Served in /directory so cooperating nodes whose
+    # credential predates it renew. Read fresh per request (no restart needed).
+    get_renew_after: "callable" = staticmethod(lambda: None)
     replay: "_ReplayGuard" = _ReplayGuard()
 
     def log_message(self, fmt, *args) -> None:
@@ -97,7 +101,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/directory":
-            self._send_json([r.to_dict() for r in self.directory.all()])
+            self._send_json({
+                "records": [r.to_dict() for r in self.directory.all()],
+                "renew_after": self.get_renew_after(),
+            })
         elif self.path == "/ca-cert":
             if self.ca is None:
                 self.send_error(404)
@@ -282,6 +289,7 @@ class ControlServer:
         cache_path: "Path | None" = None,
         tls_cert_ttl=None,
         mesh_domain: str = "gw.internal",
+        get_renew_after=lambda: None,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -294,6 +302,7 @@ class ControlServer:
         Handler.cache_path = cache_path
         Handler.tls_cert_ttl = tls_cert_ttl
         Handler.mesh_domain = mesh_domain
+        Handler.get_renew_after = staticmethod(get_renew_after)
         Handler.replay = _ReplayGuard()
 
         # Bind one socket per address — typically the hub's overlay address and

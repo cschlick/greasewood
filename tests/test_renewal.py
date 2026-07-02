@@ -49,14 +49,13 @@ def test_renewal_retries_with_exponential_backoff_then_stops(tmp_path, monkeypat
 
     def fake_wait(t):
         waits.append(t)
-        return len(waits) >= 3  # let the stop event fire during the 2nd backoff
+        return len(waits) >= 2  # let the stop event fire during the 2nd backoff
 
     monkeypatch.setattr(loop._stop, "wait", fake_wait)
 
     loop.run()
 
-    # waits[0] is the outer _next_delay(0.0); then exponential backoffs 30, 60.
-    assert waits[0] == 0.0
-    assert waits[1] == 30
-    assert waits[2] == 60
+    # The outer wait is now _renew_now.wait(timeout=_next_delay()) (woken early by
+    # a fleet renew hint), so _stop.wait only sees the exponential backoffs 30, 60.
+    assert waits == [30, 60]
     assert attempts["n"] == 2  # two failed attempts before the stop fired
