@@ -97,7 +97,13 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length > _MAX_BODY:
             raise ValueError(f"request body too large ({length} bytes)")
-        return json.loads(self.rfile.read(length))
+        body = json.loads(self.rfile.read(length))
+        # Every endpoint expects a JSON object. Enforce it here so a bare null,
+        # list, or scalar is a clean 400 in do_POST — not a TypeError deep in a
+        # from_dict (d["id_pub"] on a non-dict) that escapes as a 500.
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        return body
 
     @staticmethod
     def _now_iso() -> str:
@@ -161,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
                     log.warning("failed to persist directory after publish: %s", e)
             log.debug("published record from %s seq=%d", record.hostname, record.seq)
             self._send_json({"status": "ok"})
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, TypeError) as e:
             log.warning("publish rejected: %s", e)
             self._send_json({"error": str(e)}, 400)
 
@@ -170,7 +176,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             req = RenewRequest.from_dict(body)
             req.verify_self_sig()  # authenticate before consuming the nonce
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, TypeError) as e:
             log.warning("renew rejected: %s", e)
             self._send_json({"error": str(e)}, 400)
             return
@@ -222,7 +228,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             req = CertRequest.from_dict(body)
             req.verify_self_sig()  # proves id_priv possession
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, TypeError) as e:
             self._send_json({"error": f"bad cert request: {e}"}, 400)
             return
 
