@@ -195,6 +195,85 @@ def window_path(data_dir: Path) -> Path:
     return data_dir / "door_window.json"
 
 
+# ---------------------------------------------------------------------------
+# Door status/history — a small record of the door's lifecycle the hub daemon
+# maintains (open/close times + reason, failed attempts + source IPs, the last
+# enrollment). `gw status` reads it to show what the door is doing. Written 0600
+# because it contains source IP addresses.
+# ---------------------------------------------------------------------------
+
+def door_status_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "door_status.json"
+
+
+def read_door_status(data_dir: Path) -> "dict | None":
+    """The door's current/last-known status, or None if it has never opened."""
+    import json
+    try:
+        return json.loads(door_status_path(data_dir).read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _status_now_iso() -> str:
+    import datetime as dt
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _write_door_status(data_dir: Path, data: dict) -> None:
+    import json
+    p = door_status_path(data_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, p)
+
+
+def mark_door_opened(data_dir: Path, expires_iso: str, *, caps=None,
+                     pinned_hostname=None, max_attempts: int = 3) -> None:
+    """Record that an enrollment window just opened (resets per-window counters)."""
+    _write_door_status(data_dir, {
+        "state": "open",
+        "opened_at": _status_now_iso(),
+        "expires": expires_iso,
+        "max_attempts": max_attempts,
+        "caps": list(caps or []),
+        "pinned_hostname": pinned_hostname,
+        "attempts": [],          # failed attempts this window: {ts, ip, reason}
+        "enrolled": None,        # {ts, ip, hostname} on success
+        "closed_at": None,
+        "close_reason": None,
+    })
+
+
+def mark_door_attempt(data_dir: Path, ip: str, reason: str) -> None:
+    cur = read_door_status(data_dir) or {}
+    cur.setdefault("attempts", []).append(
+        {"ts": _status_now_iso(), "ip": ip, "reason": reason})
+    _write_door_status(data_dir, cur)
+
+
+def mark_door_enrolled(data_dir: Path, ip: str, hostname: str) -> None:
+    cur = read_door_status(data_dir) or {}
+    cur["enrolled"] = {"ts": _status_now_iso(), "ip": ip, "hostname": hostname}
+    _write_door_status(data_dir, cur)
+
+
+def mark_door_closed(data_dir: Path, reason: str) -> None:
+    cur = read_door_status(data_dir) or {}
+    if cur.get("state") == "closed":
+        return  # keep the first close reason if several paths race to close
+    cur["state"] = "closed"
+    cur["closed_at"] = _status_now_iso()
+    cur["close_reason"] = reason
+    cur["expires"] = None
+    _write_door_status(data_dir, cur)
+
+
 def active_window_expiry(data_dir: Path) -> str | None:
     """
     Return the 'expires' string of the current door window if one is open and

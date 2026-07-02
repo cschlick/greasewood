@@ -1889,6 +1889,83 @@ def _print_node_table(records, cfg, now, own_id) -> None:
                          expires, state + marker, segs))
 
 
+def _fmt_ago(iso: str) -> str:
+    """A coarse 'time since' for a timestamp: seconds, then minutes, then >1h."""
+    try:
+        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return "?"
+    s = (dt.datetime.now(_UTC) - t).total_seconds()
+    if s < 0:
+        return "just now"
+    if s < 60:
+        return f"{int(s)}s ago"
+    if s < 3600:
+        return f"{int(s // 60)}m ago"
+    return ">1h ago"
+
+
+def _fmt_until(iso: str) -> str:
+    """Minutes until a future timestamp (for the open door's close time)."""
+    try:
+        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return "?"
+    s = (t - dt.datetime.now(_UTC)).total_seconds()
+    if s <= 0:
+        return "now"
+    if s < 60:
+        return "<1m"
+    return f"{int(s // 60) + (1 if s % 60 else 0)}m"
+
+
+def _door_status_lines(cfg) -> list:
+    """The `door:` block for `gw status` — hub only. Shows whether the
+    enrollment door is open (and time-to-close) or closed (and how long ago),
+    plus failed attempts + source IPs and the last enrollment."""
+    from . import door
+    st = door.read_door_status(cfg.data_dir)
+    if st is None:
+        return ["door     : closed (never opened)"]
+
+    lines = []
+    attempts = st.get("attempts") or []
+
+    def _attempt_summary(prefix: str):
+        if not attempts:
+            return
+        ips = ", ".join(f"{a.get('ip','?')} ({a.get('reason','?')})" for a in attempts)
+        n = len(attempts)
+        lines.append(f"           {prefix}{n} failed attempt{'s' if n != 1 else ''}: {ips}")
+
+    if st.get("state") == "open":
+        head = f"door     : OPEN — closes in {_fmt_until(st.get('expires',''))}"
+        if st.get("opened_at"):
+            head += f" (opened {_fmt_ago(st['opened_at'])})"
+        lines.append(head)
+        grants = ", ".join(st.get("caps") or []) or "(default)"
+        pin = st.get("pinned_hostname")
+        lines.append(f"           grants: {grants}"
+                     + (f"; hostname pinned to {pin!r}" if pin else ""))
+        _attempt_summary("")
+        left = max(0, int(st.get("max_attempts", 3)) - len(attempts))
+        lines.append(f"           {left} attempt{'s' if left != 1 else ''} remaining")
+    else:
+        reason = st.get("close_reason") or "closed"
+        enr = st.get("enrolled")
+        if reason == "enrolled" and enr:
+            phrase = f"enrolled {enr.get('hostname','?')} from {enr.get('ip','?')}"
+        else:
+            phrase = {"expired": "window expired with no enrollment",
+                      "attempts_exhausted": "too many failed attempts",
+                      "superseded": "replaced by a newer invite / daemon stop",
+                      }.get(reason, reason)
+        when = _fmt_ago(st["closed_at"]) if st.get("closed_at") else "?"
+        lines.append(f"door     : closed — last closed {when} ({phrase})")
+        _attempt_summary("last window: ")
+    return lines
+
+
 def cmd_status(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -1907,6 +1984,10 @@ def cmd_status(args) -> int:
     print(f"role     : {cfg.role}")
     print(f"hostname : {cfg.hostname}")
     print(f"addr     : {own_addr or '(keys not generated)'}")
+    # The enrollment door only exists on the hub — show its state there.
+    if cfg.role == "hub":
+        for line in _door_status_lines(cfg):
+            print(line)
     print()
 
     directory = Directory.load(cfg.dir_cache_path)

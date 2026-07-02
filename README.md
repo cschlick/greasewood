@@ -452,6 +452,12 @@ generate another. (If you do overwrite an unused token, `gw invite` warns you â€
 on stderr, so the new token still prints cleanly to stdout and `TOKEN=$(gw
 invite)` keeps working.)
 
+On the hub, **`gw status` shows what the door is doing** â€” open (with the
+minutes until it closes, the caps it grants, any failed attempts and their
+source IPs, and attempts remaining) or closed (how long ago and why: enrolled,
+expired, or too many failed attempts). Handy for watching an enrollment or
+spotting someone knocking on the door with a bad token.
+
 **To automate over SSH**, two flags make the token pipeable: `gw invite -q`
 prints only the token, and `gw join -` reads it from stdin (so it stays out of
 the node's `ps`, and it tolerates raw `gw invite` output). Wiring those into a
