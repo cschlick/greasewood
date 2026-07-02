@@ -70,6 +70,7 @@ class RenewalLoop:
         endpoints: list[str],
         cache_path: Path,
         renew_spread: float = 2.0,
+        aliases: "list[str] | None" = None,
     ) -> None:
         self._keys = node_keys
         self._directory = directory
@@ -79,6 +80,7 @@ class RenewalLoop:
         self._inbound = inbound
         self._hostname = hostname
         self._endpoints = endpoints
+        self._aliases = list(aliases or [])
         self._cache_path = cache_path
         self._stop = threading.Event()
         # Fleet-wide renew hint (see gw renew-all): setting _renew_now wakes the
@@ -132,6 +134,7 @@ class RenewalLoop:
             endpoints=self._endpoints,
             inbound=self._inbound,
             cred=cred,
+            aliases=self._aliases,
         ).sign(self._keys.id_priv)
         self._directory.put(record)
         self._directory.save(self._cache_path)

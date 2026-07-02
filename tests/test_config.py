@@ -51,6 +51,14 @@ def test_minimal_config_defaults(tmp_path):
     # The default caps must place the node in the default segment — a bare
     # "mesh" tag is NOT a segment, and default_policy would peer it with nobody.
     assert cfg.caps == ["segment:mesh"]
+    assert cfg.aliases == []                    # no published service names by default
+
+
+def test_aliases_parsed(tmp_path):
+    p = _write(tmp_path,
+               '[node]\nhostname = "db01"\n[network]\naliases = ["pg", "metrics"]\n')
+    cfg = load_config(p)
+    assert cfg.aliases == ["pg", "metrics"]
 
 
 def test_new_node_defaults_fallback(tmp_path):

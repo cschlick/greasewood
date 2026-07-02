@@ -122,6 +122,48 @@ WantedBy=paths.target
 _UNIT_DIR = Path("/etc/systemd/system")
 
 
+def _config_aliases(cfg) -> list:
+    """The node's published service labels from [network] aliases, keeping only
+    valid DNS labels (a bad entry is dropped, not mangled)."""
+    from . import hosts
+    return [a for a in cfg.aliases if hosts.valid_label(a)]
+
+
+def _san_to_owned_label(san: str, cfg) -> "str | None":
+    """If `san` is a strict subdomain of this node's own mesh name, return the
+    single label under it (e.g. 'pg.db01.gw.internal' → 'pg'); else None."""
+    from . import hosts
+    own = hosts.mesh_name(cfg.hostname, cfg.mesh_domain)
+    suffix = "." + own
+    if san.endswith(suffix):
+        label = san[: -len(suffix)]
+        if hosts.valid_label(label):        # single label only, DNS-safe
+            return label
+    return None
+
+
+def _add_config_aliases(cfg_path: Path, cfg, labels: list) -> list:
+    """Merge `labels` into [network] aliases in the TOML, in place. Returns the
+    labels actually added (empty if all were already present / couldn't edit)."""
+    import json as _json
+    import re as _re
+    have = set(cfg.aliases)
+    new = [l for l in labels if l not in have]
+    if not new:
+        return []
+    merged = _json.dumps(sorted(have | set(new)))
+    text = cfg_path.read_text()
+    line = f"aliases = {merged}"
+    if _re.search(r"(?m)^\s*aliases\s*=", text):
+        text = _re.sub(r"(?m)^\s*aliases\s*=.*$", line, text, count=1)
+    elif _re.search(r"(?m)^\[network\]\s*$", text):
+        text = _re.sub(r"(?m)^(\[network\]\s*)$", r"\1\n" + line, text, count=1)
+    else:
+        return []                            # no place to put it — caller warns
+    cfg_path.write_text(text)
+    return new
+
+
 def _get_passphrase(env_var: str | None) -> bytes | None:
     if not env_var:
         return None
@@ -1350,6 +1392,23 @@ def cmd_cert_request(args) -> int:
               "them:")
         for p in orphans:
             print(f"  orphaned: {p}")
+
+    # A subdomain SAN (e.g. pg.<myname>) resolves nowhere on the mesh unless we
+    # also advertise it. Register the label so the daemon publishes
+    # <label>.<myname> → our address into everyone's /etc/hosts.
+    from .hosts import mesh_name as _mesh_name
+    labels = [lbl for d in dns if (lbl := _san_to_owned_label(d, cfg))]
+    if labels:
+        added = _add_config_aliases(Path(args.config), cfg, labels)
+        own = _mesh_name(cfg.hostname, cfg.mesh_domain)
+        if added:
+            print()
+            print("published name(s) so peers can resolve this service on the mesh:")
+            for lbl in added:
+                print(f"  {lbl}.{own}")
+            print("Restart the daemon to advertise them now "
+                  "(else they propagate at the next renewal): "
+                  "sudo systemctl restart greasewood  (or re-run sudo gw run).")
     return 0
 
 
@@ -1519,9 +1578,10 @@ def cmd_rename(args) -> int:
     endpoints = list(existing.endpoints) if existing else (
         [] if cfg.inbound == "no" else cfg.endpoints)
     inbound = existing.inbound if existing else cfg.inbound
+    aliases = list(existing.aliases) if existing else _config_aliases(cfg)
     record = NodeRecord(
         id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        inbound=inbound, cred=cred,
+        inbound=inbound, cred=cred, aliases=aliases,
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -1689,12 +1749,15 @@ def cmd_run(args) -> int:
     # their endpoint so peers don't waste handshakes dialing an unreachable addr.
     eff_endpoints = [] if cfg.inbound == "no" else cfg.endpoints
 
-    # Honor config changes on (re)start: if our record's inbound/endpoints no
-    # longer match config (e.g. after `gw set-inbound`), re-sign it so what we
+    # Honor config changes on (re)start: if our record's inbound/endpoints/
+    # aliases no longer match config (e.g. after `gw set-inbound` or a
+    # `gw cert-request` that added a service name), re-sign it so what we
     # advertise is current — the daemon reads config only at startup.
+    want_aliases = _config_aliases(cfg)
     own_record = directory.get(keys.id_pub_hex)
     if own_record and (own_record.inbound != cfg.inbound
-                       or list(own_record.endpoints) != list(eff_endpoints)):
+                       or list(own_record.endpoints) != list(eff_endpoints)
+                       or sorted(own_record.aliases) != sorted(want_aliases)):
         from .wire import NodeRecord
         own_record = NodeRecord(
             id_pub=keys.id_pub_bytes,
@@ -1702,11 +1765,12 @@ def cmd_run(args) -> int:
             endpoints=eff_endpoints,
             inbound=cfg.inbound,
             cred=own_record.cred,
+            aliases=want_aliases,
         ).sign(keys.id_priv)
         directory.put(own_record)
         directory.save(cfg.dir_cache_path)
-        log.info("updated own record (inbound=%s, endpoints=%s)",
-                 cfg.inbound, eff_endpoints)
+        log.info("updated own record (inbound=%s, endpoints=%s, aliases=%s)",
+                 cfg.inbound, eff_endpoints, want_aliases)
 
     # Push our own record so the rest of the mesh knows about us. This gets a
     # newly enrolled node into the hub's directory; it is also how endpoint
@@ -1730,6 +1794,7 @@ def cmd_run(args) -> int:
             hostname=cfg.hostname,
             endpoints=eff_endpoints,
             cache_path=cfg.dir_cache_path,
+            aliases=want_aliases,
         )
         renewal.start()
     else:
@@ -2250,9 +2315,10 @@ def cmd_renew(args) -> int:
     endpoints = list(existing.endpoints) if existing else (
         [] if cfg.inbound == "no" else cfg.endpoints)
     inbound = existing.inbound if existing else cfg.inbound
+    aliases = list(existing.aliases) if existing else _config_aliases(cfg)
     record = NodeRecord(
         id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        inbound=inbound, cred=cred,
+        inbound=inbound, cred=cred, aliases=aliases,
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)

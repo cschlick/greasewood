@@ -159,6 +159,51 @@ trusted_pubs = []
     assert str(certs.manifest_path(tmp_path)) in out
 
 
+def test_cert_request_registers_subdomain_san_as_alias(tmp_path, monkeypatch, capsys):
+    """A subdomain --san (a name under the node's own mesh name) is auto-added to
+    [network] aliases so the daemon publishes it — but a foreign or bare-name SAN
+    is not."""
+    NodeKeys.load_or_generate(tmp_path)
+    cfg_path = tmp_path / "gw.toml"
+    cfg_path.write_text(f"""[node]
+hostname = "db01"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-mesh"
+seeds = []
+root_url = "http://[fd8d:e5c1:db1a:7::1]:51902"
+mesh_domain = "gw.internal"
+[ca]
+trusted_pubs = []
+""")
+    from greasewood import cli
+    from greasewood.config import load_config
+    monkeypatch.setattr(certs, "issue_cert",
+                        lambda *a, **k: (k["key_path"], k["crt_path"], k["ca_path"]))
+
+    def ns(**o):
+        base = dict(config=str(cfg_path), san=[], cn=None, name="svc", out_dir=None,
+                    key_out=None, cert_out=None, ca_out=None, hub=None,
+                    reload_cmd=None, no_auto_renew=False)
+        base.update(o); return types.SimpleNamespace(**base)
+
+    # Subdomain of our own name → registered as label "pg".
+    assert cli.cmd_cert_request(ns(san=["pg.db01.gw.internal"], name="pg")) == 0
+    assert load_config(cfg_path).aliases == ["pg"]
+    assert "pg.db01.gw.internal" in capsys.readouterr().out
+
+    # A second subdomain merges in.
+    assert cli.cmd_cert_request(ns(san=["metrics.db01.gw.internal"], name="m")) == 0
+    assert load_config(cfg_path).aliases == ["metrics", "pg"]
+
+    # A foreign name (someone else's) is NOT registered (and the hub would refuse
+    # the cert anyway); the bare own-name isn't a subdomain, so not registered.
+    assert cli.cmd_cert_request(ns(san=["evil.other.gw.internal"], name="x")) == 0
+    assert cli.cmd_cert_request(ns(san=["db01.gw.internal"], name="base")) == 0
+    assert load_config(cfg_path).aliases == ["metrics", "pg"]   # unchanged
+
+
 def test_cert_request_per_file_paths_and_relocate(tmp_path, monkeypatch, capsys):
     """key/cert/ca can each target a different directory, and re-requesting the
     same name relocates the entry (single manifest row) and flags the orphaned

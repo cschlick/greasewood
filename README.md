@@ -752,6 +752,11 @@ only ever touches the region between its markers; your own `/etc/hosts` lines ar
 left alone, and `--no-hosts-sync` (or `hosts_sync = false` + restart) or `gw
 purge` removes the block.
 
+A node can also publish extra **service names** under its own name via
+`[network] aliases` (or automatically from a subdomain TLS cert) — a label `pg`
+becomes an extra `pg.<hostname>.gw.internal` line pointing at that node. See the
+TLS section for how this ties cert SANs to resolvable names.
+
 **Who chooses the name.** By default a node names itself at `gw join` (defaulting
 to its machine hostname) and can change it later with `gw rename`. If you'd rather
 the hub control it, **pin it at invite**: `gw invite --hostname db` fixes the name
@@ -839,7 +844,8 @@ for *another* node's name and impersonate its service to TLS clients.
 ```bash
 # On node "dbnode" — postgres.dbnode.gw.internal is a subdomain it owns:
 sudo gw cert-request --san postgres.dbnode.gw.internal --name postgres
-#   → writes <data_dir>/tls/postgres.key, postgres.crt, and ca.crt
+#   → writes <data_dir>/tls/postgres.key, postgres.crt, and ca.crt, AND
+#     registers the label so peers can resolve postgres.dbnode.gw.internal
 
 # With no --san, the cert defaults to the node's own name + overlay address:
 sudo gw cert-request                 # SAN = dbnode.gw.internal (and its addr)
@@ -866,6 +872,18 @@ one-shot). Managed certs are keyed by `--name`, so re-running `cert-request` wit
 the same name **relocates** it (the daemon renews into the new paths and flags
 the old files as orphaned) rather than leaving a duplicate. See
 [RUNBOOK.md](RUNBOOK.md). Revocation is passive — stop renewing and it expires.
+
+**Subdomain names resolve too.** A cert for `postgres.dbnode.gw.internal` is only
+useful if clients can resolve that name — so when a `--san` is a subdomain of the
+node's own mesh name, `cert-request` also **publishes** it: it adds the label
+(`postgres`) to `[network] aliases`, and the daemon advertises
+`postgres.dbnode.gw.internal → <dbnode's address>` into every node's `/etc/hosts`
+block (restart the daemon, or wait for the next renewal, to propagate). Aliases
+travel as bare labels in the (self-signed) `NodeRecord` and every reader expands
+them under the record's *CA-attested* mesh name — so a node can only ever publish
+names inside its **own** namespace, pointing at its **own** address; it can't
+name or hijack anything else. You can also set `aliases = ["pg", "metrics"]`
+directly in `[network]` without a cert.
 
 **Where things live** — three files, don't conflate them:
 

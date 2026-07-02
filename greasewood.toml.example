@@ -66,6 +66,13 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 hosts_sync = true
 mesh_domain = "gw.internal"
 
+# Extra service names this node publishes, as bare labels under its OWN mesh
+# name — each becomes "<label>.<hostname>.<mesh_domain>" in every node's
+# /etc/hosts, pointing at this node. `gw cert-request` appends one automatically
+# when a --san is a subdomain of this node's name (e.g. requesting a cert for
+# pg.<hostname>.<mesh_domain> adds "pg"). Restart the daemon to advertise a change.
+# aliases = ["pg", "metrics"]
+
 
 [ca]
 # Trusted CA public key(s) — raw Ed25519, hex-encoded. This is the root of

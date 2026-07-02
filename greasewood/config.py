@@ -34,6 +34,10 @@ class Config:
     # TLS cert name (gw cert-request), so a node's address name == its cert SAN.
     hosts_sync: bool
     mesh_domain: str
+    # Extra service names this node publishes into the mesh's /etc/hosts, as
+    # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
+    # `gw cert-request` appends one automatically for a subdomain --san.
+    aliases: list[str]
 
     # Control plane
     seeds: list[str]       # http://[addr]:port — seeds to pull directory from
@@ -110,6 +114,7 @@ def load_config(path: Path) -> Config:
 
         hosts_sync=bool(net.get("hosts_sync", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
+        aliases=list(net.get("aliases", [])),
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 
