@@ -56,7 +56,7 @@ def test_own_identity_missing_returns_none(tmp_path):
 
 
 def test_status_works_without_private_key(tmp_path, capsys, monkeypatch):
-    """`gw status` as a non-root user (no access to id_priv) must still work."""
+    """`gw nodes` as a non-root user (no access to id_priv) must still work."""
     _as_user(monkeypatch)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -81,7 +81,7 @@ root_url = ""
     (data_dir / "directory.json").write_text("[]")
 
     import types
-    rc = cli.cmd_status(types.SimpleNamespace(config=str(cfg)))
+    rc = cli.cmd_nodes(types.SimpleNamespace(config=str(cfg)))
     (data_dir / "id_priv.pem").chmod(0o600)
     out = capsys.readouterr().out
     assert rc == 0

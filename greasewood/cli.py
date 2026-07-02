@@ -986,7 +986,7 @@ def _resolve_node(ca, cfg, handle: str):
         s = s[: -len(suffix)]
     owner = ca.hostname_owner(s)
     if owner is None:
-        sys.exit(f"no node named {handle!r} on this hub (see `gw status`)")
+        sys.exit(f"no node named {handle!r} on this hub (see `gw nodes`)")
     return bytes.fromhex(owner), s
 
 
@@ -1068,7 +1068,7 @@ def _chown_data_dir_to_operator(data_dir: "Path") -> None:
 
 def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
     """(id_pub_hex, overlay_addr) from the world-readable id_pub.hex — never the
-    private key. Read-only commands (status, diagnose) use this so they work
+    private key. Read-only commands (nodes, diagnose) use this so they work
     without sudo: the public id is enough to mark 'self' and derive the addr."""
     from .keys import derive_addr
     try:
@@ -1739,10 +1739,10 @@ def cmd_run(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# status
+# nodes
 # ---------------------------------------------------------------------------
 
-def cmd_status(args) -> int:
+def cmd_nodes(args) -> int:
     from .config import load_config
     from .directory import Directory
     from .hosts import mesh_name
@@ -1755,7 +1755,7 @@ def cmd_status(args) -> int:
     cfg = load_config(cfg_path)
 
     # Read-only: use the public id (id_pub.hex), never the private key, so
-    # `gw status` works without sudo.
+    # `gw nodes` works without sudo.
     own_id, own_addr = _own_identity(cfg.data_dir)
 
     print(f"role     : {cfg.role}")
@@ -2188,7 +2188,7 @@ def main(argv=None) -> int:
             "  sudo gw purge                -- remove all local state\n"
             "\n"
             "no sudo needed (read-only):\n"
-            "  gw status\n"
+            "  gw nodes\n"
             "  gw diagnose   (add sudo to also see live WireGuard handshake state)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2306,9 +2306,11 @@ def main(argv=None) -> int:
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
     sp.set_defaults(fn=cmd_run)
 
-    # status
-    sp = sub.add_parser("status", help="show local node and directory state")
-    sp.set_defaults(fn=cmd_status)
+    # nodes
+    sp = sub.add_parser("nodes",
+                        help="list the mesh nodes in this node's directory (name, "
+                             "addr, expiry, state, segments) + who you are")
+    sp.set_defaults(fn=cmd_nodes)
 
     # diagnose
     sp = sub.add_parser(

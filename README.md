@@ -246,7 +246,7 @@ pip install .              # add '.[test]' to also get pytest
 ```
 
 Either installs the `gw` command. Most subcommands need sudo/root (they create
-WireGuard interfaces and edit routing); `gw status` does not.
+WireGuard interfaces and edit routing); `gw nodes` does not.
 
 The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
 as a managed systemd service instead — see [Running as a
@@ -270,7 +270,7 @@ WireGuard interface, serves the control plane, and watches for door windows.
 
 The hub takes this machine's hostname like any other node — it isn't named
 anything special. You tell which node is the hub from `role: hub` in
-`gw status`, not from its name. (Pass `--hostname <name>` to override the default.)
+`gw nodes`, not from its name. (Pass `--hostname <name>` to override the default.)
 
 ### 2. Enroll a node
 
@@ -327,7 +327,7 @@ exactly what the door exists to prevent.
 ### 3. Check it
 
 ```bash
-gw status               # local node + directory view
+gw nodes               # local node + directory view
 sudo gw diagnose        # per-peer: why each link is/isn't forming
 sudo wg show gw-mesh    # live WireGuard peers
 ```
@@ -394,7 +394,7 @@ it:
 
 - **State ownership.** Run **via `sudo`** and greasewood chowns the data dir back
   to the invoking user afterward (secrets stay mode `0600`), so you can run
-  read-only commands like `gw status` without sudo. Run **as bare root** and the
+  read-only commands like `gw nodes` without sudo. Run **as bare root** and the
   files stay root-owned (no passwordless reads). Don't *alternate* — a later
   `sudo gw …` re-chowns everything to your user, a root-direct run doesn't, so
   ownership will flip back and forth. It won't break the service (root reads
@@ -564,7 +564,7 @@ TOKEN=$(sudo gw invite --segments prod,web)   # a token for a node in prod + web
 sudo gw join "$TOKEN" --hostname web1
 ```
 
-A node's segments show up in `gw status` (a `segments` column). To change them
+A node's segments show up in `gw nodes` (a `segments` column). To change them
 later **without re-joining**, run `gw set-segments <node> prod,web` on the hub —
 it takes effect at the node's next renewal (or re-invite + re-join for an
 immediate change).
@@ -622,7 +622,7 @@ Two properties worth knowing:
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `status`           | no    | Show local node and directory state.                      |
+| `nodes`            | no    | List the mesh nodes (this node's directory) + who you are. |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
 | `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |
@@ -698,7 +698,7 @@ daemons don't clobber each other's `/etc/hosts` entries.
 
 ## Names (.gw.internal)
 
-Every node has a stable overlay address, and `gw status` shows each node's
+Every node has a stable overlay address, and `gw nodes` shows each node's
 resolvable name↔address map. Name resolution is **on by default**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
 `<hostname>.gw.internal`, built from the local directory cache. It's re-checked
