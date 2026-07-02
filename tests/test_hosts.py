@@ -5,7 +5,7 @@ These check the managed-block rendering, idempotent write/replace, that user
 lines are preserved, removal, and the shared mesh_name() (which is also the
 default TLS cert name, so the two layers agree).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from greasewood import hosts
 
@@ -19,10 +19,11 @@ class _Cred:
 class _Rec:
     hostname: str
     cred: _Cred
+    aliases: list = field(default_factory=list)
 
 
-def _rec(hostname, addr):
-    return _Rec(hostname=hostname, cred=_Cred(addr=addr))
+def _rec(hostname, addr, aliases=None):
+    return _Rec(hostname=hostname, cred=_Cred(addr=addr), aliases=aliases or [])
 
 
 def test_mesh_name_sanitizes():
@@ -53,6 +54,36 @@ def test_sanitize_caps_at_dns_label_limit():
     # Truncation must not leave a trailing hyphen.
     cut_on_hyphen = "a" * 63 + "-tail"
     assert not hosts.sanitize(cut_on_hyphen).endswith("-")
+
+
+def test_valid_label():
+    assert hosts.valid_label("pg")
+    assert hosts.valid_label("pg-replica")
+    assert hosts.valid_label("a1")
+    assert not hosts.valid_label("")
+    assert not hosts.valid_label("-pg")          # leading hyphen
+    assert not hosts.valid_label("pg.replica")   # a dot is not a single label
+    assert not hosts.valid_label("PG")           # uppercase
+    assert not hosts.valid_label("pg_db")        # underscore
+
+
+def test_render_block_expands_aliases_under_own_name():
+    # A node's aliases expand to <label>.<its mesh name> → its own address.
+    recs = [_rec("db01", "fd8d::2", aliases=["pg", "metrics"])]
+    block = hosts.render_block(recs, "internal")
+    assert "fd8d::2\tdb01.internal" in block          # base name
+    assert "fd8d::2\tpg.db01.internal" in block       # alias
+    assert "fd8d::2\tmetrics.db01.internal" in block
+
+
+def test_render_block_drops_invalid_alias_labels():
+    # Junk labels must not reach /etc/hosts (they'd be attacker-influenced in a
+    # compromised record, and are meaningless anyway).
+    recs = [_rec("db01", "fd8d::2", aliases=["ok", "bad label", "a.b", ""])]
+    block = hosts.render_block(recs, "internal")
+    assert "fd8d::2\tok.db01.internal" in block
+    assert "bad label" not in block
+    assert "a.b.db01.internal" not in block           # dotted → rejected
 
 
 def test_render_block_sorted_and_suffixed():

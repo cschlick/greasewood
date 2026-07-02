@@ -154,6 +154,7 @@ class NodeRecord:
     endpoints: list[str] # ["[v6addr]:port", ...]
     inbound: str         # "yes" | "no"  (§8)
     cred: Credential
+    aliases: list[str] = field(default_factory=list)
     sig: bytes = field(default=b"", repr=False)
 
     @property
@@ -163,13 +164,20 @@ class NodeRecord:
         return self.cred.hostname
 
     def _body_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "cred": self.cred.to_dict(),
             "endpoints": self.endpoints,
             "id_pub": _b64e(self.id_pub),
             "inbound": self.inbound,
             "seq": self.seq,
         }
+        # Extra service names the node publishes, as bare labels under its OWN
+        # mesh name (readers expand <label>.<attested-name>, so a node can only
+        # name things in its own namespace). Omitted when empty so an
+        # ordinary record's wire form is unchanged.
+        if self.aliases:
+            d["aliases"] = sorted(self.aliases)
+        return d
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "NodeRecord":
         sig = id_priv.sign(_canonical(self._body_dict()))
@@ -240,6 +248,7 @@ class NodeRecord:
             endpoints=d["endpoints"],
             inbound=d["inbound"],
             cred=Credential.from_dict(d["cred"]),
+            aliases=list(d.get("aliases", [])),
             sig=_b64d(d["sig"]),
         )
 

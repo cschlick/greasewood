@@ -56,6 +56,16 @@ def _lock(path: Path):
             f.close()
 
 
+_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def valid_label(label: str) -> bool:
+    """True if `label` is a single DNS-safe label (the form an alias must take).
+    Strict, not coercive: a bad label is rejected, never silently mangled — so
+    it can't inject an unexpected name into /etc/hosts."""
+    return bool(_LABEL_RE.match(label))
+
+
 def sanitize(hostname: str) -> str:
     """DNS-safe single label ([a-z0-9-], <=63 chars); the key used for name
     uniqueness and the label in mesh names.
@@ -100,10 +110,20 @@ def _strip_managed(text: str, tag: str) -> str:
 
 def render_block(records, domain: str) -> str:
     """The managed block (between markers) for the given NodeRecords. The domain
-    doubles as the block tag, so each mesh gets its own block on a shared host."""
+    doubles as the block tag, so each mesh gets its own block on a shared host.
+
+    Each node also gets a line per alias it publishes: a bare label expanded to
+    `<label>.<node-mesh-name>` pointing at the node's own address. Because the
+    domain part is always the record's attested mesh name (never something the
+    node chose), a node can only ever name things in its OWN namespace — no
+    ownership check needed and no cross-node collision possible."""
     lines = [_begin(domain)]
     for r in sorted(records, key=lambda r: r.hostname.lower()):
-        lines.append(f"{r.cred.addr}\t{mesh_name(r.hostname, domain)}")
+        base = mesh_name(r.hostname, domain)
+        lines.append(f"{r.cred.addr}\t{base}")
+        for label in sorted(set(getattr(r, "aliases", []) or [])):
+            if valid_label(label):        # strict: skip anything not a clean label
+                lines.append(f"{r.cred.addr}\t{label}.{base}")
     lines.append(_end(domain))
     return "\n".join(lines)
 

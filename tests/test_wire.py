@@ -378,3 +378,35 @@ class TestNaiveTimestampRejected:
         d["exp"] = d["exp"].rstrip("Z")          # strip the timezone
         with pytest.raises(ValueError, match="timezone"):
             Credential.from_dict(d)
+
+
+# ---------------------------------------------------------------------------
+# NodeRecord aliases — self-asserted service labels, covered by the self-sig
+# ---------------------------------------------------------------------------
+
+class TestNodeRecordAliases:
+    def test_roundtrip_preserves_aliases(self):
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = make_record(node, make_cred(node, ca), ).__class__(
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            cred=make_cred(node, ca), aliases=["pg", "metrics"],
+        ).sign(node.id_priv)
+        back = NodeRecord.from_dict(rec.to_dict())
+        assert back.aliases == ["metrics", "pg"]   # sorted in the signed body
+        back.verify_structural()                    # self-sig still valid
+
+    def test_empty_aliases_omitted_from_wire(self):
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = make_record(node, make_cred(node, ca))   # no aliases
+        assert "aliases" not in rec.to_dict()           # absent, not []
+
+    def test_tampered_aliases_break_self_sig(self):
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = NodeRecord(
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            cred=make_cred(node, ca), aliases=["pg"],
+        ).sign(node.id_priv)
+        d = rec.to_dict()
+        d["aliases"] = ["pg", "injected"]               # add a name post-signing
+        with pytest.raises(ValueError, match="invalid self-signature"):
+            NodeRecord.from_dict(d).verify_structural()
