@@ -1793,18 +1793,22 @@ def cmd_nodes(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<24} {:<40} {:<9} {:<22} {}"
-    print(fmt.format("name", "addr", "expires", "state", "segments"))
-    print("-" * 110)
+    # Resolvable FQDNs (what /etc/hosts maps + what you can ping), not bare
+    # hostnames. Right-justify the name column, sized to the longest name, so
+    # every ".<mesh_domain>" suffix lines up down the table.
+    names = {r.id_pub.hex(): mesh_name(r.hostname, cfg.mesh_domain) for r in records}
+    namew = max(len("name"), *(len(v) for v in names.values()))
+    fmt = f"{{:>{namew}}} {{:<40}} {{:<9}} {{:<22}} {{}}"
+    header = fmt.format("name", "addr", "expires", "state", "segments")
+    print(header)
+    print("-" * len(header))
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
         if left < 0:
-            state = "EXPIRED"
-            expires = "expired"
+            state, expires = "EXPIRED", "expired"
         elif left < 3600:
-            state = f"expiring ({int(left / 60)}m)"
-            expires = "<1 hr"
+            state, expires = f"expiring ({int(left / 60)}m)", "<1 hr"
         else:
             state = "ok"
             h = int(left // 3600)
@@ -1813,13 +1817,10 @@ def cmd_nodes(args) -> int:
         segments = ",".join(
             c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
         ) or "-"
-        # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
-        # not the bare hostname. `expires` is a coarse hours-remaining; `gw
-        # diagnose` shows the exact timestamp (and the underlay endpoints).
-        print(fmt.format(
-            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            expires, state + marker, segments
-        ))
+        # `expires` is a coarse hours-remaining; `gw diagnose` shows the exact
+        # timestamp (and the underlay endpoints).
+        print(fmt.format(names[r.id_pub.hex()], r.cred.addr,
+                         expires, state + marker, segments))
 
     print(f"\n{len(records)} record(s) in local directory cache")
     return 0
