@@ -1,7 +1,7 @@
 """
-`gw nodes` output demonstration + regression, on a full (12-node) directory.
+`gw ls` output demonstration + regression, on a full (12-node) directory.
 
-Builds a varied directory cache and runs the real `cmd_nodes`: mixed segments
+Builds a varied directory cache and runs the real `cmd_ls`: mixed segments
 (the default `mesh` pool, `prod`/`dev`/`web`, a multi-segment *bridge*, the
 reach-all `*`), the `← self` marker, and `ok`/`expiring`/`EXPIRED` states. It
 prints the full table, so `pytest -s tests/test_nodes_demo.py` shows what a dozen
@@ -71,8 +71,8 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
         directory.put(_rec(k, _cred(ca, k, name, segs, **kw)))
     directory.save(cfg.dir_cache_path)
 
-    print("\n$ gw nodes")
-    cli.cmd_nodes(types.SimpleNamespace(config=str(tmp_path / "gw.toml")))
+    print("\n$ gw ls")
+    cli.cmd_ls(types.SimpleNamespace(config=str(tmp_path / "gw.toml")))
     out = capsys.readouterr().out
     print(out)   # visible under `pytest -s`
 
@@ -114,7 +114,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     directory.save(cfg.dir_cache_path)
 
     import types as _types
-    cli.cmd_nodes(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
+    cli.cmd_ls(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                          by_segment=True))
     out = capsys.readouterr().out
     print(out)   # visible under `pytest -s`
