@@ -63,7 +63,7 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 2. (Optional) free its hostname: delete `/var/lib/greasewood/nodes/<id_pub_hex>.json`.
 3. Re-provision a replacement with a **fresh identity** (`gw join <new-token>`).
 
-`gw status` on the hub shows identities; `gw diagnose` confirms the peer drops.
+`gw nodes` on the hub shows identities; `gw diagnose` confirms the peer drops.
 
 ## SOP: node lost / decommissioned (not compromised)
 
