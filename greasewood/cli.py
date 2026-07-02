@@ -1320,7 +1320,10 @@ def cmd_cert_request(args) -> int:
         dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
         ips = [keys.addr]
 
-    cn = args.cn or (dns[0] if dns else (ips[0] if ips else keys.addr))
+    # CN is not operator-settable: it's cosmetic under verify-full (the SAN is
+    # what's checked) and the hub constrains it to an owned name anyway, so we
+    # just derive it from the first SAN.
+    cn = dns[0] if dns else (ips[0] if ips else keys.addr)
     name = args.name or (dns[0] if dns else "service")
 
     # Resolve the three destinations. Default is <out-dir>/<name>.{key,crt} +
@@ -2816,8 +2819,9 @@ def main(argv=None) -> int:
                         help="request an x509 TLS cert from the hub for a local service")
     sp.add_argument("--san", action="append", default=[], metavar="NAME|IP",
                     help="subject alternative name (repeatable; DNS or IP). "
-                         "Defaults to the node's overlay address if omitted.")
-    sp.add_argument("--cn", default=None, help="subject common name")
+                         "Must be a name the node owns (its <hostname>.<mesh_domain>, "
+                         "a subdomain of it, or its overlay address). Defaults to the "
+                         "node's own name + address if omitted.")
     sp.add_argument("--name", default=None,
                     help="basename for the written .key/.crt (default: first SAN)")
     sp.add_argument("--out-dir", dest="out_dir", default=None,

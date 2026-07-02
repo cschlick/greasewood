@@ -138,7 +138,7 @@ trusted_pubs = []
                         lambda *a, **k: (k["key_path"], k["crt_path"], k["ca_path"]))
 
     ns = types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
-                               san=["db.gw.internal"], cn=None, name="db",
+                               san=["db.gw.internal"], name="db",
                                out_dir=None, key_out=None, cert_out=None,
                                ca_out=None, hub=None,
                                reload_cmd="systemctl reload pg", no_auto_renew=False)
@@ -183,7 +183,7 @@ trusted_pubs = []
                         lambda *a, **k: (k["key_path"], k["crt_path"], k["ca_path"]))
 
     def ns(**o):
-        base = dict(config=str(cfg_path), san=[], cn=None, name="svc", out_dir=None,
+        base = dict(config=str(cfg_path), san=[], name="svc", out_dir=None,
                     key_out=None, cert_out=None, ca_out=None, hub=None,
                     reload_cmd=None, no_auto_renew=False)
         base.update(o); return types.SimpleNamespace(**base)
@@ -234,7 +234,7 @@ trusted_pubs = []
 
     def ns(**over):
         base = dict(config=str(tmp_path / "gw.toml"), san=["db.gw.internal"],
-                    cn=None, name="db", out_dir=None, key_out=None, cert_out=None,
+                    name="db", out_dir=None, key_out=None, cert_out=None,
                     ca_out=None, hub=None, reload_cmd=None, no_auto_renew=False)
         base.update(over)
         return types.SimpleNamespace(**base)
