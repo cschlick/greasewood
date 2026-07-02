@@ -888,12 +888,24 @@ GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -
 
 ## Design notes & non-goals
 
-The [non-goals](#how-it-compares) — routing/relays, NAT traversal, IPv4,
-cross-platform — aren't missing, they're the point. A few internal ones are worth
-naming with their *revisit triggers*, so it's clear they're deferred rather than
-overlooked: **gossip** between nodes if the network ever genuinely partitions;
-**lazy on-demand tunnels** at hundreds of nodes; a **threshold CA** if hub
-compromise becomes unacceptable... all rejected/deferred.
+The [non-goals](#how-it-compares) — routing/relays, NAT traversal, IPv4 overlay,
+cross-platform — aren't missing, they're the point. A few internal ideas are
+**deferred rather than overlooked** — named here with the *trigger* that would
+make them worth building:
+
+- **Gossip between nodes** — if the network ever genuinely partitions (today every
+  node pulls the directory from the hub).
+- **Lazy, on-demand tunnels** — at hundreds of nodes, if a full peer mesh becomes
+  too many links to hold open.
+- **Threshold CA** — if single-hub-key compromise becomes unacceptable.
+- **CA cross-signing to smooth re-root** — let the old CA sign a short-lived,
+  directory-distributed "also trust the new CA" delegation, so a graceful
+  [re-root](#moving-the-hub-re-root) doesn't require pushing the new key into every
+  node's `trusted_pubs` up front (the config edit becomes a calm, batchable
+  follow-up instead of a race against credential expiry). Trigger: re-root friction
+  in practice. Would be opt-in, short-lived, and logged, since it loosens the
+  config-only trust root; emergency re-root (old CA lost) still needs the
+  out-of-band config push.
 
 **Clock integrity is part of the security posture.** Every allow/deny is a
 timestamp comparison against a credential expiry, so run NTP/chrony on every
