@@ -407,6 +407,40 @@ def cmd_invite(args) -> int:
 
     window = cfg.door_window
 
+    # Caps/groups are decided HERE, by the hub, and issued to whoever redeems
+    # this token — the joiner does not get to choose (no self-assertion). "mesh"
+    # is always included; --groups add group:<name> tags; --caps adds others
+    # (e.g. tls). These are stored in the door window and the enroll server
+    # issues the credential from them, ignoring anything the joiner sends.
+    caps = [c.strip() for c in (args.caps or "mesh").split(",") if c.strip()]
+    if "mesh" not in caps:
+        caps.insert(0, "mesh")
+    if args.groups:
+        caps += ["group:" + g.strip() for g in args.groups.split(",") if g.strip()]
+    # --hostname pins the name: the hub fixes it at enrollment (the joiner's
+    # requested name is ignored) and marks the credential `host:pinned` so the
+    # node can't rename itself afterward. Without it, the node names itself at
+    # join and may `gw rename` later (today's behavior).
+    pinned_hostname = args.hostname
+    if pinned_hostname:
+        # The hub is choosing the name, so it verifies uniqueness NOW — a pinned
+        # name is guaranteed free before the token goes out, so it can't collide
+        # at enrollment (the joiner can't fix a name it didn't pick). Unpinned
+        # names are still checked at enroll, where the node can retry a new one.
+        from .ca import CA as _CA
+        owner = _CA(ca_keys, data_dir).hostname_owner(pinned_hostname)
+        if owner is not None:
+            sys.exit(
+                f"hostname {pinned_hostname!r} is already in use (node {owner[:16]}…). "
+                "Free it first (revoke + remove the old node on the hub) or pin a "
+                "different name."
+            )
+        caps.append("host:pinned")
+    _seen: set[str] = set()
+    caps = [c for c in caps if not (c in _seen or _seen.add(c))]
+    log.info("this token grants caps=%s%s", caps,
+             f"; hostname pinned to {pinned_hostname!r}" if pinned_hostname else "")
+
     seed = generate_seed()
     params = derive_door_params(seed)
 
@@ -424,6 +458,8 @@ def cmd_invite(args) -> int:
     window_path.write_text(json_mod.dumps({
         "v": 1,
         "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "caps": caps,
+        "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
     }))
 
     token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
@@ -479,18 +515,11 @@ def cmd_join(args) -> int:
         # Default to the machine's short hostname (first label, no domain).
         hostname = socket.gethostname().split(".")[0] or "node"
 
-    if args.caps is not None:
-        caps = [c.strip() for c in args.caps.split(",")]
-    elif prior and prior.caps:
-        caps = list(prior.caps)
-    else:
-        caps = ["mesh"]
-
-    # Segmentation groups ride as `group:<name>` cap tags. --groups sets them
-    # (replacing any prior group tags); omitting --groups keeps the prior ones.
-    if args.groups is not None:
-        caps = [c for c in caps if not c.startswith("group:")]
-        caps += ["group:" + g.strip() for g in args.groups.split(",") if g.strip()]
+    # Caps/groups are NOT chosen here. The hub decides them at `gw invite` and
+    # binds them into the credential issued over the door; we read them back
+    # from that credential below and write them to config. (No self-assertion:
+    # whatever a joiner might request is ignored by the hub.)
+    caps: list[str] = []
 
     # inbound: "yes" (reachable, advertise endpoint) or "no" (outbound-only,
     # suppress endpoint — peers won't dial it; it dials them).
@@ -546,7 +575,7 @@ def cmd_join(args) -> int:
     if already_enrolled:
         log.info(
             "re-enrolling existing node %s (keys reused; refreshing credential, "
-            "hostname=%s, caps=%s)", node_keys.addr, hostname, caps,
+            "hostname=%s; caps assigned by the hub)", node_keys.addr, hostname,
         )
     log.info("overlay addr: %s", node_keys.addr)
 
@@ -587,7 +616,6 @@ def cmd_join(args) -> int:
         "id_pub": node_keys.id_pub_hex,
         "wg_pub": node_keys.wg_pub_b64,
         "hostname": hostname,
-        "caps": caps,
     }
     req_body = json_mod.dumps(req, separators=(",", ":")).encode()
 
@@ -643,6 +671,15 @@ def cmd_join(args) -> int:
     except Exception as e:
         wgmod.destroy_interface("gw-door")
         sys.exit(f"credential verification failed: {e}")
+
+    # The hub decided our name + caps; adopt them from the issued credential
+    # (the authoritative record of what we were granted) so config matches. For
+    # a hub-pinned hostname, cred.hostname differs from what we requested.
+    caps = list(cred.caps)
+    if cred.hostname != hostname:
+        log.info("hub assigned hostname %r (requested %r)", cred.hostname, hostname)
+    hostname = cred.hostname
+    log.info("hub assigned caps=%s", caps)
     if cred.id_pub != node_keys.id_pub_bytes:
         wgmod.destroy_interface("gw-door")
         sys.exit("credential id_pub mismatch — something went wrong")
@@ -1252,6 +1289,12 @@ def cmd_rename(args) -> int:
         print(f"already named {newname!r} — nothing to do")
         return 0
 
+    # Hub-pinned nodes (enrolled via `gw invite --hostname`) can't rename. Fail
+    # fast locally; the hub enforces this too (defense in depth).
+    if "host:pinned" in cfg.caps:
+        sys.exit("this node's hostname is hub-pinned; rename is disabled. "
+                 "To change it, re-invite the node with a new --hostname on the hub.")
+
     try:
         keys = NodeKeys.load(cfg.data_dir)
     except FileNotFoundError:
@@ -1546,9 +1589,9 @@ def cmd_status(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<30} {:<44} {:<22} {}"
-    print(fmt.format("name", "addr", "expires", "state"))
-    print("-" * 100)
+    fmt = "{:<24} {:<40} {:<20} {:<22} {}"
+    print(fmt.format("name", "addr", "expires", "state", "groups"))
+    print("-" * 120)
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
@@ -1559,11 +1602,14 @@ def cmd_status(args) -> int:
         else:
             state = "ok"
         marker = " ← self" if r.id_pub.hex() == own_id else ""
+        groups = ",".join(
+            c[len("group:"):] for c in r.cred.caps if c.startswith("group:")
+        ) or "-"
         # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
         # not the bare hostname.
         print(fmt.format(
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker
+            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, groups
         ))
 
     print(f"\n{len(records)} record(s) in local directory cache")
@@ -1993,6 +2039,18 @@ def main(argv=None) -> int:
     # invite
     sp = sub.add_parser("invite",
                         help="[sudo] open a 15-min door window and print a single-use join token")
+    sp.add_argument("--hostname", default=None,
+                    help="pin the invited node's mesh hostname (the hub fixes it; "
+                         "the joiner can't choose or later `gw rename` it). Omit "
+                         "to let the node name itself at join.")
+    sp.add_argument("--groups", default=None, metavar="G1,G2",
+                    help="segmentation groups the invited node will belong to "
+                         "(comma-sep). The hub decides this — the joiner cannot. "
+                         "It peers only with nodes sharing a group; ungrouped "
+                         "nodes form one default pool; the hub reaches all.")
+    sp.add_argument("--caps", default="mesh",
+                    help="capability tags granted to the invited node (comma-sep; "
+                         "'mesh' is always included), e.g. 'mesh,tls'.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
     sp.add_argument("-q", "--quiet", action="store_true",
@@ -2017,13 +2075,6 @@ def main(argv=None) -> int:
     sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
                     help="name suffix for /etc/hosts + TLS (default: keep "
                          "existing, else gw.internal)")
-    sp.add_argument("--caps", default=None,
-                    help="comma-separated caps (default: keep existing, else mesh)")
-    sp.add_argument("--groups", default=None, metavar="G1,G2",
-                    help="segmentation groups this node belongs to (comma-sep). "
-                         "A node only peers with nodes sharing a group; ungrouped "
-                         "nodes form one default pool; the hub reaches all. "
-                         "Sets group membership (replaces prior); omit to keep.")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_const",

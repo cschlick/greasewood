@@ -93,6 +93,8 @@ class EnrollServer:
         cache_path: "Path | None" = None,
         control_port: int = 51902,
         max_attempts: int = 3,
+        caps: "list[str] | None" = None,
+        pinned_hostname: "str | None" = None,
     ) -> None:
         self._ca = ca
         self._directory = directory
@@ -105,6 +107,12 @@ class EnrollServer:
         self._cache_path = cache_path
         self._control_port = control_port
         self._max_attempts = max_attempts
+        # Caps/groups the hub authorized for this window (from `gw invite`).
+        # The joiner does NOT choose these — the window is authoritative.
+        self._caps = list(caps) if caps else ["mesh"]
+        # If set (`gw invite --hostname`), the hub pins the name: the joiner's
+        # requested hostname is ignored and it can't rename later.
+        self._pinned_hostname = pinned_hostname
         self._srv: socket.socket | None = None
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._serve, name="enroll", daemon=True)
@@ -202,8 +210,13 @@ class EnrollServer:
 
         id_pub_bytes = bytes.fromhex(req["id_pub"])
         wg_pub_bytes = base64.b64decode(req["wg_pub"])
-        hostname = str(req["hostname"])
-        caps = [str(c) for c in req.get("caps", ["mesh"])]
+        # Hostname: if the hub pinned one at invite, it wins and the joiner's
+        # requested name is ignored; otherwise the joiner names itself.
+        hostname = self._pinned_hostname or str(req["hostname"])
+        # Caps/groups are decided by the hub at `gw invite` and carried in the
+        # door window — NOT self-asserted by the joiner. Any caps in the request
+        # are ignored; the window's caps are authoritative.
+        caps = list(self._caps)
 
         if len(id_pub_bytes) != 32:
             raise ValueError("id_pub must be 32 bytes")
@@ -357,6 +370,10 @@ class DoorWatcher:
             remaining = (expires - now).total_seconds()
             # Capture expiry string for the on_done guard below.
             expires_str = data["expires"]
+            # Caps/groups the hub authorized at `gw invite` for this window.
+            window_caps = data.get("caps") or ["mesh"]
+            # Pinned hostname, if the hub set one (`gw invite --hostname`).
+            window_hostname = data.get("hostname")
 
             def on_done():
                 # Only delete the window if it still belongs to this session.
@@ -389,6 +406,8 @@ class DoorWatcher:
                 get_revoked=self._get_revoked,
                 cache_path=self._cache_path,
                 control_port=self._control_port,
+                caps=window_caps,
+                pinned_hostname=window_hostname,
             )
             srv.start()
             self._enroll = srv

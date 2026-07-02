@@ -28,7 +28,7 @@ its features!
 - **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
   you apply them.
 - **[Linux-only.](#linux-only)** Built on the Linux kernel's own WireGuard and
-  networking — not a portable userspace/Go stack. Optional systemd service.
+  networking — not a portable userspace/Go stack. Best run as a systemd service.
 - **[Auditable.](#auditable)** Pure Python, one dependency, driving it all through
   the stock `wg`/`ip` tools over subprocess. Greasy.
 
@@ -87,10 +87,14 @@ list to push around and no CRL. Two keys and two signed objects carry it:
   plus fast-moving facts (endpoints, a sequence number); its `hostname` is read
   from the credential. This is what gets published through the directory.
 
-**Revocation is just non-renewal.** To remove a node, stop renewing it (`gw
-revoke` on the hub also refuses its renewals immediately and evicts it live). Its
-credential lapses and it falls out of the mesh fleet-wide when it expires — at
-most one credential TTL. Shorten `credential_ttl` for a tighter bound.
+**Revocation is expiry-based (no CRL).** `gw revoke <id>` on the hub takes effect
+there immediately — the hub re-reads its revoke list each reconcile cycle,
+dropping the node from its own interface within seconds, and refuses the node's
+renewals from then on. It does **not** reach the rest of the fleet instantly:
+other nodes keep trusting the node's credential until it expires. But since the
+node can no longer renew, that credential lapses within at most one
+`credential_ttl`, at which point every node rejects it — the fleet-wide eviction.
+Shorten `credential_ttl` for a tighter bound.
 
 ## The hub
 
@@ -131,8 +135,11 @@ direct connection. This is the constraint that keeps the whole thing small: no
 STUN, no hole-punching, no relay fallback, no IPv4 dual-stack logic.
 
 If you have a node that can only reach the mesh over IPv4 (a laptop behind
-carrier NAT, say), the answer is a dual-stack **bastion** — SSH to a mesh node
+carrier NAT), the answer is probably a dual-stack **bastion** — SSH to a mesh node
 that does have IPv6 — rather than teaching greasewood to traverse NAT.
+
+Part of the motivating use for this project was managing backend cloud instances on a provider which reliably
+gives stable IPv6 GUAs.
 
 ## Self-certifying addresses
 
@@ -146,14 +153,22 @@ fd8d:e5c1:db1a:7 : truncate64(blake2s(id_pub))
 That function is public and deterministic, so anyone holding a node's `id_pub`
 can recompute its address and check it matches. The address *certifies itself*
 against the key — no allocator, and no authority needs to vouch that "this
-address belongs to this node." The math already says so.
+address belongs to this node."
+
+No encoding step is needed to fit the hash into an address: an IPv6 address is
+just 128 bits, so the low 64 (the interface identifier) can be *any* value — the
+first 8 bytes of the digest drop straight in, and the familiar `xxxx:xxxx:…`
+colon-hex is only how those bytes are printed. (Those 64 bits of entropy are also
+where the ~2⁶⁴ collision figure below comes from.)
 
 **Why it can't be spoofed.** To be accepted at an address you present a signed
-record, and every verifier runs two independent checks: `address == hash(id_pub)`
+record, and every verifier (any potential peer, and the hub) runs two independent
+checks: `address == hash(id_pub)`
 (the address is the legitimate derivation of the key), and the record is
 **self-signed by `id_priv`** (you actually hold that key). To steal node `db`'s
 address `X = hash(db_id_pub)` you would need an `id_pub` that hashes to `X` — a
-~2⁶⁴ preimage search — *and* you'd still need db's `id_priv` to sign as db. Two
+~2⁶⁴ preimage search (brute-forcing a key that hashes to that exact address) —
+*and* you'd still need db's `id_priv` to sign as db. Two
 independent locks. Notably, **not even the CA can reassign an address**: an
 address is `hash(your key)` by construction, so the CA can't hand db's address to
 a different key. The CA vouches for *membership*; the address vouches for itself.
@@ -184,8 +199,9 @@ hub within that window (see [Moving the hub](#moving-the-hub-re-root) and the
 ## Linux-only
 
 greasewood is built on **Linux-specific kernel interfaces** — the in-kernel
-WireGuard module and the kernel's own networking — and (optionally) runs as a
-**systemd** service. That's the whole reason it's Linux-only: it relies on the
+WireGuard module and the kernel's own networking — and is best run as a
+**systemd** service (the recommended way to keep the daemon up across reboots and
+crashes; a bare `gw run` works for dev). It relies on the
 kernel's WireGuard and on systemd rather than shipping its own userspace
 transport (the way a Go implementation such as `wireguard-go` does) or its own
 supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
@@ -196,10 +212,10 @@ data-plane backend and is out of scope.
 
 The entire thing is **pure Python (3.11+), one dependency (`cryptography`), one
 binary (`gw`)**, and it manages the data plane by shelling out to `wg`/`ip` via
-subprocess. That's "greasy" in the programming sense — the clean way would be
+subprocess. That's greasy. The clean way would be
 netlink bindings — but it's a deliberate trade: you can read the exact `wg set
-peer …` commands, run them by hand, and diff them against `wg show`. Transparency
-over purity. Greasy.
+peer …` commands, run them by hand, and compare them against what `wg show`
+reports.
 
 ## Install
 
@@ -218,7 +234,7 @@ cd greasewood
 pip install .              # add '.[test]' to also get pytest
 ```
 
-Either installs the `gw` command. Most subcommands need root (they create
+Either installs the `gw` command. Most subcommands need sudo/root (they create
 WireGuard interfaces and edit routing); `gw status` does not.
 
 The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
@@ -232,7 +248,7 @@ service](#running-as-a-service); then the workflow is just install → setup/joi
 On the machine that will hold the CA and serve enrollment:
 
 ```bash
-sudo gw setup-hub --hostname hub
+sudo gw setup-hub
 sudo gw run
 ```
 
@@ -240,6 +256,10 @@ sudo gw run
 the enrollment door, and the hub's own credential, then writes
 `/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw-mesh`
 WireGuard interface, serves the control plane, and watches for door windows.
+
+The hub takes this machine's hostname like any other node — it isn't named
+anything special. You tell which node is the hub from `role: hub` in
+`gw status`, not from its name. (Pass `--hostname <name>` to override the default.)
 
 ### 2. Enroll a node
 
@@ -262,6 +282,36 @@ sudo gw run
 `gw-door` tunnel to the hub, receives a CA-signed credential over it, tears the
 door down, and writes the node's config. `gw run` then brings the node into the
 mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
+
+**Why a door — why can't the token just contain everything to peer over
+`gw-mesh`?** Because WireGuard peering is *mutual*: to bring up a tunnel to the
+hub over any interface, the hub must already have **your** public key in its peer
+list. At invite time your real keys don't exist yet — they're generated locally
+at `join`, and private keys never travel — so the hub cannot pre-authorize your
+real identity key. Handing you the hub's `gw-mesh` details in the token gets you
+nowhere: the hub would drop your handshake, never having heard of your key.
+
+What the token *can* do is carry a 32-byte seed that **both sides expand (HKDF)
+into the same throwaway door keypair + PSK**. The hub derives that throwaway
+pubkey from the seed it minted and pre-installs it as a peer; you derive the
+matching private key — so now a tunnel can actually form. But it forms under a
+**disposable, credential-less key, not your identity** — and a non-member key
+like that has no business on the live overlay. That's why the door is a
+*separate* interface, not `gw-mesh`:
+
+- it runs on its own **dedicated door subnet** (`fd8d:…:d::/64`) — not a
+  throwaway address squatting on the real overlay, which would break the
+  self-certifying `address = hash(identity)` invariant;
+- it reaches **only the enroll daemon** (not the directory/control plane, not
+  other peers) — a token-holder can do exactly one thing: request a credential;
+- it's **torn down** the moment your credential is issued.
+
+You bring up `gw-mesh`, with your *real* key and its self-certifying address, only
+once you hold that credential — and from then on every peer learns your key and
+address from the directory as usual. Running the throwaway peering over `gw-mesh`
+instead would drop a credential-less stranger onto the live mesh with a fake
+address and expose the whole control plane to a mere token-holder — which is
+exactly what the door exists to prevent.
 
 ### 3. Check it
 
@@ -297,7 +347,7 @@ watcher (armed immediately) and the service (for boot), and does **not** start a
 daemon until you configure the node. After it's installed:
 
 ```bash
-sudo gw setup-hub --hostname hub      # on the hub        → daemon auto-starts
+sudo gw setup-hub                     # on the hub        → daemon auto-starts
 sudo gw join "$TOKEN" --hostname n01  # on a node         → daemon auto-starts
 journalctl -u greasewood -f           # watch it (no live terminal anymore)
 ```
@@ -315,61 +365,78 @@ Notes:
 - A **config-changing re-join** (new hub, new caps) isn't auto-detected — the
   daemon reads its config at startup, so run `sudo systemctl restart greasewood`
   afterward.
-- Via Ansible: the `greasewood` role (in the `postinstall` repo) installs and
-  enables the same units for you, so a freshly provisioned node is service-ready
-  before you even enroll it.
+
+### Root vs. sudo
+
+`gw` needs root (it manages WireGuard interfaces), and the systemd service always
+runs as root, so config and data paths (`/etc/greasewood.toml`,
+`/var/lib/greasewood`) are read identically however you invoke it — nothing gets
+corrupted either way. Two behaviors *do* differ, so pick one style and stick with
+it:
+
+- **State ownership.** Run **via `sudo`** and greasewood chowns the data dir back
+  to the invoking user afterward (secrets stay mode `0600`), so you can run
+  read-only commands like `gw status` without sudo. Run **as bare root** and the
+  files stay root-owned (no passwordless reads). Don't *alternate* — a later
+  `sudo gw …` re-chowns everything to your user, a root-direct run doesn't, so
+  ownership will flip back and forth. It won't break the service (root reads
+  everything), but it's untidy. The documented path is **`sudo gw …` as your
+  normal user**.
+- **Environment variables.** `sudo` strips the environment by default. This only
+  matters if you protect the CA key with `ca_key_passphrase_env`: a var exported
+  in your shell won't reach `sudo gw` (you'd get "environment variable is
+  empty"). Use `sudo -E` for one-off commands, and for the **service** set it in
+  the unit's `Environment=` / `EnvironmentFile=`, never a login shell.
+
+(Keep config paths absolute — a `~` in `data_dir`/`ca_key_file` expands to the
+*running* user's home, which differs under sudo.)
 
 ## Provisioning many nodes
 
 Enrollment tokens are **pushed by the hub, never pulled by nodes**. A node
-cannot request admission; the hub (or an orchestrator acting on it) decides to
-admit a machine, runs `gw invite`, and delivers the token out of band. The node
-only redeems what it was handed.
+cannot request admission; you (or an orchestrator acting on the hub) decide to
+admit a machine, run `gw invite`, and deliver the token out of band. The node
+only redeems what it was handed. The door is **single-slot by construction**:
+each invite opens one enrollment window, and the hub closes it the instant that
+node finishes joining — so provisioning is one node at a time.
 
-Because of this the door is **single-slot and orderly by construction**: one
-each invite opens one enrollment window, and the hub closes it the instant the node
-finishes joining. To provision N machines, invite and join in a sequential loop:
-
-```bash
-for host in node01 node02 node03; do
-    TOKEN=$(ssh hub 'sudo gw invite -q')       # hub opens the door, prints just the token
-    ssh -t "$host" "sudo gw join '$TOKEN'"     # node joins; hub closes the door
-done                                           # next invite only runs after join returns
-```
-
-Each `gw join` blocks until the node is enrolled, so the window is always closed
-again before the next `gw invite` — no locks or queue needed. `gw invite -q`
-prints only the token (clean for capture/piping/clipboard).
-
-**Keeping the token off the node's argv.** In the loop above the token appears in
-the node's process list (`ps`) for the duration of the join. To avoid that, feed
-it on stdin instead — `gw join -` reads the token from stdin (and tolerantly
-extracts the `gw1.…` line, so raw `gw invite` output works too):
+**The usual way is copy-paste.** On the hub:
 
 ```bash
-ssh hub 'sudo gw invite -q' | ssh "$host" 'sudo -n gw join -'
+sudo gw invite            # prints a one-time token
 ```
 
-The catch: piping the token *is* the SSH stdin, so `sudo` can't also prompt for a
-password there — this form needs passwordless privilege scoped to join on the
-node (`<user> ALL=(root) NOPASSWD: /usr/local/bin/gw join *`). Without that, use
-the interactive `ssh -t … "sudo gw join '$TOKEN'"` form above (or copy/paste the
-token by hand). Don't grant blanket `NOPASSWD: gw` — via `install-service --exec`
-that's effectively passwordless root.
+Copy the token, open a terminal on the new node, and run:
 
-A new `gw invite` regenerates the door's guest key and overwrites the current
-window, **invalidating any previously issued-but-unused token**. Issuing while a
-window is still open prints a warning to stderr (the token still goes to stdout,
-so `TOKEN=$(gw invite)` is unaffected). Treat that warning as a sign the
-provisioner is issuing ahead of itself.
+```bash
+sudo gw join <token>
+sudo gw run
+```
 
-> The door enrolls one node at a time on the wire by design. Running the issuing
-> side as parallel workers would not speed this up, so the sequential loop is
-> the intended model.
+For several machines just repeat — invite, paste, join — one at a time. There's
+only **one door open at a time**: each `gw invite` replaces the previous window,
+so a token you generated but haven't used yet stops working the moment you
+generate another. (If you do overwrite an unused token, `gw invite` warns you —
+on stderr, so the new token still prints cleanly to stdout and `TOKEN=$(gw
+invite)` keeps working.)
+
+**To automate over SSH**, two flags make the token pipeable: `gw invite -q`
+prints only the token, and `gw join -` reads it from stdin (so it stays out of
+the node's `ps`, and it tolerates raw `gw invite` output). Wiring those into a
+loop is left to you — just two things to respect:
+
+- Keep it **sequential** — invite, wait for that join to finish, then the next
+  invite. The door serves one node at a time on the wire, so issuing in parallel
+  buys nothing.
+- If you pipe the token over SSH stdin, `sudo` can't also prompt for a password
+  on that channel, so that form needs passwordless privilege **scoped to join**
+  (`<user> ALL=(root) NOPASSWD: /usr/local/bin/gw join *`). Never grant blanket
+  `NOPASSWD: gw` — with `install-service --exec` that's effectively passwordless
+  root.
 
 ## Firewall
 
-**greasewood never touches your firewall unless you ask it to.** Its control
+**greasewood never modfies your firewall ever.** Its control
 plane (`51902/tcp`) and enrollment RPC (`51903/tcp`) bind only to the node's
 overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
@@ -377,9 +444,20 @@ the underlay is WireGuard itself (UDP), which you open like for any VPN.
 
 `setup-hub`, `join`, and `set-inbound` **check** the local nftables ruleset and
 loudly warn if a needed port looks blocked by a default-drop policy, printing the
-exact rule to add. That's all greasewood does — **it never modifies your
-firewall.** You apply the printed rules yourself (put them in your nftables
-config, or the Ansible `nftables` role does it for you).
+exact rule to add. That's all greasewood does. You apply the printed rules yourself (put them in your nftables
+config, or however you configure your firewall).
+
+**No firewall at all? Then there's nothing to do — and nothing extra is
+exposed.** greasewood binds nothing to the underlay except its WireGuard UDP
+port(s): `51900` (mesh) on any inbound node, plus `51901` (the enrollment door)
+on the hub. Those are WireGuard, which is designed to face the internet — it
+silently drops any packet that isn't a valid handshake from a configured peer (no
+reply, no info leak). Everything else — the control plane (`51902`) and the
+enrollment exchange (`51903`) — binds to the overlay address or the door tunnel,
+so it's *structurally* off the underlay whether or not you run a firewall. A
+greasewood host with no firewall is therefore no more exposed than a plain
+WireGuard host with no firewall. The rules below matter only on a host that runs
+a **default-drop** policy and so must explicitly *allow* those ports through.
 
 On a default-drop host, allow (nftables):
 
@@ -407,8 +485,8 @@ in join tokens and the control port in the enrollment response, so nodes pick up
 non-default values automatically — no client config. (The internal enrollment
 port lives inside the door tunnel and can't collide, so it isn't a knob.)
 
-Your base default-drop ruleset should also carry `ct state established,related
-accept` (almost everyone has it). It's what lets an **outbound-only** node work:
+Your base default-drop ruleset should also include `ct state established,related
+accept`. It's what lets an **outbound-only** node work:
 such a node opens *no* greasewood inbound ports — it dials peers and the hub,
 and the replies come back through `established,related`.
 
@@ -418,8 +496,8 @@ hub](#moving-the-hub-re-root)), so a uniform ruleset means a hub handover
 needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
 isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
-no control plane, so on a node that will never be a hub you can omit the `gw-mesh`/
-`gw-door` TCP rules and open only the two UDP ports.
+no control plane, so on a node that will never be a hub you *could* omit the `gw-mesh`/
+`gw-door` TCP rules and open only the two UDP ports if you really want the most minimal config.
 
 **Multi-user hosts:** the overlay is host-wide — *any* local user can use the
 tunnel once it's up (identity is per-machine, not per-user). To restrict which
@@ -444,7 +522,10 @@ change it later with `gw set-inbound`:
   reachable). Switch it back with `sudo gw set-inbound yes` (then open the port).
 
 `inbound` is an optimization + a guard, not what decides direction — WireGuard
-does that on its own.
+does that on its own. So leaving it `yes` when you're actually unreachable doesn't
+break connectivity (you still dial out); peers just waste handshake attempts on
+your dead endpoint and converge slower — and `gw diagnose` will flag those as
+"configured but no handshake."
 
 ## Access control (groups)
 
@@ -452,34 +533,40 @@ By default every mesh node can talk to every other — one flat segment. To
 control **who talks to whom**, put nodes in **groups**. A node peers with another
 only if they **share a group**; assigning a group isolates a node from the rest.
 
-Groups are just `group:<name>` **capability tags** — they ride the node's
-CA-signed credential (attested, node-requested, renewed) with no separate wire
-format. Set them at join:
+Groups are `group:<name>` **capability tags** that ride the node's CA-signed
+credential. Crucially, **the hub assigns them at `gw invite` — a joining node
+cannot choose its own** (no self-assertion). Whoever you hand a token to gets
+exactly the groups that invite specified:
 
 ```bash
-sudo gw join "$TOKEN" --hostname web1 --groups prod,web
-sudo gw join "$TOKEN" --hostname db1  --groups prod
-sudo gw join "$TOKEN" --hostname ci1  --groups dev
+# On the hub — the invite decides the node's groups:
+TOKEN=$(sudo gw invite --groups prod,web)   # a token for a node in prod + web
+# On the new node — join takes no group flags; it gets what the token granted:
+sudo gw join "$TOKEN" --hostname web1
 ```
+
+A node's groups show up in `gw status` (a `groups` column), so you can see the
+segmentation at a glance. To change a node's groups, re-invite it with different
+`--groups` and re-join (renewal preserves whatever the hub last issued).
 
 The rules (`reconcile.default_policy`):
 
-- **share a group** → may peer (`web1`↔`db1` above, both `prod`; a node in
-  several groups peers with anyone sharing one).
-- **both ungrouped** → may peer — the *default pool*, and the backward-compatible
-  case (a fleet with no groups is one open mesh).
+- **share a group** → may peer (a node in several groups peers with anyone
+  sharing one).
+- **both ungrouped** → may peer — the default pool (a fleet with no groups is one open mesh).
 - **`group:*`** on either side → reaches everyone. The hub carries it
-  automatically (it must serve the control plane to every node); enroll a
-  shared-services node with `--groups '*'` to make it universally reachable.
+  automatically (it must serve the control plane to every node); grant it to a
+  shared-services node with `gw invite --groups '*'`.
 - otherwise → **denied** (a grouped node and an ungrouped node don't share a
   group, so grouping a node cuts it off from the default pool).
 
 Two properties worth knowing:
 
-- **Mutually enforced + attested.** A tunnel needs *both* ends to install each
-  other, and each side reads the *other's* groups from its CA-signed credential —
-  so a node can't talk its way into a segment it wasn't issued, and a node is
-  protected by its own policy (a peer it denies can't force a link).
+- **Hub-assigned, attested, mutually enforced.** Groups are decided by the hub at
+  admission and bound into the CA-signed credential — a node **can't self-assert**
+  a group it wasn't granted. A tunnel needs *both* ends to install each other, and
+  each side reads the *other's* groups from its credential, so a node can neither
+  talk its way into a segment nor be forced into a link it denies.
 - **Node-level and symmetric**, not port-level or one-way. Groups decide whether
   two nodes may have a tunnel *at all*; "A may reach B:5432 but not B:22" is a
   firewall concern — use your own nftables on `gw-mesh` (see
@@ -487,7 +574,7 @@ Two properties worth knowing:
 
 ## Command reference
 
-| Command            | Root? | What it does                                              |
+| Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
 | `setup-hub`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
@@ -499,7 +586,7 @@ Two properties worth knowing:
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service.     |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
-| `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join). |
+| `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
@@ -570,7 +657,10 @@ daemons don't clobber each other's `/etc/hosts` entries.
 Every node has a stable overlay address, and `gw status` shows each node's
 resolvable name↔address map. Name resolution is **on by default**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
-`<hostname>.gw.internal`, refreshed from the local directory cache each reconcile:
+`<hostname>.gw.internal`, built from the local directory cache. It's re-checked
+each reconcile but **only rewritten when the block actually changes** (a join,
+departure, or rename) — in steady state it never touches the file, so it won't
+churn your `/etc/hosts` or noise up etckeeper/config management:
 
 ```
 # BEGIN greasewood — managed, do not edit
@@ -579,21 +669,24 @@ fd8d:e5c1:db1a:7:…  node01.gw.internal
 # END greasewood
 ```
 
-So `ping db.gw.internal`, `psql -h db.gw.internal`, etc. just work — no DNS
+So `ping db.gw.internal`, `ssh db.gw.internal`, etc. just work — no DNS
 server, and it keeps resolving even if the hub is down (it's from the cache). It
 only ever touches the region between its markers; your own `/etc/hosts` lines are
 left alone, and `--no-hosts-sync` (or `hosts_sync = false` + restart) or `gw
 purge` removes the block.
 
+**Who chooses the name.** By default a node names itself at `gw join` (defaulting
+to its machine hostname) and can change it later with `gw rename`. If you'd rather
+the hub control it, **pin it at invite**: `gw invite --hostname db` fixes the name
+at enrollment (the joiner's requested name is ignored) and marks the credential so
+the node **can't `gw rename` itself** — to change a pinned name, re-invite with a
+new `--hostname`. Either way the name is CA-attested; pinning just moves the
+decision from the node to the hub.
+
 Two things make defaulting this on safe:
 - **Names are CA-attested** (the hostname lives in the signed credential), so a
   member can't publish a record claiming another node's name to poison your hosts.
-- **Names are namespaced** under a dedicated `gw.internal` sub-label
-  (`mesh_domain`, default `gw.internal`). `/etc/hosts` shadows DNS, so a *flat*
-  `.internal` default could override names an org already resolves via internal
-  DNS — but greasewood only ever writes under `*.gw.internal`, which nothing else
-  serves. If you *do* run a `gw.internal` DNS zone, pick a different `mesh_domain`
-  or use `--no-hosts-sync`.
+- **Names are namespaced** under a dedicated `gw.internal` sub-label.
 
 The domain is shared with TLS: `gw cert-request` with no `--san` defaults the
 cert to this node's `<hostname>.gw.internal` **plus** its overlay address. So the
@@ -607,11 +700,16 @@ through the hub, so it's uniqueness-checked and frees the old name — the keys 
 overlay address don't change. (Editing `hostname` in the config directly is not
 enough: the hub wouldn't know, so always use `gw rename`.)
 
-> Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`). The
-> hub **enforces uniqueness at enrollment** — a `join` whose (sanitized) name is
-> already taken is refused — so resolution stays unambiguous. A node can still
-> rename or renew itself; a decommissioned node keeps its name until its
-> `nodes/<id>.json` is removed on the hub.
+> Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`) and must
+> be **unique**. For a self-chosen name, uniqueness is checked at enrollment: a
+> `join` whose (sanitized) name is already taken is refused — but the token isn't
+> burned, so the joiner is told how many attempts remain and can retry with a
+> different `--hostname` (a few tries per window). For a **hub-pinned** name
+> (`gw invite --hostname`), uniqueness is checked at *invite* instead, so a
+> pinned name is guaranteed free before the token goes out and can't collide at
+> enrollment (the joiner couldn't fix it anyway). Either way, a decommissioned
+> node keeps its name until its `nodes/<id>.json` is removed on the hub, which
+> frees it for reuse.
 
 ## TLS certificates for services
 
@@ -740,7 +838,7 @@ cross-platform — aren't missing, they're the point. A few internal ones are wo
 naming with their *revisit triggers*, so it's clear they're deferred rather than
 overlooked: **gossip** between nodes if the network ever genuinely partitions;
 **lazy on-demand tunnels** at hundreds of nodes; a **threshold CA** if hub
-compromise becomes unacceptable. None has been hit; until one is, they stay out.
+compromise becomes unacceptable... all rejected/deferred.
 
 **Clock integrity is part of the security posture.** Every allow/deny is a
 timestamp comparison against a credential expiry, so run NTP/chrony on every
@@ -748,7 +846,7 @@ node.
 
 **CA trust is a set, not a single key.** The CA (and hub) is moved by a
 re-root — trust the new key alongside the old during an overlap, then drop the
-old — never by moving the private key. See [Moving the hub](#moving-the-hub-re-root).
+old — don't move the private key to a new machine. See [Moving the hub](#moving-the-hub-re-root).
 
 ## Security & operations
 
