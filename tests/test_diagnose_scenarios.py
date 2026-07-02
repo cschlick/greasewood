@@ -48,9 +48,11 @@ def _live(node, endpoint="", handshake_ago=None):
                        latest_handshake=hs, rx_bytes=1, tx_bytes=1)
 
 
-def _diagnose(tmp_path, monkeypatch, *, inbound, trusted, records, live_peers,
-              revoked=()):
-    """Set up a fake node + directory cache, stub live wg + root, run diagnose."""
+def _diagnose(tmp_path, monkeypatch, *, title, inbound, trusted, records,
+              live_peers, revoked=()):
+    """Set up a fake node + directory cache, stub live wg + root, run diagnose.
+    Everything printed between the banner and the next banner is the real,
+    verbatim `sudo gw diagnose` output for that node."""
     NodeKeys.load_or_generate(tmp_path)                        # our own identity
     (tmp_path / "gw.toml").write_text(f"""[node]
 hostname = "self"
@@ -77,8 +79,14 @@ trusted_pubs = ["{trusted.ca_pub_hex}"]
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)             # pretend root
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live_peers)
+
+    print("\n" + "━" * 78)
+    print(f"┃ {title}")
+    print(f"┃ $ sudo gw diagnose")
+    print("━" * 78 + "\n(everything below, to the next banner, is verbatim `gw diagnose` output)\n")
     cli.cmd_diagnose(types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                            hostname=None))
+    print("\n" + "─" * 78)
 
 
 def test_diagnose_mixed_fleet(tmp_path, monkeypatch, capsys):
@@ -103,7 +111,9 @@ def test_diagnose_mixed_fleet(tmp_path, monkeypatch, capsys):
         web.wg_pub_b64:    _live(web, "[2001:db8::9]:51900"),                        # installed, no handshake
         # cache absent → "verified but NOT installed"
     }
-    _diagnose(tmp_path, monkeypatch, inbound="yes", trusted=trusted,
+    _diagnose(tmp_path, monkeypatch,
+              title="node 'self' — inbound hub, mixed fleet of 8 peers",
+              inbound="yes", trusted=trusted,
               records=records, live_peers=live_peers,
               revoked=[banned.id_pub_bytes.hex()])
 
@@ -126,7 +136,9 @@ def test_diagnose_outbound_only(tmp_path, monkeypatch, capsys):
     peer = NodeKeys.generate()
     records = [_rec(peer, _cred(peer, trusted, "peer"), inbound="no")]  # both outbound-only
     live_peers = {peer.wg_pub_b64: _live(peer)}
-    _diagnose(tmp_path, monkeypatch, inbound="no", trusted=trusted,
+    _diagnose(tmp_path, monkeypatch,
+              title="node 'self' — outbound-only (inbound=no)",
+              inbound="no", trusted=trusted,
               records=records, live_peers=live_peers)
 
     out = capsys.readouterr().out
