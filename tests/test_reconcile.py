@@ -4,8 +4,22 @@ decided purely by **shared segments** (`segment:<name>` tags); every node is in
 `segment:mesh` by default, and `segment:*` is the reach-all wildcard (the hub).
 These branches aren't all reachable in integration (every node is in a segment),
 so they're covered here.
+
+Also covers the reconcile trust gate: everything derived from the directory —
+WireGuard peers AND the /etc/hosts name block — must pass FULL verification
+(CA sig + expiry + revocation), not just the structural check that admits
+records into the cache. A revoked node loses its tunnel; its name must not
+keep resolving either.
 """
-from greasewood.reconcile import default_policy
+import datetime as dt
+
+from greasewood import reconcile
+from greasewood.directory import Directory
+from greasewood.keys import CAKeys, NodeKeys
+from greasewood.reconcile import ReconcileLoop, default_policy, reconcile_once
+from greasewood.wire import Credential, NodeRecord
+
+_UTC = dt.timezone.utc
 
 
 def test_same_default_segment_allowed():
@@ -55,3 +69,152 @@ def test_capabilities_do_not_affect_peering():
     assert default_policy(["tls"], ["tls"]) is False               # no segment → no link
     assert default_policy(["segment:mesh", "tls", "hostname-pinned"],
                           ["segment:mesh"]) is True                 # shared segment wins
+
+
+# ---------------------------------------------------------------------------
+# Trust gate: reconcile output (peers + hosts records) is fully verified
+# ---------------------------------------------------------------------------
+
+def _make_cred(node: NodeKeys, ca: CAKeys, hostname: str,
+               ttl: int = 3600) -> Credential:
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    return Credential(
+        id_pub=node.id_pub_bytes,
+        wg_pub=node.wg_pub_bytes,
+        addr=node.addr,
+        hostname=hostname,
+        caps=["segment:mesh"],
+        iat=now,
+        exp=now + dt.timedelta(seconds=ttl),
+    ).sign(ca.ca_priv)
+
+
+def _make_record(node: NodeKeys, cred: Credential, seq: int = 1,
+                 endpoints: "list[str] | None" = None) -> NodeRecord:
+    return NodeRecord(
+        id_pub=node.id_pub_bytes,
+        seq=seq,
+        endpoints=["[2001:db8::1]:51900"] if endpoints is None else endpoints,
+        inbound="yes",
+        cred=cred,
+    ).sign(node.id_priv)
+
+
+class _FakeWg:
+    """In-memory stand-in for the wg module: records set/remove calls."""
+
+    def __init__(self):
+        self.peers: dict[str, object] = {}
+        self.set_calls = 0
+        self.remove_calls = 0
+
+    def get_peers(self, iface):
+        return dict(self.peers)
+
+    def set_peer(self, iface, wg_pub_b64, allowed_ip, endpoint=None, keepalive=25):
+        from greasewood.wg import LivePeer
+        self.set_calls += 1
+        self.peers[wg_pub_b64] = LivePeer(
+            wg_pub_b64=wg_pub_b64, endpoint=endpoint or "",
+            allowed_ips=f"{allowed_ip}/128",
+        )
+
+    def remove_peer(self, iface, wg_pub_b64, allowed_ip=None):
+        self.remove_calls += 1
+        self.peers.pop(wg_pub_b64, None)
+
+
+class TestReconcileTrustGate:
+    def _mesh(self):
+        """A local node plus three peers: valid, revoked, and expired."""
+        ca = CAKeys.generate()
+        local = NodeKeys.generate()
+        good, bad, stale = (NodeKeys.generate() for _ in range(3))
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        directory.put(_make_record(good, _make_cred(good, ca, "good")))
+        directory.put(_make_record(bad, _make_cred(bad, ca, "bad")))
+        directory.put(_make_record(stale, _make_cred(stale, ca, "stale", ttl=-1)))
+        revoked = {bad.id_pub_hex}
+        return ca, local, good, directory, revoked
+
+    def test_returns_only_fully_verified_records(self, monkeypatch):
+        ca, local, good, directory, revoked = self._mesh()
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+
+        trusted = reconcile_once(
+            "gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+            [ca.ca_pub_bytes], revoked,
+        )
+
+        names = {r.hostname for r in trusted}
+        assert "good" in names
+        assert "local" in names          # own record stays resolvable
+        assert "bad" not in names        # revoked → gone from every output
+        assert "stale" not in names      # expired → gone from every output
+
+        # Peers installed: only the valid remote node; never self.
+        import base64
+        assert set(fake.peers) == {base64.b64encode(good.wg_pub_bytes).decode()}
+
+    def test_hosts_sync_receives_trusted_records_only(self, monkeypatch):
+        """The ReconcileLoop's /etc/hosts block must be built from the same
+        fully-verified set as the WG peer list — a revoked or expired node's
+        name must stop resolving, not linger in /etc/hosts forever."""
+        ca, local, good, directory, revoked = self._mesh()
+        monkeypatch.setattr(reconcile, "wgmod", _FakeWg())
+        captured = {}
+
+        def fake_sync(records, domain, path=None):
+            captured["names"] = {r.hostname for r in records}
+            return True
+
+        from greasewood import hosts
+        monkeypatch.setattr(hosts, "sync", fake_sync)
+
+        loop = ReconcileLoop(
+            iface="gw-test",
+            directory=directory,
+            local_id_pub=local.id_pub_bytes,
+            local_caps=["segment:mesh"],
+            get_ca_pubs=lambda: [ca.ca_pub_bytes],
+            get_revoked=lambda: revoked,
+            hosts_domain="internal",
+        )
+        loop._cycle()
+
+        assert captured["names"] == {"local", "good"}
+
+    def test_peer_that_stops_advertising_keeps_live_endpoint(self, monkeypatch):
+        """A peer that stops advertising an endpoint (e.g. went outbound-only)
+        keeps whatever endpoint the kernel already has. This is deliberate:
+        WireGuard roams endpoints on any authenticated packet, and clearing one
+        would require remove+re-add, tearing down a live session for no gain.
+        Pinned here so the behavior stays a decision, not an accident."""
+        import base64
+        from greasewood.wg import LivePeer
+
+        ca = CAKeys.generate()
+        local, peer = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        # The peer's current record advertises NO endpoints.
+        rec = _make_record(peer, _make_cred(peer, ca, "peer"), endpoints=[])
+        directory.put(rec)
+
+        fake = _FakeWg()
+        pub = base64.b64encode(peer.wg_pub_bytes).decode()
+        fake.peers[pub] = LivePeer(          # kernel still has the old endpoint
+            wg_pub_b64=pub, endpoint="[2001:db8::9]:51900",
+            allowed_ips=f"{rec.cred.addr}/128",
+        )
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+
+        reconcile_once(
+            "gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+            [ca.ca_pub_bytes], set(),
+        )
+
+        assert fake.set_calls == 0 and fake.remove_calls == 0   # no churn
+        assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"

@@ -713,10 +713,13 @@ daemons don't clobber each other's `/etc/hosts` entries.
 Every node has a stable overlay address, and `gw nodes` shows each node's
 resolvable name↔address map. Name resolution is **on by default**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
-`<hostname>.gw.internal`, built from the local directory cache. It's re-checked
-each reconcile but **only rewritten when the block actually changes** (a join,
-departure, or rename) — in steady state it never touches the file, so it won't
-churn your `/etc/hosts` or noise up etckeeper/config management:
+`<hostname>.gw.internal`, built from the records that pass the reconcile loop's
+full verification — the same gate that decides WireGuard peers, so a revoked or
+expired node's name stops resolving on the same cycle its tunnel comes down.
+It's re-checked each reconcile but **only rewritten when the block actually
+changes** (a join, departure, revocation, or rename) — in steady state it never
+touches the file, so it won't churn your `/etc/hosts` or noise up
+etckeeper/config management:
 
 ```
 # BEGIN greasewood — managed, do not edit
@@ -726,7 +729,9 @@ fd8d:e5c1:db1a:7:…  node01.gw.internal
 ```
 
 So `ping db.gw.internal`, `ssh db.gw.internal`, etc. just work — no DNS
-server, and it keeps resolving even if the hub is down (it's from the cache). It
+server, and it keeps resolving even if the hub is down (it's from the cache,
+for as long as the cached credentials remain valid — one credential TTL, the
+same horizon as the tunnels themselves). It
 only ever touches the region between its markers; your own `/etc/hosts` lines are
 left alone, and `--no-hosts-sync` (or `hosts_sync = false` + restart) or `gw
 purge` removes the block.

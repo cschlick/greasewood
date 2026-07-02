@@ -85,7 +85,7 @@ def reconcile_once(
     revoked: set[str],
     policy: Policy = default_policy,
     local_families: "set[int] | None" = None,
-) -> None:
+) -> list:
     """
     Single reconcile pass against the full directory.
 
@@ -98,19 +98,28 @@ def reconcile_once(
       7    install or remove WireGuard peer
 
     Result: kernel WireGuard peer set matches exactly the authorized directory.
+
+    Returns the records that passed full verification (steps 1–5, including the
+    local node's own record). This is the ONLY set other outputs may be derived
+    from — the /etc/hosts block is built from it, so a revoked or expired node
+    stops resolving on the same cycle its tunnel comes down. The directory cache
+    itself is deliberately looser (structural checks only) so it survives
+    re-roots and clock skew; anything user-visible must go through this gate.
     """
     # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)
     desired: dict[str, tuple[str, str | None]] = {}
+    trusted: list = []
 
     for record in directory.all():
-        if record.id_pub == local_id_pub:
-            continue  # never install self as peer
-
         try:
             record.verify(ca_pubs, revoked)
         except ValueError as e:
             log.debug("skip %s: %s", record.hostname, e)
             continue
+        trusted.append(record)
+
+        if record.id_pub == local_id_pub:
+            continue  # never install self as peer
 
         # Step 6: authorization policy
         if not policy(local_caps, record.cred.caps):
@@ -135,6 +144,10 @@ def reconcile_once(
 
     for pub in desired_set & live_set:
         addr, ep = desired[pub]
+        # ep=None (the peer stopped advertising, e.g. went outbound-only)
+        # deliberately does NOT clear a live endpoint: WireGuard roams the
+        # endpoint on any authenticated packet anyway, and clearing one would
+        # require remove+re-add — tearing down a working session for no gain.
         endpoint_changed = ep and live[pub].endpoint != ep
         route_missing = not live[pub].allowed_ips or addr not in live[pub].allowed_ips
         if endpoint_changed or route_missing:
@@ -150,6 +163,8 @@ def reconcile_once(
             wgmod.remove_peer(iface, pub, peer_ip)
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", pub[-8:], e)
+
+    return trusted
 
 
 class ReconcileLoop:
@@ -187,25 +202,32 @@ class ReconcileLoop:
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
+            self._cycle()
+
+    def _cycle(self) -> None:
+        try:
+            trusted = reconcile_once(
+                self._iface,
+                self._directory,
+                self._local_id_pub,
+                self._local_caps,
+                self._get_ca_pubs(),
+                self._get_revoked(),
+                self._policy,
+                self._local_families,
+            )
+        except Exception as e:
+            log.error("reconcile error: %s", e)
+            return  # no verified set this cycle; hosts stays as-is, heals next pass
+        if self._hosts_domain:
             try:
-                reconcile_once(
-                    self._iface,
-                    self._directory,
-                    self._local_id_pub,
-                    self._local_caps,
-                    self._get_ca_pubs(),
-                    self._get_revoked(),
-                    self._policy,
-                    self._local_families,
-                )
+                from . import hosts
+                # Only fully-verified records (never directory.all()): a revoked
+                # or expired node must drop out of name resolution on the same
+                # cycle its WireGuard peer is removed.
+                hosts.sync(trusted, self._hosts_domain)
             except Exception as e:
-                log.error("reconcile error: %s", e)
-            if self._hosts_domain:
-                try:
-                    from . import hosts
-                    hosts.sync(self._directory.all(), self._hosts_domain)
-                except Exception as e:
-                    log.error("hosts sync error: %s", e)
+                log.error("hosts sync error: %s", e)
 
     def start(self) -> threading.Thread:
         t = threading.Thread(target=self.run, name="reconcile", daemon=True)
