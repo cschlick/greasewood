@@ -67,6 +67,16 @@ Additional control-plane protections:
   credential, not as a self-asserted `NodeRecord` field. A node therefore cannot
   publish a name the CA didn't issue it, so plain name resolution (the managed
   `/etc/hosts` block) can't be hijacked by a member claiming another's name.
+  One deliberate consequence: *unused* names are first-come-first-served — a
+  joiner names itself unless the hub pins the name, so any enrolled node could
+  claim a sensitive name nobody holds yet (and, with the `tls` cap, get a cert
+  for it). **Pin names that matter** (`gw invite --hostname db`): a pinned name
+  is checked free at invite, assigned by the hub, and the node can't rename.
+- **Name resolution follows the trust gate** — the `/etc/hosts` block is built
+  from the records that pass the reconcile loop's *full* verification (CA
+  signature, expiry, revocation), never from the raw directory cache. Revoking
+  a node removes its name on the same reconcile cycle that removes its tunnel;
+  an expired credential drops out of resolution the same way.
 - **Caps/segments are hub-decided, not self-asserted** — a node's capabilities
   (e.g. `tls`) and segments (`segment:<name>` tags) are chosen by the hub at
   `gw invite` and bound into the CA-signed credential; the enroll server issues
