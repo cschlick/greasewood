@@ -631,6 +631,7 @@ Two properties worth knowing:
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
+| `renew`            | yes   | Force an immediate credential renewal for this node (applies a hub-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
 | `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
