@@ -929,16 +929,10 @@ trusted_pubs = ["{ca_pub_hex}"]
 # ---------------------------------------------------------------------------
 
 def cmd_revoke(args) -> int:
-    from .config import load_config
-    from .keys import CAKeys
-    from .ca import CA
-
-    cfg = load_config(Path(args.config))
-    if cfg.ca_key_file is None:
-        sys.exit("ca_key_file must be set in [hub]")
-
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    ca = CA(ca_keys, cfg.data_dir)
+    # Same hub-only guard as set-caps/set-segments: explicit role check first,
+    # then ca_key_file + CA load — so a non-hub fails with one clear message and
+    # never reaches a traceback.
+    cfg, ca = _load_hub_ca(args, "revoke")
 
     try:
         id_pub_bytes = bytes.fromhex(args.id_pub_hex)

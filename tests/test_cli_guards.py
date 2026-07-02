@@ -37,6 +37,37 @@ def test_require_root_passes_as_root(monkeypatch):
     assert cli._require_root("run") is None  # no raise
 
 
+@pytest.mark.parametrize("cmd,fn", [
+    ("revoke", "cmd_revoke"),
+    ("set-caps", "cmd_set_caps"),
+    ("set-segments", "cmd_set_segments"),
+    ("renew-all", "cmd_renew_all"),
+])
+def test_hub_commands_refuse_non_hub(cmd, fn, tmp_path):
+    """Every hub-only command run on a role=node config exits with the same clear
+    'must be run on the hub' message — the guard runs first, so no traceback and
+    no mutation (revoke in particular now matches the others via _load_hub_ca)."""
+    import types
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text(f"""[node]
+hostname = "n1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-mesh"
+seeds = []
+[ca]
+trusted_pubs = []
+""")
+    ns = types.SimpleNamespace(config=str(cfg), id_pub_hex="00" * 32,
+                              node="n1", caps="tls", segments="mesh")
+    with pytest.raises(SystemExit) as e:
+        getattr(cli, fn)(ns)
+    assert "must be run on the hub" in str(e.value)
+    # nothing was written (e.g. renew-all's hint file)
+    assert not (tmp_path / "renew_after").exists()
+
+
 def test_own_identity_reads_public_key_only(tmp_path):
     """_own_identity must not touch the private key — even if it's unreadable."""
     keys = NodeKeys.generate()
