@@ -41,12 +41,27 @@ firewalled (or the daemon just started). It never changes the value — use
 
 ## What to back up
 
-- **`/var/lib/greasewood/ca.key`** (hub only) — encrypted, **offline**. This is
-  the one irreplaceable secret; losing it means re-rooting the whole fleet.
+**Use `sudo gw hub-backup` (hub only).** It writes ONE passphrase-encrypted
+file (AES-GCM, scrypt-derived key) containing the whole hub state — the CA key,
+the `nodes/` registry (hostname/caps per identity), `revoked.json`, the door
+key, and the hub's own node identity (`id_priv.pem`/`wg.key`, so a restore keeps
+the hub's overlay address). Move that file **offline**. The passphrase comes
+from a prompt, or `$GW_BACKUP_PASSPHRASE` for a cron job:
+
+```
+sudo GW_BACKUP_PASSPHRASE=… gw hub-backup --out /secure/offline/hub.gwbk
+```
+
+Anyone with the file **and** the passphrase can impersonate your CA, so guard
+both. Test-restore it (`gw hub-restore … --data-dir /tmp/verify`) before you
+rely on it.
+
+The pieces, if you back up by hand instead:
+- **`/var/lib/greasewood/ca.key`** (hub only) — the one irreplaceable secret;
+  losing it means re-rooting the whole fleet.
 - The CA public key / `[ca] trusted_pubs` — also kept in every node's config.
-- `/var/lib/greasewood/nodes/` (hub) — hostname/caps per identity (rebuildable by
-  re-enrolling, but a backup avoids that).
-- `/var/lib/greasewood/revoked.json` (hub).
+- `/var/lib/greasewood/nodes/` (hub) — hostname/caps per identity.
+- `/var/lib/greasewood/revoked.json` and `/var/lib/greasewood/door.key` (hub).
 
 `id_priv.pem` / `wg.key` on a node are **not** worth backing up — recover a lost
 node by enrolling a fresh one (new identity).
@@ -146,13 +161,17 @@ set so you always have an overlap path.
 
 ## SOP: hub host destroyed (disk gone)
 
-- **You have a backup of the data dir + config:** on the replacement host,
-  restore `/var/lib/greasewood/` (the whole dir — `ca.key`, `id_priv.pem`,
-  `wg.key`, `nodes/`, `revoked.json`) and `/etc/greasewood.toml`, then `gw run`.
-  This is a **restore, not a re-root**: same keys → same overlay address, same
-  CA, same trust. Nodes reconnect on their next sync (~20s). Because the hub
-  isn't in the data path, node↔node tunnels never went down; you just need to be
-  back within one credential TTL so nothing expired.
+- **You have a `gw hub-backup` archive:** on the replacement host,
+  `sudo gw hub-restore hub.gwbk --data-dir /var/lib/greasewood`, write
+  `/etc/greasewood.toml` (role = hub, `ca_key_file` pointing at the restored
+  `ca.key`), then `gw run`. This is a **restore, not a re-root**: same CA key →
+  same trust, so existing nodes keep trusting it with no `trusted_pubs` change.
+  The restore refuses to overwrite an existing `ca.key` unless you pass
+  `--force`. Nodes reconnect on their next sync (~20s); because the hub isn't in
+  the data path, node↔node tunnels never went down — you just need to be back
+  within one credential TTL so nothing expired. (The backup includes the hub's
+  own `id_priv`/`wg.key`, so the replacement comes up on the *same* overlay
+  address — address-based `seeds`/`root_url` keep working with no edits.)
 - **No backup:** follow *CA key lost* (re-root).
 
 > **Give the hub a DNS name.** The one thing that makes the restore seamless is
