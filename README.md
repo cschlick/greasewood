@@ -888,6 +888,113 @@ know which config it read and where the renewal record is.
 > `GET /ca-cert`. (After a re-root the CA changes; re-request to pick up the new
 > issuer.)
 
+### Worked example: mutual TLS for Postgres
+
+This wires up a Postgres server that authenticates clients by their mesh
+identity, with certs that rotate transparently. Nothing below hardcodes a
+hostname: greasewood **binds the cert's CN and SAN to the node's own attested
+`<hostname>.<mesh_domain>` automatically** — you can't set them to another
+identity (the hub *refuses* a SAN the node doesn't own and *forces* the CN to the
+node's own name), so each host gets a cert for exactly its own identity with no
+name typed.
+
+**The one thing to understand about CN.** greasewood makes the CN attested, not
+cosmetic, and it's the mesh FQDN — the same on the server and client cert:
+- **Server cert:** clients validate `SAN = DNS:<db-host>.<mesh_domain>` under
+  `sslmode=verify-full`. Connecting by overlay address works too — the node's own
+  address is a SAN by default.
+- **Client cert:** the CN *is* the identity Postgres maps to a role. It is the
+  connecting node's `<hostname>.<mesh_domain>` (e.g. `nats01.gw.internal`), so
+  that FQDN — not a bare label — is what your `pg_ident.conf` map keys on.
+
+**On the database host.** Point the three files at fixed, host-agnostic paths
+(the Debian `ssl-cert` group layout, which satisfies Postgres's key-permission
+check with a root-owned key):
+
+```bash
+sudo gw cert-request --name pg-server \
+  --key-out  /etc/ssl/private/gw-postgres.key \
+  --cert-out /etc/ssl/certs/gw-postgres.crt \
+  --ca-out   /etc/ssl/certs/gw-mesh-ca.crt \
+  --reload-cmd /usr/local/sbin/gw-pg-reload
+# CN + SAN default to THIS node's mesh name — no --san/--cn needed.
+# --name is just the manifest key (so cert-status is readable and a re-request
+# relocates in place); it does NOT affect the cert's identity.
+```
+
+One-time ownership so `postgres` can read a root-owned key (needs a restart):
+
+```bash
+sudo adduser postgres ssl-cert
+sudo chgrp ssl-cert /etc/ssl/private/gw-postgres.key
+sudo chmod 640      /etc/ssl/private/gw-postgres.key
+sudo systemctl restart postgresql
+```
+
+`postgresql.conf` — set once, never touched again:
+
+```
+ssl = on
+ssl_cert_file = '/etc/ssl/certs/gw-postgres.crt'
+ssl_key_file  = '/etc/ssl/private/gw-postgres.key'
+ssl_ca_file   = '/etc/ssl/certs/gw-mesh-ca.crt'   # verifies client certs
+```
+
+**Why rotation just works.** greasewood renews *in place* — it truncates and
+rewrites each file at its path and never re-chmods an existing one — so the
+ownership and mode you set that first time are **preserved on every rotation**.
+Postgres doesn't watch the files; it re-reads them on `SIGHUP`. So the
+`--reload-cmd` only needs to reload (a restart is unnecessary and drops
+connections). Make it a script that asserts the key perms first, as a guard
+against a botched change:
+
+```sh
+#!/bin/sh
+# /usr/local/sbin/gw-pg-reload   (chmod 0755, root-owned)
+set -e
+key=/etc/ssl/private/gw-postgres.key
+test "$(stat -c '%U:%G %a' "$key")" = "root:ssl-cert 640" || {
+  echo "gw-pg-reload: $key is $(stat -c '%U:%G %a' "$key"), want root:ssl-cert 640" >&2
+  exit 1   # refuse to reload with wrong perms rather than break TLS
+}
+exec systemctl reload postgresql
+```
+
+**On each client node.** Request its own cert (again, identity is automatic) and
+point libpq at it:
+
+```bash
+sudo gw cert-request --name pg-client \
+  --key-out  /etc/gw/pg-client.key \
+  --cert-out /etc/gw/pg-client.crt \
+  --ca-out   /etc/gw/gw-mesh-ca.crt
+# connect: sslmode=verify-full sslrootcert=/etc/gw/gw-mesh-ca.crt \
+#          sslcert=/etc/gw/pg-client.crt sslkey=/etc/gw/pg-client.key
+```
+
+**Map identities to roles on the server.** `pg_hba.conf`:
+
+```
+hostssl all all ::/0 cert map=mesh clientcert=verify-full
+```
+
+`pg_ident.conf` — the map keys on each client's mesh FQDN (its automatic CN):
+
+```
+# MAPNAME   CERT CN (= client's <hostname>.<mesh_domain>)   PG ROLE
+mesh        nats01.gw.internal                              nats
+mesh        chat01.gw.internal                              chat
+```
+
+This is the only place client hostnames appear — it's the allow-list of *which*
+identities may connect, and each entry is that node's own automatic name.
+
+> **CA rotation.** The `ssl_ca_file` matters only because of client-cert auth. A
+> re-root changes the CA, and both the server's CA file and every client cert
+> re-issue under the new CA on their next renewal — so rotate the CA (re-root)
+> and let the fleet re-issue together; don't swap a CA independently, or client
+> certs signed by the old one stop validating.
+
 ## Moving the hub (re-root)
 
 No node is forever-critical: because a node trusts a CA **key**, not a machine,
