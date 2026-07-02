@@ -1987,6 +1987,67 @@ def _door_status_lines(cfg) -> list:
     return lines
 
 
+def cmd_narrate(args) -> int:
+    """Read the data-plane command trail and translate it into plain English —
+    what greasewood did to the kernel's network state, when, why, and whether it
+    worked. Reads <data_dir>/audit.log by default; a path, or '-' for stdin."""
+    import sys as _sys
+    from .config import load_config
+    from . import narrate as N
+
+    # Where to read from.
+    src = getattr(args, "source", None)
+    if src == "-":
+        lines = _sys.stdin.read().splitlines()
+    else:
+        if src:
+            path = Path(src)
+        else:
+            cfg_path = Path(args.config)
+            path = None
+            if cfg_path.exists():
+                cfg = load_config(cfg_path)
+                path = cfg.audit_log or (cfg.data_dir / "audit.log")
+            path = path or Path("/var/lib/greasewood/audit.log")
+        if not path.exists():
+            sys.exit(f"no audit log at {path} (the daemon writes it; run `gw run`, "
+                     f"or pass a path / '-' for stdin)")
+        lines = path.read_text(errors="replace").splitlines()
+
+    entries = [e for e in (N.parse_line(ln) for ln in lines) if e is not None]
+
+    # Filters.
+    if getattr(args, "since", None):
+        cutoff = dt.datetime.now(_UTC) - _parse_duration(args.since)
+        def _fresh(e):
+            try:
+                return dt.datetime.fromisoformat(e.ts.replace("Z", "+00:00")) >= cutoff
+            except (ValueError, AttributeError):
+                return True
+        entries = [e for e in entries if _fresh(e)]
+    if getattr(args, "failures", False):
+        entries = [e for e in entries if e.failed]
+    if getattr(args, "peer", None):
+        entries = [e for e in entries if args.peer.lower() in e.ctx.lower()]
+    if getattr(args, "grep", None):
+        g = args.grep.lower()
+        entries = [e for e in entries
+                   if g in e.ctx.lower() or g in " ".join(e.argv).lower()
+                   or g in N.describe(e.argv).lower()]
+
+    if not entries:
+        print("no matching data-plane commands.")
+        return 0
+
+    color = _sys.stdout.isatty() and not getattr(args, "no_color", False)
+    if getattr(args, "stats", False):
+        print(N.summarize(entries))
+        print()
+    for line in N.narrate(entries, color=color, raw=getattr(args, "raw", False)):
+        print(line)
+    return 0
+
+
 def cmd_status(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -2951,6 +3012,28 @@ def main(argv=None) -> int:
     sp = sub.add_parser("cert-status", help="show local TLS certs and expiry")
     sp.add_argument("--out-dir", dest="out_dir", default=None)
     sp.set_defaults(fn=cmd_cert_status)
+
+    # narrate — translate the data-plane command trail into plain English
+    sp = sub.add_parser("narrate",
+                        help="translate the ip/wg command trail (audit.log) into a "
+                             "plain-English story of what greasewood did and why")
+    sp.add_argument("source", nargs="?", default=None,
+                    help="audit log path, or '-' for stdin (default: <data_dir>/audit.log)")
+    sp.add_argument("--since", metavar="DUR", default=None,
+                    help="only commands newer than DUR (e.g. 30m, 2h, 7d)")
+    sp.add_argument("--peer", default=None, metavar="NAME",
+                    help="only operations mentioning this peer/hostname")
+    sp.add_argument("--grep", default=None, metavar="TEXT",
+                    help="only operations matching TEXT (context, argv, or description)")
+    sp.add_argument("--failures", action="store_true",
+                    help="only commands that failed")
+    sp.add_argument("--raw", action="store_true",
+                    help="also show the raw argv under each translated command")
+    sp.add_argument("--stats", action="store_true",
+                    help="print a one-line tally before the narrative")
+    sp.add_argument("--no-color", dest="no_color", action="store_true",
+                    help="disable ANSI colour")
+    sp.set_defaults(fn=cmd_narrate)
 
     # set-inbound
     sp = sub.add_parser("set-inbound",

@@ -254,9 +254,30 @@ ERROR with the command's stderr. It's safe to record verbatim because the argv
 only ever contains **public** keys and key-file *paths* — the `wg` tool reads
 private keys from files, so no secret is ever on a command line. Point it
 elsewhere with `[network] audit_log = "/var/log/greasewood/audit.log"`, or
-`audit_log = ""` to disable. This is the sharpest edge of the auditability
-claim: **you can reconstruct every change greasewood ever made to your kernel's
-network state, with context, from a plain-text log.**
+`audit_log = ""` to disable. (State *queries* — `wg show`, `ip … show`, which run
+every reconcile cycle — go to debug, so the durable trail is only commands that
+*changed* something.)
+
+And you don't have to read raw commands: **`gw narrate` translates the trail into
+plain English** — grouping the commands of each operation and explaining what
+each did and why:
+
+```
+$ gw narrate --since 2h
+● 2026-07-02 22:12:03Z  A new node enrolled through the door and was installed
+                        as a peer (db01 [fd8d:e5c1:db1a:7::a1] from fd52:ba5e::9).
+    ✓ Set up the WireGuard tunnel to peer qa7IAQabcd=: accept and route its
+      overlay address fd8d:e5c1:db1a:7::a1 (a /128 host route — one address per
+      peer, derived from its identity key); dial it at 203.0.113.7:51900; send a
+      keepalive every 25s to hold the path open.                          (14ms)
+    ✓ Route traffic for fd8d:e5c1:db1a:7::a1 over gw-mesh — wg configures the
+      peer but not the kernel route, so greasewood adds it explicitly.     (3ms)
+```
+
+Filter it (`--peer db01`, `--failures`, `--grep`, `--stats`), point it at any
+log file or `-` for stdin, or `--raw` to see the argv alongside. This is the
+sharpest edge of the auditability claim: **you can reconstruct — and read as a
+story — every change greasewood ever made to your kernel's network state.**
 
 ## Install
 
@@ -672,6 +693,7 @@ Two properties worth knowing:
 | `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
 | `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service. The daemon then auto-renews it at ~half its TTL; `--reload-cmd` runs a command (e.g. `systemctl reload postgresql`) after each renewal, `--no-auto-renew` opts out. |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
+| `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
 | `renew`            | yes   | Force an immediate credential renewal for this node (applies a hub-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |

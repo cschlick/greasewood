@@ -35,8 +35,9 @@ def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
                              r.stdout, r.stderr)
         return r
     except subprocess.CalledProcessError as e:
+        # A command that had to succeed (check=True) didn't → a real failure.
         audit.record_command(args, e.returncode, int((time.monotonic() - t0) * 1000),
-                             e.stdout or "", e.stderr or "")
+                             e.stdout or "", e.stderr or "", failed=True)
         if e.stderr:
             log.error("command failed: %s\nstderr: %s", " ".join(args), e.stderr.strip())
         raise
@@ -149,23 +150,25 @@ def setup_door_routing() -> None:
     forwarded traffic only.
     """
     from .door import GUEST_DOOR_IP, DOOR_TABLE, DOOR_RULE_PRIO
+    from . import audit
 
-    # Blackhole default in the door table
-    r = _run("ip", "-6", "route", "show", "table", str(DOOR_TABLE), check=False)
-    if "blackhole" not in r.stdout:
-        _run("ip", "-6", "route", "add", "blackhole", "default",
-             "table", str(DOOR_TABLE), check=False)
-        log.info("door routing: blackhole default in table %d", DOOR_TABLE)
+    with audit.context("door: isolation routing"):
+        # Blackhole default in the door table
+        r = _run("ip", "-6", "route", "show", "table", str(DOOR_TABLE), check=False)
+        if "blackhole" not in r.stdout:
+            _run("ip", "-6", "route", "add", "blackhole", "default",
+                 "table", str(DOOR_TABLE), check=False)
+            log.info("door routing: blackhole default in table %d", DOOR_TABLE)
 
-    # Source rule: packets FROM GUEST_DOOR_IP → DOOR_TABLE.
-    # Do NOT use the full /64 — HUB_DOOR_IP is in that range and must route normally.
-    r = _run("ip", "-6", "rule", "show", check=False)
-    if str(DOOR_TABLE) not in r.stdout or GUEST_DOOR_IP not in r.stdout:
-        _run("ip", "-6", "rule", "add",
-             "from", GUEST_DOOR_IP,
-             "lookup", str(DOOR_TABLE),
-             "priority", str(DOOR_RULE_PRIO),
-             check=False)
+        # Source rule: packets FROM GUEST_DOOR_IP → DOOR_TABLE.
+        # Do NOT use the full /64 — HUB_DOOR_IP is in that range and must route normally.
+        r = _run("ip", "-6", "rule", "show", check=False)
+        if str(DOOR_TABLE) not in r.stdout or GUEST_DOOR_IP not in r.stdout:
+            _run("ip", "-6", "rule", "add",
+                 "from", GUEST_DOOR_IP,
+                 "lookup", str(DOOR_TABLE),
+                 "priority", str(DOOR_RULE_PRIO),
+                 check=False)
         log.info("door routing: source rule for %s → table %d", GUEST_DOOR_IP, DOOR_TABLE)
 
 
