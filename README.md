@@ -551,6 +551,15 @@ later **without re-joining**, run `gw set-segments <node> prod,web` on the hub �
 it takes effect at the node's next renewal (or re-invite + re-join for an
 immediate change).
 
+**Defaults for new nodes** live in the hub's config — `[hub] default_segments`
+(ships `["mesh"]`) and `default_caps` (ships `["tls"]`, so TLS is on by default).
+A plain `gw invite` with no `--segments`/`--caps` uses them; the flags override
+per token. They're read fresh at each invite, so **editing the config changes
+what future enrollments get, anytime, with no restart** — e.g. set
+`default_caps = []` to make TLS opt-in, or `default_segments = ["core"]` to rename
+the default segment. (Renaming it only affects *new* nodes; existing
+`segment:mesh` nodes stay in `mesh` until you `gw set-segments` them too.)
+
 The rule is one line — **share a segment** (`reconcile.default_policy`):
 
 - **share a segment** → may peer (a node in several segments peers with anyone
@@ -757,15 +766,19 @@ cert only for opportunistic encryption (no SAN check) *is* just redundant with
 WireGuard.
 
 A node may request certs only if its credential carries the **`tls`**
-capability. Like all caps it's granted by the hub at invite (the default is
-`mesh` only, so `tls` is off unless you add it):
+capability. It's granted by the hub, and **ships on by default** (`[hub]
+default_caps = ["tls"]`), so a plain `gw invite` already yields a cert-capable
+node — no extra flag:
 
 ```bash
-# On the hub — grant tls in the invite:
-TOKEN=$(sudo gw invite --caps mesh,tls)
-# On the node — join takes no caps flags:
+TOKEN=$(sudo gw invite)                 # tls is in the default caps
 sudo gw join "$TOKEN" --hostname dbnode
 ```
+
+To make `tls` opt-in instead, set `default_caps = []` in `[hub]` (effective on
+the next invite) and grant it per-node with `gw invite --caps tls` or later with
+`gw set-caps <node> …`. Either way `tls` is bounded by SAN authorization (below),
+so a cert-capable node can still only get certs for its *own* names.
 
 Then, on that node:
 

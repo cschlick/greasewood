@@ -176,8 +176,10 @@ def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
         st = pexec(node["cid"], "gw", "cert-status", "--out-dir", "/tmp/tls")
         assert "postgres.crt" in st.stdout and "postgres.dbnode.gw.internal" in st.stdout, st.stdout
 
-        # A node WITHOUT the tls cap is refused.
-        plain = bring_up_node(gw_image, gw_network, gw_hub, hostname="plainnode")
+        # A node WITHOUT the tls cap is refused. tls is on by default now, so opt
+        # out explicitly with --caps "" (empty overrides the hub's default_caps).
+        plain = bring_up_node(gw_image, gw_network, gw_hub, hostname="plainnode",
+                              caps="")
         nodes.append(plain["cid"])
         r2 = pexec(plain["cid"], "gw", "cert-request",
                    "--san", "x.mesh", "--name", "x", "--out-dir", "/tmp/tls",

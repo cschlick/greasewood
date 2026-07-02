@@ -50,6 +50,25 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.mesh_domain == "gw.internal"    # namespaced under reserved TLD
 
 
+def test_new_node_defaults_fallback(tmp_path):
+    # No [hub] defaults set → ship defaults: mesh segment, tls on.
+    p = _write(tmp_path, '[node]\nhostname = "n1"\n')
+    cfg = load_config(p)
+    assert cfg.default_segments == ["mesh"]
+    assert cfg.default_caps == ["tls"]
+
+
+def test_new_node_defaults_explicit(tmp_path):
+    # The hub operator can change what new nodes get (e.g. tls off, rename the
+    # default segment) — read fresh at each invite.
+    p = _write(tmp_path,
+               '[node]\nhostname = "hub"\nrole = "hub"\n'
+               '[hub]\ndefault_segments = ["core"]\ndefault_caps = []\n')
+    cfg = load_config(p)
+    assert cfg.default_segments == ["core"]
+    assert cfg.default_caps == []
+
+
 def test_malformed_overlay_prefix_is_swallowed(tmp_path):
     # A hand-edited bad prefix must not crash load_config; the parse failure is
     # swallowed (the process keeps the default /64) and the raw value is stored.
