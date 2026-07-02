@@ -22,7 +22,7 @@ def _as_user(monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
 
 
-@pytest.mark.parametrize("cmd", ["run", "setup-hub", "join", "invite", "purge",
+@pytest.mark.parametrize("cmd", ["run", "create", "join", "invite", "purge",
                                  "hub-promote", "set-inbound"])
 def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
     _as_user(monkeypatch)

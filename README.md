@@ -149,7 +149,7 @@ node and a v6-only node share no underlay family, so they can't pair either
 
 Inbound v4 nodes behind 1:1 NAT (e.g. EC2, whose interface holds only a private
 v4) can't autodetect their public address — pass `--endpoint <public-v4>:<port>`
-at `setup-hub`/`join`. Outbound-only (NAT'd) nodes need nothing: they advertise
+at `create`/`join`. Outbound-only (NAT'd) nodes need nothing: they advertise
 no endpoint and dial out.
 
 ## Self-certifying addresses
@@ -259,11 +259,11 @@ service](#running-as-a-service); then the workflow is just install → setup/joi
 On the machine that will hold the CA and serve enrollment:
 
 ```bash
-sudo gw setup-hub
+sudo gw create
 sudo gw run
 ```
 
-`setup-hub` generates the CA, the persistent door key, the policy routing for
+`create` generates the CA, the persistent door key, the policy routing for
 the enrollment door, and the hub's own credential, then writes
 `/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw-mesh`
 WireGuard interface, serves the control plane, and watches for door windows.
@@ -351,7 +351,7 @@ for how to read it and what to do next.
 `gw run` in a terminal is fine for trying things out, but in practice you want
 the daemon managed by systemd — survives reboots, restarts on failure, logs to
 the journal. The model is **install once, then forget `gw run`**: a path unit
-watches for `/etc/greasewood.toml` and starts the daemon the moment `setup-hub`
+watches for `/etc/greasewood.toml` and starts the daemon the moment `create`
 or `join` writes it. So the workflow becomes just **install → setup/join**.
 
 Install the service (pip-only, no Ansible):
@@ -365,7 +365,7 @@ watcher (armed immediately) and the service (for boot), and does **not** start a
 daemon until you configure the node. After it's installed:
 
 ```bash
-sudo gw setup-hub                     # on the hub        → daemon auto-starts
+sudo gw create                     # on the hub        → daemon auto-starts
 sudo gw join "$TOKEN" --hostname n01  # on a node         → daemon auto-starts
 journalctl -u greasewood -f           # watch it (no live terminal anymore)
 ```
@@ -460,7 +460,7 @@ overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
 the underlay is WireGuard itself (UDP), which you open like for any VPN.
 
-`setup-hub`, `join`, and `set-inbound` **check** the local nftables ruleset and
+`create`, `join`, and `set-inbound` **check** the local nftables ruleset and
 loudly warn if a needed port looks blocked by a default-drop policy, printing the
 exact rule to add. That's all greasewood does. You apply the printed rules yourself (put them in your nftables
 config, or however you configure your firewall).
@@ -498,7 +498,7 @@ The four ports sit in one contiguous block, **51900–51903**, deliberately clea
 of the WireGuard default (51820) and Docker Swarm / Serf (7946) so greasewood
 doesn't squat a port something else likely wants. All are configurable: mesh
 `[network] listen_port`, control `[hub] control_listen`, door `[hub] door_port`
-(or `setup-hub --listen-port/--control-port/--door-port`). The door port rides
+(or `create --listen-port/--control-port/--door-port`). The door port rides
 in join tokens and the control port in the enrollment response, so nodes pick up
 non-default values automatically — no client config. (The internal enrollment
 port lives inside the door tunnel and can't collide, so it isn't a knob.)
@@ -618,7 +618,7 @@ Two properties worth knowing:
 
 | Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
-| `setup-hub`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
+| `create`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
@@ -643,7 +643,7 @@ manual credential-copy path.
 
 ## Configuration
 
-`gw setup-hub` and `gw join` write `/etc/greasewood.toml` for you; see
+`gw create` and `gw join` write `/etc/greasewood.toml` for you; see
 `greasewood.toml.example` for the full annotated schema. Key fields:
 
 ```toml
@@ -680,7 +680,7 @@ credential_ttl = "24h"
 ### One host on two meshes
 
 The overlay `/64` is configurable (`[network] overlay_prefix`, set at
-`setup-hub --overlay-prefix`; a node learns it from its credential at join). A
+`create --overlay-prefix`; a node learns it from its credential at join). A
 node learns and verifies addresses prefix-agnostically — the self-certifying
 part is the host bits, `blake2s(id_pub)`, and the CA signature attests the
 prefix — so **one host can be a plain node on two independent meshes at once**.

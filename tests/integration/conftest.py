@@ -66,7 +66,7 @@ def gw_network():
 @pytest.fixture(scope="session")
 def gw_hub(gw_image, gw_network):
     """
-    Start the hub container, run setup-hub, launch daemon.
+    Start the hub container, run create, launch daemon.
 
     The control plane binds only to the overlay address + loopback (never the
     underlay), so it is not reachable from the host. Tests query it from inside
@@ -92,7 +92,7 @@ def gw_hub(gw_image, gw_network):
         ipv6 = container_addr(cid, gw_network)
         assert ipv6, "hub container got no underlay address"
 
-        pexec(cid, "gw", "setup-hub",
+        pexec(cid, "gw", "create",
               "--hostname", "hub",
               "--endpoint", _ep(ipv6, 51900))
 
@@ -142,7 +142,7 @@ def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
     time.sleep(1)
     ipv6 = container_addr(cid, gw_network)
     assert ipv6, "hub container got no underlay address"
-    pexec(cid, "gw", "setup-hub", "--hostname", hostname,
+    pexec(cid, "gw", "create", "--hostname", hostname,
           "--endpoint", _ep(ipv6, 51900), "--credential-ttl", ttl)
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()

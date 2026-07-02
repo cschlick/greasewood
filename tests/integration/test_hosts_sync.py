@@ -25,7 +25,7 @@ def test_hub_writes_managed_hosts_block(gw_image, gw_network):
         time.sleep(1)
         ipv6 = container_ipv6(cid, gw_network)
 
-        pexec(cid, "gw", "setup-hub", "--hostname", "hubby",
+        pexec(cid, "gw", "create", "--hostname", "hubby",
               "--endpoint", f"[{ipv6}]:51900")   # hosts_sync on by default
         cfg = pexec(cid, "cat", "/etc/greasewood.toml").stdout
         assert "hosts_sync = true" in cfg, cfg

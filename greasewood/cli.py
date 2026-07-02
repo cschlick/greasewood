@@ -5,7 +5,7 @@ Enrollment is door-based: a transient WireGuard tunnel, no SSH, no HTTP on the
 underlay.
 
   On the hub:
-    gw setup-hub          # one-shot: CA, door key, routing, self-credential
+    gw create          # one-shot: CA, door key, routing, self-credential
     gw run                # start the daemon (serves control plane + door)
     gw invite             # open a 15-min window, print a single-use join token
 
@@ -61,7 +61,7 @@ Description=greasewood mesh daemon
 Documentation=https://gitlab.com/cschlick/greasewood
 After=network-online.target
 Wants=network-online.target
-# Only run once this node is configured (setup-hub / join writes the config);
+# Only run once this node is configured (create / join writes the config);
 # greasewood.path starts us the moment it appears.
 ConditionPathExists=/etc/greasewood.toml
 
@@ -128,7 +128,7 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) ->
 
 
 # ---------------------------------------------------------------------------
-# setup-hub  (one-shot hub bootstrap: CA + door key + routing + self-credential)
+# create  (one-shot hub bootstrap: CA + door key + routing + self-credential)
 # ---------------------------------------------------------------------------
 
 def _detect_public_ipv6() -> str | None:
@@ -276,8 +276,8 @@ def _advertised_endpoints(explicit: "str | None", listen_port: int,
     return eps
 
 
-def cmd_setup_hub(args) -> int:
-    _require_root("setup-hub")
+def cmd_create(args) -> int:
+    _require_root("create")
     import json as json_mod
     from .keys import CAKeys, NodeKeys
     from .ca import CA
@@ -1081,7 +1081,7 @@ def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
 def _service_state() -> str:
     """How the greasewood daemon is managed on this host: 'active' (systemd
     unit installed and running), 'installed' (unit present, not yet running),
-    or 'manual' (no unit). Used so setup-hub / join don't tell the user to run
+    or 'manual' (no unit). Used so create / join don't tell the user to run
     `gw run` when systemd already starts the daemon on its own."""
     if not (_UNIT_DIR / "greasewood.service").exists():
         return "manual"
@@ -1602,7 +1602,7 @@ def cmd_run(args) -> int:
         ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
         get_revoked = ca.load_revoked_set
         log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
-        # Re-apply door routing in case the machine rebooted since setup-hub
+        # Re-apply door routing in case the machine rebooted since create
         wgmod.setup_door_routing()
 
         # Bind the control plane to the overlay address (reachable only through
@@ -1856,7 +1856,7 @@ def cmd_diagnose(args) -> int:
     # live WireGuard state still needs root, but it degrades gracefully below.
     own_id, own_addr = _own_identity(cfg.data_dir)
     if own_id is None:
-        print("keys not generated yet — run 'gw join <token>' or 'gw setup-hub' first")
+        print("keys not generated yet — run 'gw join <token>' or 'gw create' first")
         return 1
     own_id_bytes = bytes.fromhex(own_id)
 
@@ -2102,7 +2102,7 @@ def cmd_purge(args) -> int:
 
 def cmd_install_service(args) -> int:
     """Install + enable the systemd units so the daemon runs as a managed
-    service. After this, setup-hub / join is all you need — the service starts
+    service. After this, create / join is all you need — the service starts
     itself when the config appears. Pip-only; no Ansible required."""
     import shutil
     import subprocess
@@ -2136,7 +2136,7 @@ def cmd_install_service(args) -> int:
         subprocess.run([systemctl, "enable", "--now", "greasewood.path"], check=True)
         subprocess.run([systemctl, "enable", "greasewood.service"], check=True)
         print("\nenabled: greasewood.path (armed) + greasewood.service (boot).")
-        print("Run setup-hub or join — the daemon starts on its own; no `gw run`.")
+        print("Run create or join — the daemon starts on its own; no `gw run`.")
         print("Logs: journalctl -u greasewood -f")
         print("Opt out: sudo gw uninstall-service "
               "(or systemctl disable --now greasewood.path greasewood.service)")
@@ -2181,7 +2181,7 @@ def main(argv=None) -> int:
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
         epilog=(
             "sudo requirements:\n"
-            "  sudo gw setup-hub            -- one-shot hub bootstrap\n"
+            "  sudo gw create            -- one-shot hub bootstrap\n"
             "  sudo gw invite                 -- open a door window, print join token\n"
             "  sudo gw join <token> ...     -- enroll this machine (creates WG interfaces)\n"
             "  sudo gw run                  -- start the daemon\n"
@@ -2198,8 +2198,8 @@ def main(argv=None) -> int:
     p.add_argument("--version", action="version", version=f"greasewood {_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # setup-hub
-    sp = sub.add_parser("setup-hub",
+    # create
+    sp = sub.add_parser("create",
                         help="[sudo] one-shot hub bootstrap: CA + door key + routing + self-credential")
     sp.add_argument("--hostname", default=None,
                     help="this hub's hostname in the mesh "
@@ -2227,7 +2227,7 @@ def main(argv=None) -> int:
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
                     help="don't maintain the managed /etc/hosts block "
                          "(<name>.gw.internal -> overlay addr); it's on by default")
-    sp.set_defaults(fn=cmd_setup_hub, hosts_sync=True)
+    sp.set_defaults(fn=cmd_create, hosts_sync=True)
 
     # invite
     sp = sub.add_parser("invite",
