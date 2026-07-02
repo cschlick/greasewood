@@ -22,6 +22,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -35,13 +37,28 @@ CapPolicy = Callable[[list[str]], list[str]]
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write via a temp file + rename so a crash mid-write can't corrupt the
-    revoke list or a node-caps file (a corrupt revoked.json would otherwise make
-    every issue/renew fail until repaired)."""
+    """Write via a UNIQUE temp file + rename so a crash mid-write can't corrupt
+    the revoke list or a node-caps file, and concurrent writers (multiple
+    threads now that the control plane is threaded, or a `gw revoke`/`set-caps`
+    process racing the daemon) can't collide on a shared temp path — the rename
+    is atomic and last-writer-wins, never a truncated/mixed file or a
+    FileNotFoundError from one writer moving another's temp."""
+    import tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    tmp.replace(path)
+    # mkstemp in the SAME dir → same filesystem, so os.replace is a real atomic
+    # rename (not a cross-device copy).
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        # Clean up our own temp on any failure; never leave litter behind.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 class CA:
@@ -57,6 +74,15 @@ class CA:
         self._ttl = credential_ttl
         self._cap_policy: CapPolicy = cap_policy or (lambda caps: caps)
         self._revoke_path = data_dir / "revoked.json"
+        # Serializes the registry's check-then-act / read-modify-write regions
+        # (issue/renew/set-caps/revoke). The control plane is a
+        # ThreadingHTTPServer, so these run concurrently; without this a hostname
+        # uniqueness check could interleave (two nodes claim one name) and two
+        # writers could race. Reentrant because renew()->issue() and
+        # add_revoke()->forget_node() nest. Cross-PROCESS races (a `gw revoke`
+        # CLI vs the daemon) are handled by the unique-temp atomic write, not
+        # this lock.
+        self._lock = threading.RLock()
 
     # --- credential issuance ---
 
@@ -73,29 +99,33 @@ class CA:
         Raises ValueError if id_pub is revoked or the hostname is already taken
         by a different node (enforced on the sanitized name, so db/DB collide).
         """
-        if self.is_revoked(id_pub):
-            raise ValueError("id_pub is on the revoke list")
+        # The revoke check, the hostname-uniqueness check, and the registry
+        # write are one atomic critical section: otherwise two concurrent
+        # issues for the same name both see it free and both persist it.
+        with self._lock:
+            if self.is_revoked(id_pub):
+                raise ValueError("id_pub is on the revoke list")
 
-        owner = self._hostname_owner(hostname)
-        if owner is not None and owner != id_pub.hex():
-            raise ValueError(
-                f"hostname {hostname!r} is already in use by another node "
-                f"({owner[:16]}…); choose a different hostname"
+            owner = self._hostname_owner(hostname)
+            if owner is not None and owner != id_pub.hex():
+                raise ValueError(
+                    f"hostname {hostname!r} is already in use by another node "
+                    f"({owner[:16]}…); choose a different hostname"
+                )
+
+            caps = self._cap_policy(caps)
+            now = dt.datetime.now(_UTC).replace(microsecond=0)
+            cred = Credential(
+                id_pub=id_pub,
+                wg_pub=wg_pub,
+                addr=derive_addr(id_pub),
+                hostname=hostname,
+                caps=caps,
+                iat=now,
+                exp=now + self._ttl,
             )
-
-        caps = self._cap_policy(caps)
-        now = dt.datetime.now(_UTC).replace(microsecond=0)
-        cred = Credential(
-            id_pub=id_pub,
-            wg_pub=wg_pub,
-            addr=derive_addr(id_pub),
-            hostname=hostname,
-            caps=caps,
-            iat=now,
-            exp=now + self._ttl,
-        )
-        signed = cred.sign(self._keys.ca_priv)
-        self._save_node_caps(id_pub, hostname, caps)
+            signed = cred.sign(self._keys.ca_priv)
+            self._save_node_caps(id_pub, hostname, caps)
         log.info("issued credential for %s caps=%s exp=%s", hostname, caps, signed.exp)
         return signed
 
@@ -113,29 +143,33 @@ class CA:
         if skew > 300:
             raise ValueError(f"timestamp skew too large ({skew:.0f}s); check NTP")
 
-        if self.is_revoked(req.id_pub):
-            raise ValueError("id_pub is on the revoke list")
+        # Load-decide-issue as one critical section so a rename can't race
+        # another node claiming the same target name (issue() re-checks
+        # uniqueness under the same reentrant lock).
+        with self._lock:
+            if self.is_revoked(req.id_pub):
+                raise ValueError("id_pub is on the revoke list")
 
-        node_info = self._load_node_info(req.id_pub)
-        if node_info is None:
-            raise ValueError("unknown node — issue a credential first")
+            node_info = self._load_node_info(req.id_pub)
+            if node_info is None:
+                raise ValueError("unknown node — issue a credential first")
 
-        hostname, caps = node_info
-        if req.hostname and req.hostname != hostname:
-            # Rename (gw rename): issue() enforces uniqueness on the new name and
-            # rewrites nodes/<id>.json, which frees the old name for reuse. But a
-            # hub-pinned node (enrolled via `gw invite --hostname`) may not rename
-            # itself — the name is the hub's to set.
-            if "hostname-pinned" in caps:
-                raise ValueError(
-                    "hostname is hub-pinned for this node; rename disabled "
-                    "(re-invite with a new --hostname to change it)"
-                )
-            log.info("renaming %s -> %s", hostname, req.hostname)
-            hostname = req.hostname
-        else:
-            log.info("renewing %s", hostname)
-        return self.issue(req.id_pub, req.wg_pub, hostname, caps)
+            hostname, caps = node_info
+            if req.hostname and req.hostname != hostname:
+                # Rename (gw rename): issue() enforces uniqueness on the new name
+                # and rewrites nodes/<id>.json, which frees the old name for
+                # reuse. But a hub-pinned node (enrolled via `gw invite
+                # --hostname`) may not rename itself — the name is the hub's.
+                if "hostname-pinned" in caps:
+                    raise ValueError(
+                        "hostname is hub-pinned for this node; rename disabled "
+                        "(re-invite with a new --hostname to change it)"
+                    )
+                log.info("renaming %s -> %s", hostname, req.hostname)
+                hostname = req.hostname
+            else:
+                log.info("renewing %s", hostname)
+            return self.issue(req.id_pub, req.wg_pub, hostname, caps)
 
     # --- x509 TLS certificate issuance (§12) ---
 
@@ -179,11 +213,12 @@ class CA:
         """Rewrite a known node's caps in the registry. Takes effect at the
         node's NEXT renewal — `renew` re-issues from the registry, so the node
         picks up the change with no re-join. Raises ValueError if unknown."""
-        info = self._load_node_info(id_pub)
-        if info is None:
-            raise ValueError("unknown node — enroll it first")
-        hostname, _ = info
-        self._save_node_caps(id_pub, hostname, caps)
+        with self._lock:
+            info = self._load_node_info(id_pub)
+            if info is None:
+                raise ValueError("unknown node — enroll it first")
+            hostname, _ = info
+            self._save_node_caps(id_pub, hostname, caps)
 
     # --- revoke list ---
 
@@ -193,10 +228,11 @@ class CA:
     def add_revoke(self, id_pub: bytes) -> bool:
         """Revoke an identity and release its hostname. Returns True if the
         node's caps record existed and was removed (i.e. a hostname was freed)."""
-        revoked = self._load_revoked()
-        revoked.add(id_pub.hex())
-        self._save_revoked(revoked)
-        freed = self.forget_node(id_pub)
+        with self._lock:
+            revoked = self._load_revoked()
+            revoked.add(id_pub.hex())
+            self._save_revoked(revoked)
+            freed = self.forget_node(id_pub)
         log.info("revoked %s%s", id_pub.hex()[:16],
                  " (hostname freed)" if freed else "")
         return freed
