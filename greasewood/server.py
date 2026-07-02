@@ -99,11 +99,20 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError(f"request body too large ({length} bytes)")
         return json.loads(self.rfile.read(length))
 
+    @staticmethod
+    def _now_iso() -> str:
+        """The hub's UTC time, stamped into /directory and /health so nodes can
+        detect clock skew (sync loop warning, gw diagnose) instead of
+        mis-reading it as credential failures."""
+        import datetime as dt
+        return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
     def do_GET(self) -> None:
         if self.path == "/directory":
             self._send_json({
                 "records": [r.to_dict() for r in self.directory.all()],
                 "renew_after": self.get_renew_after(),
+                "now": self._now_iso(),
             })
         elif self.path == "/ca-cert":
             if self.ca is None:
@@ -111,7 +120,7 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"ca_cert": self.ca.ca_cert_pem()})
         elif self.path == "/health":
-            self._send_json({"status": "ok"})
+            self._send_json({"status": "ok", "now": self._now_iso()})
         else:
             self.send_error(404)
 

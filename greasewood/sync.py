@@ -37,20 +37,21 @@ def _parse_renew_after(raw) -> "dt.datetime | None":
 
 
 def pull_directory(seed_url: str, timeout: float = 10.0):
-    """Fetch (records, renew_after) from a seed's /directory endpoint.
+    """Fetch (records, renew_after, hub_now) from a seed's /directory endpoint.
 
     Accepts both the current object shape {"records": [...], "renew_after": ...}
     and a bare list (older hubs), so a mixed-version mesh still syncs. renew_after
-    is the fleet-wide renew hint (see gw renew-all), parsed to a UTC datetime or
-    None."""
+    is the fleet-wide renew hint (see gw renew-all); hub_now is the hub's own
+    clock (for skew detection) — either parsed to a UTC datetime or None."""
     url = f"{seed_url.rstrip('/')}/directory"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             raw = json.loads(resp.read())
         if isinstance(raw, dict):
             records = [NodeRecord.from_dict(r) for r in raw.get("records", [])]
-            return records, _parse_renew_after(raw.get("renew_after"))
-        return [NodeRecord.from_dict(r) for r in raw], None
+            return (records, _parse_renew_after(raw.get("renew_after")),
+                    _parse_renew_after(raw.get("now")))
+        return [NodeRecord.from_dict(r) for r in raw], None, None
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
@@ -90,6 +91,30 @@ class SyncLoop:
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
         self._stop = threading.Event()
+        self._last_skew_warn: float | None = None
+
+    # Clock-skew sentinel: past ±300s the hub refuses renewals, and well before
+    # that expiry checks start lying — but the symptom (peers vanishing, renew
+    # 400s) doesn't say "your clock is wrong". Warn at 60s, before it bites.
+    _SKEW_WARN_SECS = 60.0
+    _SKEW_WARN_INTERVAL = 600.0  # at most one warning per 10 min, not per pull
+
+    def _note_hub_clock(self, hub_now: "dt.datetime | None") -> None:
+        if hub_now is None:
+            return  # older hub that doesn't stamp its time
+        skew = (dt.datetime.now(_UTC) - hub_now).total_seconds()
+        if abs(skew) < self._SKEW_WARN_SECS:
+            self._last_skew_warn = None
+            return
+        import time
+        now = time.monotonic()
+        if self._last_skew_warn is not None \
+                and now - self._last_skew_warn < self._SKEW_WARN_INTERVAL:
+            return
+        self._last_skew_warn = now
+        log.warning("local clock is %+.0fs off the hub — check NTP. Past ±300s "
+                    "the hub refuses renewals, and credential expiry checks "
+                    "misfire well before that.", skew)
 
     def _pull_once(self) -> None:
         # Re-merge the cache file first so records written directly to disk
@@ -100,11 +125,12 @@ class SyncLoop:
 
         for seed in self._get_seeds():
             try:
-                records, renew_after = pull_directory(seed)
+                records, renew_after, hub_now = pull_directory(seed)
                 n = self._directory.merge(records)
                 if n:
                     self._directory.save(self._cache_path)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
+                self._note_hub_clock(hub_now)
                 if self._on_renew_after and renew_after is not None:
                     self._on_renew_after(renew_after)
                 return

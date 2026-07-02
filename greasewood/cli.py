@@ -1842,6 +1842,22 @@ def _handshake_phrase(live, now_epoch: int) -> str:
     return f"stale ({age // 3600}h ago)"
 
 
+def _hub_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
+    """Local-minus-hub clock difference in seconds via /health's 'now' stamp,
+    or None if the hub is unreachable or doesn't send one (older hub)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{root_url.rstrip('/')}/health",
+                                    timeout=timeout) as resp:
+            raw = json.loads(resp.read()).get("now")
+        if not raw:
+            return None
+        hub_now = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return (dt.datetime.now(_UTC) - hub_now).total_seconds()
+    except Exception:
+        return None
+
+
 def cmd_diagnose(args) -> int:
     """
     Per-peer connectivity diagnosis, **from THIS node's point of view — not a
@@ -1911,6 +1927,20 @@ def cmd_diagnose(args) -> int:
     print(f"trusted CAs: {len(ca_pubs)}   hub: {cfg.root_url or '(none configured)'}")
     if not ca_pubs:
         print("  ⚠ no trusted CA keys — check [ca] trusted_pubs; nothing will verify")
+
+    # Clock skew vs the hub — the failure mode that masquerades as everything
+    # else (creds "expired", renewals refused for skew). /health carries the
+    # hub's time; compare and say it plainly. Best-effort: hub may be down.
+    if cfg.root_url:
+        skew = _hub_clock_skew(cfg.root_url)
+        if skew is None:
+            print("clock    : hub unreachable — skew check skipped")
+        elif abs(skew) >= 60:
+            print(f"  ⚠ local clock is {skew:+.0f}s off the hub — FIX NTP. "
+                  f"Past ±300s renewals are refused; expiry checks misfire "
+                  f"before that.")
+        else:
+            print(f"clock    : within {abs(skew):.0f}s of the hub (ok)")
     if os.geteuid() != 0:
         print("  ⚠ not root — live WireGuard handshake state is unavailable; "
               "re-run with sudo for link health")
