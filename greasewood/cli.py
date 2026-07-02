@@ -1742,6 +1742,19 @@ def cmd_run(args) -> int:
 # nodes
 # ---------------------------------------------------------------------------
 
+def _underlay_addrs(endpoints: list[str]) -> tuple[str, str]:
+    """(v6_host, v4_host) from a node's advertised underlay endpoints, '-' if it
+    advertises none of that family. Endpoints are formatted 'host:port' /
+    '[v6]:port'; the port is dropped for the table."""
+    v6 = v4 = "-"
+    for ep in endpoints:
+        if ep.startswith("["):                 # [v6]:port
+            v6 = ep[1:].split("]")[0]
+        elif ep:                               # host:port (v4)
+            v4 = ep.rsplit(":", 1)[0]
+    return v6, v4
+
+
 def cmd_nodes(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -1771,9 +1784,10 @@ def cmd_nodes(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<24} {:<40} {:<20} {:<22} {}"
-    print(fmt.format("name", "addr", "expires", "state", "segments"))
-    print("-" * 120)
+    fmt = "{:<22} {:<40} {:<40} {:<16} {:<20} {:<22} {}"
+    print(fmt.format("name", "overlay", "underlay v6", "underlay v4",
+                     "expires", "state", "segments"))
+    print("-" * 175)
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
@@ -1787,10 +1801,12 @@ def cmd_nodes(args) -> int:
         segments = ",".join(
             c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
         ) or "-"
+        u6, u4 = _underlay_addrs(r.endpoints)
         # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
-        # not the bare hostname.
+        # not the bare hostname. "overlay" is the in-mesh IPv6 address; "underlay
+        # v6/v4" are the real endpoints peers dial (empty for outbound-only nodes).
         print(fmt.format(
-            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
+            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr, u6, u4,
             exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, segments
         ))
 
