@@ -102,7 +102,8 @@ credential_ttl = "24h"
 renew_before = "12h"
 
 # Lifetime of x509 TLS service certs issued via `gw cert-request` (§12).
-# Short-lived; nodes re-request to renew. Revocation is passive.
+# Short-lived; the node daemon auto-renews each requested cert at ~half this TTL
+# (and runs its --reload-cmd). Revocation is passive. This is a hub-wide setting.
 tls_cert_ttl = "7d"
 
 # What NEW nodes get at `gw invite` when --segments/--caps are omitted. Read

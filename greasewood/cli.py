@@ -1223,17 +1223,13 @@ def _resolve_hub_url(cfg) -> str:
 
 def cmd_cert_request(args) -> int:
     """Request an x509 TLS cert from the hub for a local service (e.g. Postgres).
-    Generates the leaf key locally; only its public key is sent to the hub."""
-    import json as json_mod
+    Generates the leaf key locally; only its public key is sent to the hub. Unless
+    --no-auto-renew is given, the cert is recorded so the daemon renews it at
+    ~half its TTL (and runs --reload-cmd afterward)."""
     import ipaddress
-    import secrets
-    import urllib.error
-    import urllib.request
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from .config import load_config
     from .keys import NodeKeys
-    from .wire import CertRequest
+    from . import certs as certmod
 
     cfg = load_config(Path(args.config))
     keys = NodeKeys.load(cfg.data_dir)
@@ -1259,81 +1255,24 @@ def cmd_cert_request(args) -> int:
     name = args.name or (dns[0] if dns else "service")
     out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
 
-    hub_url = _resolve_hub_url(cfg)
+    hub_url = args.hub or _resolve_hub_url(cfg)
     if not hub_url:
         sys.exit("no hub URL — set root_url in config or pass --hub")
-    if args.hub:
-        hub_url = args.hub
 
-    # Generate the leaf (service) keypair locally; the private key never leaves.
-    leaf = Ed25519PrivateKey.generate()
-    leaf_pub = leaf.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-
-    req = CertRequest(
-        id_pub=keys.id_pub_bytes,
-        leaf_pub=leaf_pub,
-        cn=cn,
-        dns=dns,
-        ips=ips,
-        nonce=secrets.token_hex(16),
-        ts=dt.datetime.now(_UTC).replace(microsecond=0),
-    ).sign(keys.id_priv)
-
-    body = json_mod.dumps(req.to_dict()).encode()
-    url = f"{hub_url.rstrip('/')}/cert"
-    # Retry a few times — the overlay tunnel to the hub may still be settling
-    # right after the node starts.
-    import time as _t
-    data = None
-    last_err = None
-    for attempt in range(5):
-        http_req = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"}
-        )
-        try:
-            with urllib.request.urlopen(http_req, timeout=10) as resp:
-                data = json_mod.loads(resp.read())
-            break
-        except urllib.error.HTTPError as e:
-            # The hub answered with an error — surface its reason. 4xx (e.g. no
-            # tls capability, bad request) won't change on retry; fail fast.
-            try:
-                msg = json_mod.loads(e.read()).get("error", str(e))
-            except Exception:
-                msg = str(e)
-            if 400 <= e.code < 500:
-                sys.exit(f"cert request rejected: {msg}")
-            last_err = msg
-            if attempt < 4:
-                _t.sleep(3)
-        except urllib.error.URLError as e:
-            last_err = e
-            if attempt < 4:
-                _t.sleep(3)
-    if data is None:
-        sys.exit(f"cert request to {hub_url} failed: {last_err}")
-    if "error" in data:
-        sys.exit(f"cert request rejected: {data['error']}")
-
-    leaf_key_pem = leaf.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    key_path = out_dir / f"{name}.key"
-    crt_path = out_dir / f"{name}.crt"
-    ca_path = out_dir / "ca.crt"
-    # Private key 0600; certs world-readable.
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, leaf_key_pem)
-    finally:
-        os.close(fd)
-    crt_path.write_text(data["cert"])
-    ca_path.write_text(data["ca_cert"])
+        key_path, crt_path, ca_path = certmod.issue_cert(
+            hub_url, keys, dns=dns, ips=ips, cn=cn, name=name, out_dir=out_dir)
+    except certmod.CertRejected as e:
+        sys.exit(f"cert request rejected: {e}")
+    except RuntimeError as e:
+        sys.exit(f"cert request to {hub_url} failed: {e}")
+
+    # Record it for the daemon's auto-renewal loop (skipped iff --no-auto-renew).
+    auto = not args.no_auto_renew
+    certmod.record_managed(cfg.data_dir, {
+        "name": name, "cn": cn, "dns": dns, "ips": ips,
+        "out_dir": str(out_dir), "reload_cmd": args.reload_cmd, "auto_renew": auto,
+    })
 
     print("TLS certificate issued.")
     print(f"  cn       : {cn}")
@@ -1346,7 +1285,14 @@ def cmd_cert_request(args) -> int:
     print(f"  ca cert  : {ca_path}")
     print()
     print("Point your service at these (e.g. Postgres ssl_cert_file / ssl_key_file,")
-    print("clients ssl_ca_file = ca.crt). Re-run before expiry to renew.")
+    print("clients ssl_ca_file = ca.crt).")
+    if auto:
+        note = "The daemon will auto-renew this cert at ~half its TTL"
+        note += f" and then run: {args.reload_cmd}" if args.reload_cmd else \
+            " (pass --reload-cmd next time to reload your service on renewal)"
+        print(note + ".")
+    else:
+        print("Auto-renewal disabled (--no-auto-renew) — re-run before expiry.")
     return 0
 
 
@@ -1724,6 +1670,16 @@ def cmd_run(args) -> int:
     else:
         log.warning("no credential in directory — run 'gw join <token>' first")
 
+    # TLS service-cert auto-renewal: renew each cert recorded by `gw cert-request`
+    # at ~half its lifetime and run its reload_cmd. No-op if none are managed.
+    from .certs import CertRenewalLoop, load_manifest as _load_cert_manifest
+    cert_renewal = None
+    _managed = _load_cert_manifest(cfg.data_dir)
+    if _managed:
+        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_hub_url(cfg), cfg.data_dir)
+        cert_renewal.start()
+        log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
+
     # Block until SIGTERM / SIGINT
     stop_flag = threading.Event()
 
@@ -1741,6 +1697,8 @@ def cmd_run(args) -> int:
         sync.stop()
     if renewal:
         renewal.stop()
+    if cert_renewal:
+        cert_renewal.stop()
     if door_watcher:
         door_watcher.stop()
     log.info("shutdown complete")
@@ -2542,6 +2500,12 @@ def main(argv=None) -> int:
     sp.add_argument("--out-dir", dest="out_dir", default=None,
                     help="where to write key/cert/ca (default: <data_dir>/tls)")
     sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
+    sp.add_argument("--reload-cmd", dest="reload_cmd", default=None, metavar="CMD",
+                    help="shell command the daemon runs after auto-renewing this "
+                         "cert (e.g. 'systemctl reload postgresql')")
+    sp.add_argument("--no-auto-renew", dest="no_auto_renew", action="store_true",
+                    help="do not auto-renew this cert in the daemon (one-shot; "
+                         "re-run manually before expiry)")
     sp.set_defaults(fn=cmd_cert_request)
 
     # cert-status
