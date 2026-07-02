@@ -867,6 +867,19 @@ the same name **relocates** it (the daemon renews into the new paths and flags
 the old files as orphaned) rather than leaving a duplicate. See
 [RUNBOOK.md](RUNBOOK.md). Revocation is passive — stop renewing and it expires.
 
+**Where things live** — three files, don't conflate them:
+
+| File | Role | Location |
+|------|------|----------|
+| the leaf **key/cert** + **CA cert** | what your service reads | wherever you point them (`--key-out`/`--cert-out`/`--ca-out`, else `<data_dir>/tls/`); the three need not share a directory |
+| `greasewood.toml` | the daemon config; `cert-request` only *reads* it (for `data_dir` + the default SAN) and never writes it | wherever you pass `gw -c …` (default `/etc/greasewood.toml`) |
+| `<data_dir>/tls/managed.json` | the **renewal source of truth** — records each managed cert's three paths; the daemon reads it to know where to re-issue | pinned to `data_dir` (there's no separate flag; move `data_dir` in the config and it follows) |
+
+So the file that actually "controls" where renewed certs land is the *manifest*,
+not `greasewood.toml`: the TOML only locates the manifest (via `data_dir`), and
+the manifest holds the per-cert paths. `cert-request` prints both so you always
+know which config it read and where the renewal record is.
+
 > **SANs are constrained to what the node owns** (its CA-registered
 > `<hostname>.<mesh_domain>`, subdomains, and its overlay address) — the hub
 > refuses a cert for another node's name, so a `tls`-capable node can't
