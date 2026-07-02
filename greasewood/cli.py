@@ -992,7 +992,7 @@ def _resolve_node(ca, cfg, handle: str):
 
 _NEXT_RENEWAL_NOTE = (
     "Takes effect at the node's next renewal (~half the credential TTL); no "
-    "re-join needed. For an immediate change, re-invite + re-join the node."
+    "re-join needed. To apply immediately, run `sudo gw renew` on that node."
 )
 
 
@@ -2033,6 +2033,90 @@ def cmd_diagnose(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# renew  (force an immediate credential renewal for THIS node)
+# ---------------------------------------------------------------------------
+
+def cmd_renew(args) -> int:
+    """
+    Force an immediate credential renewal for THIS node. Normally the daemon
+    renews on its own (~half the credential TTL); this fetches a fresh credential
+    from the hub right now, re-publishes the record so peers stop serving the old
+    expiry, and adopts any caps/segments the hub changed in the meantime (so
+    `gw set-caps` / `gw set-segments` take effect immediately instead of at the
+    next scheduled renewal).
+
+    Run it ON THE NODE: renewal is self-signed by the node's id_priv, so the hub
+    cannot renew a node on its behalf — there is no "renew everyone from the hub".
+    """
+    _require_root("renew")
+    from .config import load_config
+    from .keys import NodeKeys
+    from .directory import Directory
+    from .wire import NodeRecord
+    from .renewal import _do_renew
+    from .sync import push_record
+    import json as json_mod
+    import re
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"not configured (no config file at {cfg_path})")
+    cfg = load_config(cfg_path)
+    try:
+        keys = NodeKeys.load(cfg.data_dir)
+    except Exception:
+        sys.exit("this node isn't enrolled yet (no keys) — run 'gw join <token>' first")
+    if not cfg.root_url:
+        sys.exit("no hub URL configured (root_url) — is this node enrolled?")
+
+    try:
+        cred = _do_renew(cfg.root_url, keys)
+    except Exception as e:
+        sys.exit(f"renew failed: {e}\n(is the mesh up and the hub reachable? "
+                 f"renewal goes over the overlay)")
+
+    # Re-publish our record with the fresh credential, keeping our current seq+1,
+    # endpoints, and inbound — highest-seq-wins means peers adopt this promptly.
+    directory = Directory.load(cfg.dir_cache_path)
+    existing = directory.get(keys.id_pub_hex)
+    seq = (existing.seq + 1) if existing else 1
+    endpoints = list(existing.endpoints) if existing else (
+        [] if cfg.inbound == "no" else cfg.endpoints)
+    inbound = existing.inbound if existing else cfg.inbound
+    record = NodeRecord(
+        id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
+        inbound=inbound, cred=cred,
+    ).sign(keys.id_priv)
+    directory.put(record)
+    directory.save(cfg.dir_cache_path)
+    try:
+        push_record(cfg.root_url, record)
+    except Exception as e:
+        log.warning("published locally but push to hub failed (will sync): %s", e)
+
+    print(f"renewed — credential now expires {cred.exp:%Y-%m-%d %H:%M UTC}")
+
+    # Adopt caps/segments if the hub changed them since we last renewed. Editing
+    # this line grants nothing on its own (peers enforce against the credential),
+    # but the daemon reads its LOCAL side of the peering policy from here, so we
+    # keep it in sync with what the CA just issued.
+    if list(cred.caps) != list(cfg.caps):
+        text = cfg_path.read_text()
+        new, n = re.subn(r'(?m)^\s*caps\s*=\s*\[.*\]\s*$',
+                         f'caps = {json_mod.dumps(list(cred.caps))}', text, count=1)
+        if n:
+            cfg_path.write_text(new)
+            print(f"caps updated by the hub: {list(cfg.caps)} -> {list(cred.caps)}")
+        else:
+            log.warning("hub changed caps to %s but couldn't update %s — edit by hand",
+                        list(cred.caps), cfg_path)
+
+    print("Restart the daemon to fully adopt it: "
+          "sudo systemctl restart greasewood  (or re-run sudo gw run)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # purge  (decommission or start-over — removes all local greasewood state)
 # ---------------------------------------------------------------------------
 
@@ -2397,6 +2481,13 @@ def main(argv=None) -> int:
                         help="[sudo] change this node's mesh hostname (hub-validated, no re-join)")
     sp.add_argument("hostname", help="the new hostname")
     sp.set_defaults(fn=cmd_rename)
+
+    # renew
+    sp = sub.add_parser("renew",
+                        help="[sudo] force an immediate credential renewal for THIS "
+                             "node (applies a hub-side set-caps/set-segments now, "
+                             "instead of waiting ~half the TTL)")
+    sp.set_defaults(fn=cmd_renew)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
