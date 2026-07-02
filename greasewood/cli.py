@@ -1049,7 +1049,7 @@ def _resolve_node(ca, cfg, handle: str):
         s = s[: -len(suffix)]
     owner = ca.hostname_owner(s)
     if owner is None:
-        sys.exit(f"no node named {handle!r} on this hub (see `gw ls`)")
+        sys.exit(f"no node named {handle!r} on this hub (see `gw status`)")
     return bytes.fromhex(owner), s
 
 
@@ -1889,7 +1889,7 @@ def _print_node_table(records, cfg, now, own_id) -> None:
                          expires, state + marker, segs))
 
 
-def cmd_ls(args) -> int:
+def cmd_status(args) -> int:
     from .config import load_config
     from .directory import Directory
 
@@ -1901,7 +1901,7 @@ def cmd_ls(args) -> int:
     cfg = load_config(cfg_path)
 
     # Read-only: use the public id (id_pub.hex), never the private key, so
-    # `gw ls` works without sudo.
+    # `gw status` works without sudo.
     own_id, own_addr = _own_identity(cfg.data_dir)
 
     print(f"role     : {cfg.role}")
@@ -2645,7 +2645,7 @@ def main(argv=None) -> int:
             "  sudo gw purge                -- remove all local state\n"
             "\n"
             "no sudo needed (read-only):\n"
-            "  gw ls\n"
+            "  gw status\n"
             "  gw diagnose   (add sudo to also see live WireGuard handshake state)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2764,13 +2764,13 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_run)
 
     # nodes
-    sp = sub.add_parser("ls",
+    sp = sub.add_parser("status",
                         help="list the mesh nodes in this node's directory (name, "
                              "addr, expiry, state, segments) + who you are")
     sp.add_argument("--by-segment", action="store_true",
                     help="group into one table per segment (a node appears under "
                          "each of its segments; segment:* nodes appear under all)")
-    sp.set_defaults(fn=cmd_ls)
+    sp.set_defaults(fn=cmd_status)
 
     # diagnose
     sp = sub.add_parser(
