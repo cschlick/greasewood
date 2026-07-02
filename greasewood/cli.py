@@ -2189,6 +2189,90 @@ def cmd_renew_all(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# hub-backup / hub-restore  (encrypted CA + registry snapshot)
+# ---------------------------------------------------------------------------
+
+def _backup_passphrase(confirm: bool) -> bytes:
+    """Passphrase for the backup blob. From $GW_BACKUP_PASSPHRASE if set (for
+    unattended/cron use), else prompted — twice when confirm=True (backup)."""
+    import getpass
+    env = os.environ.get("GW_BACKUP_PASSPHRASE")
+    if env:
+        return env.encode()
+    pw = getpass.getpass("Backup passphrase: ")
+    if not pw:
+        sys.exit("empty passphrase — aborting")
+    if confirm and getpass.getpass("Confirm passphrase: ") != pw:
+        sys.exit("passphrases did not match — aborting")
+    return pw.encode()
+
+
+def cmd_hub_backup(args) -> int:
+    """Write a single encrypted archive of this hub's trust state (CA key, the
+    nodes/ registry, revoke list, door key). Restoring the same key onto a new
+    host is a restore, not a re-root — no fleet-wide trust change."""
+    from .config import load_config
+    from . import backup as bak
+
+    cfg = load_config(Path(args.config))
+    if cfg.role != "hub":
+        sys.exit("gw hub-backup must be run on the hub (role = hub)")
+    if cfg.ca_key_file is None:
+        sys.exit("hub-backup requires ca_key_file in [hub]")
+
+    files = bak.collect_hub_state(cfg.data_dir, cfg.ca_key_file)
+    if "ca.key" not in files:
+        sys.exit(f"CA key not found at {cfg.ca_key_file} — nothing to back up")
+
+    out = Path(args.out) if args.out else \
+        cfg.data_dir / f"greasewood-hub-backup-{cfg.hostname}.gwbk"
+    passphrase = _backup_passphrase(confirm=True)
+    blob = bak.pack(files, passphrase)
+
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+    node_count = sum(1 for n in files if n.startswith("nodes/"))
+    print(f"wrote encrypted hub backup → {out}")
+    print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
+    print("Store it OFFLINE. Anyone with this file AND the passphrase can "
+          "impersonate your CA. Test-restore it before you rely on it.")
+    return 0
+
+
+def cmd_hub_restore(args) -> int:
+    """Decrypt a hub backup into a data dir. For standing up a replacement hub
+    on the same CA key (see RUNBOOK 'destroyed hub')."""
+    _require_root("hub-restore")
+    from . import backup as bak
+
+    blob = Path(args.archive).read_bytes()
+    data_dir = Path(args.data_dir).expanduser()
+
+    # Guard against clobbering a live hub's CA key by accident.
+    if (data_dir / "ca.key").exists() and not args.force:
+        sys.exit(f"{data_dir / 'ca.key'} already exists — refusing to overwrite "
+                 f"a live hub. Pass --force if you really mean to restore over it.")
+
+    passphrase = _backup_passphrase(confirm=False)
+    try:
+        files = bak.unpack(blob, passphrase)
+        written = bak.restore_files(data_dir, files)
+    except bak.BackupError as e:
+        sys.exit(f"restore failed: {e}")
+
+    node_count = sum(1 for n in written if n.startswith("nodes/"))
+    print(f"restored {len(written)} file(s) into {data_dir}")
+    print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
+    print("Next: write /etc/greasewood.toml pointing ca_key_file at "
+          f"{data_dir / 'ca.key'} (role = hub), then `sudo gw run`. Because the "
+          "CA key is unchanged, existing nodes keep trusting it — no re-root.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # purge  (decommission or start-over — removes all local greasewood state)
 # ---------------------------------------------------------------------------
 
@@ -2578,6 +2662,27 @@ def main(argv=None) -> int:
                              "renew_after=now so cooperating nodes renew (jittered, "
                              "rate ~constant with mesh size)")
     sp.set_defaults(fn=cmd_renew_all)
+
+    # hub-backup
+    sp = sub.add_parser("hub-backup",
+                        help="[hub] write an encrypted backup of the CA key + "
+                             "node registry + revoke list (passphrase via prompt "
+                             "or $GW_BACKUP_PASSPHRASE)")
+    sp.add_argument("--out", default=None, metavar="PATH",
+                    help="output file (default: <data_dir>/greasewood-hub-backup-"
+                         "<hostname>.gwbk)")
+    sp.set_defaults(fn=cmd_hub_backup)
+
+    # hub-restore
+    sp = sub.add_parser("hub-restore",
+                        help="[sudo] restore a hub backup into a data dir (stand "
+                             "up a replacement hub on the same CA key — not a re-root)")
+    sp.add_argument("archive", help="the .gwbk backup file")
+    sp.add_argument("--data-dir", default="/var/lib/greasewood",
+                    help="where to restore (default: /var/lib/greasewood)")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite an existing ca.key in the target dir")
+    sp.set_defaults(fn=cmd_hub_restore)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
