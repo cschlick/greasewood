@@ -72,6 +72,91 @@ def test_capabilities_do_not_affect_peering():
 
 
 # ---------------------------------------------------------------------------
+# Endpoint auto-fallback: rotate to a peer's next advertised endpoint when the
+# current one produces no handshake (the dual-stack "v6 advertised but broken,
+# v4 also available" case). Stays direct-or-fail — only endpoints the PEER
+# advertised are ever tried, never a relay.
+# ---------------------------------------------------------------------------
+
+class TestEndpointTracker:
+    V6, V4 = "[fd8d::1]:51900", "1.2.3.4:51900"
+
+    def test_new_peer_gets_first_candidate(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=1000) == self.V6
+
+    def test_healthy_peer_sticks(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        t.choose("p", [self.V6, self.V4], hs=0, now=1000)
+        # A live tunnel keeps handshaking (~every 2 min); as long as the last one
+        # is within the healthy window, never rotate away — even long-term.
+        assert t.choose("p", [self.V6, self.V4], hs=1000, now=1005) == self.V6
+        assert t.choose("p", [self.V6, self.V4], hs=1100, now=1200) == self.V6
+        assert t.choose("p", [self.V6, self.V4], hs=1900, now=2000) == self.V6
+
+    def test_rotates_after_dwell_without_handshake(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=1000) == self.V6
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=1010) == self.V6  # dwell not up
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=1025) == self.V4  # rotated
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=1050) == self.V6  # round-robin
+
+    def test_handshake_on_fallback_stops_rotation(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        t.choose("p", [self.V6, self.V4], hs=0, now=0)
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=30) == self.V4  # rotated to v4
+        # v4 now handshakes → stay on v4
+        assert t.choose("p", [self.V6, self.V4], hs=30, now=35) == self.V4
+        assert t.choose("p", [self.V6, self.V4], hs=30, now=200) == self.V4
+
+    def test_single_candidate_never_rotates(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        assert t.choose("p", [self.V6], hs=0, now=0) == self.V6
+        assert t.choose("p", [self.V6], hs=0, now=1000) == self.V6
+
+    def test_no_candidates_is_none(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        assert t.choose("p", [], hs=0, now=0) is None
+
+    def test_readvertised_endpoints_reset_to_new_first(self):
+        t = reconcile._EndpointTracker(dwell=20)
+        assert t.choose("p", [self.V6, self.V4], hs=0, now=0) == self.V6
+        # peer now advertises a set that doesn't include the current endpoint
+        assert t.choose("p", ["9.9.9.9:51900"], hs=0, now=5) == "9.9.9.9:51900"
+
+
+class TestReconcileEndpointFallback:
+    def _mesh_with_dead_endpoint(self):
+        ca = CAKeys.generate()
+        local, peer = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        # Peer advertises v6-first then v4; the v6 path will never handshake.
+        rec = _make_record(peer, _make_cred(peer, ca, "peer"),
+                           endpoints=["[fd8d::9]:51900", "5.6.7.8:51900"])
+        directory.put(rec)
+        return ca, local, peer, directory, rec
+
+    def test_reconcile_rotates_endpoint_when_no_handshake(self, monkeypatch):
+        import base64
+        ca, local, peer, directory, rec = self._mesh_with_dead_endpoint()
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        pub = base64.b64encode(peer.wg_pub_bytes).decode()
+        tracker = reconcile._EndpointTracker(dwell=0)  # rotate as soon as stale
+
+        def run():
+            reconcile_once("gw-test", directory, local.id_pub_bytes,
+                           ["segment:mesh"], [ca.ca_pub_bytes], set(),
+                           local_families={4, 6}, endpoint_tracker=tracker)
+
+        run()                                   # installs peer on v6 (first)
+        assert fake.peers[pub].endpoint == "[fd8d::9]:51900"
+        run()                                   # still no handshake → rotate to v4
+        assert fake.peers[pub].endpoint == "5.6.7.8:51900"
+
+
+# ---------------------------------------------------------------------------
 # Trust gate: reconcile output (peers + hosts records) is fully verified
 # ---------------------------------------------------------------------------
 

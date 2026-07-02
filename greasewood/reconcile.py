@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import logging
 import threading
+import time
 from typing import Callable
 
 from .directory import Directory
@@ -58,22 +59,70 @@ def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
     return bool(local & peer)
 
 
+def _endpoint_candidates(endpoints: list[str],
+                         local_families: "set[int] | None") -> list[str]:
+    """The peer endpoints this node could actually originate on, in advertised
+    order (which is v6-first, so a dual-stack node prefers v6). Empty if the peer
+    advertises none, or only a family we can't reach (→ no endpoint installed, so
+    the link won't form — direct-or-fail across families, no special case)."""
+    if not endpoints:
+        return []
+    if not local_families:            # unknown families → keep them all, in order
+        return list(endpoints)
+    return [ep for ep in endpoints
+            if (6 if ep.startswith("[") else 4) in local_families]
+
+
 def _select_endpoint(endpoints: list[str],
                      local_families: "set[int] | None") -> "str | None":
-    """Pick a peer endpoint of an underlay family this node can originate on.
-    Endpoints are formatted ('host:port' / '[v6]:port') and listed v6-first, so a
-    dual-stack node prefers v6. Returns None if the peer advertises none, or only
-    a family we can't reach (→ installed endpoint-less, so the link won't form —
-    direct-or-fail across address families, no special case)."""
-    if not endpoints:
-        return None
-    if not local_families:            # unknown families → keep it simple (first)
-        return endpoints[0]
-    for ep in endpoints:
-        fam = 6 if ep.startswith("[") else 4
-        if fam in local_families:
-            return ep
-    return None
+    """The single preferred endpoint (first reachable candidate), or None. The
+    stateless choice used when no fallback tracker is supplied."""
+    candidates = _endpoint_candidates(endpoints, local_families)
+    return candidates[0] if candidates else None
+
+
+class _EndpointTracker:
+    """Per-peer endpoint fallback state, carried across reconcile cycles.
+
+    WireGuard pins one endpoint per peer and keeps retrying it forever, so a
+    peer that advertises a working v4 AND a broken v6 (the common dual-stack
+    case) never connects if v6 was chosen. This advances to the peer's NEXT
+    advertised endpoint once the current one has gone `dwell` seconds with no
+    handshake, round-robining until one sticks. It only ever tries endpoints the
+    PEER advertised — still direct-or-fail, no relay. A fresh handshake resets
+    the dwell clock, so a healthy link is never disturbed.
+    """
+
+    def __init__(self, dwell: float = 20.0, healthy: float = 180.0) -> None:
+        self._dwell = dwell
+        # A handshake within `healthy` seconds means the current endpoint works.
+        # ~180s covers WireGuard's ~2-min handshake refresh on an idle-but-live
+        # tunnel (matches the 'LINKED' window gw diagnose uses).
+        self._healthy = healthy
+        self._state: dict[str, dict] = {}  # wg_pub_b64 → {current, since}
+
+    def _is_healthy(self, hs: int, now: float) -> bool:
+        return bool(hs) and (now - hs) <= self._healthy
+
+    def choose(self, wg_pub_b64: str, candidates: list[str],
+               hs: int, now: float) -> "str | None":
+        if not candidates:
+            self._state.pop(wg_pub_b64, None)
+            return None
+        st = self._state.get(wg_pub_b64)
+        if st is None or st["current"] not in candidates:
+            # New peer, or it re-advertised a set without our current endpoint.
+            st = {"current": candidates[0], "since": now}
+            self._state[wg_pub_b64] = st
+            return st["current"]
+        if self._is_healthy(hs, now):
+            st["since"] = now              # working link → reset the dwell clock
+            return st["current"]
+        if len(candidates) > 1 and (now - st["since"]) >= self._dwell:
+            i = candidates.index(st["current"])
+            st["current"] = candidates[(i + 1) % len(candidates)]
+            st["since"] = now
+        return st["current"]
 
 
 def reconcile_once(
@@ -85,6 +134,7 @@ def reconcile_once(
     revoked: set[str],
     policy: Policy = default_policy,
     local_families: "set[int] | None" = None,
+    endpoint_tracker: "_EndpointTracker | None" = None,
 ) -> list:
     """
     Single reconcile pass against the full directory.
@@ -106,6 +156,11 @@ def reconcile_once(
     itself is deliberately looser (structural checks only) so it survives
     re-roots and clock skew; anything user-visible must go through this gate.
     """
+    # Live kernel state up front: the endpoint tracker needs each peer's last
+    # handshake time to decide whether its current endpoint is working.
+    live = wgmod.get_peers(iface)
+    now_epoch = time.time() if endpoint_tracker is not None else 0.0
+
     # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)
     desired: dict[str, tuple[str, str | None]] = {}
     trusted: list = []
@@ -127,11 +182,16 @@ def reconcile_once(
             continue
 
         wg_pub_b64 = base64.b64encode(record.cred.wg_pub).decode()
-        endpoint = _select_endpoint(record.endpoints, local_families)
+        candidates = _endpoint_candidates(record.endpoints, local_families)
+        if endpoint_tracker is not None:
+            lp = live.get(wg_pub_b64)
+            hs = lp.latest_handshake if lp else 0
+            endpoint = endpoint_tracker.choose(wg_pub_b64, candidates, hs, now_epoch)
+        else:
+            endpoint = candidates[0] if candidates else None
         desired[wg_pub_b64] = (record.cred.addr, endpoint)
 
     # Diff against live kernel state and apply
-    live = wgmod.get_peers(iface)
     live_set = set(live)
     desired_set = set(desired)
 
@@ -198,6 +258,10 @@ class ReconcileLoop:
         self._policy = policy
         # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
         self._hosts_domain = hosts_domain
+        # Per-peer endpoint fallback state, persisted across cycles (a no-op for
+        # single-endpoint peers). Dwell scales with the reconcile interval so a
+        # dead endpoint gets a few handshake attempts before we rotate.
+        self._endpoint_tracker = _EndpointTracker(dwell=max(15.0, interval * 3))
         self._stop = threading.Event()
 
     def run(self) -> None:
@@ -215,6 +279,7 @@ class ReconcileLoop:
                 self._get_revoked(),
                 self._policy,
                 self._local_families,
+                endpoint_tracker=self._endpoint_tracker,
             )
         except Exception as e:
             log.error("reconcile error: %s", e)
