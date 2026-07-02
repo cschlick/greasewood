@@ -83,3 +83,5 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert "prod,web" in out                                          # multi-segment bridge
     assert "*" in out                                                 # reach-all segment
     assert "expiring" in out and "EXPIRED" in out                     # varied states
+    assert "hrs" in out                                               # relative expiry (N hrs)
+    assert "<1 hr" in out                                             # expiring node's expires col

@@ -1793,28 +1793,32 @@ def cmd_nodes(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
-    fmt = "{:<24} {:<40} {:<20} {:<22} {}"
+    fmt = "{:<24} {:<40} {:<9} {:<22} {}"
     print(fmt.format("name", "addr", "expires", "state", "segments"))
-    print("-" * 120)
+    print("-" * 110)
     for r in records:
         exp = r.cred.exp
         left = (exp - now).total_seconds()
         if left < 0:
             state = "EXPIRED"
+            expires = "expired"
         elif left < 3600:
             state = f"expiring ({int(left / 60)}m)"
+            expires = "<1 hr"
         else:
             state = "ok"
+            h = int(left // 3600)
+            expires = f"{h} hr" if h == 1 else f"{h} hrs"
         marker = " ← self" if r.id_pub.hex() == own_id else ""
         segments = ",".join(
             c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")
         ) or "-"
         # Show the resolvable FQDN (what /etc/hosts maps + what you can ping),
-        # not the bare hostname. (Underlay endpoints are shown per-node by
-        # `gw diagnose`, where a block is more compact than table columns.)
+        # not the bare hostname. `expires` is a coarse hours-remaining; `gw
+        # diagnose` shows the exact timestamp (and the underlay endpoints).
         print(fmt.format(
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            exp.strftime("%Y-%m-%d %H:%M UTC"), state + marker, segments
+            expires, state + marker, segments
         ))
 
     print(f"\n{len(records)} record(s) in local directory cache")
@@ -2009,6 +2013,7 @@ def cmd_diagnose(args) -> int:
         u6, u4 = _underlay_addrs(r.endpoints)
         print(f"● {r.hostname}  [{r.cred.addr}]  inbound={r.inbound}")
         print(f"    underlay  v6={u6}  v4={u4}")
+        print(f"    expires   {r.cred.exp:%Y-%m-%d %H:%M UTC}")
         print(f"    {status}")
         for p in problems:
             print(f"    - {p}")
