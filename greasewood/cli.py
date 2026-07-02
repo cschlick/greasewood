@@ -1508,6 +1508,14 @@ def cmd_run(args) -> int:
     cfg = load_config(Path(args.config))
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
+    # Peering is decided by shared segment:<name> tags. A caps list without one
+    # (e.g. a hand-written legacy "mesh") peers with NOBODY and fails silently
+    # per-record at reconcile — say it loudly once, up front.
+    if not any(c.startswith("segment:") for c in cfg.caps):
+        log.warning("[node] caps = %s contains no segment:<name> tag — this "
+                    "node will not peer with anyone (add e.g. segment:mesh)",
+                    cfg.caps)
+
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     log.info("overlay addr: %s", keys.addr)
 
