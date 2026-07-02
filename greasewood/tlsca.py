@@ -95,8 +95,22 @@ def ensure_ca_cert(
         .sign(private_key=ca_priv, algorithm=None)  # Ed25519 → algorithm=None
     )
     pem = cert.public_bytes(serialization.Encoding.PEM)
-    path.write_bytes(pem)
-    os.chmod(path, 0o644)
+    # Atomic write via a unique temp + rename: even if two processes reach here
+    # concurrently (the in-process CA lock can't cover a separate `gw` process),
+    # a reader never sees a half-written cert — last complete write wins.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(pem)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
     return cert
 
 

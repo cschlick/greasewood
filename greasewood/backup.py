@@ -9,14 +9,22 @@ encrypted blob so the RUNBOOK's "back up ca.key encrypted + offline" is a
 single command.
 
 Format (all one file, no container library):
-    MAGIC (b"GWBK1\n")  |  salt[16]  |  nonce[12]  |  AES-GCM ciphertext
-    key = scrypt(passphrase, salt, n=2**15, r=8, p=1) -> 32 bytes
+    MAGIC (b"GWBK2\n")  |  log2n[1]  |  salt[16]  |  nonce[12]  |  AES-GCM ct
+    key = scrypt(passphrase, salt, n=2**log2n, r=8, p=1) -> 32 bytes
     plaintext = gzip(tar) of the collected files
+    AES-GCM associated data = MAGIC + log2n  (binds the work factor)
+
+The scrypt work factor lives in the header (log2n) so it can be raised over
+time without a format break; unpack still reads a legacy GWBK1 archive (fixed
+n=2**15). log2n is range-checked before the KDF runs, so a hostile header
+can't force an unbounded scrypt (a memory DoS on restore).
 
 AES-GCM authenticates the whole archive, so a wrong passphrase or a tampered
-byte fails cleanly (BackupError) rather than yielding garbage. Restoring the
-SAME CA key onto a new host changes no trust relationship — it is a restore,
-not a re-root.
+byte fails cleanly (BackupError) rather than yielding garbage. This passphrase
+is the SINGLE factor protecting the CA key (and the hub's id_priv) at rest, so
+its strength is the whole story — `gw hub-backup` warns on a short one.
+Restoring the SAME CA key onto a new host changes no trust relationship — it is
+a restore, not a re-root.
 
 The directory cache (directory.json) is deliberately NOT included: it is
 rebuilt from live node records on the first sync, and pinning a stale copy
@@ -34,12 +42,18 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-MAGIC = b"GWBK1\n"
+MAGIC = b"GWBK2\n"          # current format: work factor stored in the header
+_MAGIC_V1 = b"GWBK1\n"      # legacy: fixed n=2**15, AAD = magic only
 _SALT_LEN = 16
 _NONCE_LEN = 12
-_SCRYPT_N = 2 ** 15
+_SCRYPT_N = 2 ** 17         # OWASP 'sensitive' floor (~128 MiB); was 2**15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+_V1_N = 2 ** 15
+# Range for a header-supplied log2(N): >=14 keeps it meaningfully costly; <=20
+# caps scrypt memory (~1 GiB at r=8) so a hostile header can't OOM a restore.
+_LOG2N_MIN = 14
+_LOG2N_MAX = 20
 
 # Files that constitute hub state, relative to the data dir. ca.key is handled
 # separately (its path is configurable). Globs expand at collect time.
@@ -57,8 +71,8 @@ class BackupError(Exception):
     """Malformed archive, wrong passphrase, tamper, or unsafe restore path."""
 
 
-def _derive_key(passphrase: bytes, salt: bytes) -> bytes:
-    return Scrypt(salt=salt, length=32, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P) \
+def _derive_key(passphrase: bytes, salt: bytes, n: int) -> bytes:
+    return Scrypt(salt=salt, length=32, n=n, r=_SCRYPT_R, p=_SCRYPT_P) \
         .derive(passphrase)
 
 
@@ -74,24 +88,42 @@ def pack(files: dict[str, bytes], passphrase: bytes) -> bytes:
             tar.addfile(info, io.BytesIO(data))
     plaintext = gzip.compress(tar_buf.getvalue())
 
+    log2n = _SCRYPT_N.bit_length() - 1
+    header = MAGIC + bytes([log2n])
     salt = os.urandom(_SALT_LEN)
     nonce = os.urandom(_NONCE_LEN)
-    ct = AESGCM(_derive_key(passphrase, salt)).encrypt(nonce, plaintext, MAGIC)
-    return MAGIC + salt + nonce + ct
+    # Header (magic + work factor) is the GCM associated data, so tampering
+    # with the advertised work factor is detected.
+    ct = AESGCM(_derive_key(passphrase, salt, _SCRYPT_N)).encrypt(nonce, plaintext, header)
+    return header + salt + nonce + ct
 
 
 def unpack(blob: bytes, passphrase: bytes) -> dict[str, bytes]:
     """Decrypt and extract a backup blob into a name->bytes mapping."""
-    if not blob.startswith(MAGIC):
+    if blob.startswith(MAGIC):
+        rest = blob[len(MAGIC):]
+        if not rest:
+            raise BackupError("backup truncated")
+        log2n = rest[0]
+        if not (_LOG2N_MIN <= log2n <= _LOG2N_MAX):
+            raise BackupError(f"implausible scrypt work factor 2**{log2n}")
+        n = 1 << log2n
+        aad = MAGIC + bytes([log2n])
+        body = rest[1:]
+    elif blob.startswith(_MAGIC_V1):
+        n = _V1_N
+        aad = _MAGIC_V1
+        body = blob[len(_MAGIC_V1):]
+    else:
         raise BackupError("not a greasewood backup (bad magic)")
-    body = blob[len(MAGIC):]
+
     if len(body) < _SALT_LEN + _NONCE_LEN:
         raise BackupError("backup truncated")
     salt = body[:_SALT_LEN]
     nonce = body[_SALT_LEN:_SALT_LEN + _NONCE_LEN]
     ct = body[_SALT_LEN + _NONCE_LEN:]
     try:
-        plaintext = AESGCM(_derive_key(passphrase, salt)).decrypt(nonce, ct, MAGIC)
+        plaintext = AESGCM(_derive_key(passphrase, salt, n)).decrypt(nonce, ct, aad)
     except InvalidTag:
         raise BackupError("wrong passphrase or corrupted/tampered backup")
 

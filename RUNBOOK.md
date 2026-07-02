@@ -53,8 +53,16 @@ sudo GW_BACKUP_PASSPHRASE=… gw hub-backup --out /secure/offline/hub.gwbk
 ```
 
 Anyone with the file **and** the passphrase can impersonate your CA, so guard
-both. Test-restore it (`gw hub-restore … --data-dir /tmp/verify`) before you
-rely on it.
+both. The passphrase is the *single* factor protecting the CA key at rest — use
+a long, high-entropy one (a diceware phrase); `gw hub-backup` warns on a short
+one. Test-restore it (`gw hub-restore … --data-dir /tmp/verify`) before you rely
+on it.
+
+> **`GW_BACKUP_PASSPHRASE` in the environment is readable** by root and, on many
+> systems, visible in `/proc/<pid>/environ` and process listings — and it may
+> land in shell history or a CI log. Use it only for unattended/cron backups,
+> and prefer sourcing it from a secrets manager rather than an inline
+> assignment. For interactive backups, omit it and let `gw hub-backup` prompt.
 
 The pieces, if you back up by hand instead:
 - **`/var/lib/greasewood/ca.key`** (hub only) — the one irreplaceable secret;
