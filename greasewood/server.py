@@ -160,7 +160,7 @@ class _Handler(BaseHTTPRequestHandler):
             record.verify(self.get_ca_pubs(), self.get_revoked())
             accepted = self.directory.merge([record])
             # Persist so the record survives a daemon restart and shows up in
-            # `gw ls` (which reads the on-disk cache, not live memory).
+            # `gw status` (which reads the on-disk cache, not live memory).
             if accepted and self.cache_path is not None:
                 try:
                     self.directory.save(self.cache_path)
