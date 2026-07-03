@@ -225,7 +225,10 @@ kernel's WireGuard and on systemd rather than shipping its own userspace
 transport (the way a Go implementation such as `wireguard-go` does) or its own
 supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
 (see [Auditable](#auditable)). A macOS/Windows port would mean a different
-data-plane backend and is out of scope.
+data-plane backend and is out of scope — but [PORTING.md](PORTING.md) sketches
+what a macOS port would actually cost (spoiler: the audit trail is the *cheapest*
+part to carry across, and staying "greasy" — root + subprocess, `brew`-installed,
+not a Network Extension — is the only version consistent with the project).
 
 ## Auditable
 
