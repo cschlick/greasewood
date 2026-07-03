@@ -6,9 +6,10 @@ document exists so the reasoning isn't lost, and so that if the day ever comes,
 whoever picks it up starts from a clear-eyed estimate instead of a hunch.
 
 The short version: the parts that *look* hard (naming, the audit trail) are
-cheap, and the real cost lives in two subsystems — supervising a userspace
-tunnel process, and re-expressing the door's isolation in `pf`. Everything else
-is mechanical.
+cheap; one thing needs a modest rethink (the interface is a process, not a kernel
+object — but a launchd job absorbs most of that); and the one genuinely hard,
+security-critical subsystem is re-expressing the door's isolation in `pf`.
+Everything else is mechanical.
 
 ## The guiding principle: the grease *is* the auditability
 
@@ -51,8 +52,8 @@ audited `wg._run`. That's the cheapest, most portable part of the codebase.
 | **Audit + narrator infrastructure** | ~free | Platform-neutral: records "argv, rc, timing, why." Only the narrator's command→English *dictionary* grows (add macOS verbs). |
 | **Interface naming** | small | The mesh interface name is already config-driven (multi-mesh forced it). utun constrains the *shape* to `utunN`, and one constant (`DOOR_IFACE`) is still hardcoded. |
 | **Routing verbs/semantics** | small–medium | `ip` → `route`/`ifconfig`; no atomic `route replace`; utun is point-to-point. |
-| **Interface *lifecycle*** | **real** | The interface is a supervised userspace process (`wireguard-go`), not a kernel object. |
-| **Door isolation** | **real, security-critical** | Linux policy routing (blackhole table + `ip rule`) has no macOS equivalent; it becomes a `pf` anchor. |
+| **Interface *lifecycle*** | medium | The interface is a `wireguard-go` process, not a kernel object — but a dedicated launchd job keeps it up, so greasewood stays a `wg set` client. |
+| **Door isolation** | **the hard one, security-critical** | Linux policy routing (blackhole table + `ip rule`) has no macOS equivalent; it becomes a `pf` anchor. |
 | **Service + packaging tail** | medium | launchd instead of systemd; a fresh integration-test harness; resolver-cache quirks. |
 
 ## The cheap parts
@@ -107,20 +108,52 @@ The command shapes are a straight mapping (`ip -6 route replace X dev gw-mesh` �
 
 ## The expensive parts
 
-### 1. Interface lifecycle: a supervised process, not a kernel object
+### 1. Interface lifecycle: the interface is a process, not a kernel object
 
-On Linux, `ip link add … type wireguard` conjures a kernel interface that just
-*exists*, persistent and independent of any process. greasewood's model assumes
-this: create the interface once at startup, then reconcile only ever touches
-peers on a thing the kernel holds.
+First, clear up a common confusion: the `wg` **tool** is passive on every
+platform. It's only a *configurator* — it has never created an interface, and it
+needs nothing running. `brew install wireguard-tools`, type `wg show`, and it
+prints nothing and exits. That part "just works."
 
-On macOS there is no kernel WireGuard. The interface is created by
-`wireguard-go`, a **userspace process**, and lives and dies with it. So
-greasewood gains a lifecycle it doesn't have today: start `wireguard-go`, detect
-a crash, restart it, tear it down. The kernel used to be the supervisor; now the
-daemon is. Two interfaces (mesh + door) means two processes to babysit. `wg
-set`/`wg show` still work against it (same UAPI socket), so the *peer* management
-ports unchanged — it's the interface's existence that becomes a managed thing.
+The difference is what a WireGuard **interface** *is*:
+
+- On **Linux**, an interface is a **kernel object**. `ip link add gw-mesh type
+  wireguard` creates it and it then simply *exists* — free-standing, no process
+  attached. greasewood can crash and restart and every live tunnel keeps running
+  in the kernel (a documented property: the daemon isn't in the data path).
+- On **macOS** there is no kernel WireGuard, so an interface is a running
+  **`wireguard-go` process** on a `utun`. It exists only while that process runs,
+  and every tunnel on it drops the instant the process dies. (`wg show` shows
+  nothing on a fresh Mac precisely because no `wireguard-go` is running — there's
+  no interface for the tool to find.)
+
+So the real cost isn't "you have to start `wg`" — it's that **an interface's
+existence is now tied to a process's lifetime**, which is never true on Linux.
+*Something* has to keep that process alive. There are two ways, and one is
+clearly right:
+
+- **greasewood owns a supervise-and-restart loop** — spawn `wireguard-go`, watch
+  its PID, restart on death, tear down on shutdown. Possible, but it grows the
+  daemon a babysitter it doesn't have today, and two interfaces (mesh + door)
+  means two to mind.
+- **A dedicated launchd job keeps `wireguard-go` up** (a plist with
+  `KeepAlive`), and greasewood stays a pure `wg set` client that assumes the
+  interface exists — which is almost exactly how it treats the kernel interface
+  on Linux. **This is the way.** greasewood already delegates its *own* uptime to
+  systemd/launchd rather than daemonizing itself, so delegating the tunnel
+  process's uptime to launchd is the same move, one layer down. On this path the
+  macOS backend's `create_interface` becomes "ensure the launchd job is loaded
+  and the utun is up," not "fork and babysit a process."
+
+The one semantic that doesn't fully go away either way: a kernel interface
+survives a greasewood restart *and* survives greasewood crashing; a
+process-backed one survives a greasewood restart but not the `wireguard-go`
+process dying. launchd brings the process back fast, but there's a blink where
+tunnels are down that has no Linux analogue. Worth documenting, not worth
+losing sleep over. `wg set`/`wg show` work against the interface unchanged (same
+UAPI socket), so all the *peer* management ports as-is — it's only the
+interface's *existence* that moves from "kernel state" to "a launchd-managed
+process."
 
 ### 2. Door isolation: routing → filtering (`pf`)
 
@@ -170,9 +203,12 @@ endpoint. Why it's the hard part:
 
 1. **Extract a `Backend` driver** — `create_interface`, `set_peer`, `add_route`,
    `remove_route`, `isolate_door`, `destroy_interface`, … The current `wg`/`ip`
-   code becomes the Linux impl; a macOS impl is `wireguard-go` supervision +
-   `route`/`ifconfig` + a `pf` anchor. **Every backend command still goes through
-   the audited `wg._run`,** so the trail stays honest per-platform for free.
+   code becomes the Linux impl; the macOS impl configures peers with the same
+   `wg`, adds routes with `route`/`ifconfig`, isolates the door with a `pf`
+   anchor, and lets `create_interface` mean "ensure the launchd `wireguard-go`
+   job is up" rather than forking a process itself. **Every backend command
+   still goes through the audited `wg._run`,** so the trail stays honest
+   per-platform for free.
 2. **Extend `narrate.describe()`** with the macOS verbs, and let the door-
    isolation narration branch (blackhole table vs pf drop) — one narrator,
    identical human output.
