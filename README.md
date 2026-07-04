@@ -694,7 +694,8 @@ Two properties worth knowing:
 |--------------------|-------|-----------------------------------------------------------|
 | `create`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
-| `invite`           | yes   | Open a 15-min door window, print a single-use join token. |
+| `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
+| `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the hub it also shows the [door's state](#membership). |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
@@ -749,6 +750,43 @@ ca_key_file    = "/var/lib/greasewood/ca.key"
 control_listen = ":51902"
 credential_ttl = "24h"
 ```
+
+### Baked images & autoscaling: the standing door
+
+The default door is deliberately one-token-one-node. For cloud images and
+autoscaling groups — where instances must enroll themselves at first boot —
+open a **standing door** instead:
+
+```bash
+# On the hub, once per fleet:
+sudo gw invite --standing --segments autoscale --endpoint hub.example.com -q
+# → ONE token. Put it in the image or launch template's user-data.
+```
+
+Every instance runs the same `gw join <token>` at first boot. Each join is
+still the **full one-node ceremony** — fresh identity keys, its own CA-signed
+credential, the same door isolation (a token holder can reach the enroll port
+and *nothing else*) — the door just doesn't close afterward. Joins serialize
+(all holders share the door's guest key), so a boot burst enrolls one node
+every couple of seconds; have the first-boot script retry on failure.
+
+Threat model, honestly: a leaked standing token lets its holder **enroll a
+rogue node** into the pinned segment — a bounded, visible (`gw status` shows
+`door: OPEN (standing) — N enrolled`; every join is in the audit trail), and
+reversible (`gw revoke`) failure. That is the deliberate trade against the
+alternatives (e.g. giving instances SSH to the hub, whose failure mode is hub
+compromise). Contain it with a quarantine segment and rotate freely:
+
+```bash
+sudo gw close-door                 # token permanently dead, fleet-wide, instantly
+sudo gw invite --standing ... -q   # fresh seed → fresh token → update user-data
+```
+
+Enrolled nodes are never affected by door operations — their credentials come
+from the CA, not the door. A standing door survives hub reboots (the daemon
+re-erects it), and a plain `gw invite` refuses to silently supersede one (pass
+`--supersede` or `close-door` first), so a one-off invite can't accidentally
+invalidate the token baked into your image pipeline.
 
 ### Roles
 
