@@ -3,9 +3,11 @@
 
 Builds a varied directory cache and runs the real `cmd_status`: mixed segments
 (the default `mesh` pool, `prod`/`dev`/`web`, a multi-segment *bridge*, the
-reach-all `*`), the `← self` marker, and `ok`/`expiring`/`EXPIRED` states. It
-prints the full table, so `pytest -s tests/test_nodes_demo.py` shows what a dozen
-nodes looks like; without `-s` it's a plain regression on the output shape.
+reach-all `*`), and varied credential states (`23h` / `<1h!` / `EXPIRED`) in the
+split roster — LEFT is the mesh (fleet-wide), RIGHT is 'this node' (the `peer?`
+policy answer without root; live links + traffic with sudo). It prints the full
+table, so `pytest -s` shows what a dozen nodes looks like; without `-s` it's a
+plain regression on the output shape.
 """
 import datetime as dt
 import types
@@ -77,14 +79,14 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     print(out)   # visible under `pytest -s`
 
     assert "role     : node" in out and "hostname : api1" in out     # self header
-    assert "← self" in out                                            # self row marked
-    assert "name" in out and "segments" in out                       # column header
+    assert "│ self" in out                                            # self marked in the 'this node' column
+    assert "name" in out and "segments" in out                       # left (mesh) columns
+    assert "this node" in out and "peer?" in out                     # the split; non-root right side
+    assert "run 'sudo gw status'" in out                             # hint to see live links
     assert "12 record(s) in local directory cache" in out            # self + 11
     assert "prod,web" in out                                          # multi-segment bridge
     assert "*" in out                                                 # reach-all segment
-    assert "expiring" in out and "EXPIRED" in out                     # varied states
-    assert "hrs" in out                                               # relative expiry (N hrs)
-    assert "<1 hr" in out                                             # expiring node's expires col
+    assert "EXPIRED" in out and "<1h!" in out                         # expired + expiring exp cells
 
 
 def test_nodes_by_segment(tmp_path, capsys):
