@@ -52,9 +52,23 @@ def current_context() -> str:
     return _ctx.get()
 
 
+def _sanitize(s: str) -> str:
+    """Escape control characters to visible \\xNN. A hostname arrives off the
+    wire and flows into ctx, so an adversarial name with a newline (or other C0
+    control) must not be able to forge extra log lines or bleed across fields
+    (the deep property tests found exactly this)."""
+    return "".join(c if c >= " " else f"\\x{ord(c):02x}" for c in s)
+
+
 def _q(s: str) -> str:
-    """logfmt-quote a value only if it needs it."""
-    return s if s and all(c not in s for c in ' "=\t\n') else '"' + s.replace('"', '\\"') + '"'
+    """logfmt-quote a value only if it needs it. Quoting triggers on ANY
+    whitespace (str.isspace — includes unicode spaces like \\xa0, which the
+    parser's \\S+ would otherwise split on), on '=' / '\"' (field syntax), and
+    on backslash (escaped inside quotes so the unescape is unambiguous)."""
+    s = _sanitize(s)
+    if s and not any(c.isspace() or c in '"=\\' for c in s):
+        return s
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def is_readonly(argv) -> bool:

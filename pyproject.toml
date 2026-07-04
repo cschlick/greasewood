@@ -50,9 +50,10 @@ packages = ["greasewood"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--ignore=tests/integration"
+addopts = "--ignore=tests/integration -m 'not deep'"
 markers = [
     "integration: requires podman + WireGuard kernel module (run with: pytest tests/integration/)",
     "stress: many-node scale tests, slow + resource-heavy (gated behind GW_STRESS=1)",
     "soak: long-running renewal-cycle endurance test (gated behind GW_SOAK=1)",
+    "deep: exhaustive Hypothesis property runs, nightly-sized (run with: HYPOTHESIS_PROFILE=deep pytest tests/deep -m deep)",
 ]

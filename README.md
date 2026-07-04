@@ -1144,6 +1144,21 @@ python -m pytest tests/integration/
 GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -s
 ```
 
+**Deep property tests** (`tests/deep/`, marker `deep`) are the exhaustive
+Hypothesis tier, kept out of the default run so it stays ~30s. They drive
+state machines and adversarial inputs against the security-critical invariants:
+credential/record tamper resistance (the wire format signs *canonical
+semantics* — equivalent encodings verify, changed semantics never do), the CA
+registry's hostname-uniqueness/revocation/rollback rules under arbitrary
+operation interleavings, directory merge monotonicity, the audit→narrate logfmt
+round trip (including control-character injection via wire-supplied hostnames),
+and `/etc/hosts` never damaging user content. Run nightly-sized via
+`scripts/deep-tests.sh` (thousands of examples per property; wire it to cron or
+a CI schedule), or as a quick sanity pass with `pytest tests/deep -m deep`.
+Their first run found two real bugs the fast suite had missed — an audit-log
+injection via control characters in hostnames, and a unicode-line-boundary
+corruption in hosts-file rewrites — which is the tier's job.
+
 ## Design notes & non-goals
 
 The [non-goals](#how-it-compares) — routing/relays, NAT traversal, IPv4 overlay,

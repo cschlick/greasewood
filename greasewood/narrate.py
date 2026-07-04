@@ -41,7 +41,8 @@ def _field(line: str, key: str) -> "str | None":
         return None
     v = m.group(1)
     if v.startswith('"'):
-        v = v[1:-1].replace('\\"', '"')
+        # Invert the writer's escaping: any backslash-escaped char (\" and \\).
+        v = re.sub(r"\\(.)", r"\1", v[1:-1])
     return v
 
 
