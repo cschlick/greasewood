@@ -148,19 +148,6 @@ class SyncLoop:
         except OSError:
             pass
 
-
-def stamp_sync_path(data_dir) -> "Path":
-    """Where the last-successful-sync timestamp lives."""
-    return Path(data_dir) / "last_sync"
-
-
-def read_last_sync(data_dir) -> "str | None":
-    """The ISO time of the last successful directory sync, or None."""
-    try:
-        return stamp_sync_path(data_dir).read_text().strip()
-    except (FileNotFoundError, OSError):
-        return None
-
     def run(self) -> None:
         while not self._stop.wait(self._interval):
             try:
@@ -175,3 +162,16 @@ def read_last_sync(data_dir) -> "str | None":
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def stamp_sync_path(data_dir) -> "Path":
+    """Where the last-successful-sync timestamp lives."""
+    return Path(data_dir) / "last_sync"
+
+
+def read_last_sync(data_dir) -> "str | None":
+    """The ISO time of the last successful directory sync, or None."""
+    try:
+        return stamp_sync_path(data_dir).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
