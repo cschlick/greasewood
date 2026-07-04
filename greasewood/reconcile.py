@@ -253,8 +253,16 @@ class ReconcileLoop:
         policy: Policy = default_policy,
         hosts_domain: str | None = None,
         local_families: "set[int] | None" = None,
+        ensure_iface: "Callable[[], None] | None" = None,
     ) -> None:
         self._iface = iface
+        # Recreates the mesh interface (a closure over the daemon's config +
+        # keys). The daemon creates the interface once at startup, but it can
+        # vanish underneath a running daemon — a purge/re-create on the same
+        # host, or a manual `ip link del` — after which every peer install
+        # fails (door enrollments included) until a restart. With this hook the
+        # loop self-heals: each cycle re-checks and recreates if it's gone.
+        self._ensure_iface = ensure_iface
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
@@ -282,6 +290,17 @@ class ReconcileLoop:
             self._cycle()
 
     def _cycle(self) -> None:
+        if self._ensure_iface is not None and not wgmod.interface_exists(self._iface):
+            log.warning("mesh interface %s is MISSING — recreating it. Something "
+                        "deleted it while the daemon was running (a purge or "
+                        "re-create on this host, or a manual 'ip link del').",
+                        self._iface)
+            try:
+                self._ensure_iface()
+            except Exception as e:
+                log.error("could not recreate %s: %s — will retry next cycle",
+                          self._iface, e)
+                return
         try:
             trusted = reconcile_once(
                 self._iface,

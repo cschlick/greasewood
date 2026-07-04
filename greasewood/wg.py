@@ -70,6 +70,12 @@ def ensure_interface(
     log.info("interface %s up, addr %s, port %d", iface, overlay_addr, listen_port)
 
 
+def interface_exists(iface: str) -> bool:
+    """True if `iface` currently exists. Read-only (`show`), so it lands at
+    DEBUG in the audit trail, not the durable log."""
+    return _run("ip", "link", "show", iface, check=False).returncode == 0
+
+
 def format_endpoint(host: str, port: "int") -> str:
     """Format a wg endpoint, bracketing IPv6. `host` is a bare address (a ':' in
     it means IPv6). v4 → 'host:port'; v6 → '[host]:port'. The underlay may be

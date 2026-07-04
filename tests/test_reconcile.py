@@ -303,3 +303,57 @@ class TestReconcileTrustGate:
 
         assert fake.set_calls == 0 and fake.remove_calls == 0   # no churn
         assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"
+
+
+class TestInterfaceSelfHeal:
+    """The daemon creates the mesh interface at startup, but it can vanish
+    underneath a running daemon (purge/re-create on the host, manual ip link
+    del) — after which every peer install fails, door enrollments included,
+    until a restart. With the ensure_iface hook the loop re-checks each cycle
+    and recreates it."""
+
+    def _loop(self, ensure):
+        return ReconcileLoop(
+            iface="gw-test", directory=Directory(), local_id_pub=b"\x01" * 32,
+            local_caps=["segment:mesh"], get_ca_pubs=lambda: [],
+            get_revoked=set, ensure_iface=ensure)
+
+    def test_missing_interface_is_recreated_then_cycle_proceeds(self, monkeypatch):
+        calls = {"ensure": 0, "reconcile": 0}
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists",
+                            lambda iface: calls["ensure"] > 0, raising=False)
+        monkeypatch.setattr(reconcile, "reconcile_once",
+                            lambda *a, **k: calls.__setitem__("reconcile", calls["reconcile"] + 1) or [])
+        loop = self._loop(lambda: calls.__setitem__("ensure", calls["ensure"] + 1))
+        loop._cycle()
+        assert calls == {"ensure": 1, "reconcile": 1}   # healed, then reconciled
+
+    def test_present_interface_is_not_touched(self, monkeypatch):
+        calls = {"ensure": 0}
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists",
+                            lambda iface: True, raising=False)
+        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: [])
+        loop = self._loop(lambda: calls.__setitem__("ensure", 1))
+        loop._cycle()
+        assert calls["ensure"] == 0
+
+    def test_failed_heal_skips_cycle_and_retries_next(self, monkeypatch):
+        ran = {"reconcile": 0}
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists",
+                            lambda iface: False, raising=False)
+        monkeypatch.setattr(reconcile, "reconcile_once",
+                            lambda *a, **k: ran.__setitem__("reconcile", 1) or [])
+        def boom():
+            raise RuntimeError("ip link add failed")
+        loop = self._loop(boom)
+        loop._cycle()                       # must not raise
+        assert ran["reconcile"] == 0        # no reconcile against a dead iface
+
+    def test_no_hook_means_no_check(self, monkeypatch):
+        # Backward-compat: without the hook, _cycle never asks about the iface.
+        def explode(iface):
+            raise AssertionError("should not be called")
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists", explode, raising=False)
+        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: [])
+        loop = self._loop(None)
+        loop._cycle()
