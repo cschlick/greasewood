@@ -130,12 +130,36 @@ class SyncLoop:
                 if n:
                     self._directory.save(self._cache_path)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
+                self._stamp_sync()   # record a successful pull for `gw status`
                 self._note_hub_clock(hub_now)
                 if self._on_renew_after and renew_after is not None:
                     self._on_renew_after(renew_after)
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
+
+    def _stamp_sync(self) -> None:
+        """Record the time of a successful directory pull, so `gw status` can
+        show sync freshness (it reads a *cache*; a stale roster is worth
+        flagging). Stamped on every successful pull, even a no-op one."""
+        try:
+            stamp_sync_path(self._cache_path.parent).write_text(
+                dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
+        except OSError:
+            pass
+
+
+def stamp_sync_path(data_dir) -> "Path":
+    """Where the last-successful-sync timestamp lives."""
+    return Path(data_dir) / "last_sync"
+
+
+def read_last_sync(data_dir) -> "str | None":
+    """The ISO time of the last successful directory sync, or None."""
+    try:
+        return stamp_sync_path(data_dir).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
