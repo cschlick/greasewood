@@ -7,3 +7,6 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# Hypothesis example database (failing-example cache)
+.hypothesis/

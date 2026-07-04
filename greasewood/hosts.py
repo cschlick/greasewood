@@ -98,7 +98,11 @@ def _managed_block_addrs(text: str, tag: str) -> set:
     """The set of addresses currently in THIS tag's greasewood block."""
     begin, end = _begin(tag), _end(tag)
     addrs, inside = set(), False
-    for line in text.splitlines():
+    # split("\n"), not splitlines(): /etc/hosts is a POSIX \n-delimited file,
+    # and splitlines() also breaks on \x1c-\x1e/\x85/  — which would let a
+    # user line containing one of those be corrupted by our rewrite (found by
+    # the deep property tests).
+    for line in text.split("\n"):
         s = line.strip()
         if s == begin:
             inside = True
@@ -136,7 +140,7 @@ def _strip_managed(text: str, tag: str) -> str:
     second mesh's block on the same host is left untouched)."""
     begin, end = _begin(tag), _end(tag)
     out, skip = [], False
-    for line in text.splitlines():
+    for line in text.split("\n"):    # POSIX \n split — see _managed_block_addrs
         if line.strip() == begin:
             skip = True
             continue
