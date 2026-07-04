@@ -136,3 +136,35 @@ def test_renew_does_not_self_conflict(tmp_path):
         ts=dt.datetime.now(_UTC).replace(microsecond=0),
     ).sign(k.id_priv)
     ca.renew(req)  # no raise — renewal re-issues for the same id
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root ignores file perms")
+def test_hostname_owner_unreadable_registry_raises_not_lies(tmp_path):
+    """An unreadable registry must surface PermissionError (the CLI turns it
+    into 'try sudo'), NOT read as 'no node named X' — swallowing it made a
+    non-root `gw set-segments <name>` deny an existing node's existence."""
+    import os
+    ca = _ca(tmp_path)
+    id1, wg1 = _node()
+    ca.issue(id1, wg1, "chat01", ["mesh"])
+    assert ca.hostname_owner("chat01") == id1.hex()
+
+    node_file = next((tmp_path / "nodes").glob("*.json"))
+    os.chmod(node_file, 0o000)                 # registry entry unreadable
+    try:
+        with pytest.raises(PermissionError):
+            ca.hostname_owner("chat01")
+    finally:
+        os.chmod(node_file, 0o600)
+
+    os.chmod(tmp_path / "nodes", 0o000)        # whole registry dir unreadable
+    try:
+        with pytest.raises(PermissionError):
+            ca.hostname_owner("chat01")
+    finally:
+        os.chmod(tmp_path / "nodes", 0o700)
+
+
+def test_hostname_owner_missing_dir_is_empty_not_error(tmp_path):
+    """No nodes/ dir at all = genuinely empty registry → None, no error."""
+    ca = _ca(tmp_path)                          # nothing issued, no nodes/
+    assert ca.hostname_owner("anything") is None
