@@ -191,3 +191,53 @@ trusted_pubs = []
         assert "sudo gw status" in msg and "chmod 755" in msg
     finally:
         data.chmod(0o755)
+
+
+def _hub_cfg(tmp_path):
+    (tmp_path / "ca.key").write_text("placeholder")
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text(f"""[node]
+hostname = "hub"
+data_dir = "{tmp_path}"
+role = "hub"
+[network]
+interface = "gw-mesh"
+seeds = []
+[hub]
+ca_key_file = "{tmp_path}/ca.key"
+[ca]
+trusted_pubs = []
+""")
+    import types
+    return types.SimpleNamespace(config=str(cfg), quiet=True, endpoint=None,
+                                 segments=None, caps=None, hostname=None)
+
+
+def test_invite_preflight_requires_mesh_interface(tmp_path, monkeypatch):
+    """A token is only redeemable if the daemon (which hosts the enroll server)
+    is up with its mesh interface present. invite must catch a missing
+    interface NOW — not let the joiner discover it as a cryptic rejection."""
+    _as_root(monkeypatch)
+    monkeypatch.setattr("greasewood.wg.interface_exists", lambda iface: False)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_invite(_hub_cfg(tmp_path))
+    msg = str(e.value)
+    assert "mesh interface 'gw-mesh' doesn't exist" in msg
+    assert "systemctl start greasewood" in msg
+
+
+def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
+    """Interface present but no daemon answering on loopback (kernel keeps the
+    interface after the daemon dies) — invite must refuse with the reason."""
+    _as_root(monkeypatch)
+    monkeypatch.setattr("greasewood.wg.interface_exists", lambda iface: True)
+    import urllib.request
+
+    def refuse(url, timeout=None):
+        raise OSError("connection refused")
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_invite(_hub_cfg(tmp_path))
+    msg = str(e.value)
+    assert "isn't answering on loopback" in msg
+    assert "token could never be redeemed" in msg

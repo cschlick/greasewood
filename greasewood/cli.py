@@ -538,6 +538,24 @@ def cmd_invite(args) -> int:
     if cfg.ca_key_file is None:
         sys.exit("invite requires ca_key_file in [hub]")
 
+    # Preflight: a token is only redeemable if the daemon is up (it hosts the
+    # enroll server) with its mesh interface present (it installs the joiner as
+    # a peer). Catch both NOW, when the operator can act — not minutes later as
+    # a cryptic rejection on the joining node.
+    if not wgmod.interface_exists(cfg.wg_interface):
+        sys.exit(f"the hub's mesh interface {cfg.wg_interface!r} doesn't exist — "
+                 f"the daemon isn't running (or the interface was deleted under "
+                 f"it). A joiner would be rejected at enrollment. Start the "
+                 f"daemon first: sudo systemctl start greasewood   (or: sudo gw run)")
+    import urllib.request as _url
+    try:
+        _url.urlopen(f"http://[::1]:{_control_port(cfg)}/directory", timeout=3)
+    except Exception:
+        sys.exit(f"the hub daemon isn't answering on loopback (port "
+                 f"{_control_port(cfg)}) — it hosts the enroll server, so this "
+                 f"token could never be redeemed. Start it first: "
+                 f"sudo systemctl start greasewood   (or: sudo gw run)")
+
     data_dir = cfg.data_dir
 
     # The door is a single slot: a new invite regenerates the guest key and
@@ -1791,6 +1809,14 @@ def cmd_run(args) -> int:
         except Exception as e:
             log.warning("hosts: could not clean /etc/hosts: %s", e)
 
+    def _ensure_mesh_iface():
+        # Self-heal hook: recreate the mesh interface if it vanishes under a
+        # running daemon (purge/re-create on this host, manual ip link del).
+        with audit.context(f"heal: recreate missing interface {cfg.wg_interface}"):
+            wgmod.ensure_interface(
+                cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
+            )
+
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
         directory=directory,
@@ -1800,6 +1826,7 @@ def cmd_run(args) -> int:
         get_revoked=get_revoked,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
         local_families=_local_families(),
+        ensure_iface=_ensure_mesh_iface,
     )
     recon.start()
 
@@ -2864,6 +2891,28 @@ def cmd_purge(args) -> int:
 
     removed = []
     failed = []
+
+    # Stop the daemon FIRST. A daemon left running through a purge haunts the
+    # next mesh on this host: it keeps its stale CA and keys in memory, keeps
+    # serving door enrollments, and its mesh interface is gone — so every join
+    # against the re-created hub fails with a peer-install error.
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        r = subprocess.run([systemctl, "is-active", "--quiet", "greasewood"],
+                           capture_output=True)
+        if r.returncode == 0:
+            subprocess.run([systemctl, "stop", "greasewood"], capture_output=True)
+            removed.append("stopped greasewood.service")
+    # A manual `gw run` can't be stopped safely from here — but it MUST not
+    # survive the purge, so at least say so loudly.
+    r = subprocess.run(["pgrep", "-f", "gw run"], capture_output=True, text=True)
+    stray = [p for p in (r.stdout or "").split()
+             if p.isdigit() and int(p) != os.getpid()]
+    if r.returncode == 0 and stray:
+        print(f"⚠ a greasewood daemon still appears to be running (pid "
+              f"{', '.join(stray)}) — kill it before re-creating a mesh on this "
+              f"host, or it will serve enrollments with stale keys and no "
+              f"interface.")
 
     # Tear down WireGuard interface
     r = subprocess.run(["ip", "link", "show", iface], capture_output=True)

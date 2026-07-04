@@ -263,9 +263,31 @@ class EnrollServer:
         # its tunnel and push its NodeRecord to the hub on first startup.
         overlay_addr = derive_addr(id_pub_bytes)
         wg_pub_b64 = base64.b64encode(wg_pub_bytes).decode()
+        from subprocess import CalledProcessError
         from . import audit
-        with audit.context(f"enroll: +peer {hostname} [{overlay_addr}] from {peer_ip}"):
-            wgmod.set_peer(self._wg_iface, wg_pub_b64, overlay_addr)
+        try:
+            with audit.context(f"enroll: +peer {hostname} [{overlay_addr}] from {peer_ip}"):
+                wgmod.set_peer(self._wg_iface, wg_pub_b64, overlay_addr)
+        except CalledProcessError:
+            # Almost always: the mesh interface is gone (a purge/re-create ran
+            # under this daemon). Tell the joiner something actionable, not a
+            # raw command dump. The reconcile loop self-heals the interface
+            # within one cycle, so an immediate retry usually succeeds; a hub
+            # restart is the fallback. (The credential was written to the
+            # registry, but the joiner never received it — a same-node retry
+            # re-issues cleanly.)
+            reason = (f"the hub could not add you as a WireGuard peer — its mesh "
+                      f"interface {self._wg_iface!r} is missing or broken. It "
+                      f"should self-heal within seconds: retry this token. If it "
+                      f"keeps failing, restart the hub daemon "
+                      f"(sudo systemctl restart greasewood) and retry.")
+            log.error("enroll: peer install on %s failed for %s", self._wg_iface, hostname)
+            self._status(door.mark_door_attempt, peer_ip,
+                         f"peer install failed: {self._wg_iface} missing/broken")
+            _send_msg(conn, {"v": 1, "ok": False, "error": "hub data-plane failure",
+                             "reason": reason,
+                             "attempts_remaining": attempts_left - 1})
+            return False
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
         self._status(door.mark_door_enrolled, peer_ip, hostname)
 
