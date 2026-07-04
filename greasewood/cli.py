@@ -1881,33 +1881,98 @@ def _record_segments(r) -> list[str]:
     return [c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")]
 
 
-def _print_node_table(records, cfg, now, own_id) -> None:
-    """Print the name/addr/expires/state/segments table for `records`. The name
-    column is right-justified and sized to the longest FQDN so the
-    `.<mesh_domain>` suffixes line up."""
+def _fmt_bytes(n) -> str:
+    """Human byte size: 4200000 → '4.0M'."""
+    x = float(n)
+    for unit in ("B", "K", "M", "G"):
+        if x < 1024:
+            return f"{int(x)}{unit}" if unit == "B" else f"{x:.1f}{unit}"
+        x /= 1024
+    return f"{x:.1f}T"
+
+
+def _fmt_hs_age(age_s: float) -> str:
+    """Compact age for a handshake: 12→'12s', 90→'1m', 7200→'2h', bigger→'Nd'."""
+    if age_s < 60:
+        return f"{int(age_s)}s"
+    if age_s < 3600:
+        return f"{int(age_s // 60)}m"
+    if age_s < 86400:
+        return f"{int(age_s // 3600)}h"
+    return f"{int(age_s // 86400)}d"
+
+
+def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
+    """The split roster: LEFT is the mesh (fleet-wide, same on every node — name,
+    addr, inbound, segments, credential); RIGHT is THIS node's view (do I peer
+    with them, and — with root + live WireGuard state — the live data link and
+    its traffic). The right side degrades gracefully: without root it shows only
+    the policy 'would I peer' answer."""
+    import base64
     from .hosts import mesh_name
-    names = {r.id_pub.hex(): mesh_name(r.hostname, cfg.mesh_domain) for r in records}
-    namew = max(len("name"), *(len(v) for v in names.values()))
-    fmt = f"{{:>{namew}}} {{:<40}} {{:<9}} {{:<22}} {{}}"
-    header = fmt.format("name", "addr", "expires", "state", "segments")
-    print(header)
-    print("-" * len(header))
-    for r in records:
+    from .reconcile import default_policy
+
+    have_live = live_peers is not None
+    now_epoch = int(now.timestamp())
+
+    def _exp(r):
         left = (r.cred.exp - now).total_seconds()
         if left < 0:
-            state, expires = "EXPIRED", "expired"
-        elif left < 3600:
-            state, expires = f"expiring ({int(left / 60)}m)", "<1 hr"
+            return "EXPIRED"
+        if left < 3600:
+            return "<1h!"
+        h = int(left // 3600)
+        return f"{h // 24}d" if h >= 48 else f"{h}h"
+
+    # LEFT (mesh) cells + RIGHT (this node) cells, row-aligned.
+    left_hdr = ("name", "addr", "in", "segments", "exp")
+    left_rows, right_rows = [], []
+    for r in records:
+        left_rows.append((
+            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
+            "yes" if r.inbound != "no" else "no",
+            ",".join(_record_segments(r)) or "-", _exp(r),
+        ))
+        is_self = r.id_pub.hex() == own_id
+        peers = default_policy(cfg.caps, r.cred.caps)
+        if not have_live:                       # no live data — show policy only
+            right_rows.append(("self" if is_self else ("yes" if peers else "no"),))
+        elif is_self:
+            right_rows.append(("(self)", ""))
+        elif not peers:
+            right_rows.append(("— not a peer", ""))
         else:
-            state = "ok"
-            h = int(left // 3600)
-            expires = f"{h} hr" if h == 1 else f"{h} hrs"
-        marker = " ← self" if r.id_pub.hex() == own_id else ""
-        segs = ",".join(_record_segments(r)) or "-"
-        # `expires` is a coarse hours-remaining; `gw diagnose` shows the exact
-        # timestamp (and the underlay endpoints).
-        print(fmt.format(names[r.id_pub.hex()], r.cred.addr,
-                         expires, state + marker, segs))
+            lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
+            if lp is None:
+                right_rows.append(("not installed", ""))
+            elif lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+                right_rows.append((f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)} ago",
+                                   f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}"))
+            else:
+                right_rows.append(("○ no handshake", ""))
+    right_hdr = ("link", "traffic") if have_live else ("peer?",)
+
+    def _w(hdr, i, rows):
+        return max(len(hdr), *(len(row[i]) for row in rows)) if rows else len(hdr)
+    lw = [_w(left_hdr[i], i, left_rows) for i in range(len(left_hdr))]
+    rw = [_w(right_hdr[i], i, right_rows) for i in range(len(right_hdr))]
+
+    def _fl(cells):     # left: name right-justified, rest left
+        return " ".join([f"{cells[0]:>{lw[0]}}"]
+                        + [f"{cells[i]:<{lw[i]}}" for i in range(1, len(cells))])
+    def _fr(cells):
+        return " ".join(f"{cells[i]:<{rw[i]}}" for i in range(len(cells)))
+
+    lwidth = len(_fl(left_hdr))
+    print(f"{'mesh — the fleet (same on every node)':<{lwidth}} │ this node")
+    print(_fl(left_hdr) + " │ " + _fr(right_hdr))
+    print("-" * lwidth + "-+-" + "-" * max(len(_fr(right_hdr)), 9))
+    for lr, rr in zip(left_rows, right_rows):
+        print(_fl(lr) + " │ " + _fr(rr))
+    if not have_live:
+        note = ("run 'sudo gw status' to see live data links + traffic" if not is_root
+                else "no live WireGuard state — is the daemon running?")
+        print(f"({note})")
 
 
 def _fmt_ago(iso: str) -> str:
@@ -2142,6 +2207,18 @@ def cmd_status(args) -> int:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
         return 0
 
+    # Live data-plane state for the right-hand "this node" columns — only as
+    # root (wg show needs it). None → the roster shows the policy 'peer?' answer
+    # and a hint to re-run with sudo.
+    is_root = os.geteuid() == 0
+    live_peers = None
+    if is_root:
+        try:
+            from . import wg as wgmod
+            live_peers = wgmod.get_peers(cfg.wg_interface)
+        except Exception:
+            live_peers = None
+
     if getattr(args, "by_segment", False):
         # One table per named segment. A node appears under every segment it's in,
         # and a reach-all (segment:*) node appears under ALL of them — so many
@@ -2153,7 +2230,7 @@ def cmd_status(args) -> int:
                        if s in _record_segments(r) or "*" in _record_segments(r)]
             shown.update(r.id_pub.hex() for r in members)
             print(f"segment: {s}  ({len(members)} node{'' if len(members) == 1 else 's'})")
-            _print_node_table(members, cfg, now, own_id)
+            _print_node_table(members, cfg, now, own_id, live_peers, is_root)
             print()
         # Anything not shown above — unsegmented nodes (can't peer), or reach-all
         # nodes with no named segment to fall under — so the grouped view drops
@@ -2162,10 +2239,10 @@ def cmd_status(args) -> int:
         if leftover:
             print(f"(no segment)  ({len(leftover)} node{'' if len(leftover) == 1 else 's'}) "
                   f"— unsegmented, can't peer until given a segment")
-            _print_node_table(leftover, cfg, now, own_id)
+            _print_node_table(leftover, cfg, now, own_id, live_peers, is_root)
             print()
     else:
-        _print_node_table(records, cfg, now, own_id)
+        _print_node_table(records, cfg, now, own_id, live_peers, is_root)
         print()
 
     print(f"{len(records)} record(s) in local directory cache")

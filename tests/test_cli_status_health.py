@@ -100,6 +100,65 @@ def test_sync_stamp_written_on_successful_pull(tmp_path, monkeypatch):
     assert syncmod.read_last_sync(tmp_path) is not None
 
 
+def test_split_roster_live_links(tmp_path, monkeypatch, capsys):
+    """With root + live WireGuard state, the roster's right side shows THIS
+    node's data links: linked peers with traffic, a non-peer (no shared
+    segment), and a peer with no handshake."""
+    import base64
+    import os
+    import time
+    from greasewood import wg
+    keys = NodeKeys.load_or_generate(tmp_path)
+    ca = CAKeys.generate()
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "me"
+data_dir = "{tmp_path}"
+role = "node"
+caps = ["segment:prod"]
+[network]
+interface = "gw-mesh"
+seeds = []
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+
+    def rec(k, name, segs):
+        cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
+                          hostname=name, caps=[f"segment:{s}" for s in segs],
+                          iat=now, exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
+        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+                          cred=cred).sign(k.id_priv)
+
+    linked, other, silent = NodeKeys.generate(), NodeKeys.generate(), NodeKeys.generate()
+    d = Directory()
+    d.put(rec(keys, "me", ["prod"]))
+    d.put(rec(linked, "db01", ["prod"]))          # shared segment → peer, and linked
+    d.put(rec(other, "laptop", ["dev"]))          # different segment → not a peer
+    d.put(rec(silent, "old", ["prod"]))           # peer but no handshake
+    d.save(tmp_path / "directory.json")
+
+    nowe = int(time.time())
+    live = {
+        base64.b64encode(linked.wg_pub_bytes).decode():
+            wg.LivePeer(wg_pub_b64="x", endpoint="", allowed_ips="",
+                        latest_handshake=nowe - 12, rx_bytes=4_200_000, tx_bytes=1_100_000),
+        base64.b64encode(silent.wg_pub_bytes).decode():
+            wg.LivePeer(wg_pub_b64="x", endpoint="", allowed_ips="",
+                        latest_handshake=0, rx_bytes=0, tx_bytes=0),
+    }
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live)
+
+    cli.cmd_status(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
+    out = capsys.readouterr().out
+    assert "link" in out and "traffic" in out             # live headers, not 'peer?'
+    assert "● up, 12s ago" in out and "↓4.0M ↑1.0M" in out  # linked peer + traffic
+    assert "— not a peer" in out                          # laptop, different segment
+    assert "○ no handshake" in out                        # old, peer but silent
+    assert "(self)" in out                                # self row
+
+
 def test_syncloop_lifecycle_methods_exist(tmp_path):
     # Guard against the class body being broken by a mis-indented insert: the
     # daemon calls start()/stop(), which no unit test exercised before — so a
