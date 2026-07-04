@@ -195,6 +195,31 @@ def window_path(data_dir: Path) -> Path:
     return data_dir / "door_window.json"
 
 
+def read_window(data_dir: Path) -> "dict | None":
+    """The current door window if it is live, else None. A window is live if it
+    is STANDING (never expires; closed only by `gw close-door` or a superseding
+    invite) or if its expiry is still in the future."""
+    import datetime as dt
+    import json
+
+    p = window_path(data_dir)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    if data.get("standing"):
+        return data
+    try:
+        exp = dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.datetime.now(dt.timezone.utc) >= exp:
+        return None
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Door status/history — a small record of the door's lifecycle the hub daemon
 # maintains (open/close times + reason, failed attempts + source IPs, the last
@@ -233,18 +258,22 @@ def _write_door_status(data_dir: Path, data: dict) -> None:
     os.replace(tmp, p)
 
 
-def mark_door_opened(data_dir: Path, expires_iso: str, *, caps=None,
-                     pinned_hostname=None, max_attempts: int = 3) -> None:
-    """Record that an enrollment window just opened (resets per-window counters)."""
+def mark_door_opened(data_dir: Path, expires_iso: "str | None", *, caps=None,
+                     pinned_hostname=None, max_attempts: int = 3,
+                     standing: bool = False) -> None:
+    """Record that an enrollment window just opened (resets per-window counters).
+    A standing window has no expiry and keeps a running enrollment count."""
     _write_door_status(data_dir, {
         "state": "open",
+        "standing": standing,
         "opened_at": _status_now_iso(),
         "expires": expires_iso,
         "max_attempts": max_attempts,
         "caps": list(caps or []),
         "pinned_hostname": pinned_hostname,
         "attempts": [],          # failed attempts this window: {ts, ip, reason}
-        "enrolled": None,        # {ts, ip, hostname} on success
+        "enrolled": None,        # {ts, ip, hostname} of the LAST success
+        "enroll_count": 0,       # total successes this window (standing: many)
         "closed_at": None,
         "close_reason": None,
     })
@@ -260,6 +289,7 @@ def mark_door_attempt(data_dir: Path, ip: str, reason: str) -> None:
 def mark_door_enrolled(data_dir: Path, ip: str, hostname: str) -> None:
     cur = read_door_status(data_dir) or {}
     cur["enrolled"] = {"ts": _status_now_iso(), "ip": ip, "hostname": hostname}
+    cur["enroll_count"] = int(cur.get("enroll_count") or 0) + 1
     _write_door_status(data_dir, cur)
 
 

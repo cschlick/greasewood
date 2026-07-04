@@ -565,13 +565,29 @@ def cmd_invite(args) -> int:
     # stops working. Warn (don't fail) if we're clobbering a still-open
     # window — for orderly provisioning, run the next invite only after the
     # current node has joined (the window clears automatically on success).
-    open_exp = active_window_expiry(data_dir)
-    if open_exp:
+    if args.hostname and getattr(args, "standing", False):
+        sys.exit("--hostname cannot be combined with --standing: a standing "
+                 "door enrolls many nodes, which can't all share one pinned name")
+
+    from . import door as doormod
+    current_window = doormod.read_window(data_dir)
+    if current_window and current_window.get("standing"):
+        # Superseding a STANDING door invalidates the token baked into a whole
+        # image/launch pipeline — that must never happen as a side effect of
+        # inviting one laptop. Demand an explicit flag.
+        if not getattr(args, "supersede", False):
+            sys.exit("a STANDING door is open — a new invite would invalidate the "
+                     "standing token everywhere it's baked (images, launch "
+                     "templates). Close it deliberately first: sudo gw close-door"
+                     "\n(or pass --supersede to replace it in one step)")
+        log.warning("superseding the STANDING door — its token is now INVALID "
+                    "everywhere it was distributed.")
+    elif current_window is not None:
         log.warning(
             "superseding an open door window (expires %s) — the previously "
             "issued token is now INVALID. The door enrolls one node at a time; "
             "run the next invite only after the current node has joined.",
-            open_exp,
+            current_window.get("expires"),
         )
 
     door_key_raw = load_or_generate_door_key(data_dir)
@@ -658,19 +674,78 @@ def cmd_invite(args) -> int:
         wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64,
                                         params.psk_b64, cfg.door_port)
 
-    # Write window file so the running gw-run daemon starts the enroll server
-    expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
+    # Write window file so the running gw-run daemon starts the enroll server.
     window_path = data_dir / "door_window.json"
-    window_path.write_text(json_mod.dumps({
-        "v": 1,
-        "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "caps": caps,
-        "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
-    }))
+    if getattr(args, "standing", False):
+        # STANDING door: no expiry; serves any number of enrollments until
+        # `gw close-door` (or a --supersede invite). The guest key + PSK are
+        # persisted (0600, same posture as door.key) so the daemon can re-erect
+        # the door interface after a reboot — the window outlives the kernel
+        # state. Every join is still the full one-node ceremony: fresh identity,
+        # CA-signed credential, blackhole isolation, audit trail.
+        window_path.write_text(json_mod.dumps({
+            "v": 1,
+            "standing": True,
+            "caps": caps,
+            "hostname": None,          # standing doors can't pin one name
+            "guest_pub": params.guest_pub_b64,
+            "psk": params.psk_b64,
+        }))
+        os.chmod(window_path, 0o600)   # it now carries key material
+        log.info("STANDING door opened — this token enrolls any number of "
+                 "nodes until: sudo gw close-door")
+    else:
+        expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
+        window_path.write_text(json_mod.dumps({
+            "v": 1,
+            "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "caps": caps,
+            "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
+        }))
 
     token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
                          cfg.door_port)
     print(token)
+    return 0
+
+
+def cmd_close_door(args) -> int:
+    """[hub] Close the current door window — the issued token (standing or
+    single-use) is permanently invalid from this moment: the guest key and PSK
+    live only in the window, and seeds are never reused, so nothing can ever
+    handshake against it again. Enrolled nodes are untouched (their credentials
+    come from the CA, not the door). This is the revocation half of standing-
+    token rotation; the next `gw invite --standing` mints the new epoch."""
+    from .config import load_config
+    from . import door as doormod
+    from . import wg as wgmod
+
+    _require_root("close-door", "it removes the hub's door window and interface")
+    cfg = load_config(Path(args.config))
+    if cfg.role != "hub":
+        sys.exit("gw close-door must be run on the hub (role = hub)")
+
+    window = doormod.read_window(cfg.data_dir)
+    wpath = doormod.window_path(cfg.data_dir)
+    existed = wpath.exists()
+    wpath.unlink(missing_ok=True)
+    # Take the interface down NOW for an immediate kill; the daemon's watcher
+    # notices the missing window within a tick and stops the enroll server.
+    wgmod.destroy_interface(doormod.DOOR_IFACE)
+    try:
+        doormod.mark_door_closed(cfg.data_dir, "closed by operator (close-door)")
+    except Exception:
+        pass
+
+    if not existed:
+        print("no door window was open — nothing to close (interface torn down "
+              "if it existed).")
+        return 0
+    kind = "standing" if (window or {}).get("standing") else "single-use"
+    print(f"{kind} door closed — its token is now permanently invalid everywhere "
+          f"it was distributed. Enrolled nodes are unaffected.")
+    if kind == "standing":
+        print("Rotate: sudo gw invite --standing ...  (fresh seed → fresh token)")
     return 0
 
 
@@ -1786,6 +1861,7 @@ def cmd_run(args) -> int:
             get_revoked=get_revoked,
             cache_path=cfg.dir_cache_path,
             control_port=_control_port(cfg),
+            door_port=cfg.door_port,
         )
         door_watcher.start()
         log.info("door watcher started")
@@ -2092,7 +2168,19 @@ def _door_status_lines(cfg) -> list:
         n = len(attempts)
         lines.append(f"           {prefix}{n} failed attempt{'s' if n != 1 else ''}: {ips}")
 
-    if st.get("state") == "open":
+    if st.get("state") == "open" and st.get("standing"):
+        n = int(st.get("enroll_count") or 0)
+        head = f"door     : OPEN (standing) — {n} enrolled"
+        enr = st.get("enrolled")
+        if enr:
+            head += f", last: {enr.get('hostname','?')} ({_fmt_ago(enr.get('ts',''))})"
+        if st.get("opened_at"):
+            head += f" (opened {_fmt_ago(st['opened_at'])})"
+        lines.append(head)
+        grants = ", ".join(st.get("caps") or []) or "(default)"
+        lines.append(f"           grants: {grants} · closes only via: gw close-door")
+        _attempt_summary("")
+    elif st.get("state") == "open":
         head = f"door     : OPEN — closes in {_fmt_until(st.get('expires',''))}"
         if st.get("opened_at"):
             head += f" (opened {_fmt_ago(st['opened_at'])})"
@@ -3149,9 +3237,26 @@ def main(argv=None) -> int:
                          "(ships as 'tls'). Segmentation is set with --segments.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
+    sp.add_argument("--standing", action="store_true",
+                    help="open a STANDING door: the token enrolls any number of "
+                         "nodes (one at a time) and never expires — for baked "
+                         "images / autoscaling. Each join is still the full "
+                         "per-node ceremony (fresh identity, CA-signed "
+                         "credential, door isolation). Revoke the token any "
+                         "time with 'gw close-door'. Cannot pin --hostname.")
+    sp.add_argument("--supersede", action="store_true",
+                    help="required to replace an open STANDING door (which "
+                         "would invalidate its token everywhere it's baked)")
     sp.add_argument("-q", "--quiet", action="store_true",
                     help="print only the token; silence informational messages")
     sp.set_defaults(fn=cmd_invite)
+
+    # close-door
+    sp = sub.add_parser("close-door",
+                        help="[sudo, hub] close the current door window — "
+                             "permanently invalidates its token (standing or "
+                             "single-use); enrolled nodes are unaffected")
+    sp.set_defaults(fn=cmd_close_door)
 
     # join
     sp = sub.add_parser("join",

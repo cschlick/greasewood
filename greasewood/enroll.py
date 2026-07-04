@@ -97,7 +97,13 @@ class EnrollServer:
         caps: "list[str] | None" = None,
         pinned_hostname: "str | None" = None,
         data_dir: "Path | None" = None,
+        standing: bool = False,
     ) -> None:
+        # A STANDING door serves any number of enrollments and never closes on
+        # its own — no deadline, no attempts-exhausted, success loops back to
+        # accept. It ends only via stop() (daemon shutdown, `gw close-door`, or
+        # a superseding invite clearing the window).
+        self._standing = standing
         self._ca = ca
         self._directory = directory
         self._node_keys = node_keys
@@ -155,20 +161,29 @@ class EnrollServer:
             srv.bind((HUB_DOOR_IP, ENROLL_PORT))
             srv.listen(1)
             self._srv = srv
-            log.info("enroll server ready on [%s]:%d (window %.0fs, up to %d attempt(s))",
-                     HUB_DOOR_IP, ENROLL_PORT, self._timeout, self._max_attempts)
+            if self._standing:
+                log.info("enroll server ready on [%s]:%d (STANDING door — serves "
+                         "any number of enrollments until closed)",
+                         HUB_DOOR_IP, ENROLL_PORT)
+            else:
+                log.info("enroll server ready on [%s]:%d (window %.0fs, up to %d attempt(s))",
+                         HUB_DOOR_IP, ENROLL_PORT, self._timeout, self._max_attempts)
 
             # One shared deadline across all attempts; each accept() waits only
-            # for the time still left in the window.
-            deadline = time.monotonic() + self._timeout
+            # for the time still left in the window. A standing door has neither
+            # deadline nor a cumulative attempt budget.
+            deadline = None if self._standing else time.monotonic() + self._timeout
             attempts_left = self._max_attempts
             success = False
             while attempts_left > 0 and not success and not self._stopped.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    log.info("enroll window expired")
-                    close_reason = "expired"
-                    break
+                if deadline is None:
+                    remaining = 2.0
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        log.info("enroll window expired")
+                        close_reason = "expired"
+                        break
                 # Poll accept() with a SHORT timeout instead of blocking for the
                 # whole window, so stop() / window-consumed is honored promptly
                 # (a blocked accept() can't be reliably interrupted by close()).
@@ -195,6 +210,14 @@ class EnrollServer:
                         except Exception:
                             pass
                         success = False
+                if self._standing:
+                    # Success or failure, the standing door stays open: loop
+                    # back to accept. Failures don't accumulate toward a close
+                    # (each joiner gets the per-connection budget).
+                    if success:
+                        log.info("standing door: enrollment complete, staying open")
+                    success = False
+                    continue
                 if success:
                     close_reason = "enrolled"
                 else:
@@ -377,7 +400,11 @@ class DoorWatcher:
         get_revoked: "Callable[[], set[str]] | None" = None,
         cache_path: "Path | None" = None,
         control_port: int = 51902,
+        door_port: "int | None" = None,
     ) -> None:
+        # Needed to re-erect the door interface for a STANDING window after a
+        # hub reboot (the window persists; the kernel interface doesn't).
+        self._door_port = door_port
         self._data_dir = data_dir
         self._ca = ca
         self._directory = directory
@@ -415,13 +442,15 @@ class DoorWatcher:
 
         try:
             data = json.loads(window_path.read_text())
-            expires = dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
+            standing = bool(data.get("standing"))
+            expires = None if standing else \
+                dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
         except Exception as e:
             log.debug("door_window.json unreadable: %s", e)
             return
 
         now = dt.datetime.now(_UTC)
-        if now >= expires:
+        if expires is not None and now >= expires:
             log.info("door window expired, cleaning up")
             self._clear_enroll()
             window_path.unlink(missing_ok=True)
@@ -435,9 +464,25 @@ class DoorWatcher:
             if self._enroll is not None:
                 return  # already running
 
-            remaining = (expires - now).total_seconds()
+            # A standing window persists across hub reboots, but the door
+            # interface is kernel state and doesn't — re-erect it from the
+            # keys the window carries before serving.
+            if standing and data.get("guest_pub") and data.get("psk"):
+                from . import wg as wgmod
+                if not wgmod.interface_exists(DOOR_IFACE):
+                    log.info("standing door: re-erecting %s", DOOR_IFACE)
+                    try:
+                        wgmod.ensure_hub_door_interface(
+                            self._data_dir / "door.key", data["guest_pub"],
+                            data["psk"], self._door_port)
+                    except Exception as e:
+                        log.error("standing door: could not re-erect %s: %s — "
+                                  "will retry next tick", DOOR_IFACE, e)
+                        return
+
+            remaining = None if standing else (expires - now).total_seconds()
             # Capture expiry string for the on_done guard below.
-            expires_str = data["expires"]
+            expires_str = data.get("expires")
             # Caps the hub authorized at `gw invite` for this window.
             window_caps = data.get("caps") or ["segment:mesh"]
             # Pinned hostname, if the hub set one (`gw invite --hostname`).
@@ -451,17 +496,22 @@ class DoorWatcher:
                 # tick destroys the (now window-less) gw-door — we deliberately
                 # do NOT destroy it here, to avoid racing a fresh invite that may
                 # have just recreated the interface.
-                try:
-                    current = json.loads(window_path.read_text())
-                    if current.get("expires") == expires_str:
+                # A STANDING window is never deleted here: its server exits only
+                # on daemon shutdown / close-door / supersede, and the window
+                # must survive (it's what re-opens the door on the next boot).
+                if not standing:
+                    try:
+                        current = json.loads(window_path.read_text())
+                        if current.get("expires") == expires_str:
+                            window_path.unlink(missing_ok=True)
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
                         window_path.unlink(missing_ok=True)
-                except FileNotFoundError:
-                    pass
-                except Exception:
-                    window_path.unlink(missing_ok=True)
                 with self._lock:
                     self._enroll = None
-                log.info("door enrollment complete, window closed")
+                log.info("standing door: enroll server stopped" if standing
+                         else "door enrollment complete, window closed")
 
             srv = EnrollServer(
                 ca=self._ca,
@@ -477,15 +527,21 @@ class DoorWatcher:
                 caps=window_caps,
                 pinned_hostname=window_hostname,
                 data_dir=self._data_dir,
+                standing=standing,
             )
             try:
                 door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,
-                                      pinned_hostname=window_hostname)
+                                      pinned_hostname=window_hostname,
+                                      standing=standing)
             except Exception as e:  # noqa: BLE001
                 log.debug("door status update failed: %s", e)
             srv.start()
             self._enroll = srv
-            log.info("door window detected, enroll server started (%.0fs remaining)", remaining)
+            if standing:
+                log.info("standing door window detected, enroll server started")
+            else:
+                log.info("door window detected, enroll server started (%.0fs remaining)",
+                         remaining)
 
     def _clear_enroll(self) -> None:
         with self._lock:
