@@ -120,6 +120,14 @@ def _managed_block_addrs(text: str, tag: str) -> set:
 # flapping block would otherwise log every reconcile cycle.
 _warned_collisions: set = set()
 
+# Collision detection needs TWO consecutive foreign observations: a STALE block
+# (left by a previous, purged mesh generation on the same domain — new identity,
+# so its addresses look foreign) is overwritten by our first sync and never
+# seen foreign again, while a truly CONCURRENT mesh re-clobbers the block and
+# is foreign again by our next cycle. One observation can't tell them apart
+# (field false-positive: a re-created hub warned about its own predecessor).
+_foreign_seen: set = set()
+
 
 def _warn_domain_collision(domain: str) -> None:
     if domain in _warned_collisions:
@@ -198,11 +206,16 @@ def sync(records, domain: str, path: Path = DEFAULT_HOSTS) -> bool:
         # Silent-misconfig guard: if the block under our tag holds addresses this
         # mesh doesn't have, another mesh on this host shares our mesh_domain.
         # Our own (stable) address is always in `records`, so normal churn keeps
-        # a non-empty overlap; a foreign mesh is fully disjoint.
+        # a non-empty overlap; a foreign mesh is fully disjoint. Warn only on
+        # the SECOND consecutive foreign sighting — see _foreign_seen.
         new_addrs = {r.cred.addr for r in records}
         existing_addrs = _managed_block_addrs(current, domain)
         if new_addrs and existing_addrs and not (existing_addrs & new_addrs):
-            _warn_domain_collision(domain)
+            if domain in _foreign_seen:
+                _warn_domain_collision(domain)
+            _foreign_seen.add(domain)
+        else:
+            _foreign_seen.discard(domain)
         base = _strip_managed(current, domain).rstrip("\n")
         block = render_block(records, domain)
         new = f"{base}\n\n{block}\n" if base else f"{block}\n"
