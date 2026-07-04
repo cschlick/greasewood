@@ -68,6 +68,7 @@ def test_sync_then_remove_restores_user_content(tmp_path_factory, user, recs):
     p = tmp_path_factory.mktemp("hosts") / "hosts"
     p.write_text(user + "\n" if user else "")
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
 
     hosts.sync(recs, "gw.internal", path=p)
     text = p.read_text()
@@ -83,6 +84,7 @@ def test_distinct_domains_never_interfere(tmp_path_factory, user, a, b):
     p = tmp_path_factory.mktemp("hosts") / "hosts"
     p.write_text(user + "\n" if user else "")
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
 
     hosts.sync(a, "alpha.internal", path=p)
     before_beta = p.read_text()
@@ -97,6 +99,7 @@ def test_sync_is_idempotent(tmp_path_factory, recs):
     p = tmp_path_factory.mktemp("hosts") / "hosts"
     p.write_text("127.0.0.1 localhost\n")
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
 
     hosts.sync(recs, "gw.internal", path=p)
     once = p.read_text()

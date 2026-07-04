@@ -155,23 +155,43 @@ def test_two_meshes_coexist_and_remove_independently(tmp_path):
     assert "web.beta" in text and hosts._begin("beta") in text  # beta untouched
 
 
-def test_shared_domain_collision_warns(tmp_path, caplog):
-    """Two meshes on ONE mesh_domain clobber each other's block silently. The
-    guard turns that silent flap into a loud warning: a foreign block under our
-    tag holds addresses this mesh doesn't have."""
+def test_shared_domain_collision_warns_on_reclobber(tmp_path, caplog):
+    """Two meshes on ONE mesh_domain clobber each other's block. The guard
+    warns on the SECOND consecutive foreign sighting — one sighting is
+    indistinguishable from a harmless stale block, but a concurrent mesh
+    re-clobbers, so its block is foreign again by the next cycle."""
     import logging
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
     p = tmp_path / "hosts"
     p.write_text("127.0.0.1 localhost\n")
-    # Mesh A (prefix fd8d::) writes the [gw.internal] block.
-    hosts.sync([_rec("me-a", "fd8d::1"), _rec("db", "fd8d::2")], "gw.internal", path=p)
-    # Mesh B — SAME domain, disjoint addresses (prefix fdcc::) — syncs over it.
+    a = [_rec("me-a", "fd8d::1"), _rec("db", "fd8d::2")]
+    b = [_rec("me-b", "fdcc::1"), _rec("web", "fdcc::9")]
     with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
-        changed = hosts.sync([_rec("me-b", "fdcc::1"), _rec("web", "fdcc::9")],
-                             "gw.internal", path=p)
-    assert changed
+        hosts.sync(a, "gw.internal", path=p)      # mesh A writes the block
+        hosts.sync(b, "gw.internal", path=p)      # B sees foreign (1st) — quiet
+        assert not any("mesh_domain" in r.message for r in caplog.records)
+        hosts.sync(a, "gw.internal", path=p)      # foreign AGAIN (2nd) — warn
     assert any("share mesh_domain" in r.message for r in caplog.records)
     assert any("distinct" in r.message for r in caplog.records)
+
+
+def test_stale_block_from_previous_mesh_does_not_warn(tmp_path, caplog):
+    """Field false-positive: a purged + re-created hub (new identity, same
+    mesh_domain) found its predecessor's block — foreign addresses, but NOT a
+    concurrent mesh. First sync overwrites it; there must be no warning."""
+    import logging
+    hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
+    p = tmp_path / "hosts"
+    p.write_text("127.0.0.1 localhost\n")
+    hosts.sync([_rec("bastion", "fd8d::aaaa")], "gw.internal", path=p)  # old mesh
+    new = [_rec("bastion", "fd8d::bbbb")]                # re-created: new addr
+    with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
+        hosts.sync(new, "gw.internal", path=p)           # stale block seen once
+        hosts.sync(new, "gw.internal", path=p)           # now it's OURS again
+        hosts.sync(new, "gw.internal", path=p)
+    assert not any("mesh_domain" in r.message for r in caplog.records)
 
 
 def test_no_collision_warning_on_normal_churn(tmp_path, caplog):
@@ -179,6 +199,7 @@ def test_no_collision_warning_on_normal_churn(tmp_path, caplog):
     set, so the overlap is non-empty — no false collision warning."""
     import logging
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
     p = tmp_path / "hosts"
     p.write_text("127.0.0.1 localhost\n")
     hosts.sync([_rec("me", "fd8d::1"), _rec("db", "fd8d::2")], "gw.internal", path=p)
@@ -193,6 +214,7 @@ def test_distinct_domains_do_not_warn(tmp_path, caplog):
     """Proper multi-mesh (distinct domains → distinct tags) never collides."""
     import logging
     hosts._warned_collisions.clear()
+    hosts._foreign_seen.clear()
     p = tmp_path / "hosts"
     p.write_text("127.0.0.1 localhost\n")
     with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
