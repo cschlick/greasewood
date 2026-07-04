@@ -2048,6 +2048,65 @@ def cmd_narrate(args) -> int:
     return 0
 
 
+def _dur_short(seconds: float) -> str:
+    """Compact future-duration: '45m', '18h', '2d 3h'."""
+    s = int(seconds)
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    d, h = s // 86400, (s % 86400) // 3600
+    return f"{d}d {h}h" if h else f"{d}d"
+
+
+def _self_health_lines(cfg, directory, own_id) -> list:
+    """The self/health block for `gw status` — local facts about THIS node
+    (version, own credential, reachability posture, trust anchors, and — for a
+    plain node — how fresh the directory cache is). All local: no root, no
+    network, so `status` stays instant. Live/reach-out checks (clock skew, live
+    links) stay in `gw diagnose`."""
+    from . import sync as syncmod
+    lines = []
+    lines.append(f"{'version':<9}: {_version()}")
+
+    self_rec = directory.get(own_id) if own_id else None
+    if self_rec is not None:
+        left = (self_rec.cred.exp - dt.datetime.now(_UTC)).total_seconds()
+        if left < 0:
+            cred = f"⚠ EXPIRED {int(-left // 60)}m ago — renewal isn't keeping up"
+        else:
+            cred = (f"expires {self_rec.cred.exp:%Y-%m-%d %H:%M UTC} "
+                    f"(in {_dur_short(left)})")
+        lines.append(f"{'cred':<9}: {cred}")
+    elif own_id:
+        lines.append(f"{'cred':<9}: no self record yet (has the daemon published?)")
+
+    inb = "yes (accepts inbound)" if cfg.inbound != "no" else "no (outbound-only)"
+    lines.append(f"{'inbound':<9}: {inb}")
+
+    n = len(cfg.ca_pubs)
+    lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
+                 f"hub {cfg.root_url or '(none configured)'}")
+
+    # Sync freshness — nodes read a *cache*, so a stale roster is worth flagging.
+    # The hub is the source of truth, so it has nothing to be 'stale' against.
+    if cfg.role != "hub":
+        last = syncmod.read_last_sync(cfg.data_dir)
+        if last is None:
+            lines.append(f"{'sync':<9}: never (is the daemon running / reaching the hub?)")
+        else:
+            try:
+                age = (dt.datetime.now(_UTC)
+                       - dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
+                       ).total_seconds()
+            except (ValueError, AttributeError):
+                age = 0
+            flag = "⚠ " if age > 120 else ""
+            tail = " — hub unreachable?" if age > 120 else ""
+            lines.append(f"{'sync':<9}: {flag}directory synced {_fmt_ago(last)}{tail}")
+    return lines
+
+
 def cmd_status(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -2062,17 +2121,20 @@ def cmd_status(args) -> int:
     # Read-only: use the public id (id_pub.hex), never the private key, so
     # `gw status` works without sudo.
     own_id, own_addr = _own_identity(cfg.data_dir)
+    directory = Directory.load(cfg.dir_cache_path)
 
     print(f"role     : {cfg.role}")
     print(f"hostname : {cfg.hostname}")
     print(f"addr     : {own_addr or '(keys not generated)'}")
+    # Self/health — local facts about THIS node (fast, no root, no network).
+    for line in _self_health_lines(cfg, directory, own_id):
+        print(line)
     # The enrollment door only exists on the hub — show its state there.
     if cfg.role == "hub":
         for line in _door_status_lines(cfg):
             print(line)
     print()
 
-    directory = Directory.load(cfg.dir_cache_path)
     now = dt.datetime.now(_UTC)
     records = sorted(directory.all(), key=lambda r: r.hostname)
 
