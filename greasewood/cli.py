@@ -546,7 +546,9 @@ def cmd_invite(args) -> int:
         sys.exit(f"the hub's mesh interface {cfg.wg_interface!r} doesn't exist — "
                  f"the daemon isn't running (or the interface was deleted under "
                  f"it). A joiner would be rejected at enrollment. Start the "
-                 f"daemon first: sudo systemctl start greasewood   (or: sudo gw run)")
+                 f"daemon first: sudo systemctl start greasewood   (or: sudo gw run)\n"
+                 f"If you already started it and this persists, it's crashing on "
+                 f"startup — look at: journalctl -u greasewood -n 20")
     import urllib.request as _url
     try:
         _url.urlopen(f"http://[::1]:{_control_port(cfg)}/directory", timeout=3)
@@ -2996,7 +2998,21 @@ def cmd_install_service(args) -> int:
         subprocess.run([systemctl, "enable", "--now", "greasewood.path"], check=True)
         subprocess.run([systemctl, "enable", "greasewood.service"], check=True)
         print("\nenabled: greasewood.path (armed) + greasewood.service (boot).")
-        print("Run create or join — the daemon starts on its own; no `gw run`.")
+        if Path(getattr(args, "config", "/etc/greasewood.toml")).exists():
+            # Config already exists (install-service ran AFTER create/join), so
+            # the path unit fires the service right now — verify it actually
+            # comes up and STAYS up. `systemctl start` reports success the
+            # moment the process execs (Type=simple); a daemon that crashes a
+            # second later looks "started" while it silently restart-loops.
+            state = _wait_service_settled(systemctl, "greasewood")
+            if state == "active":
+                print("config present → greasewood.service is up and running.")
+            else:
+                print(f"⚠ config present but greasewood.service is "
+                      f"{state or 'not running'} — it is likely crashing at "
+                      f"startup. Look at: journalctl -u greasewood -n 20")
+        else:
+            print("Run create or join — the daemon starts on its own; no `gw run`.")
         print("Logs: journalctl -u greasewood -f")
         print("Opt out: sudo gw uninstall-service "
               "(or systemctl disable --now greasewood.path greasewood.service)")
@@ -3004,6 +3020,30 @@ def cmd_install_service(args) -> int:
         print("\nunits written (not enabled). Enable with:")
         print("  systemctl enable --now greasewood.path && systemctl enable greasewood.service")
     return 0
+
+
+def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> str:
+    """Wait for `unit` to reach 'active' and STAY there briefly; return the
+    final is-active state ('active', 'activating', 'failed', ...). A unit that
+    execs and crashes within a couple of seconds flaps active→activating
+    (auto-restart) — the settle re-check catches exactly that."""
+    import subprocess
+    import time
+
+    def _state() -> str:
+        r = subprocess.run([systemctl, "is-active", unit],
+                           capture_output=True, text=True)
+        return (r.stdout or "").strip()
+
+    deadline = time.monotonic() + wait_secs
+    state = _state()
+    while state != "active" and time.monotonic() < deadline:
+        time.sleep(0.5)
+        state = _state()
+    if state == "active":
+        time.sleep(2.0)          # survive the fast-crash window
+        state = _state()
+    return state
 
 
 def cmd_uninstall_service(args) -> int:
@@ -3332,6 +3372,18 @@ def main(argv=None) -> int:
         # running as root, so the usual cause is "needs sudo".
         path = getattr(e, "filename", None)
         where = f" ({path})" if path else ""
+        if os.geteuid() == 0:
+            # ALREADY root and still denied: almost always a file owned by a
+            # non-root user (legacy chowned install) under the sandboxed
+            # systemd unit, which drops CAP_DAC_OVERRIDE — so root can't read
+            # other users' 0600 files. Seen in the field as a service that
+            # "starts" then crash-loops.
+            sys.exit(f"permission denied{where} while running AS ROOT — the file "
+                     f"is likely owned by a non-root user, and the sandboxed "
+                     f"systemd unit drops the capability that lets root bypass "
+                     f"that (CAP_DAC_OVERRIDE). "
+                     f"Fix: chown root:root {path or '<the file>'}   "
+                     f"then restart the service.")
         sys.exit(f"permission denied{where} — this command likely needs root. "
                  f"Try: sudo gw {args.cmd}")
 

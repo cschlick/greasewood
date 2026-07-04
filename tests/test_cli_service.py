@@ -80,11 +80,53 @@ def test_install_enables_with_systemctl(tmp_path, monkeypatch, as_root):
                         _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
     calls = []
     monkeypatch.setattr(_subprocess, "run", _record_run(calls))
-    rc = cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False))
+    rc = cli.cmd_install_service(types.SimpleNamespace(
+        exec=None, no_enable=False, config=str(tmp_path / "absent.toml")))
     assert rc == 0
     assert ["/bin/systemctl", "daemon-reload"] in calls
     assert ["/bin/systemctl", "enable", "--now", "greasewood.path"] in calls
     assert ["/bin/systemctl", "enable", "greasewood.service"] in calls
+
+
+def test_install_verifies_daemon_when_config_exists(tmp_path, monkeypatch, as_root, capsys):
+    """install-service run AFTER create (config already present): the path unit
+    fires the service immediately, so the install must report whether the
+    daemon actually came up — `systemctl start` looks successful even when the
+    daemon crashes a second later (seen in the field: sandboxed unit +
+    legacy pmuser-owned keys = silent crash-loop)."""
+    monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
+    monkeypatch.setattr(_shutil, "which",
+                        _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
+    monkeypatch.setattr(_subprocess, "run", _record_run([]))
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text("[node]\n")
+
+    monkeypatch.setattr(cli, "_wait_service_settled", lambda *a, **k: "active")
+    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False,
+                                                  config=str(cfg)))
+    assert "up and running" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "_wait_service_settled", lambda *a, **k: "failed")
+    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False,
+                                                  config=str(cfg)))
+    out = capsys.readouterr().out
+    assert "likely crashing at startup" in out
+    assert "journalctl -u greasewood -n 20" in out
+
+
+def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
+    """EACCES while ALREADY root (sandboxed unit + non-root-owned key) must not
+    say 'try sudo' — it must name the chown fix."""
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+
+    def boom(args):
+        raise PermissionError(13, "Permission denied", "/var/lib/greasewood/ca.key")
+    monkeypatch.setattr(cli, "cmd_status", boom)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["status"])
+    msg = str(e.value)
+    assert "AS ROOT" in msg and "CAP_DAC_OVERRIDE" in msg
+    assert "chown root:root /var/lib/greasewood/ca.key" in msg
 
 
 def test_install_no_enable_skips_enable(tmp_path, monkeypatch, as_root):
