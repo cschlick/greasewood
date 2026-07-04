@@ -1152,12 +1152,28 @@ semantics* — equivalent encodings verify, changed semantics never do), the CA
 registry's hostname-uniqueness/revocation/rollback rules under arbitrary
 operation interleavings, directory merge monotonicity, the audit→narrate logfmt
 round trip (including control-character injection via wire-supplied hostnames),
-and `/etc/hosts` never damaging user content. Run nightly-sized via
-`scripts/deep-tests.sh` (thousands of examples per property; wire it to cron or
-a CI schedule), or as a quick sanity pass with `pytest tests/deep -m deep`.
-Their first run found two real bugs the fast suite had missed — an audit-log
-injection via control characters in hostnames, and a unicode-line-boundary
-corruption in hosts-file rewrites — which is the tier's job.
+and `/etc/hosts` never damaging user content. Their first run found two real
+bugs the fast suite had missed — an audit-log injection via control characters
+in hostnames, and a unicode-line-boundary corruption in hosts-file rewrites —
+which is the tier's job.
+
+```bash
+# Quick sanity pass of the deep tier: stock example counts, a few seconds.
+python -m pytest tests/deep -m deep
+
+# THE NIGHTLY: 10,000 examples per property, ~9 minutes. Point cron or a CI
+# schedule at this. Extra args pass through to pytest (-k, -x, ...).
+scripts/deep-tests.sh
+
+# Same thing spelled out (the script just sets the Hypothesis profile):
+HYPOTHESIS_PROFILE=deep python -m pytest tests/deep -m deep -q
+```
+
+When the nightly fails, Hypothesis prints the shrunken falsifying example plus
+a `@reproduce_failure(...)` blob — paste that decorator onto the failing test
+to replay the exact case in a normal fast run. Failing examples are also cached
+in `.hypothesis/` (gitignored), so a plain re-run of `tests/deep` retries them
+first even without the blob.
 
 ## Design notes & non-goals
 
