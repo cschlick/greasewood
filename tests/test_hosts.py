@@ -153,3 +153,49 @@ def test_two_meshes_coexist_and_remove_independently(tmp_path):
     text = p.read_text()
     assert "db.alpha" not in text and hosts._begin("alpha") not in text
     assert "web.beta" in text and hosts._begin("beta") in text  # beta untouched
+
+
+def test_shared_domain_collision_warns(tmp_path, caplog):
+    """Two meshes on ONE mesh_domain clobber each other's block silently. The
+    guard turns that silent flap into a loud warning: a foreign block under our
+    tag holds addresses this mesh doesn't have."""
+    import logging
+    hosts._warned_collisions.clear()
+    p = tmp_path / "hosts"
+    p.write_text("127.0.0.1 localhost\n")
+    # Mesh A (prefix fd8d::) writes the [gw.internal] block.
+    hosts.sync([_rec("me-a", "fd8d::1"), _rec("db", "fd8d::2")], "gw.internal", path=p)
+    # Mesh B — SAME domain, disjoint addresses (prefix fdcc::) — syncs over it.
+    with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
+        changed = hosts.sync([_rec("me-b", "fdcc::1"), _rec("web", "fdcc::9")],
+                             "gw.internal", path=p)
+    assert changed
+    assert any("share mesh_domain" in r.message for r in caplog.records)
+    assert any("distinct" in r.message for r in caplog.records)
+
+
+def test_no_collision_warning_on_normal_churn(tmp_path, caplog):
+    """Adding/removing a node keeps the local node's own (stable) address in the
+    set, so the overlap is non-empty — no false collision warning."""
+    import logging
+    hosts._warned_collisions.clear()
+    p = tmp_path / "hosts"
+    p.write_text("127.0.0.1 localhost\n")
+    hosts.sync([_rec("me", "fd8d::1"), _rec("db", "fd8d::2")], "gw.internal", path=p)
+    with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
+        hosts.sync([_rec("me", "fd8d::1")], "gw.internal", path=p)        # db left
+        hosts.sync([_rec("me", "fd8d::1"), _rec("db", "fd8d::2"),
+                    _rec("web", "fd8d::3")], "gw.internal", path=p)       # two joined
+    assert not any("mesh_domain" in r.message for r in caplog.records)
+
+
+def test_distinct_domains_do_not_warn(tmp_path, caplog):
+    """Proper multi-mesh (distinct domains → distinct tags) never collides."""
+    import logging
+    hosts._warned_collisions.clear()
+    p = tmp_path / "hosts"
+    p.write_text("127.0.0.1 localhost\n")
+    with caplog.at_level(logging.WARNING, logger="greasewood.hosts"):
+        hosts.sync([_rec("db", "fd8d::2")], "alpha", path=p)
+        hosts.sync([_rec("web", "fdcc::5")], "beta", path=p)
+    assert not any("mesh_domain" in r.message for r in caplog.records)

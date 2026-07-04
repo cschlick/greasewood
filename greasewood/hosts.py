@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import logging
 import os
 import re
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DEFAULT_HOSTS = Path("/etc/hosts")
 
@@ -91,6 +94,43 @@ def mesh_name(hostname: str, domain: str) -> str:
     return f"{sanitize(hostname)}.{domain}"
 
 
+def _managed_block_addrs(text: str, tag: str) -> set:
+    """The set of addresses currently in THIS tag's greasewood block."""
+    begin, end = _begin(tag), _end(tag)
+    addrs, inside = set(), False
+    for line in text.splitlines():
+        s = line.strip()
+        if s == begin:
+            inside = True
+            continue
+        if inside:
+            if s == end:
+                break
+            parts = line.split()
+            if parts and not parts[0].startswith("#"):
+                addrs.add(parts[0])
+    return addrs
+
+
+# Warn at most once per (domain) per process about a shared-tag collision — a
+# flapping block would otherwise log every reconcile cycle.
+_warned_collisions: set = set()
+
+
+def _warn_domain_collision(domain: str) -> None:
+    if domain in _warned_collisions:
+        return
+    _warned_collisions.add(domain)
+    log.warning(
+        "another greasewood mesh is writing the [%s] /etc/hosts block — its "
+        "entries are for addresses this mesh doesn't have, so two meshes on this "
+        "host share mesh_domain=%r. Their name blocks clobber each other every "
+        "reconcile, and the names themselves collide (each '<host>.%s' would "
+        "resolve to two different overlay addresses). Give each mesh a distinct "
+        "[network] mesh_domain (as you already give each a distinct interface).",
+        domain, domain, domain)
+
+
 def _strip_managed(text: str, tag: str) -> str:
     """Return `text` with THIS tag's greasewood block removed (only ours, so a
     second mesh's block on the same host is left untouched)."""
@@ -151,6 +191,14 @@ def sync(records, domain: str, path: Path = DEFAULT_HOSTS) -> bool:
     Returns True if the file changed."""
     with _lock(path):
         current = path.read_text() if path.exists() else ""
+        # Silent-misconfig guard: if the block under our tag holds addresses this
+        # mesh doesn't have, another mesh on this host shares our mesh_domain.
+        # Our own (stable) address is always in `records`, so normal churn keeps
+        # a non-empty overlap; a foreign mesh is fully disjoint.
+        new_addrs = {r.cred.addr for r in records}
+        existing_addrs = _managed_block_addrs(current, domain)
+        if new_addrs and existing_addrs and not (existing_addrs & new_addrs):
+            _warn_domain_collision(domain)
         base = _strip_managed(current, domain).rstrip("\n")
         block = render_block(records, domain)
         new = f"{base}\n\n{block}\n" if base else f"{block}\n"
