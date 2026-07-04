@@ -199,6 +199,51 @@ endpoint. Why it's the hard part:
   "v2, the macOS port": it's the natural home for the one hardware-security
   feature greasewood deliberately deferred.
 
+## Longevity of the greasy lane (the one forward-looking risk)
+
+Everything above assumes a root process can keep transparently poking the
+kernel's network config with `route`/`ifconfig`/`pfctl`. That's true **today** —
+in fact `wg-quick` on macOS *is* exactly that pipeline (`wireguard-go` +
+`ifconfig` + `route` + `pfctl`), so the greasy approach is the official CLI path,
+not a hypothetical. But it's worth being clear-eyed about the trend line.
+
+Two things to separate:
+
+- **Apple's "networking out of the kernel" push does *not* threaten these
+  tools.** That push is about where third-party *code* runs (kext → sandboxed
+  Network Extension). `route`/`ifconfig` are a different operation entirely: a
+  privileged userland process asking the kernel to modify *its own* routing
+  table via `PF_ROUTE`/ioctls. The kernel's config interface isn't going away.
+- **The broader lockdown *is* the thing to watch**, and it will arrive as
+  friction, not a headline removal:
+  - **`configd` owns the network.** macOS's System Configuration daemon reasserts
+    its view and can revert raw `ifconfig`/`route` changes to *managed*
+    interfaces — already true today. The reprieve: it leaves interfaces it didn't
+    create alone, so a utun *you* stood up for a tunnel is mostly unbothered
+    (which is why `wg-quick` gets away with it).
+  - **Root is being hollowed out.** SIP, TCC, and entitlement-gating have steadily
+    converted "root can do anything" into "root can do what Apple has decided,
+    increasingly only through entitled/managed paths." Nothing there removes
+    `route`/`ifconfig`, but it's the mechanism by which, over a long horizon,
+    low-level network config could come to require an *entitled helper* instead
+    of a plain subprocess.
+
+So the realistic risk isn't "will `route` exist" — too much (including Apple's
+own scripts and `wg-quick`) depends on it. It's "will configuring a tunnel as
+root still be a *transparent subprocess*, or a signed, entitled helper." The day
+it's the latter, a Mac port keeps *working* but stops being *greasy* — the audit
+trail would be recording a helper's mediated calls, not the raw commands.
+
+And it's the same force one more time: Apple gates root's low-level config for
+the same reason it pushes Network Extensions — network changes should flow
+through channels that are *observable, entitled, and Apple-mediated*, which is
+the philosophical inverse of greasewood's *transparent, unmediated, audit-it-
+yourself* premise. So the greasy lane isn't just unsupported; it rows against a
+current whose whole point is to eliminate the kind of access greasewood is built
+on. **Not imminent, viable now — but the day that friction lands, the honest
+question is the same as the Network Extension fork, arriving from a different
+direction: is it still greasewood, or just wearing the name?**
+
 ## Recommended shape, if it ever happens
 
 1. **Extract a `Backend` driver** — `create_interface`, `set_peer`, `add_route`,
