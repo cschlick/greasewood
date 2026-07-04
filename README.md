@@ -453,14 +453,21 @@ runs as root, so config and data paths (`/etc/greasewood.toml`,
 corrupted either way. Two behaviors *do* differ, so pick one style and stick with
 it:
 
-- **State ownership.** Run **via `sudo`** and greasewood chowns the data dir back
-  to the invoking user afterward (secrets stay mode `0600`), so you can run
-  read-only commands like `gw status` without sudo. Run **as bare root** and the
-  files stay root-owned (no passwordless reads). Don't *alternate* — a later
-  `sudo gw …` re-chowns everything to your user, a root-direct run doesn't, so
-  ownership will flip back and forth. It won't break the service (root reads
-  everything), but it's untidy. The documented path is **`sudo gw …` as your
-  normal user**.
+- **State ownership.** Everything under the data dir is **root-owned, always** —
+  greasewood never chowns state to the invoking user. (It used to hand the data
+  dir to the `sudo` user; that put the **CA key on a login account**, which
+  could then mint mesh credentials — the daemon now warns at startup if it finds
+  that legacy state, and the fix is `chown root:root` on the flagged keys.)
+  Read-only commands don't need ownership: the data dir is `0755` and the public
+  files (`id_pub.hex`, `directory.json`, `*.pub`) are world-readable, so
+  `gw status` works for **any** user; each secret is its own `0600` root-owned
+  file. Every command that needs root **says so up front** — a clean
+  `'gw <cmd>' needs root (<why>). Try: sudo gw <cmd>` — instead of failing
+  partway on whichever file access breaks first. Root-needing commands: the
+  data-plane set (`run`, `join`, `create`, `invite`, `purge`, `renew`,
+  `set-inbound`, `rename`, `hub-promote`, `hub-restore`) and the hub
+  registry/key set (`revoke`, `set-caps`, `set-segments`, `renew-all`,
+  `cert-request`, `hub-backup`).
 - **Environment variables.** `sudo` strips the environment by default. This only
   matters if you protect the CA key with `ca_key_passphrase_env`: a var exported
   in your shell won't reach `sudo gw` (you'd get "environment variable is

@@ -118,6 +118,8 @@ def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
 
 
 def test_cert_request_records_manifest(tmp_path, monkeypatch, capsys):
+    from greasewood import cli
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     NodeKeys.load_or_generate(tmp_path)
     (tmp_path / "gw.toml").write_text(f"""[node]
 hostname = "n1"
@@ -160,6 +162,8 @@ trusted_pubs = []
 
 
 def test_cert_request_registers_subdomain_san_as_alias(tmp_path, monkeypatch, capsys):
+    from greasewood import cli
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     """A subdomain --san (a name under the node's own mesh name) is auto-added to
     [network] aliases so the daemon publishes it — but a foreign or bare-name SAN
     is not."""
@@ -205,6 +209,8 @@ trusted_pubs = []
 
 
 def test_cert_request_per_file_paths_and_relocate(tmp_path, monkeypatch, capsys):
+    from greasewood import cli
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     """key/cert/ca can each target a different directory, and re-requesting the
     same name relocates the entry (single manifest row) and flags the orphaned
     old files."""

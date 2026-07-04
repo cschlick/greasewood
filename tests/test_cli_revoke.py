@@ -28,7 +28,8 @@ ca_key_file = "{ca_key}"
     return p
 
 
-def test_revoke_adds_id_and_frees_hostname(tmp_path, capsys):
+def test_revoke_adds_id_and_frees_hostname(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
