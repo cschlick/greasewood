@@ -775,8 +775,19 @@ sudo gw -c /etc/gw-b.toml run
 (Run each daemon as its own systemd service in practice — `gw run` stays in the
 foreground.)
 
-`hosts_sync` blocks are tagged per mesh domain and file-locked, so the two
-daemons don't clobber each other's `/etc/hosts` entries.
+**The mesh domain must differ between the two, for the same reason the interface
+name must** — both are flat, host-global namespaces with no scoping. The
+`/etc/hosts` block is *keyed by* `mesh_domain`, so two meshes sharing one would
+(a) clobber each other's block every reconcile — each daemon strips and rewrites
+the same-tagged block — and (b) collide on the names themselves: both meshes'
+`db.gw.internal` would claim the same name for two different addresses. Unlike a
+duplicate `listen-port` (which fails loudly at bind), a duplicate `mesh_domain`
+fails *silently*, so greasewood watches for it: if it finds another mesh writing
+its `/etc/hosts` block (foreign addresses under its tag), it logs a loud warning
+telling you to set a distinct `mesh_domain`. The two genuinely-silent knobs to
+keep distinct are `mesh_domain` and `overlay_prefix`; the rest (port, data dir)
+collide loudly on their own. With distinct domains, the blocks are tagged per
+mesh and file-locked, so the two daemons coexist cleanly.
 
 ## Names (.gw.internal)
 
