@@ -131,7 +131,9 @@ class NodeKeys:
         """
         data_dir.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(data_dir, 0o700)
+            # 0755: the dir also holds world-readable public files that root-free
+            # commands (gw status) read; every secret is its own 0600 file.
+            os.chmod(data_dir, 0o755)
         except PermissionError:
             pass  # files are 0600; dir perms are best-effort
 

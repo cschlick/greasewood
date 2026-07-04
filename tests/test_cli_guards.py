@@ -32,6 +32,28 @@ def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
     assert "needs root" in msg and f"sudo gw {cmd}" in msg
 
 
+@pytest.mark.parametrize("cmd,fn", [
+    ("revoke", "cmd_revoke"),
+    ("set-caps", "cmd_set_caps"),
+    ("set-segments", "cmd_set_segments"),
+    ("renew-all", "cmd_renew_all"),
+    ("cert-request", "cmd_cert_request"),
+    ("hub-backup", "cmd_hub_backup"),
+])
+def test_registry_commands_complain_loudly_without_root(cmd, fn, monkeypatch):
+    """The hub registry/key commands gate on root FIRST — before touching config
+    or any file — so a non-root run gets 'needs root … try sudo', never a
+    partial failure like the historical \"no node named X\" (an unreadable
+    registry scanning as empty)."""
+    import types
+    _as_user(monkeypatch)
+    ns = types.SimpleNamespace(config="/nonexistent/gw.toml")   # never read
+    with pytest.raises(SystemExit) as e:
+        getattr(cli, fn)(ns)
+    msg = str(e.value)
+    assert "needs root" in msg and f"sudo gw {cmd}" in msg
+
+
 def test_require_root_passes_as_root(monkeypatch):
     _as_root(monkeypatch)
     assert cli._require_root("run") is None  # no raise
@@ -43,11 +65,12 @@ def test_require_root_passes_as_root(monkeypatch):
     ("set-segments", "cmd_set_segments"),
     ("renew-all", "cmd_renew_all"),
 ])
-def test_hub_commands_refuse_non_hub(cmd, fn, tmp_path):
+def test_hub_commands_refuse_non_hub(cmd, fn, tmp_path, monkeypatch):
     """Every hub-only command run on a role=node config exits with the same clear
-    'must be run on the hub' message — the guard runs first, so no traceback and
-    no mutation (revoke in particular now matches the others via _load_hub_ca)."""
+    'must be run on the hub' message — the root gate passes (faked), then the
+    role check fires before any mutation."""
     import types
+    _as_root(monkeypatch)
     cfg = tmp_path / "gw.toml"
     cfg.write_text(f"""[node]
 hostname = "n1"
@@ -117,3 +140,54 @@ root_url = ""
     out = capsys.readouterr().out
     assert rc == 0
     assert derive_addr(keys.id_pub_bytes) in out  # self addr shown
+
+
+def test_key_file_warnings_flags_foreign_owner_and_loose_mode(tmp_path):
+    """Secrets owned by a non-root uid, or readable past their owner, get a
+    SECURITY warning naming the fix. (expect_uid parameterizes 'root' so the
+    test can run unprivileged: files here are owned by the test uid ≠ 0.)"""
+    import os
+    key = tmp_path / "ca.key"
+    key.write_text("k")
+    key.chmod(0o600)
+    warns = cli._key_file_warnings([key], expect_uid=0)      # test uid ≠ 0 → foreign
+    assert len(warns) == 1
+    assert "owned by uid" in warns[0] and "mint mesh credentials" in warns[0]
+    assert f"chown root:root {key}" in warns[0]
+
+    key.chmod(0o644)                                          # loose mode too
+    warns = cli._key_file_warnings([key], expect_uid=0)
+    assert len(warns) == 2 and any("group/world-accessible" in w for w in warns)
+
+    key.chmod(0o600)                                          # owned right + tight = quiet
+    assert cli._key_file_warnings([key], expect_uid=os.geteuid()) == []
+    assert cli._key_file_warnings([tmp_path / "missing.key", None]) == []
+
+
+def test_status_says_truth_when_data_dir_unreadable(tmp_path, capsys):
+    """A 0700 root data dir (legacy install) must produce an honest 'can't
+    read … try sudo / chmod 755' exit — not 'directory is empty' or 'keys not
+    generated' (what the invisible failed reads used to yield)."""
+    import types
+    import pytest as _pytest
+    data = tmp_path / "data"
+    data.mkdir()
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text(f"""[node]
+hostname = "n1"
+data_dir = "{data}"
+role = "node"
+[network]
+seeds = []
+[ca]
+trusted_pubs = []
+""")
+    data.chmod(0o000)                                        # untraversable
+    try:
+        with _pytest.raises(SystemExit) as e:
+            cli.cmd_status(types.SimpleNamespace(config=str(cfg), by_segment=False))
+        msg = str(e.value)
+        assert "can't read the public state" in msg
+        assert "sudo gw status" in msg and "chmod 755" in msg
+    finally:
+        data.chmod(0o755)

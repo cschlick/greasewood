@@ -42,6 +42,7 @@ def _make_hub(tmp_path):
 
 
 def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     ca_keys, ca_key = _make_hub(tmp_path)
     cfg = _hub_cfg(tmp_path, ca_key)
     monkeypatch.setenv("GW_BACKUP_PASSPHRASE", "s3kret")
@@ -66,7 +67,8 @@ def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
     assert restored_ca.load_revoked_set()          # revoke list survived
 
 
-def test_backup_refuses_non_hub(tmp_path):
+def test_backup_refuses_non_hub(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gate passes; role check fires
     _, ca_key = _make_hub(tmp_path)
     cfg = _hub_cfg(tmp_path, ca_key, role="node")
     with pytest.raises(SystemExit, match="must be run on the hub"):

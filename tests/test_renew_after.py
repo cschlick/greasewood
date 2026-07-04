@@ -135,7 +135,8 @@ ca_key_file = "{tmp_path}/ca.key"
     return tmp_path / "gw.toml"
 
 
-def test_renew_all_writes_hint(tmp_path):
+def test_renew_all_writes_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
     cfg = _hub_cfg(tmp_path)
     rc = cli.cmd_renew_all(types.SimpleNamespace(config=str(cfg)))
     assert rc == 0

@@ -392,7 +392,12 @@ def cmd_create(args) -> int:
 
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(data_dir, 0o700)
+        # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
+        # directory.json, *.pub) that root-free commands like `gw status` read;
+        # every secret inside is its own 0600 root-owned file. Root owns all of
+        # it — state is never chowned to the invoking user (the CA key on a
+        # login account would let that account mint credentials).
+        os.chmod(data_dir, 0o755)
     except PermissionError:
         pass
 
@@ -469,11 +474,6 @@ default_caps = ["tls"]
     ).sign(node_keys.id_priv)
     directory.put(record)
     directory.save(dir_cache)
-
-    # Hand the whole data dir to the real operator (covers the keys generated
-    # above, so this runs AFTER they're written, not before). Lets them run
-    # read-only commands without sudo; secret files stay 0600.
-    _chown_data_dir_to_operator(data_dir)
 
     # The control plane binds the OVERLAY address (+loopback), so that's the URL
     # nodes use — not the underlay endpoint.
@@ -753,7 +753,12 @@ def cmd_join(args) -> int:
     # Generate this node's permanent keypairs
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(data_dir, 0o700)
+        # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
+        # directory.json, *.pub) that root-free commands like `gw status` read;
+        # every secret inside is its own 0600 root-owned file. Root owns all of
+        # it — state is never chowned to the invoking user (the CA key on a
+        # login account would let that account mint credentials).
+        os.chmod(data_dir, 0o755)
     except PermissionError:
         pass
     node_keys = NodeKeys.load_or_generate(data_dir)
@@ -1037,6 +1042,11 @@ def _load_hub_ca(args, cmd: str):
     from .config import load_config
     from .keys import CAKeys
     from .ca import CA
+    # Gate up front: the registry (nodes/*.json) and CA key are root-owned, and
+    # these commands write them. Without this, a non-root run fails partway with
+    # whatever file access breaks first — historically misread as the node not
+    # existing at all.
+    _require_root(cmd, "it reads and writes the hub's registry and CA key")
     cfg = load_config(Path(args.config))
     if cfg.role != "hub":
         sys.exit(f"gw {cmd} must be run on the hub (role = hub)")
@@ -1110,34 +1120,49 @@ def _control_port(cfg) -> int:
         return 51902
 
 
-def _require_root(cmd: str) -> None:
-    """Exit cleanly if not root, instead of crashing partway through on EACCES.
-    For commands that create WireGuard interfaces, edit routing, write /etc, or
-    touch the firewall — all of which need privileges."""
+def _require_root(cmd: str, why: "str | None" = None) -> None:
+    """Exit cleanly if not root, instead of crashing partway through on EACCES —
+    the complaint comes FIRST, loudly, not from whichever file access happens to
+    fail deepest into the command. For commands that create WireGuard
+    interfaces, edit routing, write /etc, or read/write root-owned state."""
     if os.geteuid() != 0:
-        sys.exit(f"'gw {cmd}' needs root (it changes WireGuard/routing/system "
-                 f"files).\nTry: sudo gw {cmd}")
+        why = why or "it changes WireGuard/routing/system files"
+        sys.exit(f"'gw {cmd}' needs root ({why}).\nTry: sudo gw {cmd}")
 
 
-def _chown_data_dir_to_operator(data_dir: "Path") -> None:
-    """When run via sudo, give the data dir (recursively) to the invoking user,
-    so they own their own state and can run read-only commands without sudo.
-    Call this AFTER all files are created, or freshly-generated keys stay
-    root-owned. File modes are unchanged — secrets remain 0600."""
-    sudo_user = os.environ.get("SUDO_USER")
-    if not sudo_user:
-        return
-    import pwd
-    try:
-        uid = pwd.getpwnam(sudo_user).pw_uid
-    except KeyError:
-        return
-    for path in [data_dir, *data_dir.rglob("*")]:
+def _key_file_warnings(paths, expect_uid: int = 0) -> list:
+    """Sanity-check secret key files: each should be owned by `expect_uid`
+    (root) and readable by owner only. A key owned by another user means that
+    account can read it — for the CA key, mint mesh credentials — usually a
+    leftover from a pre-1.0 create that chowned the data dir to the operator.
+    Returns human-readable warnings; missing files are fine (not all roles have
+    all keys)."""
+    import stat as statmod
+    warns = []
+    for p in paths:
+        if p is None:
+            continue
         try:
-            os.chown(path, uid, -1)
+            st = os.stat(p)
         except OSError:
-            pass
-    log.info("data_dir ownership → %s", sudo_user)
+            continue
+        if st.st_uid != expect_uid:
+            warns.append(
+                f"SECURITY: {p} is owned by uid {st.st_uid}, not root — that "
+                f"account can read this key"
+                + (" and mint mesh credentials" if "ca" in Path(p).name else "")
+                + f". Fix: chown root:root {p}")
+        if statmod.S_IMODE(st.st_mode) & 0o077:
+            warns.append(f"SECURITY: {p} is group/world-accessible "
+                         f"(mode {statmod.S_IMODE(st.st_mode):o}). "
+                         f"Fix: chmod 600 {p}")
+    return warns
+
+
+def _secret_key_paths(cfg) -> list:
+    """The secret key files this install may have (missing ones are skipped)."""
+    return [cfg.data_dir / "id_priv.pem", cfg.data_dir / "wg.key",
+            cfg.data_dir / "door.key", getattr(cfg, "ca_key_file", None)]
 
 
 def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
@@ -1310,6 +1335,8 @@ def cmd_cert_request(args) -> int:
     from .config import load_config
     from .keys import NodeKeys
     from . import certs as certmod
+    _require_root("cert-request",
+                  "it reads the node's identity key and writes the TLS key (0600)")
 
     cfg = load_config(Path(args.config))
     keys = NodeKeys.load(cfg.data_dir)
@@ -1657,6 +1684,13 @@ def cmd_run(args) -> int:
 
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     log.info("overlay addr: %s", keys.addr)
+
+    # Key-hygiene check at every daemon start: a secret owned by a non-root
+    # user, or readable past its owner, is a standing hole (for the CA key,
+    # credential-minting). Catches legacy installs whose create chowned the
+    # data dir to the operator.
+    for w in _key_file_warnings(_secret_key_paths(cfg)):
+        log.warning("%s", w)
 
     directory = Directory.load(cfg.dir_cache_path)
 
@@ -2010,7 +2044,12 @@ def _door_status_lines(cfg) -> list:
     enrollment door is open (and time-to-close) or closed (and how long ago),
     plus failed attempts + source IPs and the last enrollment."""
     from . import door
-    st = door.read_door_status(cfg.data_dir)
+    try:
+        st = door.read_door_status(cfg.data_dir)
+    except PermissionError:
+        # door_status.json is 0600 root (it holds attempt source IPs). Degrade
+        # honestly rather than dying — status is a no-root command.
+        return ["door     : (state readable only with root — sudo gw status)"]
     if st is None:
         return ["door     : closed (never opened)"]
 
@@ -2183,8 +2222,15 @@ def cmd_status(args) -> int:
 
     cfg = load_config(cfg_path)
 
-    # Read-only: use the public id (id_pub.hex), never the private key, so
-    # `gw status` works without sudo.
+    # status is a no-root command: it reads only the public files (id_pub.hex,
+    # directory.json). But on a legacy install with a 0700 data dir, those reads
+    # fail invisibly (exists() → False, Directory.load → empty) and status would
+    # lie ("keys not generated", "directory is empty"). Say the truth instead.
+    if (cfg.data_dir.exists() and not os.access(cfg.data_dir, os.X_OK)) or (
+            cfg.dir_cache_path.exists() and not os.access(cfg.dir_cache_path, os.R_OK)):
+        sys.exit(f"can't read the public state under {cfg.data_dir} (a legacy "
+                 f"install with a 0700 data dir?). Either run: sudo gw status, "
+                 f"or open the public files up: sudo chmod 755 {cfg.data_dir}")
     own_id, own_addr = _own_identity(cfg.data_dir)
     directory = Directory.load(cfg.dir_cache_path)
 
@@ -2383,6 +2429,10 @@ def cmd_diagnose(args) -> int:
         print("keys not generated yet — run 'gw join <token>' or 'gw create' first")
         return 1
     own_id_bytes = bytes.fromhex(own_id)
+
+    # Key hygiene — stat() needs no read permission, so this works non-root too.
+    for w in _key_file_warnings(_secret_key_paths(cfg)):
+        print(f"  ⚠ {w}")
 
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
 
@@ -2672,6 +2722,7 @@ def cmd_renew_all(args) -> int:
     window closes) or any fleet-wide policy change.
     """
     from .config import load_config
+    _require_root("renew-all", "it writes the hub's root-owned renewal state")
     cfg = load_config(Path(args.config))
     if cfg.role != "hub":
         sys.exit("gw renew-all must be run on the hub (role = hub)")
@@ -2711,6 +2762,7 @@ def cmd_hub_backup(args) -> int:
     from .config import load_config
     from . import backup as bak
 
+    _require_root("hub-backup", "it reads the CA key and the hub registry")
     cfg = load_config(Path(args.config))
     if cfg.role != "hub":
         sys.exit("gw hub-backup must be run on the hub (role = hub)")
