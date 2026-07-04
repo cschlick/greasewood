@@ -98,3 +98,20 @@ def test_sync_stamp_written_on_successful_pull(tmp_path, monkeypatch):
     monkeypatch.setattr(syncmod, "pull_directory", lambda url, timeout=10.0: ([], None, None))
     loop._pull_once()
     assert syncmod.read_last_sync(tmp_path) is not None
+
+
+def test_syncloop_lifecycle_methods_exist(tmp_path):
+    # Guard against the class body being broken by a mis-indented insert: the
+    # daemon calls start()/stop(), which no unit test exercised before — so a
+    # missing method sailed past 329 tests and only integration caught it.
+    import time
+    from greasewood import sync as syncmod
+    loop = syncmod.SyncLoop(directory=Directory(), get_seeds=lambda: [],
+                            cache_path=tmp_path / "directory.json")
+    assert callable(loop.run) and callable(loop.start) and callable(loop.stop)
+    t = loop.start()
+    try:
+        assert t.is_alive()
+    finally:
+        loop.stop()
+        t.join(timeout=2)
