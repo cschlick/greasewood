@@ -298,13 +298,25 @@ class CA:
         from .hosts import sanitize
         want = sanitize(hostname)
         nodes_dir = self._data_dir / "nodes"
-        if not nodes_dir.exists():
+        # List explicitly, not via glob/exists: Path.exists() reads a denied
+        # stat as False and glob can swallow an unreadable dir — both would
+        # turn "you can't read the registry" into "no such node". Only a
+        # genuinely-missing dir means an empty registry.
+        try:
+            entries = sorted(n for n in os.listdir(nodes_dir) if n.endswith(".json"))
+        except FileNotFoundError:
             return None
-        for p in nodes_dir.glob("*.json"):
+        for p in (nodes_dir / n for n in entries):
             try:
                 info = json.loads(p.read_text())
+            except PermissionError:
+                # Can't read the registry ≠ node not found. Swallowing this made
+                # a non-root `gw set-segments` report "no node named X" for a
+                # node that exists; propagate so the CLI's handler tells the
+                # truth ("permission denied — try sudo").
+                raise
             except (OSError, ValueError):
-                continue
+                continue    # corrupt or concurrently-removed entry: skip it
             if sanitize(info.get("hostname", "")) == want:
                 return p.stem  # filename is the id_pub hex
         return None
