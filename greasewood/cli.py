@@ -899,8 +899,14 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
 def _membership_service(key: str) -> str:
     """Enable this membership's daemon as greasewood@<key> — an instance of the
     template unit install-service ships (ExecStart=gw -c /etc/greasewood_%i.toml
-    run). Returns 'active' (already running), 'installed' (enabled + started),
-    or 'manual' (no systemd management here — caller prints the gw run line)."""
+    run). Returns 'active' (came up and stayed up), 'installed' (enabled but not
+    confirmed running), 'failed' (crashed at/after start), or 'manual' (no
+    systemd management here — caller prints the gw run line).
+
+    The settle-check matters: Type=simple reports the start job done the instant
+    the process execs, so `enable --now` "succeeds" even for a daemon that
+    crashes a second later (and then crash-loops under Restart=on-failure). We
+    verify it reaches AND holds 'active' before telling the operator it's up."""
     import shutil
     import subprocess
     unit = f"greasewood@{key}.service"
@@ -911,8 +917,8 @@ def _membership_service(key: str) -> str:
                        capture_output=True)
     if r.returncode == 0:
         return "active"
-    subprocess.run([systemctl, "enable", "--now", unit], check=True)
-    return "installed"
+    subprocess.run([systemctl, "enable", "--now", f"{unit}"], check=True)
+    return _wait_service_settled(systemctl, unit)
 
 
 def _migrate_membership(cfg_path: "Path", new_key: str,
@@ -1435,20 +1441,22 @@ trusted_pubs = ["{ca_pub_hex}"]
     print()
     if membership_key:
         state = _membership_service(membership_key)
-        if state == "installed":
-            print(f"This mesh runs as its own service: greasewood@{membership_key} "
-                  f"(started; also starts at boot).")
-            print(f"  status: systemctl status greasewood@{membership_key}   "
-                  f"mesh view: gw -c {cfg_path} status")
-        elif state == "active":
-            print(f"greasewood@{membership_key} is already running — restart it "
-                  f"to pick up the refreshed config:")
-            print(f"  sudo systemctl restart greasewood@{membership_key}")
-        else:
+        unit = f"greasewood@{membership_key}"
+        if state == "active":
+            print(f"This mesh runs as its own service: {unit} (up, starts at boot).")
+            print(f"  status: systemctl status {unit}   mesh view: gw -c {cfg_path} status")
+            print(f"  (a re-join to change config? apply it: "
+                  f"sudo systemctl restart {unit})")
+        elif state == "manual":
             print("Start this mesh's daemon:")
             print(f"  sudo gw -c {cfg_path} run")
             print("  (tip: 'sudo gw install-service' + re-join makes meshes "
                   "manage themselves)")
+        else:
+            print(f"⚠ {unit} is enabled but {state or 'not running'} — likely "
+                  f"crashing at startup, so the mesh isn't up.")
+            print(f"  see why:  sudo journalctl -u {unit} -n 40 --no-pager")
+            print(f"  or watch it:  sudo gw -c {cfg_path} run")
     else:
         print("Start this mesh's daemon:")
         print(f"  sudo gw -c {cfg_path} run")
@@ -1663,15 +1671,22 @@ def _print_daemon_guidance(key: str, cfg_path, then: str = "") -> None:
     vs manual mode. `then` is an optional trailing clause."""
     tail = f" — {then}" if then else ""
     state = _membership_service(key)
-    if state in ("installed", "active"):
+    if state == "active":
         print(f"greasewood@{key} is running{tail} (and starts at boot).")
         print(f"  status: systemctl status greasewood@{key}   "
               f"logs: journalctl -u greasewood@{key} -f")
-    else:
+    elif state == "manual":
         print(f"Start this mesh's daemon{tail}:")
         print(f"  sudo gw -c {cfg_path} run")
         print("  (tip: 'sudo gw install-service' makes every mesh start on "
               "boot — no manual gw run)")
+    else:
+        # enabled, but it did NOT come up and stay up (Type=simple + a crash =
+        # a silent restart loop). Say so, and point at the journal.
+        print(f"⚠ greasewood@{key} is enabled but {state or 'not running'} — it "
+              f"is likely crashing at startup, so the mesh isn't up yet.")
+        print(f"  see why:  sudo journalctl -u greasewood@{key} -n 40 --no-pager")
+        print(f"  or run it in the foreground to watch:  sudo gw -c {cfg_path} run")
 
 
 def cmd_hub_promote(args) -> int:
