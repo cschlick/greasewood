@@ -41,7 +41,7 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
               "--endpoint", f"[{hub_ipv6}]:51900",
               "--control-port", str(CONTROL_PORT), "--door-port", str(DOOR_PORT))
         hub_overlay = overlay_addr_from_id_pub(
-            pexec(hub, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip())
+            pexec(hub, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip())
         podman("exec", "-d", hub, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
         assert wait_for_control_plane(hub, timeout=20, port=CONTROL_PORT), \
             "hub control plane not up on the custom port"
@@ -53,7 +53,7 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
         door_enroll_via(hub, hub_ipv6, node, node_ipv6, hostname="cnode")
 
         # Node config points root_url at the custom control port.
-        cfg = pexec(node, "cat", "/etc/greasewood.toml").stdout
+        cfg = pexec(node, "sh", "-c", "cat /etc/greasewood_*.toml").stdout
         assert f":{CONTROL_PORT}" in cfg, f"root_url missing custom port:\n{cfg}"
 
         podman("exec", "-d", node, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")

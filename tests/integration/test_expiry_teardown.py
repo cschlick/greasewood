@@ -18,7 +18,7 @@ from .helpers import podman, wg_peer_count, wait_for_peer_count
 pytestmark = pytest.mark.integration
 
 
-def _wait_peer_count_at_most(cid, at_most, iface="gw-mesh", timeout=150):
+def _wait_peer_count_at_most(cid, at_most, iface="gw_testmesh", timeout=150):
     """Block until the interface has at most `at_most` peers (i.e. one was torn
     down). Returns True if it dropped, False on timeout."""
     deadline = time.time() + timeout

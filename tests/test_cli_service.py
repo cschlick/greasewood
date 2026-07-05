@@ -35,14 +35,14 @@ def test_install_requires_root(monkeypatch):
         cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False))
 
 
-def test_install_writes_units_when_no_systemctl(tmp_path, monkeypatch, as_root):
+def test_install_writes_template_when_no_systemctl(tmp_path, monkeypatch, as_root):
     monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
     monkeypatch.setattr(_shutil, "which", _which({}))  # no gw, no systemctl
     rc = cli.cmd_install_service(
         types.SimpleNamespace(exec="/usr/local/bin/gw", no_enable=False))
     assert rc == 0
-    assert "ExecStart=/usr/local/bin/gw run" in (tmp_path / "greasewood.service").read_text()
-    assert "PathExists=/etc/greasewood.toml" in (tmp_path / "greasewood.path").read_text()
+    body = (tmp_path / "greasewood@.service").read_text()
+    assert "ExecStart=/usr/local/bin/gw -c /etc/greasewood_%i.toml run" in body
 
 
 def test_installed_unit_is_sandboxed(tmp_path, monkeypatch, as_root):
@@ -53,7 +53,7 @@ def test_installed_unit_is_sandboxed(tmp_path, monkeypatch, as_root):
     monkeypatch.setattr(_shutil, "which", _which({}))
     cli.cmd_install_service(
         types.SimpleNamespace(exec="/usr/local/bin/gw", no_enable=False))
-    unit = (tmp_path / "greasewood.service").read_text()
+    unit = (tmp_path / "greasewood@.service").read_text()
     for directive in [
         "NoNewPrivileges=yes",
         "CapabilityBoundingSet=CAP_NET_ADMIN",
@@ -74,44 +74,46 @@ def test_installed_unit_is_sandboxed(tmp_path, monkeypatch, as_root):
     assert not any(d.startswith("ProtectKernelModules") for d in directives)
 
 
-def test_install_enables_with_systemctl(tmp_path, monkeypatch, as_root):
+def test_install_enables_existing_memberships(tmp_path, monkeypatch, as_root, capsys):
     monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
     monkeypatch.setattr(_shutil, "which",
                         _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
     calls = []
     monkeypatch.setattr(_subprocess, "run", _record_run(calls))
-    rc = cli.cmd_install_service(types.SimpleNamespace(
-        exec=None, no_enable=False, config=str(tmp_path / "absent.toml")))
+    monkeypatch.setattr(cli, "_memberships",
+                        lambda etc=None: [("prod", tmp_path / "greasewood_prod.toml")])
+    monkeypatch.setattr(cli, "_wait_service_settled", lambda *a, **k: "active")
+    rc = cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False))
     assert rc == 0
     assert ["/bin/systemctl", "daemon-reload"] in calls
-    assert ["/bin/systemctl", "enable", "--now", "greasewood.path"] in calls
-    assert ["/bin/systemctl", "enable", "greasewood.service"] in calls
+    assert ["/bin/systemctl", "enable", "--now", "greasewood@prod.service"] in calls
+    assert "greasewood@prod: up and running" in capsys.readouterr().out
 
 
-def test_install_verifies_daemon_when_config_exists(tmp_path, monkeypatch, as_root, capsys):
-    """install-service run AFTER create (config already present): the path unit
-    fires the service immediately, so the install must report whether the
-    daemon actually came up — `systemctl start` looks successful even when the
-    daemon crashes a second later (seen in the field: sandboxed unit +
-    legacy pmuser-owned keys = silent crash-loop)."""
+def test_install_with_no_memberships_says_so(tmp_path, monkeypatch, as_root, capsys):
     monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
     monkeypatch.setattr(_shutil, "which",
                         _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
     monkeypatch.setattr(_subprocess, "run", _record_run([]))
-    cfg = tmp_path / "gw.toml"
-    cfg.write_text("[node]\n")
+    monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])
+    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False))
+    assert "No mesh configured yet" in capsys.readouterr().out
 
-    monkeypatch.setattr(cli, "_wait_service_settled", lambda *a, **k: "active")
-    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False,
-                                                  config=str(cfg)))
-    assert "up and running" in capsys.readouterr().out
 
+def test_install_flags_crashing_membership(tmp_path, monkeypatch, as_root, capsys):
+    """`systemctl start` looks successful even when the daemon crashes a second
+    later — install must verify each membership comes up AND stays up."""
+    monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
+    monkeypatch.setattr(_shutil, "which",
+                        _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
+    monkeypatch.setattr(_subprocess, "run", _record_run([]))
+    monkeypatch.setattr(cli, "_memberships",
+                        lambda etc=None: [("prod", tmp_path / "greasewood_prod.toml")])
     monkeypatch.setattr(cli, "_wait_service_settled", lambda *a, **k: "failed")
-    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False,
-                                                  config=str(cfg)))
+    cli.cmd_install_service(types.SimpleNamespace(exec=None, no_enable=False))
     out = capsys.readouterr().out
     assert "likely crashing at startup" in out
-    assert "journalctl -u greasewood -n 20" in out
+    assert "journalctl -u greasewood@prod -n 20" in out
 
 
 def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
@@ -123,7 +125,7 @@ def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
         raise PermissionError(13, "Permission denied", "/var/lib/greasewood/ca.key")
     monkeypatch.setattr(cli, "cmd_status", boom)
     with pytest.raises(SystemExit) as e:
-        cli.main(["status"])
+        cli.main(["-c", "/tmp/x.toml", "status"])
     msg = str(e.value)
     assert "AS ROOT" in msg and "CAP_DAC_OVERRIDE" in msg
     assert "chown root:root /var/lib/greasewood/ca.key" in msg
@@ -145,16 +147,19 @@ def test_uninstall_requires_root(monkeypatch):
         cli.cmd_uninstall_service(types.SimpleNamespace())
 
 
-def test_uninstall_removes_units(tmp_path, monkeypatch, as_root):
+def test_uninstall_removes_template_instances_and_legacy(tmp_path, monkeypatch, as_root):
     monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path)
-    (tmp_path / "greasewood.service").write_text("x")
-    (tmp_path / "greasewood.path").write_text("y")
+    (tmp_path / "greasewood@.service").write_text("t")
+    (tmp_path / "greasewood.service").write_text("x")   # legacy
+    (tmp_path / "greasewood.path").write_text("y")      # legacy
     monkeypatch.setattr(_shutil, "which", _which({"systemctl": "/bin/systemctl"}))
+    monkeypatch.setattr(cli, "_memberships",
+                        lambda etc=None: [("prod", tmp_path / "greasewood_prod.toml")])
     calls = []
     monkeypatch.setattr(_subprocess, "run", _record_run(calls))
     rc = cli.cmd_uninstall_service(types.SimpleNamespace())
     assert rc == 0
+    assert ["/bin/systemctl", "disable", "--now", "greasewood@prod.service"] in calls
+    assert not (tmp_path / "greasewood@.service").exists()
     assert not (tmp_path / "greasewood.service").exists()
     assert not (tmp_path / "greasewood.path").exists()
-    assert ["/bin/systemctl", "disable", "--now",
-            "greasewood.path", "greasewood.service"] in calls

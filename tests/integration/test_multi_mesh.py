@@ -33,7 +33,7 @@ def _bring_up_hub(cid, ipv6, hostname, prefix, mesh_name=None):
           "--hostname", hostname,
           "--endpoint", f"[{ipv6}]:51900", "--overlay-prefix", prefix)
     overlay = overlay_addr_from_id_pub(
-        pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip(), prefix)
+        pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip(), prefix)
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
     return overlay
 
@@ -110,7 +110,7 @@ PREFIX_C = "fdde:cafc:ffe:f::"   # distinct overlay /64 for the auto-slot fleet
 def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
     """`gw join <token>` with NO location flags: the first mesh lands in the
     default slot; a token from a second mesh auto-provisions slot 2 —
-    /etc/greasewood2.toml, /var/lib/greasewood2, gw-mesh2, UDP 51910, names
+    /etc/greasewood_<name>.toml, /var/lib/greasewood_<name>, gw_<name>, names
     under gw2.internal — and a repeat join with the same mesh's token routes
     back to slot 2 (refresh) instead of allocating slot 3."""
     hub_c = hub_d = node = None
@@ -145,20 +145,20 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
 
         # Slot 2 got the derived names + the mesh's OWN domain (carried in the
         # token — a mesh has ONE domain everywhere; no local aliasing exists).
-        cfg2 = pexec(node, "cat", "/etc/greasewood2.toml").stdout
-        assert 'interface = "gw-mesh2"' in cfg2
+        cfg2 = pexec(node, "cat", "/etc/greasewood_hubcmesh.toml").stdout
+        assert 'interface = "gw_hubcmesh"' in cfg2
         assert "listen_port = 51910" in cfg2
         assert 'mesh_domain = "hubcmesh.internal"' in cfg2
         assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
-        assert 'data_dir = "/var/lib/greasewood2"' in cfg2
-        cfg1 = pexec(node, "cat", "/etc/greasewood.toml").stdout
-        assert 'interface = "gw-mesh"' in cfg1 and "listen_port = 51900" in cfg1
+        assert 'data_dir = "/var/lib/greasewood_hubcmesh"' in cfg2
+        cfg1 = pexec(node, "cat", "/etc/greasewood_testmesh.toml").stdout
+        assert 'interface = "gw_testmesh"' in cfg1 and "listen_port = 51900" in cfg1
         assert 'mesh_domain = "testmesh.internal"' in cfg1        # adopted from token
 
         # Both daemons up; both overlays reachable.
         podman("exec", "-d", node, "sh", "-c", "gw run >> /tmp/a.log 2>&1")
         podman("exec", "-d", node, "sh", "-c",
-               "gw -c /etc/greasewood2.toml run >> /tmp/c.log 2>&1")
+               "gw -c /etc/greasewood_hubcmesh.toml run >> /tmp/c.log 2>&1")
         assert wait_for_ping(node, gw_hub["overlay"], timeout=45), \
             "node could not reach mesh A's hub"
         assert wait_for_ping(node, overlay_c, timeout=45), \
@@ -173,8 +173,9 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
                       "--endpoint", f"[{node_ipv6}]:51910", check=False)
             assert r.returncode == 0, f"slot-2 refresh failed:\n{r.stdout}\n{r.stderr}"
             assert "refreshing it" in (r.stdout + r.stderr)
-        assert pexec(node, "test", "-e", "/etc/greasewood3.toml",
-                     check=False).returncode != 0, "refresh wrongly made slot 3"
+        n_cfgs = pexec(node, "sh", "-c",
+                       "ls /etc/greasewood_*.toml | wc -l").stdout.strip()
+        assert n_cfgs == "2", f"refresh wrongly made a third membership ({n_cfgs})"
 
         # HARD-NO collision: a third mesh whose name collides with membership
         # #1 ("testmesh") is refused BEFORE the door dance — no alias, no new
@@ -192,12 +193,13 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             out = r.stdout + r.stderr
             assert "cannot bridge two meshes with the same domain" in out
             assert "set-domain" in out and "NOT consumed" in out
-            assert pexec(node, "test", "-e", "/etc/greasewood3.toml",
-                         check=False).returncode != 0, "refusal still made a slot"
+            n_cfgs = pexec(node, "sh", "-c",
+                           "ls /etc/greasewood_*.toml | wc -l").stdout.strip()
+            assert n_cfgs == "2", "refusal still made a membership"
             # Token unburned: hub_d's door window is still open.
             assert pexec(hub_d, "test", "-e",
-                         "/var/lib/greasewood/door_window.json").returncode == 0
-            pexec(hub_d, "rm", "-f", "/var/lib/greasewood/door_window.json",
+                         "/var/lib/greasewood_testmesh/door_window.json").returncode == 0
+            pexec(hub_d, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
                   check=False)
     finally:
         for cid in (hub_c, hub_d, node):

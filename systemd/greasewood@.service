@@ -1,16 +1,15 @@
 [Unit]
-Description=greasewood mesh daemon
+Description=greasewood mesh daemon (%i)
 Documentation=https://gitlab.com/cschlick/greasewood
 After=network-online.target
 Wants=network-online.target
-# Only run once this node is configured (create / join writes the config);
-# greasewood.path starts us the moment it appears.
-ConditionPathExists=/etc/greasewood.toml
+# Only run once this membership is configured (create / join writes it).
+ConditionPathExists=/etc/greasewood_%i.toml
 
 [Service]
 Type=simple
 # gw run creates WireGuard interfaces and edits routing → runs as root.
-ExecStart=/usr/local/bin/gw run
+ExecStart=/usr/local/bin/gw -c /etc/greasewood_%i.toml run
 Restart=on-failure
 RestartSec=5
 

@@ -96,8 +96,8 @@ def gw_hub(gw_image, gw_network):
               "--hostname", "hub",
               "--endpoint", _ep(ipv6, 51900))
 
-        overlay = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-        ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
+        overlay = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
+        ca_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/ca.pub").stdout.strip()
         overlay_addr = overlay_addr_from_id_pub(overlay)
 
         podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
@@ -144,8 +144,8 @@ def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
     assert ipv6, "hub container got no underlay address"
     pexec(cid, "gw", "create", f"{hostname}mesh", "--hostname", hostname,
           "--endpoint", _ep(ipv6, 51900), "--credential-ttl", ttl)
-    id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
-    ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()
+    id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
+    ca_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/ca.pub").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
     assert wait_for_control_plane(cid, timeout=20), "dedicated hub daemon did not start"
     return {"cid": cid, "ipv6": ipv6, "ca_pub": ca_pub,
@@ -227,7 +227,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
             # A failed attempt deliberately leaves the door open for retries.
             # Force-close it for test isolation: drop the window file and let
             # the DoorWatcher tear the interface down.
-            pexec(hub_cid, "rm", "-f", "/var/lib/greasewood/door_window.json",
+            pexec(hub_cid, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
                   check=False)
             _wait_iface_gone(hub_cid, "gw-door")
     return j
@@ -278,7 +278,7 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
                 inbound=inbound, invite_hostname=invite_hostname)
 
-    id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
+    id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
 
     return {

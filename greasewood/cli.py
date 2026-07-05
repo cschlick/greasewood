@@ -62,20 +62,21 @@ def _version() -> str:
 
 # systemd units, embedded so `gw install-service` works from a pip-only install
 # (no repo checkout needed). Kept in sync with systemd/ in the repo.
+# Template unit: one file serves every mesh membership as greasewood@<name>
+# (create/join enable the instance for you). %i is the mesh name.
 _SERVICE_UNIT = """\
 [Unit]
-Description=greasewood mesh daemon
+Description=greasewood mesh daemon (%i)
 Documentation=https://gitlab.com/cschlick/greasewood
 After=network-online.target
 Wants=network-online.target
-# Only run once this node is configured (create / join writes the config);
-# greasewood.path starts us the moment it appears.
-ConditionPathExists=/etc/greasewood.toml
+# Only run once this membership is configured (create / join writes it).
+ConditionPathExists=/etc/greasewood_%i.toml
 
 [Service]
 Type=simple
 # gw run creates WireGuard interfaces and edits routing → runs as root.
-ExecStart={exec} run
+ExecStart={exec} -c /etc/greasewood_%i.toml run
 Restart=on-failure
 RestartSec=5
 
@@ -108,20 +109,6 @@ SystemCallArchitectures=native
 WantedBy=multi-user.target
 """
 
-_PATH_UNIT = """\
-[Unit]
-Description=Watch for greasewood configuration and start the daemon
-Documentation=https://gitlab.com/cschlick/greasewood
-
-[Path]
-# Start greasewood.service once /etc/greasewood.toml exists. After a
-# config-changing re-join: systemctl restart greasewood.
-PathExists=/etc/greasewood.toml
-Unit=greasewood.service
-
-[Install]
-WantedBy=paths.target
-"""
 
 # Where the systemd units live. A module constant so tests can redirect it.
 _UNIT_DIR = Path("/etc/systemd/system")
@@ -366,15 +353,18 @@ def cmd_create(args) -> int:
     from .door import load_or_generate_door_key, door_pub_bytes_from_key
     from . import wg as wgmod
 
-    cfg_path = Path(args.config)
-    data_dir = Path(args.data_dir)
+    # Everything derives from the mesh name unless explicitly overridden —
+    # nothing unsuffixed exists: the first mesh on a host is named like the Nth.
+    _mp = _membership_paths(args.name)
+    cfg_path = Path(args.config) if args.config else _mp["config"]
+    data_dir = Path(args.data_dir) if args.data_dir else _mp["data_dir"]
     ca_key_path = data_dir / "ca.key"
     # The role is "hub"; the hostname is just this machine's name by default
     # (short form, no domain), overridable with --hostname.
     import socket
     from .keys import set_overlay_prefix, parse_overlay_prefix
     hostname = args.hostname or socket.gethostname().split(".")[0] or "hub"
-    listen_port = args.listen_port
+    listen_port = args.listen_port if args.listen_port is not None else _free_listen_port()
     control_port = args.control_port
     # The hub must reach every segment (it serves the control plane + door), so
     # it carries the reach-all wildcard segment. Plus any ability caps (--caps).
@@ -382,7 +372,13 @@ def cmd_create(args) -> int:
     if args.caps:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     ttl = _parse_duration(args.credential_ttl)
-    interface = args.interface
+    interface = args.interface or _mp["interface"]
+    if args.interface is None:
+        clash = _iface_collision(interface, cfg_path)
+        if clash:
+            sys.exit(f"derived interface name {interface!r} (gw_ + first 12 "
+                     f"chars of {args.name!r}) is already used by the membership "
+                     f"at {clash} — pass an explicit --interface.")
     overlay_prefix = args.overlay_prefix
     # The mesh's ONE name domain, everywhere, forever (changed only by a
     # deliberate fleet-wide set-domain). Rides in every join token.
@@ -491,7 +487,7 @@ default_caps = ["tls"]
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    _print_daemon_guidance("then invite nodes to enroll them")
+    _print_daemon_guidance(args.name, cfg_path, "then invite nodes to enroll them")
     print()
     print(f"Enroll a new node:")
     print(f"  TOKEN=$(sudo gw invite)          # on this machine")
@@ -553,9 +549,10 @@ def cmd_invite(args) -> int:
         sys.exit(f"the hub's mesh interface {cfg.wg_interface!r} doesn't exist — "
                  f"the daemon isn't running (or the interface was deleted under "
                  f"it). A joiner would be rejected at enrollment. Start the "
-                 f"daemon first: sudo systemctl start greasewood   (or: sudo gw run)\n"
+                 f"daemon first: sudo systemctl start {_unit_for_config(args.config)}   "
+                 f"(or: sudo gw -c {args.config} run)\n"
                  f"If you already started it and this persists, it's crashing on "
-                 f"startup — look at: journalctl -u greasewood -n 20")
+                 f"startup — look at: journalctl -u {_unit_for_config(args.config)} -n 20")
     import urllib.request as _url
     try:
         _url.urlopen(f"http://[::1]:{_control_port(cfg)}/directory", timeout=3)
@@ -563,7 +560,8 @@ def cmd_invite(args) -> int:
         sys.exit(f"the hub daemon isn't answering on loopback (port "
                  f"{_control_port(cfg)}) — it hosts the enroll server, so this "
                  f"token could never be redeemed. Start it first: "
-                 f"sudo systemctl start greasewood   (or: sudo gw run)")
+                 f"sudo systemctl start {_unit_for_config(args.config)}   "
+                 f"(or: sudo gw -c {args.config} run)")
 
     data_dir = cfg.data_dir
 
@@ -760,63 +758,105 @@ def cmd_close_door(args) -> int:
 # join  (new node — door-based enrollment, no SSH)
 # ---------------------------------------------------------------------------
 
-# Membership slots: the default mesh is slot 1 (unsuffixed: /etc/greasewood.toml,
-# /var/lib/greasewood, gw-mesh, 51900, gw.internal); every further mesh this
-# host joins auto-provisions the next slot N (greasewoodN.toml, greasewoodN,
-# gw-meshN, 51900+10*(N-1), gwN.internal). All of it remains overridable with
-# the explicit join flags — the slots are just the "I don't care what it's
-# called" default.
+# Memberships are keyed by the MESH NAME (given once at `gw create <name>`,
+# carried in every join token as <name>.internal). Nothing is unsuffixed and
+# nothing is numbered: the very first mesh on a host gets the same name-derived
+# artifacts as the fifth — /etc/greasewood_<name>.toml, /var/lib/
+# greasewood_<name>, interface gw_<name[:12]>, service greasewood@<name>.
+# Explicit flags override any derived value.
 
-def _slot_paths(n: int, etc: "Path" = Path("/etc"),
-                var: "Path" = Path("/var/lib")) -> dict:
-    """The derived names for membership slot `n` (1 = the unsuffixed default)."""
-    suf = "" if n == 1 else str(n)
+def _membership_key(domain: str) -> str:
+    """The membership key for a mesh domain: '<name>.internal' → '<name>';
+    anything else (a --mesh-domain override like corp.example.internal) is
+    sanitized to a single DNS-safe label."""
+    from .hosts import sanitize, valid_label
+    stem = domain[:-len(".internal")] if domain.endswith(".internal") else domain
+    return stem if valid_label(stem) else sanitize(stem)
+
+
+def _membership_paths(key: str, etc: "Path" = Path("/etc"),
+                      var: "Path" = Path("/var/lib")) -> dict:
+    """The derived artifacts for membership `key`. The interface truncates to
+    the kernel's 15-char limit (gw_ + 12); a truncation collision between two
+    memberships is a loud join/create-time refusal, never a silent rename."""
     return {
-        "config": etc / f"greasewood{suf}.toml",
-        "data_dir": var / f"greasewood{suf}",
-        "interface": f"gw-mesh{suf}",
-        "listen_port": 51900 + 10 * (n - 1),
-        "mesh_domain": f"gw{suf}.internal",
+        "config": etc / f"greasewood_{key}.toml",
+        "data_dir": var / f"greasewood_{key}",
+        "interface": f"gw_{key[:12].rstrip(chr(45))}",
+        "unit": f"greasewood@{key}",
     }
 
 
-def _mesh_slots(etc: "Path" = Path("/etc")) -> "list[tuple[int, Path]]":
-    """Existing membership configs on this host as (slot, config_path)."""
+def _memberships(etc: "Path" = Path("/etc")) -> "list[tuple[str, Path]]":
+    """Existing membership configs on this host as (key, config_path)."""
     import re as _re
     out = []
-    if (etc / "greasewood.toml").exists():
-        out.append((1, etc / "greasewood.toml"))
-    for p in etc.glob("greasewood[0-9]*.toml"):
-        m = _re.fullmatch(r"greasewood(\d+)\.toml", p.name)
-        if m and int(m.group(1)) >= 2:
-            out.append((int(m.group(1)), p))
+    for p in etc.glob("greasewood_*.toml"):
+        m = _re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", p.name)
+        if m:
+            out.append((m.group(1), p))
     return sorted(out)
 
 
-def _slot_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "int | None":
-    """The membership slot already trusting this CA, or None. This is how a
+def _membership_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "str | None":
+    """The membership key already trusting this CA, or None. This is how a
     token is routed: its CA pub identifies WHICH mesh it belongs to, so a token
     for a mesh we're already on refreshes that membership (even after a re-root
     — trusted_pubs carries old+new during migration), and an unknown CA means a
     genuinely new mesh."""
     from .config import load_config
-    for n, p in _mesh_slots(etc):
+    for key, p in _memberships(etc):
         try:
             if ca_pub_hex in load_config(p).ca_pubs:
-                return n
+                return key
         except Exception:
             continue
     return None
 
 
-def _next_free_slot(etc: "Path" = Path("/etc")) -> int:
-    """First unused slot ≥ 2 (slot 1 is the default mesh; callers only allocate
-    a new slot when slot 1 is already taken by a different mesh)."""
-    used = {n for n, _ in _mesh_slots(etc)}
-    n = 2
-    while n in used:
-        n += 1
-    return n
+def _free_listen_port(etc: "Path" = Path("/etc")) -> int:
+    """First of 51900, 51910, 51920, … not claimed by an existing membership."""
+    from .config import load_config
+    used = set()
+    for _k, p in _memberships(etc):
+        try:
+            used.add(load_config(p).listen_port)
+        except Exception:
+            continue
+    port = 51900
+    while port in used:
+        port += 10
+    return port
+
+
+def _iface_collision(iface: str, cfg_path: "Path",
+                     etc: "Path" = Path("/etc")) -> "Path | None":
+    """Another membership already using `iface` (the 15-char truncation can
+    collide for long names sharing a 12-char prefix), or None."""
+    from .config import load_config
+    for _k, p in _memberships(etc):
+        if p.resolve() == Path(cfg_path).resolve():
+            continue
+        try:
+            if load_config(p).wg_interface == iface:
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _discover_config(etc: "Path" = Path("/etc")) -> "Path":
+    """Resolve the config when -c wasn't given: exactly one membership → use it
+    (the single-mesh experience needs no flags); several → demand -c, loudly;
+    none → say how to start."""
+    ms = _memberships(etc)
+    if len(ms) == 1:
+        return ms[0][1]
+    if not ms:
+        sys.exit("no greasewood mesh is configured on this host — run "
+                 "'sudo gw create <name>' (hub) or 'sudo gw join <token>' first")
+    listing = "\n".join(f"  -c {p}   ({k})" for k, p in ms)
+    sys.exit(f"this host is on {len(ms)} meshes — say which one:\n{listing}")
 
 
 def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
@@ -835,7 +875,7 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
         mine = ipaddress.ip_network(f"{my_prefix}/64")
     except ValueError:
         return False
-    for n, p in _mesh_slots(etc):
+    for n, p in _memberships(etc):
         if p.resolve() == Path(cfg_path).resolve():
             continue
         try:
@@ -844,7 +884,7 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
             continue
         if theirs == mine:
             log.warning(
-                "this mesh uses the SAME overlay /64 (%s) as membership #%d "
+                "this mesh uses the SAME overlay /64 (%s) as membership %r "
                 "(%s). Everything still works — greasewood routes only "
                 "identity-derived /128s, never the /64 — but the prefix no "
                 "longer identifies a mesh on this host: any firewall rule or "
@@ -856,31 +896,21 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
     return False
 
 
-def _slot_service(cfg_path: "Path", slot: int) -> str:
-    """Make membership slot N run as its own systemd service (greasewoodN),
-    mirroring however slot 1 is managed: if the base greasewood.service is
-    installed, write the same unit pinned to this slot's config and enable it
-    now + at boot. Returns 'active' (already running), 'installed' (created and
-    started), or 'manual' (no systemd management here — caller prints gw run)."""
+def _membership_service(key: str) -> str:
+    """Enable this membership's daemon as greasewood@<key> — an instance of the
+    template unit install-service ships (ExecStart=gw -c /etc/greasewood_%i.toml
+    run). Returns 'active' (already running), 'installed' (enabled + started),
+    or 'manual' (no systemd management here — caller prints the gw run line)."""
     import shutil
     import subprocess
-    unit = f"greasewood{slot}.service"
+    unit = f"greasewood@{key}.service"
     systemctl = shutil.which("systemctl")
-    if not systemctl or not (_UNIT_DIR / "greasewood.service").exists():
+    if not systemctl or not (_UNIT_DIR / "greasewood@.service").exists():
         return "manual"
     r = subprocess.run([systemctl, "is-active", "--quiet", unit],
                        capture_output=True)
     if r.returncode == 0:
         return "active"
-    gw_exec = shutil.which("gw") or os.path.realpath(sys.argv[0])
-    text = (_SERVICE_UNIT.format(exec=gw_exec)
-            .replace("/etc/greasewood.toml", str(cfg_path))
-            .replace(f"ExecStart={gw_exec} run",
-                     f"ExecStart={gw_exec} -c {cfg_path} run")
-            .replace("Description=greasewood mesh daemon",
-                     f"Description=greasewood mesh daemon (membership #{slot})"))
-    (_UNIT_DIR / unit).write_text(text)
-    subprocess.run([systemctl, "daemon-reload"], check=True)
     subprocess.run([systemctl, "enable", "--now", unit], check=True)
     return "installed"
 
@@ -920,54 +950,69 @@ def cmd_join(args) -> int:
     # Auto-slotting: when every location knob is at its default, route the join
     # by the token's CA. A token for a mesh this host is already on refreshes
     # that membership; a token for a NEW mesh (unknown CA, default slot already
-    # taken) auto-provisions the next slot — greasewood2.toml,
-    # /var/lib/greasewood2, gw-mesh2, port 51910, names under gw2.internal — so
-    # joining another mesh is just `gw join <token>`. Any explicit flag opts
-    # out of the whole mechanism.
-    slot_n = None            # ≥2 when this join targets a numbered membership
-    auto = (args.config == "/etc/greasewood.toml"
-            and args.data_dir == "/var/lib/greasewood"
-            and args.listen_port == 51900
-            and args.interface is None)
+    # by the token's CA: known CA → refresh that membership; unknown CA → a new
+    # membership named by the mesh itself (the token's domain). Explicit flags
+    # override any derived value.
+    membership_key = None
+    auto = args.config is None and args.data_dir is None
     if auto:
-        known = _slot_for_ca(ca_pub_hex)
-        if known is not None and known != 1:
-            # Re-join of a mesh living in a numbered slot: use ITS config as-is
-            # (the slot's real values — possibly customized — win, not the
-            # naming formula; `prior` below then supplies interface/domain).
-            cfg_path = _slot_paths(known)["config"]
+        known = _membership_for_ca(ca_pub_hex)
+        if known is not None:
+            # Re-join: use the existing membership's config as-is (its real,
+            # possibly-customized values win; `prior` below supplies the rest).
+            cfg_path = _membership_paths(known)["config"]
             existing = load_config(cfg_path)
             data_dir, listen_port = existing.data_dir, existing.listen_port
-            slot_n = known
-            log.info("token's CA matches mesh membership #%d — refreshing it "
+            membership_key = known
+            log.info("token's CA matches membership %r — refreshing it "
                      "(config %s)", known, cfg_path)
-        elif known is None and cfg_path.exists():
-            # Unknown CA and the default slot is taken: a genuinely new mesh.
-            n = _next_free_slot()
-            sp = _slot_paths(n)
-            cfg_path, data_dir = sp["config"], sp["data_dir"]
-            listen_port = sp["listen_port"]
-            args.interface = sp["interface"]
-            slot_n = n
+        else:
+            if not token_domain:
+                sys.exit("token carries no mesh domain (older hub?) — re-issue "
+                         "the invite on a current hub, or pass -c/--data-dir/"
+                         "--interface/--listen-port explicitly")
+            key = _membership_key(token_domain)
+            mp = _membership_paths(key)
+            cfg_path, data_dir = mp["config"], mp["data_dir"]
+            listen_port = (args.listen_port
+                           if args.listen_port is not None else _free_listen_port())
+            if args.interface is None:
+                args.interface = mp["interface"]
+                clash = _iface_collision(args.interface, cfg_path)
+                if clash:
+                    sys.exit(
+                        f"derived interface name {args.interface!r} (gw_ + first "
+                        f"12 chars of {key!r}) is already used by the membership "
+                        f"at {clash} — the kernel caps interface names at 15 "
+                        f"chars, so long mesh names can collide after "
+                        f"truncation. Re-run with an explicit --interface. "
+                        f"The token was NOT consumed.")
+            membership_key = key
             log.info(
-                "token is for a mesh this host isn't on — auto-provisioning "
-                "membership #%d: config %s, data %s, interface %s, UDP %d "
+                "token is for a mesh this host isn't on — provisioning "
+                "membership %r: config %s, data %s, interface %s, UDP %d "
                 "(every value overridable with join flags)",
-                n, cfg_path, data_dir, args.interface, listen_port)
+                key, cfg_path, data_dir, args.interface, listen_port)
+    else:
+        if args.config is None or args.data_dir is None:
+            sys.exit("explicit joins need BOTH -c and --data-dir (any other "
+                     "flags optional); omit both for the derived defaults")
+        if args.listen_port is None:
+            listen_port = _free_listen_port()
 
     # HARD domain-collision refusal, BEFORE the door dance (so a refusal never
     # burns the invite): a mesh has ONE domain everywhere, and a node cannot
     # bridge two meshes that share one — no alias, no flag, no exception. The
     # membership being refreshed (same config path) doesn't count against itself.
     if token_domain:
-        for _n, _p in _mesh_slots():
+        for _n, _p in _memberships():
             if _p.resolve() == cfg_path.resolve():
                 continue
             try:
                 if load_config(_p).mesh_domain == token_domain:
                     sys.exit(
                         f"this mesh's domain {token_domain!r} is already used by "
-                        f"membership #{_n} ({_p}) — a node cannot bridge two "
+                        f"membership {_n!r} ({_p}) — a node cannot bridge two "
                         f"meshes with the same domain. Rename one of them on its "
                         f"hub (gw set-domain <new-name>) and re-run this join. "
                         f"The token was NOT consumed.")
@@ -1285,24 +1330,25 @@ trusted_pubs = ["{ca_pub_hex}"]
     if hub_overlay_url:
         print(f"  hub control  : {hub_overlay_url}")
     print()
-    if slot_n and slot_n != 1:
-        state = _slot_service(cfg_path, slot_n)
+    if membership_key:
+        state = _membership_service(membership_key)
         if state == "installed":
-            print(f"This membership runs as its own service: greasewood{slot_n} "
+            print(f"This mesh runs as its own service: greasewood@{membership_key} "
                   f"(started; also starts at boot).")
-            print(f"  status: systemctl status greasewood{slot_n}   "
+            print(f"  status: systemctl status greasewood@{membership_key}   "
                   f"mesh view: gw -c {cfg_path} status")
         elif state == "active":
-            print(f"greasewood{slot_n}.service is already running — restart it "
+            print(f"greasewood@{membership_key} is already running — restart it "
                   f"to pick up the refreshed config:")
-            print(f"  sudo systemctl restart greasewood{slot_n}")
+            print(f"  sudo systemctl restart greasewood@{membership_key}")
         else:
-            print("Start this membership's daemon:")
+            print("Start this mesh's daemon:")
             print(f"  sudo gw -c {cfg_path} run")
-            print("  (tip: 'sudo gw install-service' + re-join makes memberships "
+            print("  (tip: 'sudo gw install-service' + re-join makes meshes "
                   "manage themselves)")
     else:
-        _print_daemon_guidance()
+        print("Start this mesh's daemon:")
+        print(f"  sudo gw -c {cfg_path} run")
     print()
     from . import firewall as _fw
     if node_inbound == "no":
@@ -1490,39 +1536,39 @@ def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
         return None, None
 
 
+def _unit_for_config(cfg_path) -> str:
+    """The systemd unit serving this membership: greasewood@<key> when the
+    config follows the /etc/greasewood_<key>.toml scheme, else a generic
+    'greasewood@<name>' placeholder for messages."""
+    import re as _re
+    m = _re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", Path(cfg_path).name)
+    return f"greasewood@{m.group(1)}" if m else "greasewood@<name>"
+
+
 def _service_state() -> str:
     """How the greasewood daemon is managed on this host: 'active' (systemd
     unit installed and running), 'installed' (unit present, not yet running),
     or 'manual' (no unit). Used so create / join don't tell the user to run
     `gw run` when systemd already starts the daemon on its own."""
-    if not (_UNIT_DIR / "greasewood.service").exists():
+    if not (_UNIT_DIR / "greasewood@.service").exists():
         return "manual"
-    import shutil
-    import subprocess
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return "installed"
-    r = subprocess.run([systemctl, "is-active", "greasewood.service"],
-                       capture_output=True, text=True)
-    return "active" if r.stdout.strip() == "active" else "installed"
+    return "installed"
 
 
-def _print_daemon_guidance(then: str = "") -> None:
-    """Tell the user how the daemon runs, correctly for service vs manual mode.
-    `then` is an optional trailing clause (e.g. 'then invite nodes')."""
-    state = _service_state()
+def _print_daemon_guidance(key: str, cfg_path, then: str = "") -> None:
+    """Tell the user how this membership's daemon runs, correctly for service
+    vs manual mode. `then` is an optional trailing clause."""
     tail = f" — {then}" if then else ""
-    if state == "active":
-        print(f"The greasewood service is already running{tail}.")
-        print("  status: systemctl status greasewood   logs: journalctl -u greasewood -f")
-    elif state == "installed":
-        print("The greasewood service is installed; it starts automatically now that")
-        print("the config exists (and on every reboot). Check it in a moment with:")
-        print("  systemctl status greasewood   (logs: journalctl -u greasewood -f)")
+    state = _membership_service(key)
+    if state in ("installed", "active"):
+        print(f"greasewood@{key} is running{tail} (and starts at boot).")
+        print(f"  status: systemctl status greasewood@{key}   "
+              f"logs: journalctl -u greasewood@{key} -f")
     else:
-        print(f"Start the daemon{tail}:")
-        print("  sudo gw run")
-        print("  (tip: 'sudo gw install-service' makes it start on boot — no manual gw run)")
+        print(f"Start this mesh's daemon{tail}:")
+        print(f"  sudo gw -c {cfg_path} run")
+        print("  (tip: 'sudo gw install-service' makes every mesh start on "
+              "boot — no manual gw run)")
 
 
 def cmd_hub_promote(args) -> int:
@@ -1764,7 +1810,7 @@ def cmd_cert_request(args) -> int:
                 print(f"  {lbl}.{own}")
             print("Restart the daemon to advertise them now "
                   "(else they propagate at the next renewal): "
-                  "sudo systemctl restart greasewood  (or re-run sudo gw run).")
+                  "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run).")
     return 0
 
 
@@ -1958,7 +2004,7 @@ def cmd_rename(args) -> int:
 
     print(f"renamed {cfg.hostname!r} -> {newname!r} (overlay addr unchanged)")
     print("Restart the daemon so it keeps advertising the new name: "
-          "sudo systemctl restart greasewood  (or re-run sudo gw run)")
+          "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run)")
     return 0
 
 
@@ -3038,7 +3084,7 @@ def cmd_renew(args) -> int:
                         list(cred.caps), cfg_path)
 
     print("Restart the daemon to fully adopt it: "
-          "sudo systemctl restart greasewood  (or re-run sudo gw run)")
+          "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run)")
     return 0
 
 
@@ -3176,19 +3222,18 @@ def cmd_purge(args) -> int:
 
     cfg_path = Path(args.config)
 
-    # Determine interface name, data_dir, and mesh domain from config if available
-    iface = "gw-mesh"
-    data_dir = Path("/var/lib/greasewood")
-    mesh_domain = "gw.internal"
-    if cfg_path.exists():
-        try:
-            from .config import load_config
-            cfg = load_config(cfg_path)
-            iface = cfg.wg_interface
-            data_dir = cfg.data_dir
-            mesh_domain = cfg.mesh_domain
-        except Exception:
-            pass
+    # Nothing is unsuffixed anymore, so there are no guessable defaults: the
+    # config must exist (main() discovery already resolved -c, or errored).
+    try:
+        from .config import load_config
+        cfg = load_config(cfg_path)
+        iface = cfg.wg_interface
+        data_dir = cfg.data_dir
+        mesh_domain = cfg.mesh_domain
+    except Exception as e:
+        sys.exit(f"can't read {cfg_path} ({e}) — pass -c <this mesh's config> "
+                 f"(purge won't guess which mesh to destroy)")
+    unit = _unit_for_config(cfg_path)
 
     if not args.yes:
         print(f"This will permanently remove:")
@@ -3209,11 +3254,12 @@ def cmd_purge(args) -> int:
     # against the re-created hub fails with a peer-install error.
     systemctl = shutil.which("systemctl")
     if systemctl:
-        r = subprocess.run([systemctl, "is-active", "--quiet", "greasewood"],
+        r = subprocess.run([systemctl, "is-active", "--quiet", unit],
                            capture_output=True)
         if r.returncode == 0:
-            subprocess.run([systemctl, "stop", "greasewood"], capture_output=True)
-            removed.append("stopped greasewood.service")
+            subprocess.run([systemctl, "disable", "--now", unit],
+                           capture_output=True)
+            removed.append(f"stopped {unit}")
     # A manual `gw run` can't be stopped safely from here — but it MUST not
     # survive the purge, so at least say so loudly.
     r = subprocess.run(["pgrep", "-f", "gw run"], capture_output=True, text=True)
@@ -3272,9 +3318,10 @@ def cmd_purge(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_install_service(args) -> int:
-    """Install + enable the systemd units so the daemon runs as a managed
-    service. After this, create / join is all you need — the service starts
-    itself when the config appears. Pip-only; no Ansible required."""
+    """Install the greasewood@ TEMPLATE unit — one file serves every mesh
+    membership as its own service instance (greasewood@<name>). create/join
+    enable their instance automatically once the template is installed; for
+    memberships that already exist, this enables them now. Pip-only."""
     import shutil
     import subprocess
 
@@ -3282,52 +3329,42 @@ def cmd_install_service(args) -> int:
         sys.exit("install-service must run as root (sudo gw install-service)")
 
     gw_exec = args.exec or shutil.which("gw") or os.path.realpath(sys.argv[0])
-    units = {
-        "greasewood.service": _SERVICE_UNIT.format(exec=gw_exec),
-        "greasewood.path": _PATH_UNIT,
-    }
     _UNIT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, body in units.items():
-        path = _UNIT_DIR / name
-        path.write_text(body)
-        print(f"wrote {path}")
+    unit_path = _UNIT_DIR / "greasewood@.service"
+    unit_path.write_text(_SERVICE_UNIT.format(exec=gw_exec))
+    print(f"wrote {unit_path}")
 
     systemctl = shutil.which("systemctl")
     if not systemctl:
-        print("\nsystemctl not found — on a systemd host, enable once with:")
-        print("  systemctl daemon-reload")
-        print("  systemctl enable --now greasewood.path")
-        print("  systemctl enable greasewood.service")
+        print("\nsystemctl not found — on a systemd host, enable per mesh with:")
+        print("  systemctl daemon-reload && systemctl enable --now greasewood@<name>")
         return 0
 
     subprocess.run([systemctl, "daemon-reload"], check=True)
-    if not args.no_enable:
-        # The path unit (always armed) starts the daemon when config appears;
-        # enabling the service makes it also come up at boot once configured.
-        subprocess.run([systemctl, "enable", "--now", "greasewood.path"], check=True)
-        subprocess.run([systemctl, "enable", "greasewood.service"], check=True)
-        print("\nenabled: greasewood.path (armed) + greasewood.service (boot).")
-        if Path(getattr(args, "config", "/etc/greasewood.toml")).exists():
-            # Config already exists (install-service ran AFTER create/join), so
-            # the path unit fires the service right now — verify it actually
-            # comes up and STAYS up. `systemctl start` reports success the
-            # moment the process execs (Type=simple); a daemon that crashes a
-            # second later looks "started" while it silently restart-loops.
-            state = _wait_service_settled(systemctl, "greasewood")
-            if state == "active":
-                print("config present → greasewood.service is up and running.")
-            else:
-                print(f"⚠ config present but greasewood.service is "
-                      f"{state or 'not running'} — it is likely crashing at "
-                      f"startup. Look at: journalctl -u greasewood -n 20")
+    if args.no_enable:
+        print("\ntemplate written (nothing enabled). Per mesh:")
+        print("  systemctl enable --now greasewood@<name>")
+        return 0
+
+    existing = _memberships()
+    if not existing:
+        print("\nNo mesh configured yet — run create or join; each mesh's")
+        print("daemon (greasewood@<name>) starts on its own from then on.")
+        return 0
+    for key, _cfg in existing:
+        unit = f"greasewood@{key}"
+        subprocess.run([systemctl, "enable", "--now", f"{unit}.service"],
+                       check=True)
+        # `systemctl start` reports success the moment the process execs
+        # (Type=simple); a daemon that crashes a second later looks "started"
+        # while it silently restart-loops — so verify it comes up AND stays up.
+        state = _wait_service_settled(systemctl, unit)
+        if state == "active":
+            print(f"{unit}: up and running (also starts at boot).")
         else:
-            print("Run create or join — the daemon starts on its own; no `gw run`.")
-        print("Logs: journalctl -u greasewood -f")
-        print("Opt out: sudo gw uninstall-service "
-              "(or systemctl disable --now greasewood.path greasewood.service)")
-    else:
-        print("\nunits written (not enabled). Enable with:")
-        print("  systemctl enable --now greasewood.path && systemctl enable greasewood.service")
+            print(f"⚠ {unit} is {state or 'not running'} — it is likely "
+                  f"crashing at startup. Look at: journalctl -u {unit} -n 20")
+    print("Opt out: sudo gw uninstall-service")
     return 0
 
 
@@ -3366,17 +3403,26 @@ def cmd_uninstall_service(args) -> int:
 
     systemctl = shutil.which("systemctl")
     if systemctl:
-        subprocess.run([systemctl, "disable", "--now",
-                        "greasewood.path", "greasewood.service"], check=False)
+        # Disable every membership instance, then drop the template.
+        for key, _cfg in _memberships():
+            subprocess.run([systemctl, "disable", "--now",
+                            f"greasewood@{key}.service"], check=False)
+    tmpl = _UNIT_DIR / "greasewood@.service"
+    if tmpl.exists():
+        tmpl.unlink()
+        print(f"removed {tmpl}")
+    # Legacy single-mesh units, if this host predates the template.
     for name in ("greasewood.path", "greasewood.service"):
         p = _UNIT_DIR / name
         if p.exists():
+            if systemctl:
+                subprocess.run([systemctl, "disable", "--now", name], check=False)
             p.unlink()
             print(f"removed {p}")
     if systemctl:
         subprocess.run([systemctl, "daemon-reload"], check=False)
-    print("greasewood service removed. (Run `gw run` manually, or reinstall with "
-          "`gw install-service`.)")
+    print("greasewood services removed. (Run `gw -c <config> run` manually, or "
+          "reinstall with `gw install-service`.)")
     return 0
 
 
@@ -3402,7 +3448,10 @@ def main(argv=None) -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("-c", "--config", default="/etc/greasewood.toml", metavar="FILE")
+    p.add_argument("-c", "--config", default=None, metavar="FILE",
+                   help="membership config (default: the host's single "
+                        "/etc/greasewood_<name>.toml, discovered; required "
+                        "when the host is on several meshes)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=f"greasewood {_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -3418,16 +3467,17 @@ def main(argv=None) -> int:
     sp.add_argument("--hostname", default=None,
                     help="this hub's hostname in the mesh "
                          "(default: the machine's hostname)")
-    sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
-    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
+    sp.add_argument("--data-dir", dest="data_dir", default=None,
+                    help="state directory (default: /var/lib/greasewood_<name>)")
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=None,
+                    help="mesh WireGuard UDP port (default: first free of 51900, 51910, …)")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--door-port", dest="door_port", type=int, default=51901,
                     help="UDP port for the enrollment door (carried in tokens)")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address (auto-detected if omitted)")
-    sp.add_argument("--interface", default="gw-mesh",
-                    help="WireGuard interface name (default: gw-mesh; use a "
-                         "distinct name per mesh on a multi-homed host)")
+    sp.add_argument("--interface", default=None,
+                    help="WireGuard interface name (default: gw_<name[:12]>)")
     sp.add_argument("--overlay-prefix", dest="overlay_prefix",
                     default="fd8d:e5c1:db1a:7::",
                     help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")
@@ -3494,8 +3544,10 @@ def main(argv=None) -> int:
     sp.add_argument("--hostname", default=None,
                     help="this node's hostname in the mesh "
                          "(default: keep existing, else the machine's hostname)")
-    sp.add_argument("--data-dir", dest="data_dir", default="/var/lib/greasewood")
-    sp.add_argument("--listen-port", dest="listen_port", type=int, default=51900)
+    sp.add_argument("--data-dir", dest="data_dir", default=None,
+                    help="state directory (default: /var/lib/greasewood_<name>)")
+    sp.add_argument("--listen-port", dest="listen_port", type=int, default=None,
+                    help="mesh WireGuard UDP port (default: first free of 51900, 51910, …)")
     sp.add_argument("--interface", default=None,
                     help="WireGuard interface name (default: keep existing, else "
                          "gw-mesh; use a distinct name per mesh on one host)")
@@ -3692,6 +3744,13 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
+    # -c discovery: with one membership on the host, every command finds it
+    # unaided; with several, demand -c (loudly, listing them). create/join
+    # derive their own config from the mesh name; the service commands manage
+    # units, not meshes.
+    if args.config is None and args.cmd not in (
+            "create", "join", "install-service", "uninstall-service"):
+        args.config = str(_discover_config())
     try:
         return args.fn(args)
     except PermissionError as e:

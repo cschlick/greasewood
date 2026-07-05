@@ -74,7 +74,7 @@ def test_peer_install_failure_reports_actionable_reason(monkeypatch):
     assert resp["error"] == "hub data-plane failure"
     assert "mesh interface 'gw-mesh' is missing or broken" in resp["reason"]
     assert "retry this token" in resp["reason"]           # self-heal story
-    assert "systemctl restart greasewood" in resp["reason"]
+    assert "restart the hub's greasewood daemon" in resp["reason"]
     assert "CalledProcessError" not in resp["reason"]     # no traceback leak
     assert resp["attempts_remaining"] == 2
 
