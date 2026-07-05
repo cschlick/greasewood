@@ -24,6 +24,8 @@ its features!
   talks to whom.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
+- **[Service TLS.](#tls-certificates-for-services)** The same CA issues auto-renewing
+  x509 certs for your services (Postgres, nginx, …) — with profiles that place them where each wants them.
 - **[Offline-tolerant.](#offline-tolerance)** The anchor can be down for a credential
   lifetime — nodes run from cache.
 - **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
