@@ -877,25 +877,34 @@ The overlay `/64` is configurable (`[network] overlay_prefix`, set at
 `create --overlay-prefix`; a node learns it from its credential at join). A
 node learns and verifies addresses prefix-agnostically — the self-certifying
 part is the host bits, `blake2s(id_pub)`, and the CA signature attests the
-prefix — so **one host can be a plain node on two independent meshes at once**.
-Give each membership its own config, data dir, interface, listen port, and mesh
-domain (hub-in-two-meshes is not supported):
+prefix — so **one host can be a plain node on two independent meshes at once**
+(hub-in-two-meshes is not supported). Joining a second mesh is just:
 
 ```bash
-# Mesh A
-sudo gw -c /etc/gw-a.toml join "$TOKEN_A" --data-dir /var/lib/gw-a \
-    --interface gw-a --listen-port 51900 --mesh-domain alpha
-sudo gw -c /etc/gw-a.toml run
-
-# Mesh B — the same two commands, with every A-specific value swapped for a B one:
-# its own config, token, data dir, interface, UDP port, and mesh domain.
-sudo gw -c /etc/gw-b.toml join "$TOKEN_B" --data-dir /var/lib/gw-b \
-    --interface gw-b --listen-port 51910 --mesh-domain beta
-sudo gw -c /etc/gw-b.toml run
+sudo gw join "$TOKEN_B"        # that's it
 ```
 
-(Run each daemon as its own systemd service in practice — `gw run` stays in the
-foreground.)
+`join` routes by the token's **CA**: a token for a mesh you're already on
+refreshes that membership; an unknown CA **auto-provisions the next membership
+slot** — config `/etc/greasewood2.toml`, data `/var/lib/greasewood2`, interface
+`gw-mesh2`, UDP `51910`, names under `gw2.internal` (then 3, 4, … each +10 on
+the port). If slot 1 runs as a systemd service, the new membership gets its own
+`greasewood2.service`, started and boot-enabled automatically; otherwise join
+prints the `gw -c /etc/greasewood2.toml run` line. Everything else is per
+membership via `-c`:
+
+```bash
+sudo gw -c /etc/greasewood2.toml status      # mesh 2's roster, your mesh-2 identity
+ping db.gw2.internal                          # mesh 2's names, next to mesh 1's
+```
+
+Every derived value is still overridable — pass any of the explicit knobs and
+the auto-slotting steps aside entirely:
+
+```bash
+sudo gw -c /etc/gw-b.toml join "$TOKEN_B" --data-dir /var/lib/gw-b \
+    --interface gw-b --listen-port 51920 --mesh-domain beta
+```
 
 **The mesh domain must differ between the two, for the same reason the interface
 name must** — both are flat, host-global namespaces with no scoping. The

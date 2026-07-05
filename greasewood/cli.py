@@ -753,6 +753,94 @@ def cmd_close_door(args) -> int:
 # join  (new node — door-based enrollment, no SSH)
 # ---------------------------------------------------------------------------
 
+# Membership slots: the default mesh is slot 1 (unsuffixed: /etc/greasewood.toml,
+# /var/lib/greasewood, gw-mesh, 51900, gw.internal); every further mesh this
+# host joins auto-provisions the next slot N (greasewoodN.toml, greasewoodN,
+# gw-meshN, 51900+10*(N-1), gwN.internal). All of it remains overridable with
+# the explicit join flags — the slots are just the "I don't care what it's
+# called" default.
+
+def _slot_paths(n: int, etc: "Path" = Path("/etc"),
+                var: "Path" = Path("/var/lib")) -> dict:
+    """The derived names for membership slot `n` (1 = the unsuffixed default)."""
+    suf = "" if n == 1 else str(n)
+    return {
+        "config": etc / f"greasewood{suf}.toml",
+        "data_dir": var / f"greasewood{suf}",
+        "interface": f"gw-mesh{suf}",
+        "listen_port": 51900 + 10 * (n - 1),
+        "mesh_domain": f"gw{suf}.internal",
+    }
+
+
+def _mesh_slots(etc: "Path" = Path("/etc")) -> "list[tuple[int, Path]]":
+    """Existing membership configs on this host as (slot, config_path)."""
+    import re as _re
+    out = []
+    if (etc / "greasewood.toml").exists():
+        out.append((1, etc / "greasewood.toml"))
+    for p in etc.glob("greasewood[0-9]*.toml"):
+        m = _re.fullmatch(r"greasewood(\d+)\.toml", p.name)
+        if m and int(m.group(1)) >= 2:
+            out.append((int(m.group(1)), p))
+    return sorted(out)
+
+
+def _slot_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "int | None":
+    """The membership slot already trusting this CA, or None. This is how a
+    token is routed: its CA pub identifies WHICH mesh it belongs to, so a token
+    for a mesh we're already on refreshes that membership (even after a re-root
+    — trusted_pubs carries old+new during migration), and an unknown CA means a
+    genuinely new mesh."""
+    from .config import load_config
+    for n, p in _mesh_slots(etc):
+        try:
+            if ca_pub_hex in load_config(p).ca_pubs:
+                return n
+        except Exception:
+            continue
+    return None
+
+
+def _next_free_slot(etc: "Path" = Path("/etc")) -> int:
+    """First unused slot ≥ 2 (slot 1 is the default mesh; callers only allocate
+    a new slot when slot 1 is already taken by a different mesh)."""
+    used = {n for n, _ in _mesh_slots(etc)}
+    n = 2
+    while n in used:
+        n += 1
+    return n
+
+
+def _slot_service(cfg_path: "Path", slot: int) -> str:
+    """Make membership slot N run as its own systemd service (greasewoodN),
+    mirroring however slot 1 is managed: if the base greasewood.service is
+    installed, write the same unit pinned to this slot's config and enable it
+    now + at boot. Returns 'active' (already running), 'installed' (created and
+    started), or 'manual' (no systemd management here — caller prints gw run)."""
+    import shutil
+    import subprocess
+    unit = f"greasewood{slot}.service"
+    systemctl = shutil.which("systemctl")
+    if not systemctl or not (_UNIT_DIR / "greasewood.service").exists():
+        return "manual"
+    r = subprocess.run([systemctl, "is-active", "--quiet", unit],
+                       capture_output=True)
+    if r.returncode == 0:
+        return "active"
+    gw_exec = shutil.which("gw") or os.path.realpath(sys.argv[0])
+    text = (_SERVICE_UNIT.format(exec=gw_exec)
+            .replace("/etc/greasewood.toml", str(cfg_path))
+            .replace(f"ExecStart={gw_exec} run",
+                     f"ExecStart={gw_exec} -c {cfg_path} run")
+            .replace("Description=greasewood mesh daemon",
+                     f"Description=greasewood mesh daemon (membership #{slot})"))
+    (_UNIT_DIR / unit).write_text(text)
+    subprocess.run([systemctl, "daemon-reload"], check=True)
+    subprocess.run([systemctl, "enable", "--now", unit], check=True)
+    return "installed"
+
+
 def cmd_join(args) -> int:
     _require_root("join")
     import json as json_mod
@@ -771,9 +859,58 @@ def cmd_join(args) -> int:
     # way we tolerantly extract the gw1.… line, so `gw invite | ssh B gw join -`
     # works even without `invite -q`.
     token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
+
+    # Decode token → hub_door_pub, ca_pub, hub_host(s), seed, door_port.
+    # Decoded FIRST because the CA pub routes the join (see below).
+    try:
+        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port = decode_token(token)
+    except ValueError as e:
+        sys.exit(f"invalid token: {e}")
+    ca_pub_hex = ca_pub_bytes.hex()
+
     cfg_path = Path(args.config)
     data_dir = Path(args.data_dir)
     listen_port = args.listen_port
+
+    # Auto-slotting: when every location knob is at its default, route the join
+    # by the token's CA. A token for a mesh this host is already on refreshes
+    # that membership; a token for a NEW mesh (unknown CA, default slot already
+    # taken) auto-provisions the next slot — greasewood2.toml,
+    # /var/lib/greasewood2, gw-mesh2, port 51910, names under gw2.internal — so
+    # joining another mesh is just `gw join <token>`. Any explicit flag opts
+    # out of the whole mechanism.
+    slot_n = None            # ≥2 when this join targets a numbered membership
+    auto = (args.config == "/etc/greasewood.toml"
+            and args.data_dir == "/var/lib/greasewood"
+            and args.listen_port == 51900
+            and args.interface is None and args.mesh_domain is None)
+    if auto:
+        known = _slot_for_ca(ca_pub_hex)
+        if known is not None and known != 1:
+            # Re-join of a mesh living in a numbered slot: use ITS config as-is
+            # (the slot's real values — possibly customized — win, not the
+            # naming formula; `prior` below then supplies interface/domain).
+            cfg_path = _slot_paths(known)["config"]
+            existing = load_config(cfg_path)
+            data_dir, listen_port = existing.data_dir, existing.listen_port
+            slot_n = known
+            log.info("token's CA matches mesh membership #%d — refreshing it "
+                     "(config %s)", known, cfg_path)
+        elif known is None and cfg_path.exists():
+            # Unknown CA and the default slot is taken: a genuinely new mesh.
+            n = _next_free_slot()
+            sp = _slot_paths(n)
+            cfg_path, data_dir = sp["config"], sp["data_dir"]
+            listen_port = sp["listen_port"]
+            args.interface = sp["interface"]
+            args.mesh_domain = sp["mesh_domain"]
+            slot_n = n
+            log.info(
+                "token is for a mesh this host isn't on — auto-provisioning "
+                "membership #%d: config %s, data %s, interface %s, UDP %d, "
+                "names *.%s  (every value overridable with join flags)",
+                n, cfg_path, data_dir, args.interface, listen_port,
+                args.mesh_domain)
 
     # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
     # address), so this just refreshes the credential. Detect it so we can (a)
@@ -828,18 +965,12 @@ def cmd_join(args) -> int:
             "so direct node-to-node links may not form. Pass --endpoint <addr> "
             "if this node is publicly reachable.")
 
-    # Decode token → hub_door_pub, ca_pub, hub_host(s), seed, door_port
-    try:
-        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port = decode_token(token)
-    except ValueError as e:
-        sys.exit(f"invalid token: {e}")
-
+    # (token was decoded up top — its CA pub routed the join to a slot)
     # The token may carry several hub underlay hosts (v4 and/or v6, comma-sep);
     # dial one this node can actually reach.
     hub_host = _pick_reachable_host(hub_host.split(","))
 
     hub_door_pub_b64 = base64.b64encode(hub_door_pub_bytes).decode()
-    ca_pub_hex = ca_pub_bytes.hex()
 
     # Derive door params from seed (same derivation the hub ran at invite time)
     params = derive_door_params(seed)
@@ -1084,7 +1215,24 @@ trusted_pubs = ["{ca_pub_hex}"]
     if hub_overlay_url:
         print(f"  hub control  : {hub_overlay_url}")
     print()
-    _print_daemon_guidance()
+    if slot_n and slot_n != 1:
+        state = _slot_service(cfg_path, slot_n)
+        if state == "installed":
+            print(f"This membership runs as its own service: greasewood{slot_n} "
+                  f"(started; also starts at boot).")
+            print(f"  status: systemctl status greasewood{slot_n}   "
+                  f"mesh view: gw -c {cfg_path} status")
+        elif state == "active":
+            print(f"greasewood{slot_n}.service is already running — restart it "
+                  f"to pick up the refreshed config:")
+            print(f"  sudo systemctl restart greasewood{slot_n}")
+        else:
+            print("Start this membership's daemon:")
+            print(f"  sudo gw -c {cfg_path} run")
+            print("  (tip: 'sudo gw install-service' + re-join makes memberships "
+                  "manage themselves)")
+    else:
+        _print_daemon_guidance()
     print()
     from . import firewall as _fw
     if node_inbound == "no":
