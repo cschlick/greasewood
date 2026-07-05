@@ -54,7 +54,6 @@ def hub_get(hub_cid: str, path: str, port: int = 51902) -> str:
 
 
 def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 51902) -> bool:
-    iface = iface or mesh_iface(container)
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
