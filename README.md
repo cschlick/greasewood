@@ -971,10 +971,10 @@ becomes an extra `pg.<hostname>.myfleet.internal` line pointing at that node. Se
 TLS section for how this ties cert SANs to resolvable names.
 
 **Who chooses the name.** By default a node names itself at `gw join` (defaulting
-to its machine hostname) and can change it later with `gw rename`. If you'd rather
+to its machine hostname) and can change it later with `gw rename-node`. If you'd rather
 the hub control it, **pin it at invite**: `gw invite --hostname db` fixes the name
 at enrollment (the joiner's requested name is ignored) and marks the credential so
-the node **can't `gw rename` itself** — to change a pinned name, re-invite with a
+the node **can't `gw rename-node` itself** — to change a pinned name, re-invite with a
 new `--hostname`. Either way the name is CA-attested; pinning just moves the
 decision from the node to the hub.
 
@@ -991,10 +991,10 @@ resolve `db.myfleet.internal` → connect over WireGuard → TLS validates the
 name(s) a certificate is valid for).
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
-it later with `sudo gw rename <newname>` (then restart the daemon). Rename goes
+it later with `sudo gw rename-node <newname>` (then restart the daemon). Rename goes
 through the hub, so it's uniqueness-checked and frees the old name — the keys and
 overlay address don't change. (Editing `hostname` in the config directly is not
-enough: the hub wouldn't know, so always use `gw rename`.)
+enough: the hub wouldn't know, so always use `gw rename-node`.)
 
 > Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`) and must
 > be **unique**. For a self-chosen name, uniqueness is checked at enrollment: a

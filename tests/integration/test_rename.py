@@ -1,5 +1,5 @@
 """
-Integration test for `gw rename` — change a node's mesh hostname without
+Integration test for `gw rename-node` — change a node's mesh hostname without
 re-joining. Verifies the hub adopts the new name over the live control plane,
 the old name is freed for reuse, and the local config is updated.
 """
@@ -23,7 +23,7 @@ def test_rename_updates_hub_and_frees_old_name(gw_hub, gw_image, gw_network):
             "mesh never formed"
 
         r = pexec(node["cid"], "gw",
-                  "rename", "newname", check=False)
+                  "rename-node", "newname", check=False)
         assert r.returncode == 0, r.stdout + r.stderr
 
         # Hub adopts the new name; the old one disappears (same id, higher seq).

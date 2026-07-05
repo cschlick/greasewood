@@ -94,7 +94,7 @@ def _renew_req(k, hostname=""):
 
 
 def test_renew_with_hostname_renames_and_frees_old(tmp_path):
-    """`gw rename` path: renew carrying a new hostname re-issues under it and
+    """`gw rename-node` path: renew carrying a new hostname re-issues under it and
     releases the old name for another node."""
     ca = _ca(tmp_path)
     k = NodeKeys.generate()
