@@ -815,7 +815,11 @@ def _membership_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "str | No
 
 
 def _free_listen_port(etc: "Path" = Path("/etc")) -> int:
-    """First of 51900, 51910, 51920, … not claimed by an existing membership."""
+    """First of 51900, 51910, 51920, … claimed by neither an existing membership
+    config NOR a live WireGuard interface. The latter matters: a purged mesh can
+    leave a kernel interface still bound to its port with no config to show for
+    it, and picking that port would crash the new daemon at interface-up with
+    EADDRINUSE."""
     from .config import load_config
     used = set()
     for _k, p in _memberships(etc):
@@ -823,6 +827,11 @@ def _free_listen_port(etc: "Path" = Path("/etc")) -> int:
             used.add(load_config(p).listen_port)
         except Exception:
             continue
+    try:
+        from . import wg as wgmod
+        used.update(wgmod.wg_interface_ports().values())
+    except Exception:
+        pass
     port = 51900
     while port in used:
         port += 10
@@ -2182,9 +2191,15 @@ def cmd_run(args) -> int:
 
     from . import audit
     with audit.context(f"startup: ensure interface {cfg.wg_interface} [{keys.addr}]"):
-        wgmod.ensure_interface(
-            cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
-        )
+        try:
+            wgmod.ensure_interface(
+                cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
+            )
+        except wgmod.PortInUse as e:
+            # A fatal, operator-fixable startup condition — exit cleanly with the
+            # actionable message instead of a traceback that crash-loops under
+            # the systemd unit's Restart=on-failure.
+            sys.exit(str(e))
 
     ca: CA | None = None
     sync: SyncLoop | None = None

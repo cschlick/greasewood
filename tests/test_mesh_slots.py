@@ -331,3 +331,38 @@ def test_join_refuses_same_name_different_mesh(tmp_path, monkeypatch):
     assert "NOT consumed" in msg
     # No state written for the refused join.
     assert not (tmp_path / "greasewood_prod" / "id_priv.pem").exists()
+
+
+def test_free_port_avoids_live_interface_orphan(monkeypatch, tmp_path):
+    """A purged mesh can leave a WG interface still bound to its port with no
+    config — _free_listen_port must skip it, not hand it to a new mesh that
+    would then crash at interface-up (the bastion incident)."""
+    from greasewood import wg as wgmod
+    monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])   # no configs
+    # But a leftover interface holds 51900.
+    monkeypatch.setattr(wgmod, "wg_interface_ports", lambda: {"gw-old": 51900})
+    assert cli._free_listen_port(etc=tmp_path) == 51910
+
+
+def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
+    """An EADDRINUSE at `ip link set up` (another wg iface on our port) raises
+    PortInUse with the culprit + fix — not a raw CalledProcessError."""
+    import subprocess
+    from greasewood import wg as wgmod
+
+    def fake_run(*args, check=True):
+        cmd = list(args)
+        if cmd[:3] == ["ip", "link", "set"] and cmd[-1] == "up":
+            return subprocess.CompletedProcess(
+                cmd, 2, "", "RTNETLINK answers: Address already in use")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(wgmod, "_run", fake_run)
+    monkeypatch.setattr(wgmod, "_wg_iface_on_port",
+                        lambda port, exclude="": "gw-old")
+
+    import pytest
+    with pytest.raises(wgmod.PortInUse) as e:
+        wgmod.ensure_interface("gw_pm", "fd8d::1", 51900, __import__("pathlib").Path("/x"))
+    msg = str(e.value)
+    assert "UDP port 51900 is already used by WireGuard interface 'gw-old'" in msg
+    assert "ip link del gw-old" in msg and "--listen-port" in msg
