@@ -98,7 +98,12 @@ class EnrollServer:
         pinned_hostname: "str | None" = None,
         data_dir: "Path | None" = None,
         standing: bool = False,
+        mesh_domain: "str | None" = None,
     ) -> None:
+        # The mesh's canonical name domain, advertised to joiners in the enroll
+        # response so every member mounts the mesh under the SAME suffix (and
+        # TLS names agree fleet-wide). None → field omitted (older hubs).
+        self._mesh_domain = mesh_domain
         # A STANDING door serves any number of enrollments and never closes on
         # its own — no deadline, no attempts-exhausted, success loops back to
         # accept. It ends only via stop() (daemon shutdown, `gw close-door`, or
@@ -332,13 +337,16 @@ class EnrollServer:
         # Send back the credential + hub's own NodeRecord so the new node can
         # pre-seed its directory and configure seeds using the overlay address.
         hub_record = self._directory.get(self._node_keys.id_pub_hex)
-        _send_msg(conn, {
+        reply = {
             "v": 1,
             "ok": True,
             "credential": cred.to_dict(),
             "hub_record": hub_record.to_dict() if hub_record else None,
             "control_port": self._control_port,
-        })
+        }
+        if self._mesh_domain:
+            reply["mesh_domain"] = self._mesh_domain
+        _send_msg(conn, reply)
 
         # Second leg: the node now builds + signs its NodeRecord (it embeds the
         # credential we just issued) and sends it here. We merge it into the
@@ -401,10 +409,13 @@ class DoorWatcher:
         cache_path: "Path | None" = None,
         control_port: int = 51902,
         door_port: "int | None" = None,
+        mesh_domain: "str | None" = None,
     ) -> None:
         # Needed to re-erect the door interface for a STANDING window after a
         # hub reboot (the window persists; the kernel interface doesn't).
         self._door_port = door_port
+        # Advertised to joiners so the whole mesh shares one name domain.
+        self._mesh_domain = mesh_domain
         self._data_dir = data_dir
         self._ca = ca
         self._directory = directory
@@ -528,6 +539,7 @@ class DoorWatcher:
                 pinned_hostname=window_hostname,
                 data_dir=self._data_dir,
                 standing=standing,
+                mesh_domain=self._mesh_domain,
             )
             try:
                 door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,
