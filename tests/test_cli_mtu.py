@@ -134,24 +134,24 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
 
 
 def test_diagnose_reports_blackhole_on_linked_peer(tmp_path, monkeypatch, capsys):
+    """A LINKED pair involving this host runs the PMTU probe; a blackhole
+    (small DF ping passes, full-MTU one dropped) is reported on the verdict."""
     cfg, addr = _linked_peer_diagnose(tmp_path, monkeypatch)
-    # Simulate the blackhole: small DF ping passes, full-MTU one is dropped.
     monkeypatch.setattr(cli, "_ping6_df",
                         lambda a, payload, timeout=1: payload <= 100)
     cli.cmd_diagnose(types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
-                                           hostname=None, no_mtu_probe=False))
+                                           nodes=["db"]))
     out = capsys.readouterr().out
     assert "LINKED" in out
     assert "PATH MTU BLACKHOLE" in out and "1372" in out
 
 
-def test_diagnose_no_mtu_probe_flag_skips_it(tmp_path, monkeypatch, capsys):
+def test_diagnose_no_blackhole_when_path_clean(tmp_path, monkeypatch, capsys):
+    """Clean path (both DF pings pass) → LINKED, no blackhole warning."""
     cfg, addr = _linked_peer_diagnose(tmp_path, monkeypatch)
-    # If the probe DID run it would warn; the flag must prevent it entirely.
-    monkeypatch.setattr(cli, "_ping6_df",
-                        lambda a, payload, timeout=1: payload <= 100)
+    monkeypatch.setattr(cli, "_ping6_df", lambda a, payload, timeout=1: True)
     cli.cmd_diagnose(types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
-                                           hostname=None, no_mtu_probe=True))
+                                           nodes=["db"]))
     out = capsys.readouterr().out
     assert "LINKED" in out
     assert "BLACKHOLE" not in out

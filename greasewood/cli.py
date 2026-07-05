@@ -3053,22 +3053,6 @@ def cmd_status(args) -> int:
 # diagnose — explain why a peer link is or isn't forming
 # ---------------------------------------------------------------------------
 
-def _handshake_phrase(live, now_epoch: int) -> str:
-    """Human phrase for a live peer's last-handshake age."""
-    if live is None:
-        return "not installed"
-    if live.latest_handshake == 0:
-        return "no handshake yet"
-    age = now_epoch - live.latest_handshake
-    if age < 0:
-        age = 0
-    if age <= 180:
-        return f"handshook {age}s ago"
-    if age < 3600:
-        return f"stale ({age // 60}m ago)"
-    return f"stale ({age // 3600}h ago)"
-
-
 def _hub_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
     """Local-minus-hub clock difference in seconds via /health's 'now' stamp,
     or None if the hub is unreachable or doesn't send one (older hub)."""
@@ -3142,22 +3126,61 @@ def _mtu_probe(iface: str, addr: str, iface_mtu: "int | None") -> "str | None":
             f"(ip link set {iface} mtu 1280) or fix the underlay path MTU.")
 
 
+def _self_firewall_port(port: int) -> str:
+    """This host's own nftables verdict for a UDP port: 'OPEN', 'CLOSED' (a
+    default-drop policy with no accept rule), 'open (no default-drop)', or
+    '??? (nft unreadable)'. Only the local host is knowable — every other node's
+    firewall is inferred from observed connectivity or left ???."""
+    from . import firewall as fw
+    rs = fw._load_ruleset()
+    if rs is None:
+        return "??? (nft unreadable)"
+    if not fw.default_drop(rs):
+        return "open (no default-drop)"
+    missing = fw.missing_rules(rs, [fw.Rule("udp", port, None, "mesh")])
+    return "CLOSED — blocked!" if missing else "OPEN"
+
+
+def _diag_hub_record(directory, cfg, own_rec):
+    """The hub's directory record. If this host IS the hub, that's our own
+    record; otherwise the node at the control-plane URL (root_url) address.
+    None if unresolvable / not yet in cache."""
+    if cfg.role == "hub":
+        return own_rec
+    import re
+    m = re.search(r"\[([0-9a-fA-F:]+)\]", cfg.root_url or "")
+    if not m:
+        return None
+    addr = m.group(1)
+    for r in directory.all():
+        if r.cred.addr == addr:
+            return r
+    return None
+
+
+class _DiagCol:
+    """One column of the diagnose comparison — a node's resolved facts."""
+    __slots__ = ("label", "is_self", "rec", "addr", "u6", "u4", "inbound",
+                 "caps", "segments", "cred", "has_ep", "ep_str", "hs", "fw")
+
+
 def cmd_diagnose(args) -> int:
     """
-    Per-peer connectivity diagnosis, **from THIS node's point of view — not a
-    global fleet dashboard.** It reads only this node's own directory cache,
-    trusted-CA set, and live WireGuard state, and reports, for each peer this node
-    knows about, whether *this* node can form a link to it. Every verdict is about
-    a link *from here* (e.g. "REJECTED" = this node won't install that peer under
-    its trust set; "LINKED" = this node has a live tunnel to it) — not the peer's
-    health elsewhere. So run it on the node that's actually having trouble, and
-    it only sees peers already in its local directory cache.
+    Pairwise link diagnosis. `gw diagnose [A [B]]` lays up to two named nodes
+    plus the hub side by side and explains, per pair, whether a WireGuard tunnel
+    can form — and if not, WHICH factor blocks it, with the firewall/reachability
+    directionality that's usually the real question.
 
-    Runs the same 7-step reconcile checks the daemon uses and prints, per peer,
-    exactly which step it fails — turning a silent direct-or-fail link into an
-    actionable reason. Then overlays live WireGuard handshake state to separate
-    "rejected by verification" from "configured but never handshook" (an
-    endpoint/firewall problem).
+      gw diagnose            this node ↔ the hub
+      gw diagnose A          this node ↔ A            (+ hub as reference)
+      gw diagnose A B        A ↔ B                    (+ hub as reference)
+
+    Only THIS host's firewall is directly knowable; a peer's is inferred OPEN
+    from an observed handshake (packets flowing prove its whole inbound path —
+    host firewall + any router/NAT + daemon) and otherwise shown ???. When the
+    pair involves this host, the verdict localizes a failure: e.g. "our host
+    firewall allows the port, so a peer that still can't reach us points at an
+    upstream router/NAT not forwarding it."
     """
     import base64
     import time as _time
@@ -3175,23 +3198,19 @@ def cmd_diagnose(args) -> int:
         print(f"not configured (no config file at {cfg_path})")
         return 1
     cfg = load_config(cfg_path)
+    port = cfg.listen_port
 
-    # Read-only: use the public id (never the private key) so non-root works;
-    # live WireGuard state still needs root, but it degrades gracefully below.
     own_id, own_addr = _own_identity(cfg.data_dir)
     if own_id is None:
         print("keys not generated yet — run 'gw join <token>' or 'gw create' first")
         return 1
     own_id_bytes = bytes.fromhex(own_id)
 
-    # Key hygiene — stat() needs no read permission, so this works non-root too.
     for w in _key_file_warnings(_secret_key_paths(cfg)):
         print(f"  ⚠ {w}")
 
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
-
-    # Revoke list: only the hub maintains one (nodes are expiry-based).
-    revoked: set[str] = set()
+    revoked: set = set()
     rev_path = cfg.data_dir / "revoked.json"
     if rev_path.exists():
         try:
@@ -3199,177 +3218,204 @@ def cmd_diagnose(args) -> int:
         except Exception:
             pass
 
-    # Live WireGuard state (best effort — needs root + the daemon running).
     try:
         live_peers = wgmod.get_peers(cfg.wg_interface)
-        wg_available = True
     except Exception:
-        live_peers, wg_available = {}, False
-
+        live_peers = {}
     directory = Directory.load(cfg.dir_cache_path)
     now = dt.datetime.now(_UTC)
     now_epoch = int(_time.time())
+    own_rec = directory.get(own_id)
 
-    # MTU blackhole probe for LINKED peers: on by default when we have live WG
-    # state (needs root anyway), off with --no-mtu-probe. Reads the tunnel MTU
-    # once; the per-peer DF pings happen in the loop below.
-    do_mtu_probe = wg_available and not getattr(args, "no_mtu_probe", False)
-    iface_mtu = _iface_mtu(cfg.wg_interface) if do_mtu_probe else None
+    # ---- resolve the requested nodes → up to three columns (pair + hub) ------
+    def _find(name):
+        from .hosts import sanitize
+        want = sanitize(name)
+        for r in directory.all():
+            if sanitize(r.hostname) == want:
+                return r
+        return None
 
-    print(f"self     : {cfg.hostname}  ({own_addr})")
-    print(f"role     : {cfg.role}   inbound={cfg.inbound}   iface={cfg.wg_interface}")
-    print(f"trusted CAs: {len(ca_pubs)}   hub: {cfg.root_url or '(none configured)'}")
-    if not ca_pubs:
-        print("  ⚠ no trusted CA keys — check [ca] trusted_pubs; nothing will verify")
+    requested = [n for n in (getattr(args, "nodes", None) or []) if n]
+    picks = []                                  # list of (label, rec|None, is_self)
+    for name in requested:
+        r = _find(name)
+        if r is None:
+            sys.exit(f"no node named {name!r} in the directory cache (see gw status)")
+        picks.append((r.hostname, r, r.id_pub == own_id_bytes))
 
-    # Clock skew vs the hub — the failure mode that masquerades as everything
-    # else (creds "expired", renewals refused for skew). /health carries the
-    # hub's time; compare and say it plainly. Best-effort: hub may be down.
-    if cfg.root_url:
-        skew = _hub_clock_skew(cfg.root_url)
-        if skew is None:
-            print("clock    : hub unreachable — skew check skipped")
-        elif abs(skew) >= 60:
-            print(f"  ⚠ local clock is {skew:+.0f}s off the hub — FIX NTP. "
-                  f"Past ±300s renewals are refused; expiry checks misfire "
-                  f"before that.")
-        else:
-            print(f"clock    : within {abs(skew):.0f}s of the hub (ok)")
-    if os.geteuid() != 0:
-        print("  ⚠ not root — live WireGuard handshake state is unavailable; "
-              "re-run with sudo for link health")
-    elif not live_peers:
-        print(f"WireGuard: 0 live peer(s) on {cfg.wg_interface} "
-              f"(is the daemon running?)")
-    print()
+    if not requested:                           # 0 args: self ↔ hub
+        picks.append((cfg.hostname, own_rec, True))
+    elif len(requested) == 1:                   # 1 arg: self ↔ A
+        picks.insert(0, (cfg.hostname, own_rec, True))
 
-    records = sorted((r for r in directory.all() if r.id_pub != own_id_bytes),
-                     key=lambda r: r.hostname)
-    if not records:
-        print("no peer records in the directory cache yet — is sync reaching the hub?")
-        return 0
+    hub_rec = _diag_hub_record(directory, cfg, own_rec)  # always add the hub as reference
+    if hub_rec is not None:
+        picks.append((hub_rec.hostname, hub_rec, hub_rec.id_pub == own_id_bytes))
 
-    own_rec = directory.get(own_id)  # our own published record (endpoint check)
-    want = getattr(args, "hostname", None)
-    counts = {"linked": 0, "no-handshake": 0, "rejected": 0, "policy": 0}
-    # Set if an outbound-only peer has a live link to us: since it advertises no
-    # endpoint, it could only have reached us by dialing OURS — proof we're
-    # actually inbound-reachable (a fact a node otherwise can't observe itself).
-    proved_inbound = False
-
-    for r in records:
-        if want and r.hostname != want:
+    # Dedup by overlay address, cap at three, keep order.
+    cols, seen = [], set()
+    for label, rec, is_self in picks:
+        key = rec.cred.addr if rec is not None else ("self" if is_self else label)
+        if key in seen:
             continue
-        wg_b64 = base64.b64encode(r.cred.wg_pub).decode()
-        live = live_peers.get(wg_b64)
-        problems: list[str] = []
+        seen.add(key)
+        cols.append((label, rec, is_self))
+    cols = cols[:3]
 
-        # Step 1: CA signature against the trusted set
-        body = _canonical(r.cred._body_dict())
-        ca_ok = False
+    def _verify(rec) -> str:
+        if rec is None:
+            return "(not in cache)"
+        ok = False
+        body = _canonical(rec.cred._body_dict())
         for raw in ca_pubs:
             try:
-                Ed25519PublicKey.from_public_bytes(raw).verify(r.cred.ca_sig, body)
-                ca_ok = True
+                Ed25519PublicKey.from_public_bytes(raw).verify(rec.cred.ca_sig, body)
+                ok = True
                 break
             except InvalidSignature:
                 continue
-        if not ca_ok:
-            problems.append("CA signature not from a trusted CA (wrong fleet? trusted_pubs not updated after a re-root?)")
-
-        # Step 2: expiry
-        left = (r.cred.exp - now).total_seconds()
+        if not ok:
+            return "✗ untrusted CA"
+        if rec.id_pub.hex() in revoked:
+            return "✗ REVOKED"
+        left = (rec.cred.exp - now).total_seconds()
         if left < 0:
-            problems.append(f"credential EXPIRED {int(-left // 60)}m ago (renewal not propagating?)")
+            return f"✗ EXPIRED {int(-left // 60)}m ago"
+        return f"valid · {_dur_short(left)}"
 
-        # Step 3: self-signature
-        try:
-            Ed25519PublicKey.from_public_bytes(r.id_pub).verify(
-                r.sig, _canonical(r._body_dict()))
-        except InvalidSignature:
-            problems.append("invalid self-signature (record tampered/corrupt)")
+    def _hs_age(rec):
+        if rec is None:
+            return None
+        lp = live_peers.get(base64.b64encode(rec.cred.wg_pub).decode())
+        if lp and lp.latest_handshake:
+            age = now_epoch - lp.latest_handshake
+            return age if age <= 180 else None
+        return None
 
-        # Step 4: addr derivation + id/cred consistency
-        if r.cred.addr != derive_addr(r.id_pub) or r.id_pub != r.cred.id_pub:
-            problems.append("addr does not derive from id_pub (forged record)")
-
-        # Step 5: revoke list
-        if r.id_pub.hex() in revoked:
-            problems.append("node is REVOKED")
-
-        # Step 6: authorization policy
-        policy_ok = default_policy(cfg.caps, r.cred.caps)
-        if not policy_ok:
-            problems.append(f"policy denies link (local caps={cfg.caps}, peer caps={r.cred.caps})")
-
-        # Classify. Verification/policy failures (steps 1-6) come first; only if
-        # the record is acceptable do we look at the data plane (step 7).
-        only_policy = problems == [problems[-1]] if problems else False
-        if problems and not policy_ok and only_policy:
-            status, bucket = "policy-denied", "policy"
-        elif problems:
-            status, bucket = "REJECTED (won't be installed)", "rejected"
-        elif live is None:
-            status, bucket = "verified but NOT installed (reconcile not run / not root?)", "no-handshake"
-        elif live.latest_handshake and (now_epoch - live.latest_handshake) <= 180:
-            status, bucket = f"LINKED ({_handshake_phrase(live, now_epoch)})", "linked"
-            if r.inbound == "no" or not r.endpoints:
-                proved_inbound = True
-            # A LINKED peer can still silently blackhole large packets (WG-over-
-            # cloud MTU mismatch): small traffic works, TLS handshakes hang.
-            if do_mtu_probe:
-                warn = _mtu_probe(cfg.wg_interface, r.cred.addr, iface_mtu)
-                if warn:
-                    problems.append(warn)
+    # Build a column of facts per node.
+    facts = []
+    for label, rec, is_self in cols:
+        c = _DiagCol()
+        c.label = label
+        c.is_self = is_self
+        c.rec = rec
+        c.addr = rec.cred.addr if rec else (own_addr or "?")
+        eps = rec.endpoints if rec else cfg.endpoints
+        c.u6, c.u4 = _underlay_addrs(eps)
+        c.inbound = (rec.inbound if rec else cfg.inbound)
+        c.caps = list(rec.cred.caps) if rec else list(cfg.caps)
+        c.segments = ",".join(_record_segments(rec)) if rec else \
+            ",".join(s[len("segment:"):] for s in cfg.caps if s.startswith("segment:"))
+        c.cred = _verify(rec)
+        c.has_ep = c.inbound != "no" and (c.u6 != "-" or c.u4 != "-")
+        c.ep_str = c.u6 if c.u6 != "-" else (c.u4 if c.u4 != "-" else "—")
+        c.hs = _hs_age(rec)
+        if is_self:
+            c.fw = _self_firewall_port(port)
+        elif c.inbound == "no":
+            c.fw = "n/a (outbound-only)"
+        elif c.hs is not None:
+            c.fw = "OPEN (inferred: handshake)"
         else:
-            status, bucket = f"installed, {_handshake_phrase(live, now_epoch)}", "no-handshake"
-            # Why no handshake? Endpoint / inbound-asymmetry hints.
-            no_self_ep = cfg.inbound == "no"
-            no_peer_ep = (r.inbound == "no") or (not r.endpoints)
-            if no_self_ep and no_peer_ep:
-                problems.append("both sides are outbound-only (inbound=no / no endpoint) "
-                                "— direct-or-fail can't form this link")
-            elif not live.endpoint and no_peer_ep:
-                problems.append("no endpoint to dial and the peer advertises none "
-                                "(peer is outbound-only); this side must be reachable")
-            elif live.endpoint:
-                problems.append(f"dialing {live.endpoint} but no handshake — check the peer's "
-                                "firewall (mesh UDP port open?) and that its daemon is running")
-        counts[bucket] += 1
+            c.fw = "??? unconfirmed"
+        facts.append(c)
 
-        u6, u4 = _underlay_addrs(r.endpoints)
-        print(f"● {r.hostname}  [{r.cred.addr}]  inbound={r.inbound}")
-        print(f"    underlay  v6={u6}  v4={u4}")
-        print(f"    expires   {r.cred.exp:%Y-%m-%d %H:%M UTC}")
-        print(f"    {status}")
-        for p in problems:
-            print(f"    - {p}")
-
+    # ---- header -------------------------------------------------------------
+    print(f"diagnose · this host: {cfg.hostname} ({own_addr}) · "
+          f"iface {cfg.wg_interface} · mesh UDP {port}")
+    if not ca_pubs:
+        print("  ⚠ no trusted CA keys — nothing will verify (check [ca] trusted_pubs)")
+    if cfg.root_url:
+        skew = _hub_clock_skew(cfg.root_url)
+        if skew is None:
+            print("  clock: hub unreachable — skew check skipped")
+        elif abs(skew) >= 60:
+            print(f"  ⚠ clock {skew:+.0f}s off the hub — FIX NTP (past ±300s "
+                  f"renewals refused; expiry checks misfire earlier)")
+    if os.geteuid() != 0:
+        print("  ⚠ not root — no live WireGuard state; link status & firewall "
+              "inference unavailable (re-run with sudo)")
     print()
-    print(f"summary: {counts['linked']} linked, {counts['no-handshake']} configured/no-handshake, "
-          f"{counts['rejected']} rejected, {counts['policy']} policy-denied")
 
-    # Self inbound-reachability advisory (best-effort, from live handshakes only —
-    # never auto-changes the declared value; just surfaces evidence for/against).
-    if os.geteuid() == 0 and live_peers:
-        if cfg.inbound == "no":
-            print("reachability: inbound=no (outbound-only) — you advertise no "
-                  "endpoint; links form only when you initiate to a reachable peer.")
-        elif proved_inbound:
-            print("reachability: inbound=yes CONFIRMED — an outbound-only peer "
-                  "reached you, so your endpoint is dialable from the mesh.")
-        elif own_rec is not None and not own_rec.endpoints:
-            print("reachability: inbound=yes but you advertise NO endpoint — peers "
-                  "have nothing to dial; set [network] endpoints, or you'll only "
-                  "link when you're the initiator.")
-        elif counts["linked"] == 0:
-            print("reachability: inbound=yes but no peer has handshaked — if this "
-                  "persists, your advertised endpoint may be blocked inbound "
-                  "(firewall/NAT); verify the mesh UDP port is open. (Normal right "
-                  "after startup.)")
-        else:
-            print("reachability: inbound=yes — reachable-looking, but unconfirmed "
-                  "(no outbound-only peer has dialed in to prove it).")
+    # ---- comparison table (nodes as columns) --------------------------------
+    heads = [f"{c.label}{' (self)' if c.is_self else ''}" for c in facts]
+    rows = [("overlay", [c.addr for c in facts]),
+            ("underlay v6", [c.u6 for c in facts]),
+            ("underlay v4", [c.u4 for c in facts]),
+            ("inbound", [c.inbound + ("" if c.inbound != "no" else " (outbound-only)")
+                         for c in facts]),
+            ("segments", [c.segments or "-" for c in facts]),
+            ("credential", [c.cred for c in facts]),
+            (f"firewall udp/{port}", [c.fw for c in facts])]
+    lblw = max([len(r[0]) for r in rows] + [0])
+    colw = [max(len(heads[i]), *(len(r[1][i]) for r in rows)) for i in range(len(facts))]
+    print(" " * lblw + "  " + "  ".join(f"{heads[i]:<{colw[i]}}" for i in range(len(facts))))
+    for name, cells in rows:
+        print(f"{name:<{lblw}}  " +
+              "  ".join(f"{cells[i]:<{colw[i]}}" for i in range(len(cells))))
+    print()
+
+    # ---- pairwise verdicts --------------------------------------------------
+    print(f"link viability  (direct-or-fail; ??? firewalls assumed open)")
+    import itertools
+    for x, y in itertools.combinations(facts, 2):
+        print(f"  {x.label} ↔ {y.label}")
+        if not default_policy(x.caps, y.caps):
+            print("    ✗ no shared segment — they won't peer by design "
+                  "(give them a common segment to change this)")
+            continue
+        seg = "hub is reach-all *" if ("*" in x.segments or "*" in y.segments) \
+            else "share " + repr(",".join(sorted(
+                set(x.segments.split(",")) & set(y.segments.split(",")))) or "?")
+        print(f"    segment: ✓ {seg}")
+
+        x_dials_y = y.has_ep       # x can dial y iff y listens with an endpoint
+        y_dials_x = x.has_ep
+        print(f"    {x.label} → {y.label}: " + (f"dial {y.ep_str}" if x_dials_y
+              else f"can't — {y.label} is outbound-only / advertises no endpoint"))
+        print(f"    {y.label} → {x.label}: " + (f"dial {x.ep_str}" if y_dials_x
+              else f"can't — {x.label} is outbound-only / advertises no endpoint"))
+        if not (x_dials_y or y_dials_x):
+            print("    ✗ no dialable direction — the link can't form "
+                  "(both outbound-only)")
+            continue
+
+        self_col = x if x.is_self else (y if y.is_self else None)
+        other = y if x.is_self else (x if y.is_self else None)
+        if self_col is None:
+            print("    live: (neither is this host) — should link per the "
+                  "directory; run 'gw diagnose' from either for live confirmation")
+            continue
+        if other.hs is not None:
+            print(f"    live: ● LINKED (handshake {other.hs}s ago) — path open; "
+                  f"{other.label}'s firewall/router inferred OPEN")
+            # A LINKED peer can still silently blackhole full-size packets (a
+            # WG-over-cloud MTU mismatch): small pings pass, TLS handshakes hang.
+            if os.geteuid() == 0:
+                warn = _mtu_probe(cfg.wg_interface, other.addr,
+                                  _iface_mtu(cfg.wg_interface))
+                if warn:
+                    print(f"    ⚠ {warn}")
+            continue
+        print("    live: ○ no handshake yet")
+        self_fw = self_col.fw
+        if self_col.inbound != "no" and self_col.has_ep:
+            if self_fw.startswith("OPEN") or self_fw.startswith("open"):
+                print(f"    ⚠ our host firewall {self_fw} for udp/{port} — so the "
+                      f"block is NOT this host. If {other.label} can't reach us, "
+                      f"suspect an UPSTREAM router/NAT not forwarding udp/{port} to "
+                      f"this host, or {other.label}'s outbound/daemon.")
+            elif self_fw.startswith("CLOSED"):
+                print(f"    ⚠ our host firewall {self_fw} for udp/{port} — OPEN it "
+                      f"(create/join printed the exact rule).")
+            else:
+                print(f"    firewall udp/{port} here: {self_fw}")
+        if other.has_ep:
+            print(f"    ⚠ we can dial {other.label} at {other.ep_str} but it isn't "
+                  f"answering — check {other.label}'s host firewall + any upstream "
+                  f"port-forward for udp/{port}, and that its daemon is up "
+                  f"('gw diagnose' on {other.label} shows its host firewall).")
     return 0
 
 
@@ -3934,14 +3980,13 @@ def main(argv=None) -> int:
     # diagnose
     sp = sub.add_parser(
         "diagnose",
-        help="explain why THIS node's links to its peers are/aren't forming "
-             "(per-peer checks + live handshake, from this node's view — not a fleet dashboard)")
-    sp.add_argument("hostname", nargs="?", default=None,
-                    help="diagnose only this peer (default: every peer in this "
-                         "node's directory cache)")
-    sp.add_argument("--no-mtu-probe", dest="no_mtu_probe", action="store_true",
-                    help="skip the DF-ping path-MTU check on linked peers "
-                         "(which sends a couple of pings per linked peer)")
+        help="pairwise link diagnosis: compare up to two nodes + the hub side "
+             "by side and explain whether a tunnel can form (segments, "
+             "reachability, firewall directionality). No args = this host ↔ hub.")
+    sp.add_argument("nodes", nargs="*", metavar="NODE",
+                    help="0, 1, or 2 node hostnames. none → this host ↔ hub; "
+                         "one → this host ↔ NODE; two → NODE ↔ NODE (hub shown "
+                         "as reference either way)")
     sp.set_defaults(fn=cmd_diagnose)
 
     # revoke

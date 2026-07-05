@@ -6,38 +6,42 @@ Disaster SOPs for a greasewood fleet. Commands assume the default
 
 ## First, debug it: `gw diagnose`
 
-Before any recovery, find out what's actually wrong. `gw diagnose` runs the same
-7-step checks the daemon uses, per peer, and overlays live WireGuard handshake
-state — turning a silent "direct-or-fail" link into a reason:
+Before any recovery, find out what's actually wrong. `gw diagnose` is a
+**pairwise** tool: it lays up to two named nodes plus the hub side by side and
+explains, per pair, whether a tunnel can form — and if not, which factor blocks
+it. (Fleet-wide link state is `gw status`; diagnose is the focused deep-dive.)
 
 ```
-sudo gw diagnose            # every peer in this node's directory cache
-sudo gw diagnose db01       # just one
+sudo gw diagnose            # this host ↔ the hub
+sudo gw diagnose db01       # this host ↔ db01   (+ hub as reference)
+sudo gw diagnose db01 web1  # db01 ↔ web1        (+ hub as reference)
 ```
 
-It reports **from the node you run it on** — its directory cache, its trusted-CA
-set, its live tunnels — **not** a fleet-wide status. Each verdict means "can
-*this* node link to that peer." So run it **on the node that's misbehaving**;
-running it elsewhere tells you about *that* node's links, which may be fine.
+The comparison table shows each node's overlay/underlay addresses, inbound flag,
+segments, credential, and firewall for the mesh UDP port. **Only this host's
+firewall is directly known**; a peer's is *inferred `OPEN`* when a handshake has
+been observed (packets flowing prove its whole inbound path — host firewall,
+any router/NAT, and daemon), and shown `???` otherwise. Run it **on the node
+that's misbehaving** (or on the hub, which has live handshakes to prove each
+node's reachability).
 
-Reading the output:
+The per-pair verdict reads out the **directionality** — who can dial whom — and
+the live status. When a pair involves this host and there's no handshake, it
+localizes the block, e.g.:
 
-| Line says | Meaning | Likely fix |
-|-----------|---------|------------|
-| `LINKED (handshook Ns ago)` | Healthy tunnel. | — |
-| `installed, no handshake yet` + "check the peer's firewall" | Peer configured, but no handshake. | Open the mesh UDP port on the peer; confirm its daemon is up. |
-| `installed, ...` + "both sides are outbound-only" | Neither side accepts inbound. | Set `inbound=yes` on at least one (`gw set-inbound yes`). |
-| `REJECTED` + "credential EXPIRED" | Renewal isn't propagating. | Check hub reachability and clock; see *fleet-wide teardown* below. |
-| `REJECTED` + "not from a trusted CA" | Wrong fleet, or `trusted_pubs` not updated after a re-root. | Confirm `[ca] trusted_pubs`; push the current CA key; check the hub. |
-| `REJECTED` + "node is REVOKED" | Intentionally revoked. | Expected, or un-revoke and re-issue. |
-| `verified but NOT installed` | Daemon not reconciling / not root. | Ensure `gw run` (or the service) is up as root. |
+| Verdict says | Meaning | Likely fix |
+|--------------|---------|------------|
+| `● LINKED (handshake Ns ago)` | Healthy tunnel; the peer's firewall/router are inferred OPEN. | — |
+| `no handshake` + "our host firewall OPEN … suspect an UPSTREAM router/NAT" | Our port is open locally but the peer can't reach us. | Check the upstream router/NAT port-forward for the mesh UDP port; confirm the peer's daemon/outbound. |
+| `no handshake` + "our host firewall CLOSED … OPEN it" | This host's own firewall blocks the port. | Open the mesh UDP port (create/join printed the rule). |
+| `no handshake` + "we can dial X but it isn't answering" | The remote isn't responding. | Check X's host firewall + upstream forward, and that its daemon is up (`gw diagnose` on X shows its own firewall). |
+| `✗ no shared segment` | They won't peer by design. | Give them a common segment. |
+| `✗ no dialable direction (both outbound-only)` | Neither accepts inbound. | Set `inbound=yes` on at least one (`gw set-inbound yes`). |
+| credential `✗ EXPIRED` / `✗ untrusted CA` / `✗ REVOKED` | Bad credential. | Renewal/clock (expired); `[ca] trusted_pubs` after a re-root (untrusted); expected (revoked). |
 
-The last line, `reachability: ...`, is an advisory about **this** node's own
-`inbound` posture, inferred from live handshakes (root only). `inbound=yes
-CONFIRMED` means an outbound-only peer dialed in, so you're provably reachable;
-`inbound=yes but no peer has handshaked` suggests your advertised endpoint may be
-firewalled (or the daemon just started). It never changes the value — use
-`gw set-inbound` for that.
+A LINKED pair involving this host also gets a **path-MTU blackhole** check (small
+pings pass but full-size packets are dropped — the "TLS hangs but ping works"
+failure); it reports the fix if it fires.
 
 ## What to back up
 
