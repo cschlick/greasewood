@@ -3371,10 +3371,15 @@ def cmd_purge(args) -> int:
     unit = _unit_for_config(cfg_path)
 
     if not args.yes:
-        print(f"This will permanently remove:")
+        last = not [k for k, p in _memberships() if p.resolve() != cfg_path.resolve()]
+        print(f"This will permanently remove this mesh from the host:")
+        print(f"  service instance    : {unit} (stop + disable)")
         print(f"  WireGuard interface : {iface}")
-        print(f"  data directory      : {data_dir}")
+        print(f"  data directory      : {data_dir}  (keys, CA, credentials)")
         print(f"  config file         : {cfg_path}")
+        if last:
+            print(f"  systemd template    : greasewood@.service (last mesh → "
+                  f"full reset)")
         answer = input("Proceed? [y/N] ").strip().lower()
         if answer != "y":
             print("Aborted.")
@@ -3436,6 +3441,24 @@ def cmd_purge(args) -> int:
             removed.append("/etc/hosts greasewood block")
     except Exception as e:
         failed.append(f"/etc/hosts: {e}")
+
+    # Service teardown. This membership's instance was already disabled above;
+    # if it was the LAST mesh on the host, remove the shared template unit too,
+    # so `gw purge` on a single-mesh host is a true from-scratch reset. Other
+    # meshes still need the template, so it stays while any remain.
+    if systemctl:
+        remaining = _memberships()   # cfg_path is already unlinked above
+        if not remaining:
+            tmpl = _UNIT_DIR / "greasewood@.service"
+            if tmpl.exists():
+                subprocess.run([systemctl, "disable", unit], capture_output=True)
+                tmpl.unlink()
+                subprocess.run([systemctl, "daemon-reload"], capture_output=True)
+                removed.append("systemd template greasewood@.service (last mesh)")
+        elif (_UNIT_DIR / "greasewood@.service").exists():
+            print(f"note: kept greasewood@.service — {len(remaining)} other mesh"
+                  f"{'es' if len(remaining) != 1 else ''} still use it "
+                  f"({', '.join(k for k, _ in remaining)}).")
 
     for item in removed:
         print(f"removed: {item}")
@@ -3700,7 +3723,10 @@ def main(argv=None) -> int:
 
     # purge
     sp = sub.add_parser("purge",
-                        help="[sudo] remove all greasewood state from this machine (decommission or start over)")
+                        help="[sudo] remove this mesh entirely — stop+disable its "
+                             "service, tear down the interface, delete data dir + "
+                             "config + /etc/hosts block (and the systemd template "
+                             "if it was the last mesh). A from-scratch reset.")
     sp.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     sp.set_defaults(fn=cmd_purge)
 
