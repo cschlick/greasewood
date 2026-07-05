@@ -139,7 +139,7 @@ def _san_to_owned_label(san: str, cfg) -> "str | None":
     single label under it (e.g. 'pg.db01.gw.internal' → 'pg'); else None.
     Cert SANs live in the mesh's CANONICAL namespace (see cert-request)."""
     from . import hosts
-    own = hosts.mesh_name(cfg.hostname, cfg.canonical_domain)
+    own = hosts.mesh_name(cfg.hostname, cfg.mesh_domain)
     suffix = "." + own
     if san.endswith(suffix):
         label = san[: -len(suffix)]
@@ -353,6 +353,10 @@ def _advertised_endpoints(explicit: "str | None", listen_port: int,
 
 def cmd_create(args) -> int:
     _require_root("create")
+    from .hosts import valid_label as _vl
+    if not _vl(args.name):
+        sys.exit(f"mesh name {args.name!r} must be a DNS label "
+                 "(lowercase letters/digits/hyphens, e.g. 'prod-fleet')")
     import json as json_mod
     from .keys import CAKeys, NodeKeys
     from .ca import CA
@@ -380,7 +384,9 @@ def cmd_create(args) -> int:
     ttl = _parse_duration(args.credential_ttl)
     interface = args.interface
     overlay_prefix = args.overlay_prefix
-    mesh_domain = args.mesh_domain
+    # The mesh's ONE name domain, everywhere, forever (changed only by a
+    # deliberate fleet-wide set-domain). Rides in every join token.
+    mesh_domain = args.mesh_domain or f"{args.name}.internal"
     # Activate this fleet's overlay /64 before we derive the hub's own address.
     try:
         set_overlay_prefix(parse_overlay_prefix(overlay_prefix))
@@ -922,7 +928,7 @@ def cmd_join(args) -> int:
     auto = (args.config == "/etc/greasewood.toml"
             and args.data_dir == "/var/lib/greasewood"
             and args.listen_port == 51900
-            and args.interface is None and args.mesh_domain is None)
+            and args.interface is None)
     if auto:
         known = _slot_for_ca(ca_pub_hex)
         if known is not None and known != 1:
@@ -942,16 +948,33 @@ def cmd_join(args) -> int:
             cfg_path, data_dir = sp["config"], sp["data_dir"]
             listen_port = sp["listen_port"]
             args.interface = sp["interface"]
-            # mesh_domain is NOT preset here: the hub advertises the mesh's
-            # canonical domain in the enroll response, and the joiner adopts it
-            # when locally free — the slot name (gwN.internal) is only the
-            # collision fallback. Resolved after enrollment, below.
             slot_n = n
             log.info(
                 "token is for a mesh this host isn't on — auto-provisioning "
                 "membership #%d: config %s, data %s, interface %s, UDP %d "
                 "(every value overridable with join flags)",
                 n, cfg_path, data_dir, args.interface, listen_port)
+
+    # HARD domain-collision refusal, BEFORE the door dance (so a refusal never
+    # burns the invite): a mesh has ONE domain everywhere, and a node cannot
+    # bridge two meshes that share one — no alias, no flag, no exception. The
+    # membership being refreshed (same config path) doesn't count against itself.
+    if token_domain:
+        for _n, _p in _mesh_slots():
+            if _p.resolve() == cfg_path.resolve():
+                continue
+            try:
+                if load_config(_p).mesh_domain == token_domain:
+                    sys.exit(
+                        f"this mesh's domain {token_domain!r} is already used by "
+                        f"membership #{_n} ({_p}) — a node cannot bridge two "
+                        f"meshes with the same domain. Rename one of them on its "
+                        f"hub (gw set-domain <new-name>) and re-run this join. "
+                        f"The token was NOT consumed.")
+            except SystemExit:
+                raise
+            except Exception:
+                continue
 
     # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
     # address), so this just refreshes the credential. Detect it so we can (a)
@@ -1223,58 +1246,16 @@ def cmd_join(args) -> int:
         hosts_sync = "false"
     else:
         hosts_sync = "true"
-    # mesh_domain / interface: explicit flag wins, else keep prior, else default.
-    # Name domain: explicit flag > prior config (a re-join never renames) >
-    # the domain the HUB advertised in the enroll response (adopted when no
-    # other membership on this host already mounts that suffix — so a mesh's
-    # canonical name is the same on every member and TLS names agree fleet-
-    # wide) > the slot fallback. When the canonical domain is locally TAKEN
-    # (two meshes both on the default), the local mount falls back to the slot
-    # name and the canonical domain is remembered separately: certs this node
-    # requests still carry the canonical name the REST of the mesh resolves it
-    # by; only this host's own outbound TLS dials need canonical-name
-    # verification (curl --connect-to / psql hostaddr= style).
-    hub_domain = resp.get("mesh_domain") or None
-    canonical_domain = None
-    slot_fallback = _slot_paths(slot_n)["mesh_domain"] if slot_n else "gw.internal"
-    if args.mesh_domain:
-        mesh_domain = args.mesh_domain
-    elif prior and getattr(prior, "mesh_domain", None):
-        mesh_domain = prior.mesh_domain
-        pc = getattr(prior, "canonical_domain", None)
-        canonical_domain = pc if pc and pc != mesh_domain else None
-    elif hub_domain:
-        taken = set()
-        for _n, _p in _mesh_slots():
-            if _p.resolve() == cfg_path.resolve():
-                continue
-            try:
-                taken.add(load_config(_p).mesh_domain)
-            except Exception:
-                continue
-        if hub_domain not in taken:
-            mesh_domain = hub_domain
-        else:
-            mesh_domain = slot_fallback
-            canonical_domain = hub_domain
-            log.warning(
-                "this mesh's canonical domain %r is already used by another "
-                "membership on this host — mounting it locally at %r instead. "
-                "Certs this node requests still carry canonical *.%s names "
-                "(the rest of the mesh verifies them fine), but TLS clients ON "
-                "THIS HOST dialing *.%s must verify against the canonical name "
-                "(e.g. curl --connect-to, psql host=/hostaddr=). To make this "
-                "go away, give one of the meshes a distinct domain at its hub.",
-                hub_domain, mesh_domain, hub_domain, mesh_domain)
-    else:
-        mesh_domain = slot_fallback
+    # Name domain: the mesh has exactly ONE, carried in the token (declared at
+    # its hub's create / set-domain). The joiner adopts it, period — a collision
+    # with another membership already hard-refused before the door dance. A
+    # re-join of an existing membership keeps its config; token wins if both.
+    mesh_domain = (token_domain
+                   or (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
+                       else "gw.internal"))
     interface = (args.interface or (prior.wg_interface if prior and getattr(prior, "wg_interface", None)
                  else "gw-mesh"))
 
-    # Written only when the local mount had to diverge from the mesh's
-    # canonical domain (collision fallback) — certs use the canonical name.
-    canonical_line = (f'canonical_domain = "{canonical_domain}"\n'
-                      if canonical_domain else "")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
@@ -1291,7 +1272,7 @@ seeds = {seeds_list}
 root_url = {root_url_val}
 hosts_sync = {hosts_sync}
 mesh_domain = "{mesh_domain}"
-{canonical_line}
+
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
 """)
@@ -1689,7 +1670,7 @@ def cmd_cert_request(args) -> int:
     # resolve this node under the canonical suffix, so that's the cert name.
     if not dns and not ips:
         from .hosts import mesh_name
-        dns = [mesh_name(cfg.hostname, cfg.canonical_domain)]
+        dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
         ips = [keys.addr]
 
     # CN is not operator-settable: it's cosmetic under verify-full (the SAN is
@@ -1775,7 +1756,7 @@ def cmd_cert_request(args) -> int:
     labels = [lbl for d in dns if (lbl := _san_to_owned_label(d, cfg))]
     if labels:
         added = _add_config_aliases(Path(args.config), cfg, labels)
-        own = _mesh_name(cfg.hostname, cfg.canonical_domain)
+        own = _mesh_name(cfg.hostname, cfg.mesh_domain)
         if added:
             print()
             print("published name(s) so peers can resolve this service on the mesh:")
@@ -3429,6 +3410,11 @@ def main(argv=None) -> int:
     # create
     sp = sub.add_parser("create",
                         help="[sudo] one-shot hub bootstrap: CA + door key + routing + self-credential")
+    sp.add_argument("name",
+                    help="the mesh's name (a DNS label, e.g. 'prod-fleet') — "
+                         "members resolve as <hostname>.<name>.internal. "
+                         "Required so no two meshes sit on the same default: "
+                         "a node can never bridge two meshes with one domain.")
     sp.add_argument("--hostname", default=None,
                     help="this hub's hostname in the mesh "
                          "(default: the machine's hostname)")
@@ -3445,8 +3431,8 @@ def main(argv=None) -> int:
     sp.add_argument("--overlay-prefix", dest="overlay_prefix",
                     default="fd8d:e5c1:db1a:7::",
                     help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")
-    sp.add_argument("--mesh-domain", dest="mesh_domain", default="gw.internal",
-                    help="name suffix for /etc/hosts + TLS (default: gw.internal)")
+    sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
+                    help="full domain override (default: <name>.internal)")
     sp.add_argument("--caps", default="",
                     help="extra ability caps for the hub (it always carries "
                          "segment:* to reach every segment), e.g. 'tls'")
@@ -3513,9 +3499,6 @@ def main(argv=None) -> int:
     sp.add_argument("--interface", default=None,
                     help="WireGuard interface name (default: keep existing, else "
                          "gw-mesh; use a distinct name per mesh on one host)")
-    sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
-                    help="name suffix for /etc/hosts + TLS (default: keep "
-                         "existing, else gw.internal)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
                     help="this node's underlay endpoint (auto-detected if omitted)")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_const",

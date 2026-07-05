@@ -120,21 +120,30 @@ def test_shared_prefix_warns_distinct_does_not(tmp_path, caplog):
         assert not caplog.records
 
 
-def test_canonical_domain_defaults_and_parses(tmp_path):
-    """canonical_domain: absent → equals mesh_domain (local == canonical, the
-    normal case); present → the mesh's real namespace while mesh_domain stays
-    the local mount (the collision-fallback case)."""
-    from greasewood.config import load_config
-    ca = CAKeys.generate()
-    _write_cfg(tmp_path / "greasewood.toml", tmp_path / "d1", ca.ca_pub_hex,
-               domain="gw2.internal")
-    cfg = load_config(tmp_path / "greasewood.toml")
-    assert cfg.canonical_domain == "gw2.internal"          # defaults to local
+def test_token_carries_mesh_domain_roundtrip():
+    """The mesh's ONE domain rides in the token (decided at create/set-domain),
+    so joiners adopt it and can hard-refuse a collision BEFORE the door dance."""
+    from greasewood.door import encode_token, decode_token
+    tok = encode_token(b"\x01" * 32, b"\x02" * 32, "203.0.113.9", b"\x03" * 32,
+                       51901, mesh_domain="prod-fleet.internal")
+    *_, domain = decode_token(tok)
+    assert domain == "prod-fleet.internal"
+    # Old-style empty domain decodes as "" (joiner falls back to defaults).
+    tok2 = encode_token(b"\x01" * 32, b"\x02" * 32, "h", b"\x03" * 32, 51901)
+    *_, domain2 = decode_token(tok2)
+    assert domain2 == ""
 
-    p2 = tmp_path / "greasewood2.toml"
-    _write_cfg(p2, tmp_path / "d2", ca.ca_pub_hex, domain="gw2.internal")
-    p2.write_text(p2.read_text().replace(
-        "[network]", '[network]\ncanonical_domain = "gw.internal"'))
-    cfg2 = load_config(p2)
-    assert cfg2.mesh_domain == "gw2.internal"              # local mount
-    assert cfg2.canonical_domain == "gw.internal"          # cert namespace
+
+def test_create_requires_valid_mesh_name(monkeypatch):
+    """gw create <name> is required and must be a DNS label — no more shared
+    gw.internal default, so domain collisions need a genuine coincidence."""
+    import types
+    import pytest
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    ns = types.SimpleNamespace(name="Bad_Name!", caps="", credential_ttl="24h",
+                               interface="gw-mesh",
+                               overlay_prefix="fd8d:e5c1:db1a:7::",
+                               mesh_domain=None)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_create(ns)
+    assert "must be a DNS label" in str(e.value)
