@@ -409,35 +409,26 @@ tunnel MTU. Pass `--no-mtu-probe` to skip the extra pings.
 
 ## Running as a service
 
-`gw run` in a terminal is fine for trying things out, but in practice you want
-the daemon managed by systemd — survives reboots, restarts on failure, logs to
-the journal. One **template unit** serves every mesh membership as its own
-service instance, `greasewood@<name>`; `create` and `join` enable their
-instance for you, so the workflow is just **install once → create/join**.
-
-Install the template (pip-only, no Ansible):
+On a systemd host the daemon is managed for you — **`create` and `join` install
+the service and start it**, no extra command. A single **template unit** serves
+every mesh as its own instance `greasewood@<name>` (survives reboots, restarts
+on failure, logs to the journal), so the whole workflow is just:
 
 ```bash
-sudo gw install-service
-```
-
-This writes `/etc/systemd/system/greasewood@.service` (and enables + starts an
-instance for any mesh already configured). From then on:
-
-```bash
-sudo gw create myfleet                # on the hub  → greasewood@myfleet starts
-sudo gw join "$TOKEN" --hostname n01  # on a node   → greasewood@<mesh> starts
+sudo gw create myfleet                # hub  → greasewood@myfleet installed + running
+sudo gw join "$TOKEN" --hostname n01  # node → greasewood@<mesh> installed + running
 journalctl -u greasewood@myfleet -f   # watch a mesh's daemon
 systemctl status 'greasewood@*'       # all of them
 ```
 
-Opt out / undo:
+There is no separate install/uninstall step: the service lifecycle rides on the
+mesh lifecycle. **`gw purge`** removes a mesh's instance (and the shared
+template when it's the last mesh) — a from-scratch reset in one command.
 
-```bash
-sudo gw uninstall-service             # disable every instance + remove the template
-```
-
-Notes:
+- **Not on systemd, or want to run it yourself?** Pass `--no-service` to
+  `create`/`join`; they print the `sudo gw -c <config> run` line instead and
+  touch nothing under `/etc/systemd`. (A non-systemd host auto-falls-back to
+  this even without the flag.)
 - Instances run `gw run` as root (they manage WireGuard interfaces and
   routing). Don't also run `gw run` by hand while an instance is up — both
   would fight over the interface.
@@ -523,7 +514,7 @@ loop is left to you — just two things to respect:
 - If you pipe the token over SSH stdin, `sudo` can't also prompt for a password
   on that channel, so that form needs passwordless privilege **scoped to join**
   (`<user> ALL=(root) NOPASSWD: /usr/local/bin/gw join *`). Never grant blanket
-  `NOPASSWD: gw` — with `install-service --exec` that's effectively passwordless
+  `NOPASSWD: gw` — that's effectively passwordless
   root.
 
 ## Firewall
@@ -789,8 +780,6 @@ Two properties worth knowing:
 | `renew-all`        | no    | On the hub: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the hub's rate stays ~constant with mesh size). |
 | `hub-backup`       | no    | On the hub: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and hub identity. Store it offline. |
 | `hub-restore`      | yes   | Restore a `hub-backup` archive onto a replacement host (same CA key → a restore, not a re-root). |
-| `install-service`  | yes   | Install + enable the systemd units (run as a service).     |
-| `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default: discovered — with one mesh on the host every command finds its config unaided; with several, gw lists them and asks for `-c`) and
