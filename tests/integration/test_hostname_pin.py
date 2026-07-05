@@ -3,7 +3,7 @@ Integration test: hub-pinned hostnames (`gw invite --hostname`).
 
 When the hub pins a name at invite, the joiner's requested `--hostname` is
 ignored (the credential carries the hub's name), and the node cannot
-`gw rename` itself afterward (the `hostname-pinned` marker). Dedicated hub so the
+`gw rename-node` itself afterward (the `hostname-pinned` marker). Dedicated hub so the
 shared session hub isn't polluted.
 """
 import pytest
@@ -33,7 +33,7 @@ def test_hub_pinned_hostname_overrides_and_locks_rename(gw_image, gw_network):
             f"joiner's requested name leaked through:\n{status}"
 
         # 2. A pinned node cannot rename itself.
-        r = pexec(node["cid"], "gw", "rename", "somethingelse", check=False)
+        r = pexec(node["cid"], "gw", "rename-node", "somethingelse", check=False)
         assert r.returncode != 0, "rename should be refused for a pinned node"
         assert "pinned" in (r.stdout + r.stderr).lower(), \
             f"expected a 'pinned' refusal:\n{r.stdout}\n{r.stderr}"
