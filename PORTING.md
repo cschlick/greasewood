@@ -77,7 +77,7 @@ you log the command that actually ran, not a Linux fiction.**
 ### Interface naming — mostly pre-paid by multi-mesh
 
 The mesh interface name is `cfg.wg_interface` (`[network] interface`, default
-`gw-mesh`), threaded everywhere as data — because
+`gw_myfleet`), threaded everywhere as data — because
 [a node on two meshes](README.md) runs two daemons, each with its own
 `interface = …`. So the downstream code already reads a variable, not a constant.
 

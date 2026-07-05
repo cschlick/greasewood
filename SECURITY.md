@@ -114,7 +114,7 @@ Additional control-plane protections:
 
 ## Multi-user hosts
 
-**The unit of identity is the machine, not the user.** `gw-mesh` is a kernel
+**The unit of identity is the machine, not the user.** `gw_myfleet` is a kernel
 interface in the host's single network namespace, so — like any VPN or route on
 a shared host — **every local user can send and receive over the overlay** once
 it's up. There is no per-user access control on the tunnel; a local user can
@@ -140,18 +140,18 @@ won't, by design — it never touches your firewall):
    # Members of group "gwmesh" (and root, for the daemon) may use the overlay.
    chain output {
        type filter hook output priority 0; policy accept;
-       oifname "gw-mesh" meta skuid 0 accept
-       oifname "gw-mesh" meta skgid "gwmesh" accept
-       oifname "gw-mesh" drop
+       oifname "gw_myfleet" meta skuid 0 accept
+       oifname "gw_myfleet" meta skgid "gwmesh" accept
+       oifname "gw_myfleet" drop
    }
    ```
 
    This gates who can *initiate*. It does not gate inbound *new* connections from
    the mesh to a local service (owner match has no input-side equivalent); for
-   that, restrict inbound `iifname "gw-mesh"` to an allowlist of dports, or use
+   that, restrict inbound `iifname "gw_myfleet"` to an allowlist of dports, or use
    option 2.
 2. **Network namespace** — run greasewood and the intended workloads in a
-   dedicated netns so `gw-mesh` isn't visible to other users' processes at all.
+   dedicated netns so `gw_myfleet` isn't visible to other users' processes at all.
    Strongest isolation; more setup.
 3. **Don't co-tenant** untrusted users on a mesh machine — the implicit default.
 

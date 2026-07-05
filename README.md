@@ -22,7 +22,7 @@ its features!
   address is a hash of its identity key.
 - **[Segmented.](#access-control-segments)** Optional `segment:` tags control who
   talks to whom.
-- **[Named.](#names-gwinternal)** Every node gets a `<host>.gw.internal` name and
+- **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
 - **[Offline-tolerant.](#offline-tolerance)** The hub can be down for a credential
   lifetime — nodes run from cache.
@@ -248,7 +248,7 @@ One greppable [logfmt](https://brandur.org/logfmt) line per command:
 ```
 ts=2026-07-02T10:15:03Z INFO greasewood.audit: cmd rc=0 t=12ms \
   ctx="reconcile: +peer db01 [fd8d:e5c1:db1a:7::a1] seg=prod" \
-  argv="wg set gw-mesh peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
+  argv="wg set gw_myfleet peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
 ```
 
 So months later you can answer "when did db01 get added, why, and did it
@@ -273,7 +273,7 @@ $ gw narrate --since 2h
       overlay address fd8d:e5c1:db1a:7::a1 (a /128 host route — one address per
       peer, derived from its identity key); dial it at 203.0.113.7:51900; send a
       keepalive every 25s to hold the path open.                          (14ms)
-    ✓ Route traffic for fd8d:e5c1:db1a:7::a1 over gw-mesh — wg configures the
+    ✓ Route traffic for fd8d:e5c1:db1a:7::a1 over gw_myfleet — wg configures the
       peer but not the kernel route, so greasewood adds it explicitly.     (3ms)
 ```
 
@@ -319,7 +319,7 @@ sudo gw run
 
 `create` generates the CA, the persistent door key, the policy routing for
 the enrollment door, and the hub's own credential, then writes
-`/etc/greasewood.toml`. `gw run` starts the daemon: it brings up the `gw-mesh`
+`/etc/greasewood_myfleet.toml`. `gw run` starts the daemon: it brings up the `gw_myfleet`
 WireGuard interface, serves the control plane, and watches for door windows.
 
 The hub takes this machine's hostname like any other node — it isn't named
@@ -349,11 +349,11 @@ door down, and writes the node's config. `gw run` then brings the node into the
 mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
 
 **Why a door — why can't the token just contain everything to peer over
-`gw-mesh`?** Because WireGuard peering is *mutual*: to bring up a tunnel to the
+your mesh interface?** Because WireGuard peering is *mutual*: to bring up a tunnel to the
 hub over any interface, the hub must already have **your** public key in its peer
 list. At invite time your real keys don't exist yet — they're generated locally
 at `join`, and private keys never travel — so the hub cannot pre-authorize your
-real identity key. Handing you the hub's `gw-mesh` details in the token gets you
+real identity key. Handing you the hub's mesh-interface details in the token gets you
 nowhere: the hub would drop your handshake, never having heard of your key.
 
 What the token *can* do is carry a 32-byte seed that **both sides expand (HKDF)
@@ -362,7 +362,7 @@ pubkey from the seed it minted and pre-installs it as a peer; you derive the
 matching private key — so now a tunnel can actually form. But it forms under a
 **disposable, credential-less key, not your identity** — and a non-member key
 like that has no business on the live overlay. That's why the door is a
-*separate* interface, not `gw-mesh`:
+*separate* interface, not the mesh one:
 
 - it runs on its own **dedicated door subnet** (`fd8d:…:d::/64`) — not a
   throwaway address squatting on the real overlay, which would break the
@@ -371,9 +371,9 @@ like that has no business on the live overlay. That's why the door is a
   other peers) — a token-holder can do exactly one thing: request a credential;
 - it's **torn down** the moment your credential is issued.
 
-You bring up `gw-mesh`, with your *real* key and its self-certifying address, only
+You bring up the mesh interface, with your *real* key and its self-certifying address, only
 once you hold that credential — and from then on every peer learns your key and
-address from the directory as usual. Running the throwaway peering over `gw-mesh`
+address from the directory as usual. Running the throwaway peering over the mesh interface
 instead would drop a credential-less stranger onto the live mesh with a fake
 address and expose the whole control plane to a mere token-holder — which is
 exactly what the door exists to prevent.
@@ -383,7 +383,7 @@ exactly what the door exists to prevent.
 ```bash
 gw status               # local node + directory view
 sudo gw diagnose        # per-peer: why each link is/isn't forming
-sudo wg show gw-mesh    # live WireGuard peers
+sudo wg show gw_myfleet    # live WireGuard peers
 ```
 
 `gw diagnose` is the tool to reach for when a peer won't connect. Because the
@@ -411,45 +411,45 @@ tunnel MTU. Pass `--no-mtu-probe` to skip the extra pings.
 
 `gw run` in a terminal is fine for trying things out, but in practice you want
 the daemon managed by systemd — survives reboots, restarts on failure, logs to
-the journal. The model is **install once, then forget `gw run`**: a path unit
-watches for `/etc/greasewood.toml` and starts the daemon the moment `create`
-or `join` writes it. So the workflow becomes just **install → setup/join**.
+the journal. One **template unit** serves every mesh membership as its own
+service instance, `greasewood@<name>`; `create` and `join` enable their
+instance for you, so the workflow is just **install once → create/join**.
 
-Install the service (pip-only, no Ansible):
+Install the template (pip-only, no Ansible):
 
 ```bash
 sudo gw install-service
 ```
 
-This writes `/etc/systemd/system/greasewood.{service,path}`, enables the path
-watcher (armed immediately) and the service (for boot), and does **not** start a
-daemon until you configure the node. After it's installed:
+This writes `/etc/systemd/system/greasewood@.service` (and enables + starts an
+instance for any mesh already configured). From then on:
 
 ```bash
-sudo gw create myfleet             # on the hub        → daemon auto-starts
-sudo gw join "$TOKEN" --hostname n01  # on a node         → daemon auto-starts
-journalctl -u greasewood -f           # watch it (no live terminal anymore)
+sudo gw create myfleet                # on the hub  → greasewood@myfleet starts
+sudo gw join "$TOKEN" --hostname n01  # on a node   → greasewood@<mesh> starts
+journalctl -u greasewood@myfleet -f   # watch a mesh's daemon
+systemctl status 'greasewood@*'       # all of them
 ```
 
 Opt out / undo:
 
 ```bash
-sudo gw uninstall-service             # disable + remove the units
-# or just: sudo systemctl disable --now greasewood.path greasewood.service
+sudo gw uninstall-service             # disable every instance + remove the template
 ```
 
 Notes:
-- It runs `gw run` as root (it manages WireGuard interfaces and routing). Don't
-  also run `gw run` by hand while the service is up — both would fight over `gw-mesh`.
+- Instances run `gw run` as root (they manage WireGuard interfaces and
+  routing). Don't also run `gw run` by hand while an instance is up — both
+  would fight over the interface.
 - A **config-changing re-join** (new hub, new caps) isn't auto-detected — the
-  daemon reads its config at startup, so run `sudo systemctl restart greasewood`
+  daemon reads its config at startup, so run `sudo systemctl restart greasewood@<name>`
   afterward.
 
 ### Root vs. sudo
 
 `gw` needs root (it manages WireGuard interfaces), and the systemd service always
-runs as root, so config and data paths (`/etc/greasewood.toml`,
-`/var/lib/greasewood`) are read identically however you invoke it — nothing gets
+runs as root, so config and data paths (`/etc/greasewood_<name>.toml`,
+`/var/lib/greasewood_<name>`) are read identically however you invoke it — nothing gets
 corrupted either way. Two behaviors *do* differ, so pick one style and stick with
 it:
 
@@ -558,13 +558,13 @@ On a default-drop host, allow (nftables):
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
 | underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
 | `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:51902`)|
-| `gw-mesh`  | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
+| `gw_<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
 | `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when hub** |
 
 ```
 udp dport { 51900, 51901 } accept
 iifname "lo" accept
-iifname "gw-mesh" tcp dport 51902 accept
+iifname "gw_myfleet" tcp dport 51902 accept
 iifname "gw-door" tcp dport 51903 accept
 ```
 
@@ -603,7 +603,7 @@ table inet gw_hub {
         # --- tunnel-internal services (TCP), scoped to their interface.
         # 51902 is reachable only as a verified mesh peer; 51903 only
         # through a token's door tunnel.
-        iifname "gw-mesh" tcp dport 51902 accept comment "control plane"
+        iifname "gw_myfleet" tcp dport 51902 accept comment "control plane"
         iifname "gw-door" tcp dport 51903 accept comment "enroll server"
 
         # --- your own management access — adjust to taste ------------------
@@ -665,7 +665,7 @@ hub](#moving-the-hub-re-root)), so a uniform ruleset means a hub handover
 needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
 isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
 connection until that node actually becomes a hub and binds it. Plain nodes run
-no control plane, so on a node that will never be a hub you *could* omit the `gw-mesh`/
+no control plane, so on a node that will never be a hub you *could* omit the mesh-interface/
 `gw-door` TCP rules and open only the two UDP ports if you really want the most minimal config.
 
 **Multi-user hosts:** the overlay is host-wide — *any* local user can use the
@@ -762,7 +762,7 @@ Two properties worth knowing:
   node can neither talk its way into a segment nor be forced into a link it denies.
 - **Node-level and symmetric**, not port-level or one-way. Segments decide whether
   two nodes may have a tunnel *at all*; "A may reach B:5432 but not B:22" is a
-  firewall concern — use your own nftables on `gw-mesh` (see
+  firewall concern — use your own nftables on the mesh interface (see
   [SECURITY.md](SECURITY.md)).
 
 ## Command reference
@@ -792,7 +792,7 @@ Two properties worth knowing:
 | `uninstall-service`| yes   | Disable + remove the systemd units.                        |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
-Global flags: `-c/--config FILE` (default `/etc/greasewood.toml`) and
+Global flags: `-c/--config FILE` (default: discovered — with one mesh on the host every command finds its config unaided; with several, gw lists them and asks for `-c`) and
 `-v/--verbose`. Both must precede the subcommand (`gw -v run`, not `gw run -v`).
 
 Enrollment is door-only: `invite` on the hub, `join` on the node. There is no
@@ -800,7 +800,7 @@ manual credential-copy path.
 
 ## Configuration
 
-`gw create` and `gw join` write `/etc/greasewood.toml` for you; see
+`gw create` and `gw join` write `/etc/greasewood_<name>.toml` for you; see
 `greasewood.toml.example` for the full annotated schema. Key fields:
 
 ```toml
@@ -811,13 +811,13 @@ inbound  = "yes"           # can this node accept cold inbound handshakes?
 caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
 
 [network]
-interface  = "gw-mesh"
+interface  = "gw_myfleet"
 listen_port = 51900
 overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
 seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
 root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
 hosts_sync  = true                           # manage /etc/hosts names (on by default)
-mesh_domain = "gw.internal"                  # name suffix + default TLS cert name
+mesh_domain = "myfleet.internal"             # the mesh's ONE domain (from create <name>)
 
 [ca]
 trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
@@ -887,7 +887,7 @@ sudo gw join "$TOKEN_B"        # that's it
 `join` routes by the token's **CA**: a token for a mesh you're already on
 refreshes that membership; an unknown CA **auto-provisions the next membership
 slot** — config `/etc/greasewood2.toml`, data `/var/lib/greasewood2`, interface
-`gw-mesh2`, UDP `51910` (then 3, 4, … each +10). The mesh's **name domain rides
+`gw_<name>`, UDP `51910` (then +10 each). The mesh's **name domain rides
 in the token** (declared once at `gw create <name>` → `<name>.internal`), so
 every member of a mesh — including multi-mesh hosts — mounts it under the SAME
 suffix, and TLS names agree fleet-wide with no flags.
@@ -913,7 +913,7 @@ name must** — both are flat, host-global namespaces with no scoping. The
 `/etc/hosts` block is *keyed by* `mesh_domain`, so two meshes sharing one would
 (a) clobber each other's block every reconcile — each daemon strips and rewrites
 the same-tagged block — and (b) collide on the names themselves: both meshes'
-`db.gw.internal` would claim the same name for two different addresses. Unlike a
+`db.myfleet.internal` would claim the same name for two different addresses. Unlike a
 duplicate `listen-port` (which fails loudly at bind), a duplicate `mesh_domain`
 fails *silently*, so greasewood watches for it: if it finds another mesh writing
 its `/etc/hosts` block (foreign addresses under its tag), it logs a loud warning
@@ -937,12 +937,12 @@ self-certifying (derived from the node's identity key and attested by the CA),
 so a rewritten address is a *lie about identity* that every peer's
 verification would reject.
 
-## Names (.gw.internal)
+## Names
 
 Every node has a stable overlay address, and `gw status` shows each node's
 resolvable name↔address map. Name resolution is **on by default**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
-`<hostname>.gw.internal`, built from the records that pass the reconcile loop's
+`<hostname>.<mesh>.internal` (e.g. `db.myfleet.internal`), built from the records that pass the reconcile loop's
 full verification — the same gate that decides WireGuard peers, so a revoked or
 expired node's name stops resolving on the same cycle its tunnel comes down.
 It's re-checked each reconcile but **only rewritten when the block actually
@@ -952,12 +952,12 @@ etckeeper/config management:
 
 ```
 # BEGIN greasewood — managed, do not edit
-fd8d:e5c1:db1a:7:…  db.gw.internal
-fd8d:e5c1:db1a:7:…  node01.gw.internal
+fd8d:e5c1:db1a:7:…  db.myfleet.internal
+fd8d:e5c1:db1a:7:…  node01.myfleet.internal
 # END greasewood
 ```
 
-So `ping db.gw.internal`, `ssh db.gw.internal`, etc. just work — no DNS
+So `ping db.myfleet.internal`, `ssh db.myfleet.internal`, etc. just work — no DNS
 server, and it keeps resolving even if the hub is down (it's from the cache,
 for as long as the cached credentials remain valid — one credential TTL, the
 same horizon as the tunnels themselves). It
@@ -967,7 +967,7 @@ purge` removes the block.
 
 A node can also publish extra **service names** under its own name via
 `[network] aliases` (or automatically from a subdomain TLS cert) — a label `pg`
-becomes an extra `pg.<hostname>.gw.internal` line pointing at that node. See the
+becomes an extra `pg.<hostname>.myfleet.internal` line pointing at that node. See the
 TLS section for how this ties cert SANs to resolvable names.
 
 **Who chooses the name.** By default a node names itself at `gw join` (defaulting
@@ -981,13 +981,13 @@ decision from the node to the hub.
 Two things make defaulting this on safe:
 - **Names are CA-attested** (the hostname lives in the signed credential), so a
   member can't publish a record claiming another node's name to poison your hosts.
-- **Names are namespaced** under a dedicated `gw.internal` sub-label.
+- **Names are namespaced** under the mesh's own `<name>.internal` label.
 
 The domain is shared with TLS: `gw cert-request` with no `--san` defaults the
-cert to this node's `<hostname>.gw.internal` **plus** its overlay address. So the
+cert to this node's `<hostname>.myfleet.internal` **plus** its overlay address. So the
 name a node is reached by is exactly the name its certificate is valid for —
-resolve `db.gw.internal` → connect over WireGuard → TLS validates the
-`db.gw.internal` SAN (Subject Alternative Name — the x509 field listing the
+resolve `db.myfleet.internal` → connect over WireGuard → TLS validates the
+`db.myfleet.internal` SAN (Subject Alternative Name — the x509 field listing the
 name(s) a certificate is valid for).
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
@@ -1020,10 +1020,10 @@ traffic between nodes, so TLS here is **not** about adding encryption — that p
 would be redundant. Its value is at the layers WireGuard doesn't cover:
 
 - **Service identity by name.** WireGuard authenticates the *node* you reached,
-  not that you reached the *right* node for a name — the `db.gw.internal`→address
-  mapping lives outside its crypto. A cert with `SAN=db.gw.internal`, validated by
+  not that you reached the *right* node for a name — the `db.myfleet.internal`→address
+  mapping lives outside its crypto. A cert with `SAN=db.myfleet.internal`, validated by
   the client, is what proves "this endpoint is authorized for that name."
-- **Process/tenant identity.** The `gw-mesh` interface is host-global, so any
+- **Process/tenant identity.** The mesh interface is host-global, so any
   process on a node can use the tunnel. **mTLS** (client certs) narrows a
   connection to a specific identity and surfaces it into the app (e.g. Postgres
   cert→role) for authz and audit.
@@ -1055,13 +1055,13 @@ address. The hub (the CA) enforces this, so a node can never obtain a valid cert
 for *another* node's name and impersonate its service to TLS clients.
 
 ```bash
-# On node "dbnode" — postgres.dbnode.gw.internal is a subdomain it owns:
-sudo gw cert-request --san postgres.dbnode.gw.internal --name postgres
+# On node "dbnode" — postgres.dbnode.myfleet.internal is a subdomain it owns:
+sudo gw cert-request --san postgres.dbnode.myfleet.internal --name postgres
 #   → writes <data_dir>/tls/postgres.key, postgres.crt, and ca.crt, AND
-#     registers the label so peers can resolve postgres.dbnode.gw.internal
+#     registers the label so peers can resolve postgres.dbnode.myfleet.internal
 
 # With no --san, the cert defaults to the node's own name + overlay address:
-sudo gw cert-request                 # SAN = dbnode.gw.internal (and its addr)
+sudo gw cert-request                 # SAN = dbnode.myfleet.internal (and its addr)
 
 # The three files need not share a directory — override any of them, e.g. put
 # the key where the service expects it and the CA in the system trust store:
@@ -1086,11 +1086,11 @@ the same name **relocates** it (the daemon renews into the new paths and flags
 the old files as orphaned) rather than leaving a duplicate. See
 [RUNBOOK.md](RUNBOOK.md). Revocation is passive — stop renewing and it expires.
 
-**Subdomain names resolve too.** A cert for `postgres.dbnode.gw.internal` is only
+**Subdomain names resolve too.** A cert for `postgres.dbnode.myfleet.internal` is only
 useful if clients can resolve that name — so when a `--san` is a subdomain of the
 node's own mesh name, `cert-request` also **publishes** it: it adds the label
 (`postgres`) to `[network] aliases`, and the daemon advertises
-`postgres.dbnode.gw.internal → <dbnode's address>` into every node's `/etc/hosts`
+`postgres.dbnode.myfleet.internal → <dbnode's address>` into every node's `/etc/hosts`
 block (restart the daemon, or wait for the next renewal, to propagate). Aliases
 travel as bare labels in the (self-signed) `NodeRecord` and every reader expands
 them under the record's *CA-attested* mesh name — so a node can only ever publish
@@ -1103,7 +1103,7 @@ directly in `[network]` without a cert.
 | File | Role | Location |
 |------|------|----------|
 | the leaf **key/cert** + **CA cert** | what your service reads | wherever you point them (`--key-out`/`--cert-out`/`--ca-out`, else `<data_dir>/tls/`); the three need not share a directory |
-| `greasewood.toml` | the daemon config; `cert-request` only *reads* it (for `data_dir` + the default SAN) and never writes it | wherever you pass `gw -c …` (default `/etc/greasewood.toml`) |
+| `greasewood.toml` | the daemon config; `cert-request` only *reads* it (for `data_dir` + the default SAN) and never writes it | wherever you pass `gw -c …` (default: the discovered `/etc/greasewood_<name>.toml`) |
 | `<data_dir>/tls/managed.json` | the **renewal source of truth** — records each managed cert's three paths; the daemon reads it to know where to re-issue | pinned to `data_dir` (there's no separate flag; move `data_dir` in the config and it follows) |
 
 So the file that actually "controls" where renewed certs land is the *manifest*,
@@ -1135,7 +1135,7 @@ cosmetic, and it's the mesh FQDN — the same on the server and client cert:
   `sslmode=verify-full`. Connecting by overlay address works too — the node's own
   address is a SAN by default.
 - **Client cert:** the CN *is* the identity Postgres maps to a role. It is the
-  connecting node's `<hostname>.<mesh_domain>` (e.g. `nats01.gw.internal`), so
+  connecting node's `<hostname>.<mesh_domain>` (e.g. `nats01.myfleet.internal`), so
   that FQDN — not a bare label — is what your `pg_ident.conf` map keys on.
 
 **On the database host.** Point the three files at fixed, host-agnostic paths
@@ -1146,7 +1146,7 @@ check with a root-owned key):
 sudo gw cert-request --name pg-server \
   --key-out  /etc/ssl/private/gw-postgres.key \
   --cert-out /etc/ssl/certs/gw-postgres.crt \
-  --ca-out   /etc/ssl/certs/gw-mesh-ca.crt \
+  --ca-out   /etc/ssl/certs/gw-myfleet-ca.crt \
   --reload-cmd /usr/local/sbin/gw-pg-reload
 # CN + SAN default to THIS node's mesh name — no --san needed.
 # --name is just the manifest key (so cert-status is readable and a re-request
@@ -1168,7 +1168,7 @@ sudo systemctl restart postgresql
 ssl = on
 ssl_cert_file = '/etc/ssl/certs/gw-postgres.crt'
 ssl_key_file  = '/etc/ssl/private/gw-postgres.key'
-ssl_ca_file   = '/etc/ssl/certs/gw-mesh-ca.crt'   # verifies client certs
+ssl_ca_file   = '/etc/ssl/certs/gw-myfleet-ca.crt'   # verifies client certs
 ```
 
 **Why rotation just works.** greasewood renews *in place* — it truncates and
@@ -1198,8 +1198,8 @@ point libpq at it:
 sudo gw cert-request --name pg-client \
   --key-out  /etc/gw/pg-client.key \
   --cert-out /etc/gw/pg-client.crt \
-  --ca-out   /etc/gw/gw-mesh-ca.crt
-# connect: sslmode=verify-full sslrootcert=/etc/gw/gw-mesh-ca.crt \
+  --ca-out   /etc/gw/gw-myfleet-ca.crt
+# connect: sslmode=verify-full sslrootcert=/etc/gw/gw-myfleet-ca.crt \
 #          sslcert=/etc/gw/pg-client.crt sslkey=/etc/gw/pg-client.key
 ```
 
@@ -1213,8 +1213,8 @@ hostssl all all ::/0 cert map=mesh clientcert=verify-full
 
 ```
 # MAPNAME   CERT CN (= client's <hostname>.<mesh_domain>)   PG ROLE
-mesh        nats01.gw.internal                              nats
-mesh        chat01.gw.internal                              chat
+mesh        nats01.myfleet.internal                              nats
+mesh        chat01.myfleet.internal                              chat
 ```
 
 This is the only place client hostnames appear — it's the allow-list of *which*

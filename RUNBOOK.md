@@ -1,7 +1,7 @@
 # Operations runbook
 
 Disaster SOPs for a greasewood fleet. Commands assume the default
-`/etc/greasewood.toml` and data dir `/var/lib/greasewood`. Read
+`/etc/greasewood_myfleet.toml` and data dir `/var/lib/greasewood`. Read
 [SECURITY.md](SECURITY.md) for the trust model these procedures rest on.
 
 ## First, debug it: `gw diagnose`
@@ -171,7 +171,7 @@ set so you always have an overlap path.
 
 - **You have a `gw hub-backup` archive:** on the replacement host,
   `sudo gw hub-restore hub.gwbk --data-dir /var/lib/greasewood`, write
-  `/etc/greasewood.toml` (role = hub, `ca_key_file` pointing at the restored
+  `/etc/greasewood_myfleet.toml` (role = hub, `ca_key_file` pointing at the restored
   `ca.key`), then `gw run`. This is a **restore, not a re-root**: same CA key →
   same trust, so existing nodes keep trusting it with no `trusted_pubs` change.
   The restore refuses to overwrite an existing `ca.key` unless you pass
@@ -227,7 +227,7 @@ capability (grant it with `gw set-caps` on the hub).
 Request once, with a reload hook so the service picks up rotations:
 
 ```
-sudo gw cert-request --san db.gw.internal \
+sudo gw cert-request --san db.myfleet.internal \
      --reload-cmd "systemctl reload postgresql"
 # writes <data_dir>/tls/db.key, db.crt, ca.crt; point the service at them
 ```
