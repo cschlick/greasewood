@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — NATS
+#
+#  original template based on :  Debian 13 (trixie)  ·  NATS Server 2.10
+#  adapted for this host      :  ..............................................
+#
+#  Writes the leaf key/cert and the mesh CA under /etc/nats/tls. If your layout
+#  or service user differs, edit the [[file]] paths (and the 'nats' owner) and
+#  fill the blank above. A wrong path or a missing 'nats' user fails LOUDLY at
+#  `gw cert-request` time; it never silently mis-places a cert.
+#
+#  Then, in nats-server.conf:
+#    tls {
+#      cert_file: "/etc/nats/tls/server.crt"
+#      key_file:  "/etc/nats/tls/server.key"
+#      ca_file:   "/etc/nats/tls/ca.crt"    # required for verify (mTLS)
+#      # verify: true                        # require client certs
+#    }
+#
+#  The reload below is a SIGHUP (nats-server re-reads its TLS files on reload);
+#  no connection drop. SANs default to <hostname>.<mesh_domain>; --san overrides.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reload = "systemctl reload nats-server"
+
+[[file]]
+role  = "key"
+path  = "/etc/nats/tls/server.key"
+owner = "nats:nats"
+mode  = "0600"
+
+[[file]]
+role  = "cert"
+path  = "/etc/nats/tls/server.crt"
+owner = "nats:nats"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/etc/nats/tls/ca.crt"
+owner = "nats:nats"
+mode  = "0644"

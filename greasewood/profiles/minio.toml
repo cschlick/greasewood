@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — MinIO
+#
+#  original template based on :  Debian 13 (trixie)  ·  MinIO RELEASE.2025-04
+#  adapted for this host      :  ..............................................
+#
+#  MinIO reads TLS from its certs dir: the server cert as `public.crt`, the key
+#  as `private.key`, and any private CAs it should trust from a `CAs/`
+#  subdirectory. The paths below assume `--certs-dir /etc/minio/certs` (set it
+#  in MINIO_OPTS, or use the default ${HOME}/.minio/certs and edit these).
+#  Wrong paths or a missing 'minio-user' fail LOUDLY at `gw cert-request` time.
+#
+#  MinIO WATCHES its certs dir and hot-reloads on change, so no reload command
+#  is set — renewal just re-places the files and MinIO picks them up. (If your
+#  build doesn't hot-reload, add:  reload = "systemctl restart minio".)
+#
+#  SANs default to this node's <hostname>.<mesh_domain>; pass --san to override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[file]]
+role  = "cert"
+path  = "/etc/minio/certs/public.crt"
+owner = "minio-user:minio-user"
+mode  = "0644"
+
+[[file]]
+role  = "key"
+path  = "/etc/minio/certs/private.key"
+owner = "minio-user:minio-user"
+mode  = "0600"
+
+[[file]]
+role  = "ca"
+path  = "/etc/minio/certs/CAs/greasewood-ca.crt"
+owner = "minio-user:minio-user"
+mode  = "0644"
