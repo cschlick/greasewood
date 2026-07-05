@@ -40,7 +40,7 @@ caps = ["segment:mesh"]
 
 
 [network]
-interface = "gw-mesh"
+interface = "gw_myfleet"
 listen_port = 51900
 
 # The fleet's overlay /64 (a ULA). Must be identical on every node in a mesh —
@@ -58,13 +58,13 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 
 # Name resolution (ON by default). The daemon maintains a managed block in
 # /etc/hosts mapping overlay addresses to "<hostname>.<mesh_domain>", so you can
-# `ping db.gw.internal`. The domain is also the default TLS cert name from
+# `ping db.myfleet.internal`. The domain is also the default TLS cert name from
 # `gw cert-request`, so a node's address name matches its certificate SAN.
-# It's namespaced under a dedicated ".gw.internal" so it can't shadow names an
+# It's namespaced under a dedicated ".myfleet.internal" so it can't shadow names an
 # org already resolves via internal DNS for ".internal". Set hosts_sync=false
 # (or `--no-hosts-sync`) to opt out; pick a distinct mesh_domain per fleet.
 hosts_sync = true
-mesh_domain = "gw.internal"
+mesh_domain = "myfleet.internal"
 
 # Extra service names this node publishes, as bare labels under its OWN mesh
 # name — each becomes "<label>.<hostname>.<mesh_domain>" in every node's
