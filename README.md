@@ -915,10 +915,25 @@ the same-tagged block — and (b) collide on the names themselves: both meshes'
 duplicate `listen-port` (which fails loudly at bind), a duplicate `mesh_domain`
 fails *silently*, so greasewood watches for it: if it finds another mesh writing
 its `/etc/hosts` block (foreign addresses under its tag), it logs a loud warning
-telling you to set a distinct `mesh_domain`. The two genuinely-silent knobs to
-keep distinct are `mesh_domain` and `overlay_prefix`; the rest (port, data dir)
-collide loudly on their own. With distinct domains, the blocks are tagged per
-mesh and file-locked, so the two daemons coexist cleanly.
+telling you to set a distinct `mesh_domain`. The rest (port, data dir) collide
+loudly on their own. With distinct domains, the blocks are tagged per mesh and
+file-locked, so the two daemons coexist cleanly.
+
+**What about two meshes on the same overlay `/64`?** (Likely, since both
+probably use the stock prefix.) Surprisingly: *it works.* greasewood's data
+plane never routes the /64 — every address, kernel route, and WireGuard
+allowed-ip is an **identity-derived /128** (`blake2s(id_pub)` host bits), so
+two meshes sharing a prefix produce no ambiguous route; an actual /128 overlap
+is a birthday collision over 64 bits (ignorable). What a shared prefix breaks
+is *prefix-based reasoning*: a firewall rule or script scoped to the /64 now
+silently matches **both** meshes, and an address no longer tells a human which
+mesh it belongs to — so `join` warns when a new membership lands on a /64
+another membership already uses, and distinct `create --overlay-prefix` per
+mesh remains the recommendation for legibility. Rewriting one mesh's addresses
+to avoid the overlap is not on the table and never will be: addresses are
+self-certifying (derived from the node's identity key and attested by the CA),
+so a rewritten address is a *lie about identity* that every peer's
+verification would reject.
 
 ## Names (.gw.internal)
 
