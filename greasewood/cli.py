@@ -989,6 +989,10 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     # dialing either verify throughout (see certs._grace_dual_names).
     _rewrite_cert_manifest_domain(new_data, cfg.mesh_domain, new_domain)
 
+    # This membership just migrated — drop the pending-rename flag the sync
+    # loop raised (a member adopting the hub's rename), so `gw status` clears.
+    (new_data / "pending_rename.json").unlink(missing_ok=True)
+
     # Grace: old names keep resolving for one credential TTL, then retire.
     until = (dt.datetime.now(_UTC) + cfg.credential_ttl).replace(microsecond=0)
     (new_data / "rename_grace.json").write_text(_json.dumps(
@@ -2763,6 +2767,20 @@ def _self_health_lines(cfg, directory, own_id) -> list:
             flag = "⚠ " if age > 120 else ""
             tail = " — hub unreachable?" if age > 120 else ""
             lines.append(f"{'sync':<9}: {flag}directory synced {_fmt_ago(last)}{tail}")
+
+    # A pending mesh rename the daemon detected from the hub — persisted so it
+    # doesn't scroll past in the log. Needs an operator action, so it's loud.
+    import json as _json
+    pend = cfg.data_dir / "pending_rename.json"
+    if pend.exists():
+        try:
+            d = _json.loads(pend.read_text())
+            newk = _membership_key(d["new_domain"])
+            lines.append(f"{'rename':<9}: ⚠ the hub renamed this mesh "
+                         f"{d.get('old_domain','?')} → {d['new_domain']}. "
+                         f"Migrate: sudo gw rename-mesh {newk}")
+        except Exception:
+            pass
     return lines
 
 

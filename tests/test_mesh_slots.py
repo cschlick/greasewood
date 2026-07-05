@@ -366,3 +366,52 @@ def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
     msg = str(e.value)
     assert "UDP port 51900 is already used by WireGuard interface 'gw-old'" in msg
     assert "ip link del gw-old" in msg and "--listen-port" in msg
+
+
+def test_sync_persists_pending_rename(tmp_path):
+    """A detected rename is written to pending_rename.json (survives restarts,
+    surfaces in status) and cleared when the hub domain matches again."""
+    import json
+    from greasewood.directory import Directory
+    from greasewood import sync as syncmod
+    loop = syncmod.SyncLoop(Directory(), lambda: [], tmp_path / "directory.json",
+                            expected_domain="old.internal")
+    loop._note_mesh_domain("new.internal")
+    p = tmp_path / "pending_rename.json"
+    assert p.exists()
+    d = json.loads(p.read_text())
+    assert d == {"new_domain": "new.internal", "old_domain": "old.internal"}
+    # Hub back in sync (e.g. after this member migrated) → marker cleared.
+    loop._note_mesh_domain("old.internal")
+    assert not p.exists()
+
+
+def test_status_surfaces_pending_rename(tmp_path):
+    import json
+    import types
+    from greasewood import cli
+    from greasewood.keys import CAKeys, NodeKeys
+    from greasewood.directory import Directory
+    from greasewood.wire import Credential, NodeRecord
+    import datetime as dt
+    _UTC = dt.timezone.utc
+    keys = NodeKeys.load_or_generate(tmp_path)
+    ca = CAKeys.generate()
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "n1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+seeds = []
+mesh_domain = "old.internal"
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    (tmp_path / "pending_rename.json").write_text(json.dumps(
+        {"new_domain": "prod-fleet.internal", "old_domain": "old.internal"}))
+    from greasewood.config import load_config
+    cfg = load_config(tmp_path / "gw.toml")
+    lines = cli._self_health_lines(cfg, Directory(), keys.id_pub_hex)
+    joined = "\n".join(lines)
+    assert "the hub renamed this mesh" in joined
+    assert "sudo gw rename-mesh prod-fleet" in joined

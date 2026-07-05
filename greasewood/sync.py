@@ -129,17 +129,41 @@ class SyncLoop:
         is keyed to the old name, so tell the operator the exact migration
         command. Warned once per observed domain."""
         if (not hub_domain or self._expected_domain is None
-                or hub_domain == self._expected_domain
-                or hub_domain == self._warned_domain):
+                or hub_domain == self._expected_domain):
+            # In sync (or no expectation) — clear any stale pending marker.
+            if hub_domain and hub_domain == self._expected_domain:
+                self._clear_pending_rename()
             return
-        self._warned_domain = hub_domain
         from .cli import _membership_key
-        log.warning(
-            "the hub renamed this mesh: %s → %s. This member still uses its "
-            "old-name artifacts; migrate them (config, data dir, interface, "
-            "service) with:  sudo gw rename-mesh %s   (brief tunnel blip while "
-            "the interface renames)",
-            self._expected_domain, hub_domain, _membership_key(hub_domain))
+        # Persist the pending rename so it survives daemon restarts and surfaces
+        # in `gw status` — a scrolled-past log line is easy to miss for a change
+        # that needs an operator action.
+        self._write_pending_rename(hub_domain)
+        if hub_domain != self._warned_domain:
+            self._warned_domain = hub_domain
+            log.warning(
+                "the hub renamed this mesh: %s → %s. This member still uses its "
+                "old-name artifacts; migrate them (config, data dir, interface, "
+                "service) with:  sudo gw rename-mesh %s   (brief tunnel blip "
+                "while the interface renames)",
+                self._expected_domain, hub_domain, _membership_key(hub_domain))
+
+    def _pending_rename_path(self):
+        return self._cache_path.parent / "pending_rename.json"
+
+    def _write_pending_rename(self, new_domain: str) -> None:
+        import json
+        try:
+            self._pending_rename_path().write_text(json.dumps(
+                {"new_domain": new_domain, "old_domain": self._expected_domain}))
+        except OSError:
+            pass
+
+    def _clear_pending_rename(self) -> None:
+        try:
+            self._pending_rename_path().unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _pull_once(self) -> None:
         # Re-merge the cache file first so records written directly to disk
