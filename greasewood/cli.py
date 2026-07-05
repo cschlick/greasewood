@@ -2489,17 +2489,20 @@ def _fmt_hs_age(age_s: float) -> str:
     return f"{int(age_s // 86400)}d"
 
 
-def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
-    """The split roster: LEFT is the mesh (fleet-wide, same on every node — name,
-    addr, inbound, segments, credential); RIGHT is THIS node's view (do I peer
-    with them, and — with root + live WireGuard state — the live data link and
-    its traffic). The right side degrades gracefully: without root it shows only
-    the policy 'would I peer' answer."""
+def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
+                  latency=None, rates=None) -> list:
+    """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
+    every node — name, addr, inbound, segments, credential); RIGHT is THIS
+    node's view. Without root the right side is just the policy 'would I peer'
+    answer. With root it's the live link + cumulative traffic. In LIVE mode
+    (latency dict supplied) the right side is link + per-second RATE + a latency
+    column that fills in asynchronously (blank until each peer's ping returns)."""
     import base64
     from .hosts import mesh_name
     from .reconcile import default_policy
 
     have_live = live_peers is not None
+    is_live = latency is not None
     now_epoch = int(now.timestamp())
 
     def _exp(r):
@@ -2511,8 +2514,40 @@ def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
         h = int(left // 3600)
         return f"{h // 24}d" if h >= 48 else f"{h}h"
 
-    # LEFT (mesh) cells + RIGHT (this node) cells, row-aligned.
+    def _right(r, is_self, peers, lp):
+        if is_live:                             # link · rate · latency
+            if is_self:
+                return ("(self)", "", "")
+            if not peers:
+                return ("— not a peer", "", "")
+            if lp is None:
+                return ("not installed", "", "")
+            if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+                return (f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)}",
+                        (rates or {}).get(r.cred.addr, ""),
+                        latency.get(r.cred.addr, "…"))   # … = ping in flight
+            return ("○ no handshake", "", "—")
+        if not have_live:                       # policy only (no root)
+            return ("self" if is_self else ("yes" if peers else "no"),)
+        if is_self:
+            return ("(self)", "")
+        if not peers:
+            return ("— not a peer", "")
+        if lp is None:
+            return ("not installed", "")
+        if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+            return (f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)} ago",
+                    f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
+        return ("○ no handshake", "")
+
     left_hdr = ("name", "addr", "in", "segments", "exp")
+    if is_live:
+        right_hdr = ("link", "rate", "latency")
+    elif have_live:
+        right_hdr = ("link", "traffic")
+    else:
+        right_hdr = ("peer?",)
+
     left_rows, right_rows = [], []
     for r in records:
         left_rows.append((
@@ -2520,24 +2555,9 @@ def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
             "yes" if r.inbound != "no" else "no",
             ",".join(_record_segments(r)) or "-", _exp(r),
         ))
-        is_self = r.id_pub.hex() == own_id
-        peers = default_policy(cfg.caps, r.cred.caps)
-        if not have_live:                       # no live data — show policy only
-            right_rows.append(("self" if is_self else ("yes" if peers else "no"),))
-        elif is_self:
-            right_rows.append(("(self)", ""))
-        elif not peers:
-            right_rows.append(("— not a peer", ""))
-        else:
-            lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
-            if lp is None:
-                right_rows.append(("not installed", ""))
-            elif lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
-                right_rows.append((f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)} ago",
-                                   f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}"))
-            else:
-                right_rows.append(("○ no handshake", ""))
-    right_hdr = ("link", "traffic") if have_live else ("peer?",)
+        lp = (live_peers or {}).get(base64.b64encode(r.cred.wg_pub).decode())
+        right_rows.append(_right(r, r.id_pub.hex() == own_id,
+                                 default_policy(cfg.caps, r.cred.caps), lp))
 
     def _w(hdr, i, rows):
         return max(len(hdr), *(len(row[i]) for row in rows)) if rows else len(hdr)
@@ -2551,15 +2571,148 @@ def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
         return " ".join(f"{cells[i]:<{rw[i]}}" for i in range(len(cells)))
 
     lwidth = len(_fl(left_hdr))
-    print(f"{'mesh — the fleet (same on every node)':<{lwidth}} │ this node")
-    print(_fl(left_hdr) + " │ " + _fr(right_hdr))
-    print("-" * lwidth + "-+-" + "-" * max(len(_fr(right_hdr)), 9))
-    for lr, rr in zip(left_rows, right_rows):
-        print(_fl(lr) + " │ " + _fr(rr))
-    if not have_live:
+    out = [f"{'mesh — the fleet (same on every node)':<{lwidth}} │ this node",
+           _fl(left_hdr) + " │ " + _fr(right_hdr),
+           "-" * lwidth + "-+-" + "-" * max(len(_fr(right_hdr)), 9)]
+    out += [_fl(lr) + " │ " + _fr(rr) for lr, rr in zip(left_rows, right_rows)]
+    if not have_live and not is_live:
         note = ("run 'sudo gw status' to see live data links + traffic" if not is_root
                 else "no live WireGuard state — is the daemon running?")
-        print(f"({note})")
+        out.append(f"({note})")
+    return out
+
+
+def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
+    for line in _roster_lines(records, cfg, now, own_id, live_peers, is_root):
+        print(line)
+
+
+def _fmt_rate(bytes_per_s: float) -> str:
+    return f"{_fmt_bytes(max(0.0, bytes_per_s))}/s"
+
+
+def _ping_rtt(addr: str) -> str:
+    """Round-trip time to an overlay address via one ICMPv6 echo, as 'Nms', or
+    '—' on timeout/unreachable. Numeric only (-n), 1s deadline (-W1)."""
+    import re
+    import subprocess
+    try:
+        r = subprocess.run(["ping", "-6", "-n", "-c", "1", "-W", "1", addr],
+                           capture_output=True, text=True, timeout=3)
+    except Exception:
+        return "—"
+    if r.returncode != 0:
+        return "—"
+    m = re.search(r"time=([\d.]+)\s*ms", r.stdout)
+    return f"{float(m.group(1)):.0f}ms" if m else "—"
+
+
+class _LatencyProber:
+    """Background prober for `status --live`: round-robins ICMP pings over the
+    current linked peers and publishes results in `self.results` ({addr: 'Nms'|
+    '—'}). The display reads it non-blocking, so latency fills in over the first
+    few seconds instead of stalling the first frame — and pings run ONLY while
+    someone is watching the live view (the caller stops it on exit)."""
+
+    def __init__(self) -> None:
+        import threading
+        self.results: dict = {}
+        self._targets: list = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, name="latency", daemon=True)
+
+    def set_targets(self, addrs) -> None:
+        with self._lock:
+            self._targets = list(addrs)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                tgts = list(self._targets)
+            if not tgts:
+                self._stop.wait(0.5)
+                continue
+            for addr in tgts:
+                if self._stop.is_set():
+                    break
+                self.results[addr] = _ping_rtt(addr)
+
+    def start(self) -> None:
+        self._t.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def _status_live(cfg, own_id, interval: float = 2.0) -> int:
+    """Live, redraw-in-place `gw status`: link state + per-second throughput
+    (from the sample delta between frames) + an async latency column. Root +
+    a terminal required; Ctrl-C exits."""
+    import base64
+    import time
+    from .directory import Directory
+    from . import wg as wgmod
+
+    if not sys.stdout.isatty():
+        sys.exit("gw status --live needs a terminal (it redraws in place); "
+                 "plain 'gw status' for piped/one-shot output")
+    if os.geteuid() != 0:
+        sys.exit("gw status --live needs root (it reads live WireGuard state "
+                 "and pings peers). Try: sudo gw status --live")
+
+    prober = _LatencyProber()
+    prober.start()
+    prev: dict = {}          # wg_pub_b64 -> (rx, tx, monotonic) for the rate delta
+    sys.stdout.write("\033[?25l")   # hide cursor
+    try:
+        while True:
+            records = sorted(Directory.load(cfg.dir_cache_path).all(),
+                             key=lambda r: r.hostname)
+            try:
+                live = wgmod.get_peers(cfg.wg_interface)
+            except Exception:
+                live = {}
+            now = dt.datetime.now(_UTC)
+            now_epoch = int(now.timestamp())
+            mono = time.monotonic()
+
+            rates, targets = {}, []
+            for r in records:
+                pub = base64.b64encode(r.cred.wg_pub).decode()
+                lp = live.get(pub)
+                if not lp:
+                    continue
+                if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+                    targets.append(r.cred.addr)
+                    p = prev.get(pub)
+                    if p and mono > p[2]:
+                        dts = mono - p[2]
+                        rates[r.cred.addr] = (
+                            f"↓{_fmt_rate((lp.rx_bytes - p[0]) / dts)} "
+                            f"↑{_fmt_rate((lp.tx_bytes - p[1]) / dts)}")
+                prev[pub] = (lp.rx_bytes, lp.tx_bytes, mono)
+            prober.set_targets(targets)
+
+            body = _roster_lines(records, cfg, now, own_id, live, True,
+                                 latency=prober.results, rates=rates)
+            up = sum(1 for a in targets)
+            frame = ["\033[H\033[J",
+                     f"gw status --live · {cfg.hostname}.{cfg.mesh_domain} · "
+                     f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up", ""]
+            frame += body
+            frame += ["", "(latency pings fill in live · throughput is per-second "
+                      "· Ctrl-C to exit)"]
+            sys.stdout.write("\n".join(frame))
+            sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        prober.stop()
+        sys.stdout.write("\033[?25h\n")   # restore cursor
+        sys.stdout.flush()
+    return 0
 
 
 def _fmt_ago(iso: str) -> str:
@@ -2818,6 +2971,13 @@ def cmd_status(args) -> int:
                  f"install with a 0700 data dir?). Either run: sudo gw status, "
                  f"or open the public files up: sudo chmod 755 {cfg.data_dir}")
     own_id, own_addr = _own_identity(cfg.data_dir)
+
+    if getattr(args, "live", False):
+        # Redraw-in-place live view: link state + per-second throughput + an
+        # async latency column (pings run only while you're watching).
+        return _status_live(cfg, own_id,
+                            interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
+
     directory = Directory.load(cfg.dir_cache_path)
 
     print(f"role     : {cfg.role}")
@@ -3821,6 +3981,12 @@ def main(argv=None) -> int:
     sp.add_argument("--by-segment", action="store_true",
                     help="group into one table per segment (a node appears under "
                          "each of its segments; segment:* nodes appear under all)")
+    sp.add_argument("--live", "-w", action="store_true",
+                    help="[sudo] redraw-in-place live view: link state, "
+                         "per-second throughput, and a latency column that fills "
+                         "in as pings return. Ctrl-C to exit.")
+    sp.add_argument("--interval", type=float, default=2.0, metavar="SECS",
+                    help="live refresh interval (default 2s; min 1s)")
     sp.set_defaults(fn=cmd_status)
 
     # diagnose
