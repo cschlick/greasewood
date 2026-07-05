@@ -265,3 +265,51 @@ trusted_pubs = []
     out = capsys.readouterr().out
     assert "orphaned" in out
     assert str(tmp_path / "priv" / "db.key") in out
+
+
+def test_grace_dual_names_bidirectional():
+    from greasewood.certs import _grace_dual_names
+    # A cert under the NEW domain gains the old-domain variant (and vice versa),
+    # covering a manifest frozen with either.
+    out = _grace_dual_names(["db.new.internal"], "new.internal", "old.internal")
+    assert set(out) == {"db.new.internal", "db.old.internal"}
+    out = _grace_dual_names(["pg.db.old.internal"], "new.internal", "old.internal")
+    assert "pg.db.new.internal" in out and "pg.db.old.internal" in out
+    # Non-mesh SANs are untouched.
+    out = _grace_dual_names(["service.corp.example"], "new.internal", "old.internal")
+    assert out == ["service.corp.example"]
+
+
+def test_grace_old_domain_expiry(tmp_path):
+    import datetime as dt
+    import json
+    from greasewood.certs import _rename_grace_old_domain
+    assert _rename_grace_old_domain(tmp_path) is None            # no marker
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+    (tmp_path / "rename_grace.json").write_text(
+        json.dumps({"old_domain": "old.internal", "until": future}))
+    assert _rename_grace_old_domain(tmp_path) == "old.internal"  # active
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
+    (tmp_path / "rename_grace.json").write_text(
+        json.dumps({"old_domain": "old.internal", "until": past}))
+    assert _rename_grace_old_domain(tmp_path) is None            # expired → retire
+
+
+def test_migrate_rewrites_cert_manifest(tmp_path):
+    """rename-mesh repoints managed certs old→new so post-grace renewals use
+    the new names."""
+    import json
+    from greasewood import cli
+    from greasewood.certs import manifest_path
+    data = tmp_path / "d"; (data / "tls").mkdir(parents=True)
+    manifest_path(data).write_text(json.dumps([
+        {"name": "self", "dns": ["db.old.internal"], "cn": "db.old.internal",
+         "ips": ["fd8d::1"]},
+        {"name": "svc", "dns": ["pg.db.old.internal", "keep.corp.example"],
+         "cn": "pg.db.old.internal"},
+    ]))
+    cli._rewrite_cert_manifest_domain(data, "old.internal", "new.internal")
+    entries = json.loads(manifest_path(data).read_text())
+    assert entries[0]["dns"] == ["db.new.internal"]
+    assert entries[0]["cn"] == "db.new.internal"
+    assert entries[1]["dns"] == ["pg.db.new.internal", "keep.corp.example"]  # non-mesh kept
