@@ -25,6 +25,10 @@ from . import wg as wgmod
 
 log = logging.getLogger(__name__)
 
+# persistent-keepalive (secs) for a healthy or still-probing peer. A peer whose
+# endpoint has gone dead past a full probe cycle drops to 0 — see _EndpointTracker.
+_KEEPALIVE = 25
+
 # Step 6 authorization policy: (local_caps, peer_caps) → bool
 Policy = Callable[[list[str], list[str]], bool]
 
@@ -114,17 +118,35 @@ class _EndpointTracker:
         st = self._state.get(wg_pub_b64)
         if st is None or st["current"] not in candidates:
             # New peer, or it re-advertised a set without our current endpoint.
-            st = {"current": candidates[0], "since": now}
+            # Start the unhealthy clock now if it isn't already handshaking, so
+            # the backoff countdown runs from when we first pinned the endpoint.
+            healthy = self._is_healthy(hs, now)
+            st = {"current": candidates[0], "since": now,
+                  "unhealthy_since": None if healthy else now, "dead": False}
             self._state[wg_pub_b64] = st
             return st["current"]
         if self._is_healthy(hs, now):
-            st["since"] = now              # working link → reset the dwell clock
+            # Working link → reset the dwell clock, clear any backoff.
+            st.update(since=now, unhealthy_since=None, dead=False)
             return st["current"]
+        if st.get("unhealthy_since") is None:
+            st["unhealthy_since"] = now
         if len(candidates) > 1 and (now - st["since"]) >= self._dwell:
             i = candidates.index(st["current"])
             st["current"] = candidates[(i + 1) % len(candidates)]
             st["since"] = now
+        # Backoff: once we've been unhealthy for a full probe cycle (dwell per
+        # advertised endpoint) with no handshake, the endpoint(s) are dead. We
+        # keep it pinned for automatic recovery, but the caller drops keepalive
+        # to 0 so we stop firing a futile packet every 25s into the void.
+        st["dead"] = (now - st["unhealthy_since"]) >= self._dwell * len(candidates)
         return st["current"]
+
+    def is_backoff(self, wg_pub_b64: str) -> bool:
+        """True if this peer's endpoint has been dead past a full probe cycle —
+        pinned but not worth keepalive traffic (see choose())."""
+        st = self._state.get(wg_pub_b64)
+        return bool(st and st.get("dead"))
 
 
 def reconcile_once(
@@ -186,13 +208,16 @@ def reconcile_once(
 
         wg_pub_b64 = base64.b64encode(record.cred.wg_pub).decode()
         candidates = _endpoint_candidates(record.endpoints, local_families)
+        keepalive = _KEEPALIVE
         if endpoint_tracker is not None:
             lp = live.get(wg_pub_b64)
             hs = lp.latest_handshake if lp else 0
             endpoint = endpoint_tracker.choose(wg_pub_b64, candidates, hs, now_epoch)
+            if endpoint_tracker.is_backoff(wg_pub_b64):
+                keepalive = 0          # dead endpoint: stop the futile 25s poke
         else:
             endpoint = candidates[0] if candidates else None
-        desired[wg_pub_b64] = (record.cred.addr, endpoint)
+        desired[wg_pub_b64] = (record.cred.addr, endpoint, keepalive)
         # Context for the audit trail: name + segments, so every peer command
         # says WHO and WHY, not just a bare pubkey.
         segs = ",".join(sorted(_segments(record.cred.caps))) or "-"
@@ -206,26 +231,28 @@ def reconcile_once(
         return meta.get(pub, f"...{pub[-8:]}")
 
     for pub in desired_set - live_set:
-        addr, ep = desired[pub]
+        addr, ep, ka = desired[pub]
         try:
             with audit.context(f"reconcile: +peer {_who(pub)}"):
-                wgmod.set_peer(iface, pub, addr, ep)
+                wgmod.set_peer(iface, pub, addr, ep, keepalive=ka)
         except Exception as e:
             log.warning("add peer ...%s failed: %s", pub[-8:], e)
 
     for pub in desired_set & live_set:
-        addr, ep = desired[pub]
+        addr, ep, ka = desired[pub]
         # ep=None (the peer stopped advertising, e.g. went outbound-only)
         # deliberately does NOT clear a live endpoint: WireGuard roams the
         # endpoint on any authenticated packet anyway, and clearing one would
         # require remove+re-add — tearing down a working session for no gain.
         endpoint_changed = ep and live[pub].endpoint != ep
         route_missing = not live[pub].allowed_ips or addr not in live[pub].allowed_ips
-        if endpoint_changed or route_missing:
+        ka_changed = live[pub].keepalive != ka   # dead↔alive flips keepalive 25↔0
+        if endpoint_changed or route_missing or ka_changed:
             try:
-                why = "endpoint" if endpoint_changed else "route"
+                why = ("endpoint" if endpoint_changed else
+                       "keepalive" if ka_changed else "route")
                 with audit.context(f"reconcile: ~peer {_who(pub)} ({why})"):
-                    wgmod.set_peer(iface, pub, addr, ep)
+                    wgmod.set_peer(iface, pub, addr, ep, keepalive=ka)
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", pub[-8:], e)
 
