@@ -141,7 +141,7 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             r = pexec(node, "gw", "join", tok_c,
                       "--endpoint", f"[{node_ipv6}]:51910", check=False)
             assert r.returncode == 0, f"auto-slot join failed:\n{r.stdout}\n{r.stderr}"
-            assert "auto-provisioning" in (r.stdout + r.stderr)
+            assert "provisioning membership" in (r.stdout + r.stderr)
 
         # Slot 2 got the derived names + the mesh's OWN domain (carried in the
         # token — a mesh has ONE domain everywhere; no local aliasing exists).
