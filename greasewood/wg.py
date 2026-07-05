@@ -66,8 +66,61 @@ def ensure_interface(
     if overlay_addr not in r.stdout:
         _run("ip", "-6", "addr", "add", f"{overlay_addr}/128", "dev", iface)
 
-    _run("ip", "link", "set", iface, "up")
+    # Bringing a WireGuard interface up binds its listen-port; EADDRINUSE here
+    # means ANOTHER wg interface already holds this UDP port — a leftover mesh
+    # whose config is gone but whose kernel interface lingers, so port
+    # allocation (which scans configs) couldn't see it. Turn the raw RTNETLINK
+    # crash into an actionable message naming the culprit.
+    r = _run("ip", "link", "set", iface, "up", check=False)
+    if r.returncode != 0:
+        if "Address already in use" in (r.stderr or ""):
+            holder = _wg_iface_on_port(listen_port, exclude=iface)
+            who = (f"WireGuard interface {holder!r}" if holder
+                   else "another WireGuard interface")
+            raise PortInUse(
+                f"can't bring up {iface}: UDP port {listen_port} is already used "
+                f"by {who} — a leftover from a previous mesh on this host. Remove "
+                f"it (sudo ip link del {holder or '<iface>'}) or give this mesh a "
+                f"different port (create/join --listen-port). "
+                f"'wg show interfaces' lists them.")
+        raise subprocess.CalledProcessError(r.returncode,
+                                            ["ip", "link", "set", iface, "up"],
+                                            r.stdout, r.stderr)
     log.info("interface %s up, addr %s, port %d", iface, overlay_addr, listen_port)
+
+
+class PortInUse(RuntimeError):
+    """A mesh's listen-port is held by a leftover WireGuard interface."""
+
+
+def _wg_iface_on_port(port: int, exclude: str = "") -> "str | None":
+    """The name of the WireGuard interface currently listening on `port`, if any
+    (other than `exclude`). Best-effort — parses `wg show <iface> listen-port`."""
+    r = _run("wg", "show", "interfaces", check=False)
+    if r.returncode != 0:
+        return None
+    for name in r.stdout.split():
+        if name == exclude:
+            continue
+        p = _run("wg", "show", name, "listen-port", check=False)
+        if p.returncode == 0 and p.stdout.strip() == str(port):
+            return name
+    return None
+
+
+def wg_interface_ports() -> dict:
+    """Map of {wg_interface_name: listen_port} for every live WireGuard
+    interface — so port allocation can avoid a port a leftover interface holds,
+    not just one a config claims."""
+    out = {}
+    r = _run("wg", "show", "interfaces", check=False)
+    if r.returncode != 0:
+        return out
+    for name in r.stdout.split():
+        p = _run("wg", "show", name, "listen-port", check=False)
+        if p.returncode == 0 and p.stdout.strip().isdigit():
+            out[name] = int(p.stdout.strip())
+    return out
 
 
 def interface_exists(iface: str) -> bool:
