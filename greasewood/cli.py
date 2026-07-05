@@ -812,6 +812,43 @@ def _next_free_slot(etc: "Path" = Path("/etc")) -> int:
     return n
 
 
+def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
+                                etc: "Path" = Path("/etc")) -> bool:
+    """Warn when another membership on this host uses the same overlay /64.
+    NOT a functional failure — greasewood's data plane is /128-only (address,
+    kernel route, and WireGuard allowed-ip are all identity-derived host
+    routes), so two meshes on one prefix never produce an ambiguous route.
+    What a shared prefix DOES break is prefix-based reasoning: a firewall rule
+    or script scoped to the /64 now silently matches BOTH meshes, and an
+    address no longer tells a human which mesh it belongs to. Returns True if
+    it warned (for tests)."""
+    import ipaddress
+    from .config import load_config
+    try:
+        mine = ipaddress.ip_network(f"{my_prefix}/64")
+    except ValueError:
+        return False
+    for n, p in _mesh_slots(etc):
+        if p.resolve() == Path(cfg_path).resolve():
+            continue
+        try:
+            theirs = ipaddress.ip_network(f"{load_config(p).overlay_prefix}/64")
+        except Exception:
+            continue
+        if theirs == mine:
+            log.warning(
+                "this mesh uses the SAME overlay /64 (%s) as membership #%d "
+                "(%s). Everything still works — greasewood routes only "
+                "identity-derived /128s, never the /64 — but the prefix no "
+                "longer identifies a mesh on this host: any firewall rule or "
+                "script scoped to %s now matches BOTH meshes, and addresses "
+                "are indistinguishable by eye. For legibility, create meshes "
+                "with distinct `create --overlay-prefix`.",
+                mine, n, p, mine)
+            return True
+    return False
+
+
 def _slot_service(cfg_path: "Path", slot: int) -> str:
     """Make membership slot N run as its own systemd service (greasewoodN),
     mirroring however slot 1 is managed: if the base greasewood.service is
@@ -1112,6 +1149,8 @@ def cmd_join(args) -> int:
     from .keys import set_overlay_prefix, format_overlay_prefix
     overlay_prefix = format_overlay_prefix(_ip.IPv6Address(cred.addr).packed[:8])
     set_overlay_prefix(_ip.IPv6Address(cred.addr).packed[:8])
+    # Multi-mesh legibility check: same /64 as another membership on this host?
+    _warn_shared_overlay_prefix(cfg_path, overlay_prefix)
 
     # Build directory with our record + hub's record
     dir_cache = data_dir / "directory.json"

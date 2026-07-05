@@ -86,3 +86,35 @@ def test_unparseable_slot_config_is_skipped(tmp_path):
     (tmp_path / "greasewood.toml").write_text("not toml at all [[[")
     _write_cfg(tmp_path / "greasewood2.toml", tmp_path / "d2", ca.ca_pub_hex)
     assert cli._slot_for_ca(ca.ca_pub_hex, etc=tmp_path) == 2
+
+
+def test_shared_prefix_warns_distinct_does_not(tmp_path, caplog):
+    """Two memberships on one overlay /64: functional (all routing is /128) but
+    prefix-scoped firewall rules / human reading break — warn at join. Distinct
+    prefixes stay quiet, and a membership never warns about itself."""
+    import logging
+    ca_a, ca_b = CAKeys.generate(), CAKeys.generate()
+    _write_cfg(tmp_path / "greasewood.toml", tmp_path / "d1", ca_a.ca_pub_hex)
+    (tmp_path / "greasewood.toml").write_text(
+        (tmp_path / "greasewood.toml").read_text().replace(
+            "[network]", '[network]\noverlay_prefix = "fd8d:e5c1:db1a:7::"'))
+    cfg2 = tmp_path / "greasewood2.toml"
+    _write_cfg(cfg2, tmp_path / "d2", ca_b.ca_pub_hex, iface="gw-mesh2",
+               port=51910, domain="gw2.internal")
+    cfg2.write_text(cfg2.read_text().replace(
+        "[network]", '[network]\noverlay_prefix = "fdde:cafc:ffe:e::"'))
+
+    with caplog.at_level(logging.WARNING, logger="greasewood"):
+        # Same /64 (different textual spelling — compares as networks) → warn.
+        assert cli._warn_shared_overlay_prefix(
+            cfg2, "fd8d:e5c1:db1a:0007::", etc=tmp_path) is True
+        assert any("SAME overlay /64" in r.message for r in caplog.records)
+        assert any("/128" in r.message for r in caplog.records)  # says it's not fatal
+        caplog.clear()
+        # Distinct /64 → quiet.
+        assert cli._warn_shared_overlay_prefix(
+            cfg2, "fdde:cafc:ffe:e::", etc=tmp_path) is False
+        # Own config never matches itself.
+        assert cli._warn_shared_overlay_prefix(
+            tmp_path / "greasewood.toml", "fd8d:e5c1:db1a:7::", etc=tmp_path) is False
+        assert not caplog.records
