@@ -783,7 +783,8 @@ Two properties worth knowing:
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
-| `rename <name>`    | yes   | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
+| `rename-node <name>` | yes | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
+| `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the hub, then on each member (surfaced in its `gw status`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
 | `renew`            | yes   | Force an immediate credential renewal for this node (applies a hub-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
 | `renew-all`        | no    | On the hub: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the hub's rate stays ~constant with mesh size). |
 | `hub-backup`       | no    | On the hub: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and hub identity. Store it offline. |

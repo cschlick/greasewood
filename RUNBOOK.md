@@ -167,6 +167,46 @@ Avoid the lost-key case entirely: **back up `ca.key` encrypted and offline** (th
 a dead hub is a *restore*, not a re-root — see below), and keep `trusted_pubs` a
 set so you always have an overlap path.
 
+## SOP: rename a mesh (`gw rename-mesh`)
+
+A mesh's name is one thing everywhere: its domain (`<name>.internal`), and — on
+each host — its config (`/etc/greasewood_<name>.toml`), data dir
+(`/var/lib/greasewood_<name>`), interface (`gw_<name>`), and service
+(`greasewood@<name>`). `gw rename-mesh <new>` moves all of them together, so
+they never drift apart. It is **operator-driven on every host** — a rare,
+deliberate fleet change, not something the daemon does to itself.
+
+1. **On the hub:** `sudo gw rename-mesh <new-name>`. This migrates the hub's own
+   artifacts, starts advertising the new domain in `GET /directory`, and starts
+   a **grace window** (one credential TTL) during which the hub keeps resolving
+   both old and new names.
+
+2. **Each member, on its next directory poll**, notices the hub's domain no
+   longer matches its own and records it — `gw status` then shows, loudly:
+   `rename: ⚠ the hub renamed this mesh <old> → <new>. Migrate: sudo gw
+   rename-mesh <new>`. (An un-migrated member keeps working — peering is by
+   identity, not name — it's just naming-inconsistent with the fleet until you
+   migrate it.)
+
+3. **On each member:** `sudo gw rename-mesh <new-name>`. Same migration locally,
+   plus its own grace window. Do them at your leisure inside the grace TTL; both
+   names resolve and both verify in TLS throughout (the daemon issues dual-SAN
+   certs and keeps a dual `/etc/hosts` block during grace).
+
+4. **The one manual step nothing can automate:** update **client connection
+   strings / app configs** from `<host>.<old>` to `<host>.<new>`. Do this
+   *after* the cert has rolled to dual-SAN (check `gw cert-status`), any time
+   inside the grace window — both names work until it ends.
+
+5. **After grace**, old names stop resolving (a straggler dialing `<host>.<old>`
+   fails at *name resolution*, cleanly, not with a cryptic cert error) and the
+   next cert renewal drops the old SAN.
+
+Notes: new join tokens carry the new name immediately, so nodes enrolled
+mid-rename land on the new domain directly. `--interface` is the one artifact
+that can collide after the 15-char kernel truncation for very long names —
+`rename-mesh` refuses loudly and tells you to pass an explicit interface if so.
+
 ## SOP: hub host destroyed (disk gone)
 
 - **You have a `gw hub-backup` archive:** on the replacement host,
