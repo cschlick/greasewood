@@ -1613,7 +1613,7 @@ def cmd_set_caps(args) -> int:
         log.warning("caps %s include no segment — %r will peer with no one "
                     "(add e.g. segment:mesh)", caps, name)
     ca.set_caps(id_pub, caps)
-    print(f"caps for {name!r} → {caps}")
+    print(f"caps for {name} ({id_pub.hex()}) → {caps}")
     print(_NEXT_RENEWAL_NOTE)
     return 0
 
@@ -1628,7 +1628,7 @@ def cmd_set_segments(args) -> int:
     segments = ["segment:" + s for s in segs]
     caps = kept + segments
     ca.set_caps(id_pub, caps)
-    print(f"segments for {name!r} → {segs}  (caps now {caps})")
+    print(f"segments for {name} ({id_pub.hex()}) → {segs}  (caps now {caps})")
     print(_NEXT_RENEWAL_NOTE)
     return 0
 
