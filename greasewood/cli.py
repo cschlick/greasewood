@@ -60,7 +60,7 @@ def _version() -> str:
         return "0.0.0+unknown"
 
 
-# systemd units, embedded so `gw install-service` works from a pip-only install
+# systemd template unit, embedded so create/join can install it on a pip-only install
 # (no repo checkout needed). Kept in sync with systemd/ in the repo.
 # Template unit: one file serves every mesh membership as greasewood@<name>
 # (create/join enable the instance for you). %i is the mesh name.
@@ -487,7 +487,8 @@ default_caps = ["tls"]
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
     print()
-    _print_daemon_guidance(args.name, cfg_path, "then invite nodes to enroll them")
+    _print_daemon_guidance(args.name, cfg_path, "then invite nodes to enroll them",
+                           no_service=getattr(args, "no_service", False))
     print()
     print(f"Enroll a new node:")
     print(f"  TOKEN=$(sudo gw invite)          # on this machine")
@@ -913,7 +914,7 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
 
 def _membership_service(key: str) -> str:
     """Enable this membership's daemon as greasewood@<key> — an instance of the
-    template unit install-service ships (ExecStart=gw -c /etc/greasewood_%i.toml
+    template unit create/join install (ExecStart=gw -c /etc/greasewood_%i.toml
     run). Returns 'active' (came up and stayed up), 'installed' (enabled but not
     confirmed running), 'failed' (crashed at/after start), or 'manual' (no
     systemd management here — caller prints the gw run line).
@@ -932,7 +933,10 @@ def _membership_service(key: str) -> str:
                        capture_output=True)
     if r.returncode == 0:
         return "active"
-    subprocess.run([systemctl, "enable", "--now", f"{unit}"], check=True)
+    r = subprocess.run([systemctl, "enable", "--now", f"{unit}"],
+                       capture_output=True)
+    if r.returncode != 0:
+        return "manual"            # systemctl present but no live manager → manual
     return _wait_service_settled(systemctl, unit)
 
 
@@ -1494,26 +1498,17 @@ trusted_pubs = ["{ca_pub_hex}"]
         print(f"  hub control  : {hub_overlay_url}")
     print()
     if membership_key:
-        state = _membership_service(membership_key)
-        unit = f"greasewood@{membership_key}"
-        if state == "active":
-            print(f"This mesh runs as its own service: {unit} (up, starts at boot).")
-            print(f"  status: systemctl status {unit}   mesh view: gw -c {cfg_path} status")
-            print(f"  (a re-join to change config? apply it: "
-                  f"sudo systemctl restart {unit})")
-        elif state == "manual":
-            print("Start this mesh's daemon:")
-            print(f"  sudo gw -c {cfg_path} run")
-            print("  (tip: 'sudo gw install-service' + re-join makes meshes "
-                  "manage themselves)")
-        else:
-            print(f"⚠ {unit} is enabled but {state or 'not running'} — likely "
-                  f"crashing at startup, so the mesh isn't up.")
-            print(f"  see why:  sudo journalctl -u {unit} -n 40 --no-pager")
-            print(f"  or watch it:  sudo gw -c {cfg_path} run")
+        # Name-keyed path → the greasewood@ template can serve it. Install +
+        # enable (unless --no-service), settle-checked, same as create.
+        _print_daemon_guidance(membership_key, cfg_path,
+                               no_service=getattr(args, "no_service", False))
     else:
+        # Explicit custom -c path: the template's ExecStart hardcodes
+        # /etc/greasewood_%i.toml, so systemd can't serve it — run it yourself.
         print("Start this mesh's daemon:")
         print(f"  sudo gw -c {cfg_path} run")
+        print("  (custom -c path isn't served by the greasewood@ template; run "
+              "it yourself or write your own unit)")
     print()
     from . import firewall as _fw
     if node_inbound == "no":
@@ -1720,20 +1715,31 @@ def _service_state() -> str:
     return "installed"
 
 
-def _print_daemon_guidance(key: str, cfg_path, then: str = "") -> None:
-    """Tell the user how this membership's daemon runs, correctly for service
-    vs manual mode. `then` is an optional trailing clause."""
+def _print_daemon_guidance(key: str, cfg_path, then: str = "",
+                           no_service: bool = False) -> None:
+    """Bring up (and report) this membership's daemon. By default create/join
+    install the systemd template + enable this mesh's instance so it's running
+    and boot-persistent with no extra command; --no-service skips systemd and
+    prints the manual `gw run` line. `then` is an optional trailing clause."""
     tail = f" — {then}" if then else ""
+    if no_service or not _systemd_available():
+        print(f"Start this mesh's daemon{tail}:")
+        print(f"  sudo gw -c {cfg_path} run")
+        if no_service and _systemd_available():
+            print(f"  (or switch to systemd later: 'gw create/join' installs the "
+                  f"greasewood@ template — enable with 'systemctl enable --now "
+                  f"greasewood@{key}')")
+        return
+
+    _write_service_template()          # ensure the template exists, then enable
     state = _membership_service(key)
     if state == "active":
         print(f"greasewood@{key} is running{tail} (and starts at boot).")
         print(f"  status: systemctl status greasewood@{key}   "
               f"logs: journalctl -u greasewood@{key} -f")
     elif state == "manual":
-        print(f"Start this mesh's daemon{tail}:")
+        print(f"No systemd here — start this mesh's daemon{tail}:")
         print(f"  sudo gw -c {cfg_path} run")
-        print("  (tip: 'sudo gw install-service' makes every mesh start on "
-              "boot — no manual gw run)")
     else:
         # enabled, but it did NOT come up and stay up (Type=simple + a crash =
         # a silent restart loop). Say so, and point at the journal.
@@ -3701,58 +3707,33 @@ def cmd_purge(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# service management — install-service / uninstall-service (no Ansible needed)
+# service management — the greasewood@ template unit (create/join install it,
+# purge removes it; no separate install/uninstall command, no Ansible)
 # ---------------------------------------------------------------------------
 
-def cmd_install_service(args) -> int:
-    """Install the greasewood@ TEMPLATE unit — one file serves every mesh
-    membership as its own service instance (greasewood@<name>). create/join
-    enable their instance automatically once the template is installed; for
-    memberships that already exist, this enables them now. Pip-only."""
+def _systemd_available() -> bool:
+    """True only when this host is actually running systemd — `systemctl` on
+    PATH AND /run/systemd/system present (the canonical sd_booted() check). A
+    container with systemctl installed but `sleep` as PID 1 returns False, so
+    create/join fall back to the manual `gw run` line instead of crashing on a
+    systemctl that can't reach a manager."""
+    import shutil
+    return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
+
+
+def _write_service_template(exec_path: "str | None" = None) -> "str | None":
+    """Write the greasewood@ template unit (idempotent) and daemon-reload.
+    Returns the systemctl path (None if this host has no systemd). Shared by
+    create/join (auto by default) and re-used across memberships."""
     import shutil
     import subprocess
-
-    if os.geteuid() != 0:
-        sys.exit("install-service must run as root (sudo gw install-service)")
-
-    gw_exec = args.exec or shutil.which("gw") or os.path.realpath(sys.argv[0])
+    gw_exec = exec_path or shutil.which("gw") or os.path.realpath(sys.argv[0])
     _UNIT_DIR.mkdir(parents=True, exist_ok=True)
-    unit_path = _UNIT_DIR / "greasewood@.service"
-    unit_path.write_text(_SERVICE_UNIT.format(exec=gw_exec))
-    print(f"wrote {unit_path}")
-
+    (_UNIT_DIR / "greasewood@.service").write_text(_SERVICE_UNIT.format(exec=gw_exec))
     systemctl = shutil.which("systemctl")
-    if not systemctl:
-        print("\nsystemctl not found — on a systemd host, enable per mesh with:")
-        print("  systemctl daemon-reload && systemctl enable --now greasewood@<name>")
-        return 0
-
-    subprocess.run([systemctl, "daemon-reload"], check=True)
-    if args.no_enable:
-        print("\ntemplate written (nothing enabled). Per mesh:")
-        print("  systemctl enable --now greasewood@<name>")
-        return 0
-
-    existing = _memberships()
-    if not existing:
-        print("\nNo mesh configured yet — run create or join; each mesh's")
-        print("daemon (greasewood@<name>) starts on its own from then on.")
-        return 0
-    for key, _cfg in existing:
-        unit = f"greasewood@{key}"
-        subprocess.run([systemctl, "enable", "--now", f"{unit}.service"],
-                       check=True)
-        # `systemctl start` reports success the moment the process execs
-        # (Type=simple); a daemon that crashes a second later looks "started"
-        # while it silently restart-loops — so verify it comes up AND stays up.
-        state = _wait_service_settled(systemctl, unit)
-        if state == "active":
-            print(f"{unit}: up and running (also starts at boot).")
-        else:
-            print(f"⚠ {unit} is {state or 'not running'} — it is likely "
-                  f"crashing at startup. Look at: journalctl -u {unit} -n 20")
-    print("Opt out: sudo gw uninstall-service")
-    return 0
+    if systemctl:
+        subprocess.run([systemctl, "daemon-reload"], check=False)
+    return systemctl
 
 
 def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> str:
@@ -3777,40 +3758,6 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
         time.sleep(2.0)          # survive the fast-crash window
         state = _state()
     return state
-
-
-def cmd_uninstall_service(args) -> int:
-    """Disable and remove the systemd units (the daemon keeps running until the
-    next stop/reboot; this just stops it from auto-starting)."""
-    import shutil
-    import subprocess
-
-    if os.geteuid() != 0:
-        sys.exit("uninstall-service must run as root (sudo gw uninstall-service)")
-
-    systemctl = shutil.which("systemctl")
-    if systemctl:
-        # Disable every membership instance, then drop the template.
-        for key, _cfg in _memberships():
-            subprocess.run([systemctl, "disable", "--now",
-                            f"greasewood@{key}.service"], check=False)
-    tmpl = _UNIT_DIR / "greasewood@.service"
-    if tmpl.exists():
-        tmpl.unlink()
-        print(f"removed {tmpl}")
-    # Legacy single-mesh units, if this host predates the template.
-    for name in ("greasewood.path", "greasewood.service"):
-        p = _UNIT_DIR / name
-        if p.exists():
-            if systemctl:
-                subprocess.run([systemctl, "disable", "--now", name], check=False)
-            p.unlink()
-            print(f"removed {p}")
-    if systemctl:
-        subprocess.run([systemctl, "daemon-reload"], check=False)
-    print("greasewood services removed. (Run `gw -c <config> run` manually, or "
-          "reinstall with `gw install-service`.)")
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -3878,6 +3825,9 @@ def main(argv=None) -> int:
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
                     help="don't maintain the managed /etc/hosts block "
                          "(<name>.gw.internal -> overlay addr); it's on by default")
+    sp.add_argument("--no-service", action="store_true",
+                    help="don't set up the systemd service; print the manual "
+                         "'gw run' line instead (for non-systemd hosts)")
     sp.set_defaults(fn=cmd_create, hosts_sync=True)
 
     # invite
@@ -3948,6 +3898,9 @@ def main(argv=None) -> int:
                     help="can peers dial this node? 'no' = outbound-only "
                          "(suppress endpoint, no inbound ports). Default: keep "
                          "existing, else yes.")
+    sp.add_argument("--no-service", action="store_true",
+                    help="don't set up the systemd service; print the manual "
+                         "'gw run' line instead (for non-systemd hosts)")
     sp.set_defaults(fn=cmd_join)
 
     # purge
@@ -3958,19 +3911,6 @@ def main(argv=None) -> int:
                              "if it was the last mesh). A from-scratch reset.")
     sp.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     sp.set_defaults(fn=cmd_purge)
-
-    # install-service / uninstall-service
-    sp = sub.add_parser("install-service",
-                        help="[sudo] install + enable the systemd units (run as a background service)")
-    sp.add_argument("--exec", default=None,
-                    help="path to the gw executable for ExecStart (default: auto-detect)")
-    sp.add_argument("--no-enable", dest="no_enable", action="store_true",
-                    help="write the unit files but don't enable/start them")
-    sp.set_defaults(fn=cmd_install_service)
-
-    sp = sub.add_parser("uninstall-service",
-                        help="[sudo] disable + remove the systemd units")
-    sp.set_defaults(fn=cmd_uninstall_service)
 
     # run
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
@@ -4154,7 +4094,7 @@ def main(argv=None) -> int:
     # derive their own config from the mesh name; the service commands manage
     # units, not meshes.
     if args.config is None and args.cmd not in (
-            "create", "join", "install-service", "uninstall-service"):
+            "create", "join"):
         args.config = str(_discover_config())
     try:
         return args.fn(args)
