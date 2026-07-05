@@ -943,8 +943,10 @@ def cmd_join(args) -> int:
         sys.exit(f"invalid token: {e}")
     ca_pub_hex = ca_pub_bytes.hex()
 
-    cfg_path = Path(args.config)
-    data_dir = Path(args.data_dir)
+    # -c/--data-dir default to None (derived below from the token's mesh name);
+    # the auto/explicit block after this always leaves both set.
+    cfg_path = Path(args.config) if args.config else None
+    data_dir = Path(args.data_dir) if args.data_dir else None
     listen_port = args.listen_port
 
     # Auto-slotting: when every location knob is at its default, route the join
