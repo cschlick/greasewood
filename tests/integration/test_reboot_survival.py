@@ -30,10 +30,10 @@ def _simulate_reboot(cid: str) -> None:
     # Stop the daemon. The [g]w trick keeps pkill from matching its own cmdline.
     pexec(cid, "pkill", "-f", "[g]w.*run", check=False)
     time.sleep(2)
-    for iface in ("gw-mesh", "gw-door"):
+    for iface in ("gw_testmesh", "gw-door"):
         pexec(cid, "ip", "link", "del", iface, check=False)
     # Sanity: the interface is really gone.
-    assert pexec(cid, "ip", "link", "show", "gw-mesh", check=False).returncode != 0
+    assert pexec(cid, "ip", "link", "show", "gw_testmesh", check=False).returncode != 0
 
 
 def _start_daemon(cid: str) -> None:
@@ -48,8 +48,8 @@ def test_node_reconnects_after_reboot(gw_hub, gw_image, gw_network):
         assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=40), \
             "mesh never formed before reboot"
 
-        id_before = pexec(node["cid"], "cat",
-                          "/var/lib/greasewood/id_pub.hex").stdout.strip()
+        id_before = pexec(node["cid"], "sh", "-c",
+                          "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
 
         _simulate_reboot(node["cid"])
         # With the interface gone the overlay is unreachable (sanity check).
@@ -61,8 +61,8 @@ def test_node_reconnects_after_reboot(gw_hub, gw_image, gw_network):
             "node did not reconnect after reboot"
         # Identity persisted (same id_pub → same overlay addr), proving it
         # rehydrated rather than re-enrolled.
-        id_after = pexec(node["cid"], "cat",
-                         "/var/lib/greasewood/id_pub.hex").stdout.strip()
+        id_after = pexec(node["cid"], "sh", "-c",
+                         "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
         assert id_after == id_before
     finally:
         if node:

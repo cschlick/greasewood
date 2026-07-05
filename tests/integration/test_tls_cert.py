@@ -35,7 +35,7 @@ def serve():
 t = threading.Thread(target=serve); t.start()
 try:
     with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
-        with cctx.wrap_socket(raw, server_hostname="postgres.dbnode.gw.internal") as cs:
+        with cctx.wrap_socket(raw, server_hostname="postgres.dbnode.testmesh.internal") as cs:
             cs.send(b"hi")
     print("HANDSHAKE_OK")
 except Exception as e:
@@ -106,7 +106,7 @@ def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
     a mesh-CA-secured web/DB link between two nodes."""
     cids = []
     try:
-        san = "webserver.gw.internal"
+        san = "webserver.testmesh.internal"
         port = "8443"
 
         server = bring_up_node(gw_image, gw_network, gw_hub,
@@ -127,7 +127,7 @@ def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
                   check=False)
         assert r.returncode == 0, f"server cert-request failed:\n{r.stdout}\n{r.stderr}"
         r2 = pexec(client["cid"], "gw", "cert-request",
-                   "--san", "webclient.gw.internal", "--name", "client",
+                   "--san", "webclient.testmesh.internal", "--name", "client",
                    "--out-dir", "/tmp/tls", check=False)
         assert r2.returncode == 0, f"client cert-request failed:\n{r2.stdout}\n{r2.stderr}"
 
@@ -160,7 +160,7 @@ def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
         # Request a cert for a service name UNDER this node's own name (dbnode);
         # the hub only issues SANs the node owns.
         r = pexec(node["cid"], "gw", "cert-request",
-                  "--san", "postgres.dbnode.gw.internal", "--name", "postgres",
+                  "--san", "postgres.dbnode.testmesh.internal", "--name", "postgres",
                   "--out-dir", "/tmp/tls", check=False)
         assert r.returncode == 0, f"cert-request failed:\n{r.stdout}\n{r.stderr}"
 
@@ -174,7 +174,7 @@ def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
 
         # cert-status shows it.
         st = pexec(node["cid"], "gw", "cert-status", "--out-dir", "/tmp/tls")
-        assert "postgres.crt" in st.stdout and "postgres.dbnode.gw.internal" in st.stdout, st.stdout
+        assert "postgres.crt" in st.stdout and "postgres.dbnode.testmesh.internal" in st.stdout, st.stdout
 
         # A node WITHOUT the tls cap is refused. tls is on by default now, so opt
         # out explicitly with --caps "" (empty overrides the hub's default_caps).

@@ -93,5 +93,5 @@ def test_standing_door_lifecycle(gw_image, gw_network, gw_hub):
         for cid in cids:
             podman("rm", "-f", cid, check=False)
         # Leave the shared hub pristine for the other tests.
-        pexec(hub, "rm", "-f", "/var/lib/greasewood/door_window.json", check=False)
+        pexec(hub, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json", check=False)
         _wait_iface_gone(hub, "gw-door")

@@ -35,7 +35,8 @@ def _repoint_to_b(cid: str, a_ca: str, b_ca: str, b_ctrl: str) -> None:
     # A content regex like \[.*?\] would mis-stop at the ']' inside a v6 URL.
     script = (
         "import re,pathlib\n"
-        "p=pathlib.Path('/etc/greasewood.toml'); t=p.read_text()\n"
+        "import glob\n"
+        "p=pathlib.Path(glob.glob('/etc/greasewood_*.toml')[0]); t=p.read_text()\n"
         f"t=re.sub(r'(?m)^trusted_pubs\\s*=.*$', 'trusted_pubs = [\"{a_ca}\", \"{b_ca}\"]', t)\n"
         f"t=re.sub(r'(?m)^root_url\\s*=.*$', 'root_url = \"{b_ctrl}\"', t)\n"
         f"t=re.sub(r'(?m)^seeds\\s*=.*$', 'seeds = [\"{b_ctrl}\"]', t)\n"

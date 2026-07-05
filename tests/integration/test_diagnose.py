@@ -23,18 +23,18 @@ def test_diagnose_reports_linked(gw_hub, gw_image, gw_network):
             "node never reached the hub overlay"
 
         # From the node's perspective: the hub should show as LINKED.
-        out = pexec(node["cid"], "gw", "-c", "/etc/greasewood.toml", "diagnose").stdout
+        out = pexec(node["cid"], "gw", "diagnose").stdout
         assert "hub" in out, out
         assert "LINKED" in out, f"expected a LINKED peer, got:\n{out}"
         assert "REJECTED" not in out, f"unexpected rejection:\n{out}"
 
         # From the hub's perspective: the node should show as LINKED too.
-        out_hub = pexec(gw_hub["cid"], "gw", "-c", "/etc/greasewood.toml", "diagnose").stdout
+        out_hub = pexec(gw_hub["cid"], "gw", "diagnose").stdout
         assert "diagnode" in out_hub, out_hub
         assert "LINKED" in out_hub, f"hub should see node linked:\n{out_hub}"
 
         # Targeted form: `gw diagnose <hostname>` narrows to that one peer.
-        one = pexec(gw_hub["cid"], "gw", "-c", "/etc/greasewood.toml",
+        one = pexec(gw_hub["cid"], "gw",
                     "diagnose", "diagnode").stdout
         assert one.count("●") == 1 and "diagnode" in one
     finally:

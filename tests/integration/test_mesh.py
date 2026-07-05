@@ -99,12 +99,12 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_hub, gw_image, gw_network):
 
         # 2. Keys reused — same id_pub, hence same overlay address.
         id_pub_after = pexec(
-            node["cid"], "cat", "/var/lib/greasewood/id_pub.hex"
+            node["cid"], "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex"
         ).stdout.strip()
         assert id_pub_after == id_pub_before, "re-join changed the node's identity"
 
         # 3. Prior hostname preserved (not reset to user@hostname).
-        cfg = pexec(node["cid"], "cat", "/etc/greasewood.toml").stdout
+        cfg = pexec(node["cid"], "sh", "-c", "cat /etc/greasewood_*.toml").stdout
         assert 'hostname = "alpha"' in cfg, f"hostname not preserved:\n{cfg}"
     finally:
         if node:

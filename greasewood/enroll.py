@@ -323,7 +323,7 @@ class EnrollServer:
                       f"interface {self._wg_iface!r} is missing or broken. It "
                       f"should self-heal within seconds: retry this token. If it "
                       f"keeps failing, restart the hub daemon "
-                      f"(sudo systemctl restart greasewood) and retry.")
+                      f"(restart the hub's greasewood daemon) and retry.")
             log.error("enroll: peer install on %s failed for %s", self._wg_iface, hostname)
             self._status(door.mark_door_attempt, peer_ip,
                          f"peer install failed: {self._wg_iface} missing/broken")

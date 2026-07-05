@@ -80,7 +80,7 @@ def ping_once(container: str, addr: str, timeout: int = 2) -> bool:
     return r.returncode == 0
 
 
-def wg_peer_count(container: str, iface: str = "gw-mesh") -> int:
+def wg_peer_count(container: str, iface: str = "gw_testmesh") -> int:
     """Number of WireGuard peers currently installed on the interface."""
     r = pexec(container, "wg", "show", iface, "peers", check=False)
     if r.returncode != 0:
@@ -88,7 +88,7 @@ def wg_peer_count(container: str, iface: str = "gw-mesh") -> int:
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
-def wg_handshake_ages(container: str, iface: str = "gw-mesh") -> list[int]:
+def wg_handshake_ages(container: str, iface: str = "gw_testmesh") -> list[int]:
     """Age in seconds of each peer's most recent handshake (now - latest). A
     peer that has never handshaked is reported as a very large age. Empty list
     if the interface/daemon isn't up. Used by the soak test to assert tunnels
@@ -110,7 +110,7 @@ def wg_handshake_ages(container: str, iface: str = "gw-mesh") -> list[int]:
     return ages
 
 
-def wait_for_peer_count(container: str, expected: int, iface: str = "gw-mesh",
+def wait_for_peer_count(container: str, expected: int, iface: str = "gw_testmesh",
                         timeout: int = 90) -> int:
     """
     Block until the interface has at least `expected` peers. Returns the final
