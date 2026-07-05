@@ -22,7 +22,7 @@ def test_parse_duration_bad_suffix_raises():
 
 
 def test_parse_duration_non_integer_raises():
-    # e.g. a typo'd duration in [hub]; must surface as ValueError, not crash oddly
+    # e.g. a typo'd duration in [anchor]; must surface as ValueError, not crash oddly
     with pytest.raises(ValueError):
         _parse_duration("abch")
 
@@ -62,7 +62,7 @@ def test_aliases_parsed(tmp_path):
 
 
 def test_new_node_defaults_fallback(tmp_path):
-    # No [hub] defaults set → ship defaults: mesh segment, tls on.
+    # No [anchor] defaults set → ship defaults: mesh segment, tls on.
     p = _write(tmp_path, '[node]\nhostname = "n1"\n')
     cfg = load_config(p)
     assert cfg.default_segments == ["mesh"]
@@ -70,11 +70,11 @@ def test_new_node_defaults_fallback(tmp_path):
 
 
 def test_new_node_defaults_explicit(tmp_path):
-    # The hub operator can change what new nodes get (e.g. tls off, rename the
+    # The anchor operator can change what new nodes get (e.g. tls off, rename the
     # default segment) — read fresh at each invite.
     p = _write(tmp_path,
-               '[node]\nhostname = "hub"\nrole = "hub"\n'
-               '[hub]\ndefault_segments = ["core"]\ndefault_caps = []\n')
+               '[node]\nhostname = "anchor"\nrole = "anchor"\n'
+               '[anchor]\ndefault_segments = ["core"]\ndefault_caps = []\n')
     cfg = load_config(p)
     assert cfg.default_segments == ["core"]
     assert cfg.default_caps == []

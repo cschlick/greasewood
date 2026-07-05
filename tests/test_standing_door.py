@@ -55,12 +55,12 @@ def _watcher(tmp_path, **kw):
 
 
 def test_watcher_standing_starts_server_and_reerects_door(tmp_path, monkeypatch):
-    """A standing window with the door interface missing (hub rebooted) must
+    """A standing window with the door interface missing (anchor rebooted) must
     re-erect gw-door from the persisted guest key + PSK, then serve."""
     _standing_window(tmp_path)
     calls = {}
     monkeypatch.setattr("greasewood.wg.interface_exists", lambda i: False)
-    monkeypatch.setattr("greasewood.wg.ensure_hub_door_interface",
+    monkeypatch.setattr("greasewood.wg.ensure_anchor_door_interface",
                         lambda key, pub, psk, port: calls.update(
                             {"pub": pub, "port": port}))
 
@@ -117,14 +117,14 @@ def test_enroll_server_standing_stays_open_after_success(tmp_path, monkeypatch):
         wg_iface="gw-mesh", on_done=lambda: handled.append("done"),
         standing=True, data_dir=tmp_path)
 
-    # Bind on loopback instead of HUB_DOOR_IP so the test needs no interface.
+    # Bind on loopback instead of ANCHOR_DOOR_IP so the test needs no interface.
     real_socket = socket.socket
 
     def fake_handle(conn, peer_ip, attempts_left):
         handled.append(peer_ip)
         return True                                    # a SUCCESS
     srv._handle = fake_handle
-    monkeypatch.setattr(enroll, "HUB_DOOR_IP", "::1")
+    monkeypatch.setattr(enroll, "ANCHOR_DOOR_IP", "::1")
 
     t = threading.Thread(target=srv._serve, daemon=True)
     t.start()
@@ -144,9 +144,9 @@ def test_enroll_server_standing_stays_open_after_success(tmp_path, monkeypatch):
 def test_close_door_invalidates_and_reports(tmp_path, monkeypatch, capsys):
     _standing_window(tmp_path)
     (tmp_path / "gw.toml").write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
-role = "hub"
+role = "anchor"
 [network]
 seeds = []
 [ca]
@@ -170,13 +170,13 @@ def test_invite_refuses_to_silently_supersede_standing(tmp_path, monkeypatch):
     _standing_window(tmp_path)
     (tmp_path / "ca.key").write_text("placeholder")
     (tmp_path / "gw.toml").write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
-role = "hub"
+role = "anchor"
 [network]
 interface = "gw-mesh"
 seeds = []
-[hub]
+[anchor]
 ca_key_file = "{tmp_path}/ca.key"
 [ca]
 trusted_pubs = []
@@ -199,13 +199,13 @@ trusted_pubs = []
 def test_invite_standing_rejects_pinned_hostname(tmp_path, monkeypatch):
     (tmp_path / "ca.key").write_text("placeholder")
     (tmp_path / "gw.toml").write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
-role = "hub"
+role = "anchor"
 [network]
 interface = "gw-mesh"
 seeds = []
-[hub]
+[anchor]
 ca_key_file = "{tmp_path}/ca.key"
 [ca]
 trusted_pubs = []
@@ -224,7 +224,7 @@ trusted_pubs = []
 
 def test_standing_window_stores_and_status_shows_token(tmp_path):
     """A standing invite stores its token (0600 root) so it can be re-retrieved
-    for baking without re-issuing; the hub door block surfaces it."""
+    for baking without re-issuing; the anchor door block surfaces it."""
     import types
     from greasewood import cli, door
 
@@ -233,7 +233,7 @@ def test_standing_window_stores_and_status_shows_token(tmp_path):
         "guest_pub": "x", "psk": "y", "token": "gw1.THE-STANDING-TOKEN",
     }))
     door.mark_door_opened(tmp_path, None, caps=["segment:autoscale"], standing=True)
-    cfg = types.SimpleNamespace(data_dir=tmp_path, role="hub")
+    cfg = types.SimpleNamespace(data_dir=tmp_path, role="anchor")
     lines = cli._door_status_lines(cfg)
     joined = "\n".join(lines)
     assert "OPEN (standing)" in joined
@@ -249,5 +249,5 @@ def test_single_use_window_has_no_stored_token(tmp_path):
         "v": 1, "expires": "2099-01-01T00:00:00Z", "caps": [], "hostname": None,
     }))
     door.mark_door_opened(tmp_path, "2099-01-01T00:00:00Z")
-    lines = cli._door_status_lines(types.SimpleNamespace(data_dir=tmp_path, role="hub"))
+    lines = cli._door_status_lines(types.SimpleNamespace(data_dir=tmp_path, role="anchor"))
     assert not any("token:" in ln for ln in lines)

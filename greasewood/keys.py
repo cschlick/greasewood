@@ -192,7 +192,7 @@ class NodeKeys:
 
 @dataclass
 class CAKeys:
-    """CA keypair — held only on the hub. ca_priv is the root of all trust."""
+    """CA keypair — held only on the anchor. ca_priv is the root of all trust."""
 
     ca_priv: Ed25519PrivateKey
     ca_pub_bytes: bytes  # 32-byte raw

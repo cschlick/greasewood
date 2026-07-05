@@ -1,7 +1,7 @@
 """
 greasewood.certs — TLS service certs: issuance + auto-renewal.
 
-`gw cert-request` issues a short-lived leaf cert from the hub (default 7d TTL)
+`gw cert-request` issues a short-lived leaf cert from the anchor (default 7d TTL)
 and records it in a small manifest (<data_dir>/tls/managed.json). The daemon then
 runs a CertRenewalLoop that re-issues each managed cert at ~half its lifetime —
 the same "short-lived + rotate" model the mesh credential already uses — and runs
@@ -35,17 +35,17 @@ _UTC = dt.timezone.utc
 
 
 class CertRejected(RuntimeError):
-    """The hub refused the request (4xx) — won't change on retry."""
+    """The anchor refused the request (4xx) — won't change on retry."""
 
 
-def issue_cert(hub_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
+def issue_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
                key_path, crt_path, ca_path, timeout: float = 10.0,
                attempts: int = 5) -> "tuple[Path, Path, Path]":
-    """Request a leaf TLS cert from the hub and write the leaf key, leaf cert,
+    """Request a leaf TLS cert from the anchor and write the leaf key, leaf cert,
     and CA cert to their three (independent) paths — they need not share a
     directory. The leaf private key is generated locally, written 0600, and
     never sent. Returns (key_path, crt_path, ca_path). Raises CertRejected on a
-    hub 4xx (no retry) or RuntimeError after exhausting retries."""
+    anchor 4xx (no retry) or RuntimeError after exhausting retries."""
     import time as _t
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -62,7 +62,7 @@ def issue_cert(hub_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
     ).sign(keys.id_priv)
 
     body = json.dumps(req.to_dict()).encode()
-    url = f"{hub_url.rstrip('/')}/cert"
+    url = f"{anchor_url.rstrip('/')}/cert"
     data, last_err = None, None
     for attempt in range(attempts):
         http_req = urllib.request.Request(
@@ -193,11 +193,11 @@ def _grace_dual_names(dns: list, current_domain: str, old_domain: str) -> list:
 class CertRenewalLoop:
     """Re-issue each managed cert at ~half its lifetime and run its reload_cmd."""
 
-    def __init__(self, node_keys, get_hub_url: "Callable[[], str]", data_dir,
+    def __init__(self, node_keys, get_anchor_url: "Callable[[], str]", data_dir,
                  mesh_domain: "str | None" = None,
                  check_interval: float = 3600.0) -> None:
         self._keys = node_keys
-        self._get_hub_url = get_hub_url
+        self._get_anchor_url = get_anchor_url
         self._data_dir = data_dir
         # The mesh's CURRENT domain — during a rename-mesh grace window, renewed
         # certs must cover BOTH the new and the old name so TLS clients dialing
@@ -224,7 +224,7 @@ class CertRenewalLoop:
             log.warning("cert reload_cmd %r failed: %s", reload_cmd, e)
 
     def check_all(self) -> None:
-        hub_url = self._get_hub_url()
+        anchor_url = self._get_anchor_url()
         grace_old = _rename_grace_old_domain(self._data_dir)
         for entry in load_manifest(self._data_dir):
             if not entry.get("auto_renew", True):
@@ -236,7 +236,7 @@ class CertRenewalLoop:
             if grace_old and self._mesh_domain:
                 dns = _grace_dual_names(dns, self._mesh_domain, grace_old)
             try:
-                issue_cert(hub_url, self._keys, dns=dns,
+                issue_cert(anchor_url, self._keys, dns=dns,
                            ips=entry.get("ips", []), cn=entry["cn"],
                            key_path=key_path, crt_path=crt_path, ca_path=ca_path)
                 log.info("auto-renewed TLS cert %r", entry["name"])

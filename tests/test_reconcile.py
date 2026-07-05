@@ -1,7 +1,7 @@
 """
 Unit tests for reconcile.default_policy — the authorization gate. Peering is
 decided purely by **shared segments** (`segment:<name>` tags); every node is in
-`segment:mesh` by default, and `segment:*` is the reach-all wildcard (the hub).
+`segment:mesh` by default, and `segment:*` is the reach-all wildcard (the anchor).
 These branches aren't all reachable in integration (every node is in a segment),
 so they're covered here.
 
@@ -48,7 +48,7 @@ def test_no_segment_denied():
 
 
 def test_wildcard_reaches_every_segment():
-    # The hub carries segment:* and must reach every node, in any segment.
+    # The anchor carries segment:* and must reach every node, in any segment.
     assert default_policy(["segment:*"], ["segment:prod"]) is True
     assert default_policy(["segment:prod"], ["segment:*"]) is True
     assert default_policy(["segment:*"], ["segment:mesh"]) is True

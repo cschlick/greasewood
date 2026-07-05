@@ -105,15 +105,15 @@ def test_decode_token_never_raises_non_valueerror(text):
 
 @settings(deadline=None)
 @given(
-    hub_pub=bytes32, ca_pub=bytes32, seed=bytes32,
+    anchor_pub=bytes32, ca_pub=bytes32, seed=bytes32,
     host=st.text(max_size=60).filter(lambda h: len(h.encode()) <= 255),
     port=st.integers(min_value=0, max_value=65535),
 )
-def test_token_roundtrip(hub_pub, ca_pub, seed, host, port):
-    tok = door.encode_token(hub_pub, ca_pub, host, seed, door_port=port)
-    got_hub, got_ca, got_host, got_seed, got_port, _dom = door.decode_token(tok)
-    assert (got_hub, got_ca, got_host, got_seed, got_port) == \
-        (hub_pub, ca_pub, host, seed, port)
+def test_token_roundtrip(anchor_pub, ca_pub, seed, host, port):
+    tok = door.encode_token(anchor_pub, ca_pub, host, seed, door_port=port)
+    got_anchor, got_ca, got_host, got_seed, got_port, _dom = door.decode_token(tok)
+    assert (got_anchor, got_ca, got_host, got_seed, got_port) == \
+        (anchor_pub, ca_pub, host, seed, port)
 
 
 # --- hostname sanitization ----------------------------------------------------
@@ -164,7 +164,7 @@ def _state(directory: Directory) -> dict:
 @given(refs=st.lists(record_refs, max_size=20), data=st.data())
 def test_merge_is_order_independent(refs, data):
     """Highest-seq-wins must converge to the same state whatever order (or
-    batching) records arrive in — that's what makes hub pulls conflict-free."""
+    batching) records arrive in — that's what makes anchor pulls conflict-free."""
     records = [_record(i, s) for i, s in refs]
     shuffled = data.draw(st.permutations(records))
 

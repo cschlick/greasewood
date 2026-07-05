@@ -2,10 +2,10 @@
 greasewood.sync — directory pull loop.
 
 Every node pulls the full record-set from one or more seeds every ~20s
-and merges by highest seq per id_pub. The hub can be offline for up to
+and merges by highest seq per id_pub. The anchor can be offline for up to
 one credential TTL with no impact on live links — nodes keep running from
-their local cache (§10.2). Without local caching, the hub would silently
-be a hard availability dependency; the cache is what makes "hub not in
+their local cache (§10.2). Without local caching, the anchor would silently
+be a hard availability dependency; the cache is what makes "anchor not in
 the data path" true in practice.
 """
 from __future__ import annotations
@@ -37,11 +37,11 @@ def _parse_renew_after(raw) -> "dt.datetime | None":
 
 
 def pull_directory(seed_url: str, timeout: float = 10.0):
-    """Fetch (records, renew_after, hub_now) from a seed's /directory endpoint.
+    """Fetch (records, renew_after, anchor_now) from a seed's /directory endpoint.
 
     Accepts both the current object shape {"records": [...], "renew_after": ...}
-    and a bare list (older hubs), so a mixed-version mesh still syncs. renew_after
-    is the fleet-wide renew hint (see gw renew-all); hub_now is the hub's own
+    and a bare list (older anchors), so a mixed-version mesh still syncs. renew_after
+    is the fleet-wide renew hint (see gw renew-all); anchor_now is the anchor's own
     clock (for skew detection) — either parsed to a UTC datetime or None."""
     url = f"{seed_url.rstrip('/')}/directory"
     try:
@@ -83,32 +83,32 @@ class SyncLoop:
         on_renew_after: "Callable[[dt.datetime], None] | None" = None,
         expected_domain: "str | None" = None,
     ) -> None:
-        # This member's mesh domain, compared against the hub's advertisement
+        # This member's mesh domain, compared against the anchor's advertisement
         # each pull to detect a fleet rename (None disables the check).
         self._expected_domain = expected_domain
         self._directory = directory
         # A callable so the caller decides where seeds come from; in practice
-        # the configured seeds (the hub).
+        # the configured seeds (the anchor).
         self._get_seeds = get_seeds
         self._cache_path = cache_path
         self._interval = interval
-        # Called with the hub's fleet-wide renew hint (renew_after) after each
+        # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
         self._stop = threading.Event()
         self._last_skew_warn: float | None = None
         self._warned_domain: str | None = None
 
-    # Clock-skew sentinel: past ±300s the hub refuses renewals, and well before
+    # Clock-skew sentinel: past ±300s the anchor refuses renewals, and well before
     # that expiry checks start lying — but the symptom (peers vanishing, renew
     # 400s) doesn't say "your clock is wrong". Warn at 60s, before it bites.
     _SKEW_WARN_SECS = 60.0
     _SKEW_WARN_INTERVAL = 600.0  # at most one warning per 10 min, not per pull
 
-    def _note_hub_clock(self, hub_now: "dt.datetime | None") -> None:
-        if hub_now is None:
-            return  # older hub that doesn't stamp its time
-        skew = (dt.datetime.now(_UTC) - hub_now).total_seconds()
+    def _note_anchor_clock(self, anchor_now: "dt.datetime | None") -> None:
+        if anchor_now is None:
+            return  # older anchor that doesn't stamp its time
+        skew = (dt.datetime.now(_UTC) - anchor_now).total_seconds()
         if abs(skew) < self._SKEW_WARN_SECS:
             self._last_skew_warn = None
             return
@@ -118,35 +118,35 @@ class SyncLoop:
                 and now - self._last_skew_warn < self._SKEW_WARN_INTERVAL:
             return
         self._last_skew_warn = now
-        log.warning("local clock is %+.0fs off the hub — check NTP. Past ±300s "
-                    "the hub refuses renewals, and credential expiry checks "
+        log.warning("local clock is %+.0fs off the anchor — check NTP. Past ±300s "
+                    "the anchor refuses renewals, and credential expiry checks "
                     "misfire well before that.", skew)
 
-    def _note_mesh_domain(self, hub_domain: "str | None") -> None:
-        """The hub advertises the mesh's ONE name domain. If it no longer
+    def _note_mesh_domain(self, anchor_domain: "str | None") -> None:
+        """The anchor advertises the mesh's ONE name domain. If it no longer
         matches this member's config, the mesh was RENAMED (gw rename-mesh on
-        the hub) — every artifact here (config/data-dir/interface/unit/domain)
+        the anchor) — every artifact here (config/data-dir/interface/unit/domain)
         is keyed to the old name, so tell the operator the exact migration
         command. Warned once per observed domain."""
-        if (not hub_domain or self._expected_domain is None
-                or hub_domain == self._expected_domain):
+        if (not anchor_domain or self._expected_domain is None
+                or anchor_domain == self._expected_domain):
             # In sync (or no expectation) — clear any stale pending marker.
-            if hub_domain and hub_domain == self._expected_domain:
+            if anchor_domain and anchor_domain == self._expected_domain:
                 self._clear_pending_rename()
             return
         from .cli import _membership_key
         # Persist the pending rename so it survives daemon restarts and surfaces
         # in `gw status` — a scrolled-past log line is easy to miss for a change
         # that needs an operator action.
-        self._write_pending_rename(hub_domain)
-        if hub_domain != self._warned_domain:
-            self._warned_domain = hub_domain
+        self._write_pending_rename(anchor_domain)
+        if anchor_domain != self._warned_domain:
+            self._warned_domain = anchor_domain
             log.warning(
-                "the hub renamed this mesh: %s → %s. This member still uses its "
+                "the anchor renamed this mesh: %s → %s. This member still uses its "
                 "old-name artifacts; migrate them (config, data dir, interface, "
                 "service) with:  sudo gw rename-mesh %s   (brief tunnel blip "
                 "while the interface renames)",
-                self._expected_domain, hub_domain, _membership_key(hub_domain))
+                self._expected_domain, anchor_domain, _membership_key(anchor_domain))
 
     def _pending_rename_path(self):
         return self._cache_path.parent / "pending_rename.json"
@@ -174,14 +174,14 @@ class SyncLoop:
 
         for seed in self._get_seeds():
             try:
-                records, renew_after, hub_now, hub_domain = pull_directory(seed)
+                records, renew_after, anchor_now, anchor_domain = pull_directory(seed)
                 n = self._directory.merge(records)
                 if n:
                     self._directory.save(self._cache_path)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
                 self._stamp_sync()   # record a successful pull for `gw status`
-                self._note_hub_clock(hub_now)
-                self._note_mesh_domain(hub_domain)
+                self._note_anchor_clock(anchor_now)
+                self._note_mesh_domain(anchor_domain)
                 if self._on_renew_after and renew_after is not None:
                     self._on_renew_after(renew_after)
                 return

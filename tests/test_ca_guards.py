@@ -74,7 +74,7 @@ def test_rename_refused_when_hostname_pinned(tmp_path):
     # Plain renewal (no hostname change) still works.
     ca.renew(_req(k))
     # Rename attempt is rejected.
-    with pytest.raises(ValueError, match="hub-pinned"):
+    with pytest.raises(ValueError, match="anchor-pinned"):
         ca.renew(_req(k, hostname="newname"))
 
 

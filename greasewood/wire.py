@@ -13,7 +13,7 @@ NodeRecord (self-signed by id_priv, §5.2):
 Both objects use json.dumps(sort_keys=True) as the canonical signing form.
 Binary fields (keys, signatures) are standard base64.
 
-RenewRequest is sent by enrolled nodes to the hub for credential renewal.
+RenewRequest is sent by enrolled nodes to the anchor for credential renewal.
 Enrollment is out of band over the transient WireGuard "door" (`gw invite` /
 `gw join`, see greasewood.door / greasewood.enroll); the control plane has no
 network-reachable enrollment endpoint.
@@ -264,7 +264,7 @@ class RenewRequest:
     id_priv possession is the authentication — no separate session credential.
     nonce prevents replay within the timestamp skew window.
     wg_pub may differ from the current one (free operational-key rotation).
-    hostname, when set, requests a rename (`gw rename`): the hub re-issues under
+    hostname, when set, requests a rename (`gw rename`): the anchor re-issues under
     the new name, enforcing uniqueness. It is omitted from the signed body when
     empty, so an ordinary renewal produces exactly the pre-rename wire form.
     """
@@ -316,13 +316,13 @@ class RenewRequest:
 
 
 # ---------------------------------------------------------------------------
-# CertRequest — a node asking the hub for an x509 TLS cert (§12)
+# CertRequest — a node asking the anchor for an x509 TLS cert (§12)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class CertRequest:
     """
-    Sent by an enrolled node to the hub to obtain an x509 TLS certificate for a
+    Sent by an enrolled node to the anchor to obtain an x509 TLS certificate for a
     local service. id_priv possession authenticates the requester (same model
     as RenewRequest); the leaf private key never leaves the node — only leaf_pub
     is sent. nonce + ts bound replay.

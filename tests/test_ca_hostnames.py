@@ -1,7 +1,7 @@
 """
-Unit tests for hub-side hostname uniqueness (CA.issue).
+Unit tests for anchor-side hostname uniqueness (CA.issue).
 
-The hub refuses to enroll a node whose (sanitized) hostname is already used by
+The anchor refuses to enroll a node whose (sanitized) hostname is already used by
 a different node, while letting a node re-issue/renew/rename itself.
 """
 import datetime as dt

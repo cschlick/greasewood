@@ -3,33 +3,33 @@
 
 [node]
 # The node's mesh name. Chosen at `gw join` (defaults to the machine hostname)
-# and changeable later with `gw rename` — UNLESS the hub pinned it at invite
-# (`gw invite --hostname …`), in which case this reflects the hub's choice and
+# and changeable later with `gw rename` — UNLESS the anchor pinned it at invite
+# (`gw invite --hostname …`), in which case this reflects the anchor's choice and
 # rename is disabled. Either way it's CA-attested in the credential.
 hostname = "mynode"
 data_dir = "/var/lib/greasewood"
 
-# "hub"   — holds ca_priv, serves the control plane + enrollment door, participates in mesh
+# "anchor"   — holds ca_priv, serves the control plane + enrollment door, participates in mesh
 # "node"  — plain mesh participant
 role = "node"
 
 # Can this node accept cold inbound WireGuard handshakes? (§8)
 # "yes"     — open firewall, publicly reachable (cloud VMs, etc.)
 # "no"      — outbound-only: advertises no endpoint, opens no inbound ports,
-#             can only pair with inbound nodes, and can't be a hub. Change with
+#             can only pair with inbound nodes, and can't be an anchor. Change with
 #             `gw set-inbound yes`.
 inbound = "yes"
 
 # The node's tag set. Two kinds of tag live here:
 #   segments — "segment:<name>" controls who-talks-to-whom. Two nodes peer only
 #     if they share a segment. Every node is in "segment:mesh" by default (the
-#     flat default pool); "segment:*" (the hub) reaches all.
+#     flat default pool); "segment:*" (the anchor) reaches all.
 #   abilities — e.g. "tls" (may request TLS certs).
-# Both are decided by the HUB at `gw invite [--segments …] [--caps …]` and bound
+# Both are decided by the ANCHOR at `gw invite [--segments …] [--caps …]` and bound
 # into the CA-signed credential — the joining node cannot choose its own. This
-# line just reflects what the hub issued; editing it grants nothing (peers
+# line just reflects what the anchor issued; editing it grants nothing (peers
 # enforce against your credential, not this file). To change: `gw set-segments`/
-# `gw set-caps` on the hub, or re-invite + re-join.
+# `gw set-caps` on the anchor, or re-invite + re-join.
 caps = ["segment:mesh"]
 
 # Underlay endpoint(s) other nodes dial to reach this one. The overlay is always
@@ -50,7 +50,7 @@ listen_port = 51900
 overlay_prefix = "fd8d:e5c1:db1a:7::"
 
 # Seeds to pull the directory from (HTTP).
-# The hub is typically also a seed.
+# The anchor is typically also a seed.
 seeds = ["http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"]
 
 # Where to send enroll/renew requests.
@@ -91,8 +91,8 @@ trusted_pubs = [
 ]
 
 
-# Hub-only section — omit entirely on plain nodes.
-[hub]
+# Anchor-only section — omit entirely on plain nodes.
+[anchor]
 ca_key_file = "/var/lib/greasewood/ca.key"
 # Optionally protect the CA key with a passphrase (env var):
 # ca_key_passphrase_env = "GREASEWOOD_CA_PASS"
@@ -116,7 +116,7 @@ renew_before = "12h"
 
 # Lifetime of x509 TLS service certs issued via `gw cert-request` (§12).
 # Short-lived; the node daemon auto-renews each requested cert at ~half this TTL
-# (and runs its --reload-cmd). Revocation is passive. This is a hub-wide setting.
+# (and runs its --reload-cmd). Revocation is passive. This is an anchor-wide setting.
 tls_cert_ttl = "7d"
 
 # What NEW nodes get at `gw invite` when --segments/--caps are omitted. Read
@@ -131,9 +131,9 @@ default_caps = ["tls"]
 
 # Enrollment flow (door-based — no SSH, no underlay HTTP):
 #
-#   1. On the hub:    TOKEN=$(sudo gw invite)
+#   1. On the anchor:    TOKEN=$(sudo gw invite)
 #                     (delivers a single-use token out of band)
 #   2. On new node:   sudo gw join "$TOKEN" --hostname newnode
 #                     sudo gw run
 #      join receives a CA-signed credential over a transient WireGuard door;
-#      run brings the node into the mesh and publishes its record to the hub.
+#      run brings the node into the mesh and publishes its record to the anchor.

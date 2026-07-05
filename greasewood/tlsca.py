@@ -13,7 +13,7 @@ keyUsage=digitalSignature and EKU serverAuth+clientAuth (every leaf may be
 either end of a connection). No CRL/OCSP — revocation is passive (short leaf
 TTLs you stop renewing), matching the rest of greasewood.
 
-The leaf private key never reaches the hub: the node generates it locally and
+The leaf private key never reaches the anchor: the node generates it locally and
 sends only its public key.
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ _CA_CERT_LIFETIME = dt.timedelta(days=3650)
 
 
 def ca_cert_path(data_dir: Path) -> Path:
-    """The hub's self-signed x509 CA certificate — the TLS trust anchor."""
+    """The anchor's self-signed x509 CA certificate — the TLS trust anchor."""
     return data_dir / "ca.cert.pem"
 
 
@@ -57,7 +57,7 @@ def ensure_ca_cert(
     data_dir: Path,
 ) -> x509.Certificate:
     """
-    Load the hub's self-signed x509 CA certificate, creating and persisting it
+    Load the anchor's self-signed x509 CA certificate, creating and persisting it
     from the existing Ed25519 CA key on first use. The cert wraps the same key
     that signs mesh credentials, so the mesh CA and the TLS CA are one identity.
     """

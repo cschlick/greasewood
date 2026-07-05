@@ -1,14 +1,14 @@
 """
-greasewood.enroll — TCP enroll server and door-window watcher for the hub.
+greasewood.enroll — TCP enroll server and door-window watcher for the anchor.
 
 EnrollServer
-  Binds to [HUB_DOOR_IP]:ENROLL_PORT (only reachable through the door WG tunnel).
+  Binds to [ANCHOR_DOOR_IP]:ENROLL_PORT (only reachable through the door WG tunnel).
   Accepts exactly one connection per door window.  On success: issues a credential,
   adds the new node as a peer on the main WG interface, sends the response, then
   calls on_done() which tears down the door and deletes the window file.
 
 DoorWatcher
-  Background thread in gw-run (hub role only).  Polls data_dir/door_window.json
+  Background thread in gw-run (anchor role only).  Polls data_dir/door_window.json
   every poll_interval seconds.  When a valid, unexpired window appears, it
   starts an EnrollServer.
   When the window is consumed, expired, or absent, it cleans up.
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from . import door
-from .door import ENROLL_PORT, HUB_DOOR_IP, DOOR_IFACE
+from .door import ENROLL_PORT, ANCHOR_DOOR_IP, DOOR_IFACE
 
 if TYPE_CHECKING:
     from .ca import CA
@@ -72,7 +72,7 @@ def _send_msg(sock: socket.socket, data: dict) -> None:
 
 class EnrollServer:
     """
-    TCP server bound to [HUB_DOOR_IP]:ENROLL_PORT for one door window.
+    TCP server bound to [ANCHOR_DOOR_IP]:ENROLL_PORT for one door window.
 
     Closes the window (calls on_done) on the FIRST successful enrollment, OR
     after `max_attempts` failed attempts, OR when the window times out —
@@ -102,7 +102,7 @@ class EnrollServer:
     ) -> None:
         # The mesh's canonical name domain, advertised to joiners in the enroll
         # response so every member mounts the mesh under the SAME suffix (and
-        # TLS names agree fleet-wide). None → field omitted (older hubs).
+        # TLS names agree fleet-wide). None → field omitted (older anchors).
         self._mesh_domain = mesh_domain
         # A STANDING door serves any number of enrollments and never closes on
         # its own — no deadline, no attempts-exhausted, success loops back to
@@ -123,10 +123,10 @@ class EnrollServer:
         self._cache_path = cache_path
         self._control_port = control_port
         self._max_attempts = max_attempts
-        # Caps the hub authorized for this window (from `gw invite`).
+        # Caps the anchor authorized for this window (from `gw invite`).
         # The joiner does NOT choose these — the window is authoritative.
         self._caps = list(caps) if caps else ["segment:mesh"]
-        # If set (`gw invite --hostname`), the hub pins the name: the joiner's
+        # If set (`gw invite --hostname`), the anchor pins the name: the joiner's
         # requested hostname is ignored and it can't rename later.
         self._pinned_hostname = pinned_hostname
         self._srv: socket.socket | None = None
@@ -163,16 +163,16 @@ class EnrollServer:
         try:
             srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind((HUB_DOOR_IP, ENROLL_PORT))
+            srv.bind((ANCHOR_DOOR_IP, ENROLL_PORT))
             srv.listen(1)
             self._srv = srv
             if self._standing:
                 log.info("enroll server ready on [%s]:%d (STANDING door — serves "
                          "any number of enrollments until closed)",
-                         HUB_DOOR_IP, ENROLL_PORT)
+                         ANCHOR_DOOR_IP, ENROLL_PORT)
             else:
                 log.info("enroll server ready on [%s]:%d (window %.0fs, up to %d attempt(s))",
-                         HUB_DOOR_IP, ENROLL_PORT, self._timeout, self._max_attempts)
+                         ANCHOR_DOOR_IP, ENROLL_PORT, self._timeout, self._max_attempts)
 
             # One shared deadline across all attempts; each accept() waits only
             # for the time still left in the window. A standing door has neither
@@ -261,10 +261,10 @@ class EnrollServer:
 
         id_pub_bytes = bytes.fromhex(req["id_pub"])
         wg_pub_bytes = base64.b64decode(req["wg_pub"])
-        # Hostname: if the hub pinned one at invite, it wins and the joiner's
+        # Hostname: if the anchor pinned one at invite, it wins and the joiner's
         # requested name is ignored; otherwise the joiner names itself.
         hostname = self._pinned_hostname or str(req["hostname"])
-        # Caps are decided by the hub at `gw invite` and carried in the
+        # Caps are decided by the anchor at `gw invite` and carried in the
         # door window — NOT self-asserted by the joiner. Any caps in the request
         # are ignored; the window's caps are authoritative.
         caps = list(self._caps)
@@ -295,7 +295,7 @@ class EnrollServer:
             return False
 
         # Add new node as a peer on the main WG interface so it can establish
-        # its tunnel and push its NodeRecord to the hub on first startup.
+        # its tunnel and push its NodeRecord to the anchor on first startup.
         overlay_addr = derive_addr(id_pub_bytes)
         wg_pub_b64 = base64.b64encode(wg_pub_bytes).decode()
         from subprocess import CalledProcessError
@@ -307,7 +307,7 @@ class EnrollServer:
             # Almost always: the mesh interface is gone (a purge/re-create ran
             # under this daemon). Tell the joiner something actionable, not a
             # raw command dump. The reconcile loop self-heals the interface
-            # within one cycle, so an immediate retry usually succeeds; a hub
+            # within one cycle, so an immediate retry usually succeeds; an anchor
             # restart is the fallback.
             # Roll back a registration this failed attempt created: the joiner
             # never received the credential, so the entry only squats the
@@ -319,29 +319,29 @@ class EnrollServer:
                     self._ca.forget_node(id_pub_bytes)
                 except Exception as e:  # noqa: BLE001
                     log.warning("rollback of failed enrollment failed: %s", e)
-            reason = (f"the hub could not add you as a WireGuard peer — its mesh "
+            reason = (f"the anchor could not add you as a WireGuard peer — its mesh "
                       f"interface {self._wg_iface!r} is missing or broken. It "
                       f"should self-heal within seconds: retry this token. If it "
-                      f"keeps failing, restart the hub daemon "
-                      f"(restart the hub's greasewood daemon) and retry.")
+                      f"keeps failing, restart the anchor daemon "
+                      f"(restart the anchor's greasewood daemon) and retry.")
             log.error("enroll: peer install on %s failed for %s", self._wg_iface, hostname)
             self._status(door.mark_door_attempt, peer_ip,
                          f"peer install failed: {self._wg_iface} missing/broken")
-            _send_msg(conn, {"v": 1, "ok": False, "error": "hub data-plane failure",
+            _send_msg(conn, {"v": 1, "ok": False, "error": "anchor data-plane failure",
                              "reason": reason,
                              "attempts_remaining": attempts_left - 1})
             return False
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
         self._status(door.mark_door_enrolled, peer_ip, hostname)
 
-        # Send back the credential + hub's own NodeRecord so the new node can
+        # Send back the credential + anchor's own NodeRecord so the new node can
         # pre-seed its directory and configure seeds using the overlay address.
-        hub_record = self._directory.get(self._node_keys.id_pub_hex)
+        anchor_record = self._directory.get(self._node_keys.id_pub_hex)
         reply = {
             "v": 1,
             "ok": True,
             "credential": cred.to_dict(),
-            "hub_record": hub_record.to_dict() if hub_record else None,
+            "anchor_record": anchor_record.to_dict() if anchor_record else None,
             "control_port": self._control_port,
         }
         if self._mesh_domain:
@@ -412,7 +412,7 @@ class DoorWatcher:
         mesh_domain: "str | None" = None,
     ) -> None:
         # Needed to re-erect the door interface for a STANDING window after a
-        # hub reboot (the window persists; the kernel interface doesn't).
+        # anchor reboot (the window persists; the kernel interface doesn't).
         self._door_port = door_port
         # Advertised to joiners so the whole mesh shares one name domain.
         self._mesh_domain = mesh_domain
@@ -475,7 +475,7 @@ class DoorWatcher:
             if self._enroll is not None:
                 return  # already running
 
-            # A standing window persists across hub reboots, but the door
+            # A standing window persists across anchor reboots, but the door
             # interface is kernel state and doesn't — re-erect it from the
             # keys the window carries before serving.
             if standing and data.get("guest_pub") and data.get("psk"):
@@ -483,7 +483,7 @@ class DoorWatcher:
                 if not wgmod.interface_exists(DOOR_IFACE):
                     log.info("standing door: re-erecting %s", DOOR_IFACE)
                     try:
-                        wgmod.ensure_hub_door_interface(
+                        wgmod.ensure_anchor_door_interface(
                             self._data_dir / "door.key", data["guest_pub"],
                             data["psk"], self._door_port)
                     except Exception as e:
@@ -494,9 +494,9 @@ class DoorWatcher:
             remaining = None if standing else (expires - now).total_seconds()
             # Capture expiry string for the on_done guard below.
             expires_str = data.get("expires")
-            # Caps the hub authorized at `gw invite` for this window.
+            # Caps the anchor authorized at `gw invite` for this window.
             window_caps = data.get("caps") or ["segment:mesh"]
-            # Pinned hostname, if the hub set one (`gw invite --hostname`).
+            # Pinned hostname, if the anchor set one (`gw invite --hostname`).
             window_hostname = data.get("hostname")
 
             def on_done():

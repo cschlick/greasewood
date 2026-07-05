@@ -1,7 +1,7 @@
 """
 Integration test for TLS service certs (§12).
 
-A node with the `tls` capability requests an x509 cert from the hub and uses it
+A node with the `tls` capability requests an x509 cert from the anchor and uses it
 for a real TLS handshake validated against the returned mesh CA cert — the
 Postgres-style use case end to end. Also checks the capability gate.
 """
@@ -44,7 +44,7 @@ t.join(timeout=5)
 """
 
 
-# A real HTTPS server bound to the node's OVERLAY address, using the hub-issued
+# A real HTTPS server bound to the node's OVERLAY address, using the anchor-issued
 # leaf cert+key. argv: <overlay-addr> <port>.
 _TLS_WEB_SERVER = r"""
 import ssl, sys, socket
@@ -70,7 +70,7 @@ httpd.serve_forever()
 """
 
 # The client on the OTHER node: connects over the mesh to the server's overlay
-# address, trusting only the hub's ca.crt and validating the server's SAN.
+# address, trusting only the anchor's ca.crt and validating the server's SAN.
 # argv: <overlay-addr> <port> <san> <cafile>.
 _TLS_WEB_CLIENT = r"""
 import ssl, socket, sys, time
@@ -99,20 +99,20 @@ else:
 """
 
 
-def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
-    """End-to-end: one node runs an HTTPS server with a hub-issued leaf cert;
+def test_tls_service_between_two_nodes_over_mesh(gw_anchor, gw_image, gw_network):
+    """End-to-end: one node runs an HTTPS server with an anchor-issued leaf cert;
     another node connects to it over the overlay and validates the certificate
-    against the hub's CA (by SAN). This is the real service-to-service use case —
+    against the anchor's CA (by SAN). This is the real service-to-service use case —
     a mesh-CA-secured web/DB link between two nodes."""
     cids = []
     try:
         san = "webserver.testmesh.internal"
         port = "8443"
 
-        server = bring_up_node(gw_image, gw_network, gw_hub,
+        server = bring_up_node(gw_image, gw_network, gw_anchor,
                                hostname="webserver", caps="tls")
         cids.append(server["cid"])
-        client = bring_up_node(gw_image, gw_network, gw_hub,
+        client = bring_up_node(gw_image, gw_network, gw_anchor,
                                hostname="webclient", caps="tls")
         cids.append(client["cid"])
 
@@ -135,7 +135,7 @@ def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
         podman("exec", "-d", server["cid"], "python3", "-c", _TLS_WEB_SERVER,
                server["overlay"], port)
 
-        # Client connects over the mesh and validates the hub-issued cert by SAN.
+        # Client connects over the mesh and validates the anchor-issued cert by SAN.
         h = pexec(client["cid"], "python3", "-c", _TLS_WEB_CLIENT,
                   server["overlay"], port, san, "/tmp/tls/ca.crt")
         assert "CLIENT_OK" in h.stdout, \
@@ -145,20 +145,20 @@ def test_tls_service_between_two_nodes_over_mesh(gw_hub, gw_image, gw_network):
             podman("rm", "-f", cid, check=False)
 
 
-def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
+def test_node_requests_and_uses_tls_cert(gw_anchor, gw_image, gw_network):
     nodes = []
     try:
         # Node enrolled WITH the tls capability.
-        node = bring_up_node(gw_image, gw_network, gw_hub,
+        node = bring_up_node(gw_image, gw_network, gw_anchor,
                              hostname="dbnode", caps="tls")
         nodes.append(node["cid"])
 
-        # Wait for the node↔hub overlay tunnel before talking to the control plane.
-        assert wait_for_ping(node["cid"], gw_hub["overlay"], timeout=30), \
-            "node never reached the hub overlay"
+        # Wait for the node↔anchor overlay tunnel before talking to the control plane.
+        assert wait_for_ping(node["cid"], gw_anchor["overlay"], timeout=30), \
+            "node never reached the anchor overlay"
 
         # Request a cert for a service name UNDER this node's own name (dbnode);
-        # the hub only issues SANs the node owns.
+        # the anchor only issues SANs the node owns.
         r = pexec(node["cid"], "gw", "cert-request",
                   "--san", "postgres.dbnode.testmesh.internal", "--name", "postgres",
                   "--out-dir", "/tmp/tls", check=False)
@@ -177,8 +177,8 @@ def test_node_requests_and_uses_tls_cert(gw_hub, gw_image, gw_network):
         assert "postgres.crt" in st.stdout and "postgres.dbnode.testmesh.internal" in st.stdout, st.stdout
 
         # A node WITHOUT the tls cap is refused. tls is on by default now, so opt
-        # out explicitly with --caps "" (empty overrides the hub's default_caps).
-        plain = bring_up_node(gw_image, gw_network, gw_hub, hostname="plainnode",
+        # out explicitly with --caps "" (empty overrides the anchor's default_caps).
+        plain = bring_up_node(gw_image, gw_network, gw_anchor, hostname="plainnode",
                               caps="")
         nodes.append(plain["cid"])
         r2 = pexec(plain["cid"], "gw", "cert-request",

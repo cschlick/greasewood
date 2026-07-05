@@ -6,13 +6,13 @@ when its credential lapses" (no CRL). This test proves that end to end on a live
 WireGuard interface: with a short `credential_ttl`, a node that stops renewing is
 removed as a peer by another node's reconcile loop when its credential expires.
 
-Needs its own hub because the shared `gw_hub` issues 24h credentials.
+Needs its own anchor because the shared `gw_anchor` issues 24h credentials.
 """
 import time
 
 import pytest
 
-from .conftest import bring_up_node, make_hub
+from .conftest import bring_up_node, make_anchor
 from .helpers import podman, wg_peer_count, wait_for_peer_count
 
 pytestmark = pytest.mark.integration
@@ -32,23 +32,23 @@ def _wait_peer_count_at_most(cid, at_most, iface="gw_testmesh", timeout=150):
 def test_expired_node_is_torn_down_by_peer(gw_image, gw_network):
     cids = []
     try:
-        hub = make_hub(gw_image, gw_network, ttl="1m", hostname="ttlhub")
-        cids.append(hub["cid"])
+        anchor = make_anchor(gw_image, gw_network, ttl="1m", hostname="ttlanchor")
+        cids.append(anchor["cid"])
 
-        alive = bring_up_node(gw_image, gw_network, hub, hostname="alive")
+        alive = bring_up_node(gw_image, gw_network, anchor, hostname="alive")
         cids.append(alive["cid"])
-        doomed = bring_up_node(gw_image, gw_network, hub, hostname="doomed")
+        doomed = bring_up_node(gw_image, gw_network, anchor, hostname="doomed")
         cids.append(doomed["cid"])
 
-        # `alive` forms a full mesh: peers with the hub AND with `doomed` = 2.
+        # `alive` forms a full mesh: peers with the anchor AND with `doomed` = 2.
         assert wait_for_peer_count(alive["cid"], 2, timeout=60) >= 2, \
-            "the surviving node never reached 2 peers (hub + doomed)"
+            "the surviving node never reached 2 peers (anchor + doomed)"
 
         # `doomed` stops renewing (container stopped). Its 1-minute credential
         # now lapses with nothing to refresh it.
         podman("stop", "-t", "2", doomed["cid"])
 
-        # The surviving node must drop `doomed` on expiry, leaving only the hub.
+        # The surviving node must drop `doomed` on expiry, leaving only the anchor.
         # This is the reconcile-time expiry check removing a live WireGuard peer
         # — the "revocation = not renewing" guarantee, proven on the interface.
         assert _wait_peer_count_at_most(alive["cid"], 1, timeout=150), (

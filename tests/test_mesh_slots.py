@@ -239,7 +239,7 @@ def test_migrate_membership_refuses_collisions(tmp_path, monkeypatch):
 
 
 def test_sync_warns_on_mesh_rename(tmp_path, caplog):
-    """A member whose hub advertises a different domain gets the exact
+    """A member whose anchor advertises a different domain gets the exact
     migration command, once."""
     import logging
     from greasewood.directory import Directory
@@ -316,7 +316,7 @@ def test_join_refuses_same_name_different_mesh(tmp_path, monkeypatch):
                         lambda key, etc=None, var=None:
                             _orig_paths(key, etc=etc_dir, var=tmp_path))
 
-    # A DIFFERENT hub (fresh CA) for a mesh ALSO named 'prod'.
+    # A DIFFERENT anchor (fresh CA) for a mesh ALSO named 'prod'.
     other_ca = CAKeys.generate()
     token = encode_token(b"\x01" * 32, other_ca.ca_pub_bytes, "203.0.113.9",
                          generate_seed(), 51901, mesh_domain="prod.internal")
@@ -370,7 +370,7 @@ def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
 
 def test_sync_persists_pending_rename(tmp_path):
     """A detected rename is written to pending_rename.json (survives restarts,
-    surfaces in status) and cleared when the hub domain matches again."""
+    surfaces in status) and cleared when the anchor domain matches again."""
     import json
     from greasewood.directory import Directory
     from greasewood import sync as syncmod
@@ -381,7 +381,7 @@ def test_sync_persists_pending_rename(tmp_path):
     assert p.exists()
     d = json.loads(p.read_text())
     assert d == {"new_domain": "new.internal", "old_domain": "old.internal"}
-    # Hub back in sync (e.g. after this member migrated) → marker cleared.
+    # Anchor back in sync (e.g. after this member migrated) → marker cleared.
     loop._note_mesh_domain("old.internal")
     assert not p.exists()
 
@@ -413,5 +413,5 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     cfg = load_config(tmp_path / "gw.toml")
     lines = cli._self_health_lines(cfg, Directory(), keys.id_pub_hex)
     joined = "\n".join(lines)
-    assert "the hub renamed this mesh" in joined
+    assert "the anchor renamed this mesh" in joined
     assert "sudo gw rename-mesh prod-fleet" in joined

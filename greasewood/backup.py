@@ -1,7 +1,7 @@
 """
-greasewood.backup — encrypted hub trust-state backup (`gw hub-backup` / restore).
+greasewood.backup — encrypted anchor trust-state backup (`gw anchor-backup` / restore).
 
-A hub's whole trust state is a handful of files: the CA private key, the
+An anchor's whole trust state is a handful of files: the CA private key, the
 `nodes/` registry (hostname + caps per enrolled node, needed for renewal and
 name uniqueness), the revoke list, and the door key (its public half is baked
 into every outstanding join token). This packs them into ONE passphrase-
@@ -21,8 +21,8 @@ can't force an unbounded scrypt (a memory DoS on restore).
 
 AES-GCM authenticates the whole archive, so a wrong passphrase or a tampered
 byte fails cleanly (BackupError) rather than yielding garbage. This passphrase
-is the SINGLE factor protecting the CA key (and the hub's id_priv) at rest, so
-its strength is the whole story — `gw hub-backup` warns on a short one.
+is the SINGLE factor protecting the CA key (and the anchor's id_priv) at rest, so
+its strength is the whole story — `gw anchor-backup` warns on a short one.
 Restoring the SAME CA key onto a new host changes no trust relationship — it is
 a restore, not a re-root.
 
@@ -55,16 +55,16 @@ _V1_N = 2 ** 15
 _LOG2N_MIN = 14
 _LOG2N_MAX = 20
 
-# Files that constitute hub state, relative to the data dir. ca.key is handled
+# Files that constitute anchor state, relative to the data dir. ca.key is handled
 # separately (its path is configurable). Globs expand at collect time.
 #
-# id_priv.pem + wg.key are the hub's OWN node identity — included so a restore
-# reproduces the hub's overlay address, keeping address-based seeds/root_url
-# working (a re-generated identity would give the hub a new address). They're
-# hub secrets living in the same encrypted blob, so no extra exposure.
-_HUB_STATE = ["ca.key.pub", "ca.cert.pem", "door.key", "revoked.json",
+# id_priv.pem + wg.key are the anchor's OWN node identity — included so a restore
+# reproduces the anchor's overlay address, keeping address-based seeds/root_url
+# working (a re-generated identity would give the anchor a new address). They're
+# anchor secrets living in the same encrypted blob, so no extra exposure.
+_ANCHOR_STATE = ["ca.key.pub", "ca.cert.pem", "door.key", "revoked.json",
               "id_priv.pem", "wg.key"]
-_HUB_STATE_GLOBS = ["nodes/*.json"]
+_ANCHOR_STATE_GLOBS = ["nodes/*.json"]
 
 
 class BackupError(Exception):
@@ -139,8 +139,8 @@ def unpack(blob: bytes, passphrase: bytes) -> dict[str, bytes]:
     return out
 
 
-def collect_hub_state(data_dir, ca_key_file) -> dict[str, bytes]:
-    """Read the hub's trust-state files into a name->bytes mapping. ca_key_file
+def collect_anchor_state(data_dir, ca_key_file) -> dict[str, bytes]:
+    """Read the anchor's trust-state files into a name->bytes mapping. ca_key_file
     may live outside data_dir (configurable path); it is always stored as
     'ca.key' in the archive so restore is location-independent."""
     data_dir = Path(data_dir)
@@ -150,11 +150,11 @@ def collect_hub_state(data_dir, ca_key_file) -> dict[str, bytes]:
     if ca_key_file.exists():
         files["ca.key"] = ca_key_file.read_bytes()
 
-    for rel in _HUB_STATE:
+    for rel in _ANCHOR_STATE:
         p = data_dir / rel
         if p.exists():
             files[rel] = p.read_bytes()
-    for pattern in _HUB_STATE_GLOBS:
+    for pattern in _ANCHOR_STATE_GLOBS:
         for p in sorted(data_dir.glob(pattern)):
             files[str(p.relative_to(data_dir))] = p.read_bytes()
     return files

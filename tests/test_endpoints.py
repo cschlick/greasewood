@@ -52,14 +52,14 @@ def test_endpoint_with_port_normalization():
     assert _endpoint_with_port("[fd8d::1]:51900", 51900) == "[fd8d::1]:51900"  # full v6
 
 
-def test_token_carries_multiple_hub_hosts():
-    # The token's single host field carries comma-separated hub underlay hosts
+def test_token_carries_multiple_anchor_hosts():
+    # The token's single host field carries comma-separated anchor underlay hosts
     # (v6 + v4); a v6 literal has colons but never commas, so it round-trips.
     seed = generate_seed()
-    hub_door_pub = b"\x01" * 32
+    anchor_door_pub = b"\x01" * 32
     ca_pub = b"\x02" * 32
     hosts = "fd8d:e5c1:db1a:7::1,203.0.113.5"
-    tok = encode_token(hub_door_pub, ca_pub, hosts, seed, 51901)
+    tok = encode_token(anchor_door_pub, ca_pub, hosts, seed, 51901)
     dpub, cpub, host, dseed, dport, _dom = decode_token(tok)
     assert host.split(",") == ["fd8d:e5c1:db1a:7::1", "203.0.113.5"]
-    assert dport == 51901 and dseed == seed and dpub == hub_door_pub
+    assert dport == 51901 and dseed == seed and dpub == anchor_door_pub

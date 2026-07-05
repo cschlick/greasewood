@@ -31,8 +31,8 @@ Policy = Callable[[list[str], list[str]], bool]
 
 def _segments(caps: list[str]) -> set[str]:
     """A node's segments, carried as `segment:<name>` tags in its CA-signed caps
-    (attested, hub-assigned, renewed) — no separate wire field. Every node is in
-    `segment:mesh` by default; `segment:*` is the reach-all wildcard (the hub)."""
+    (attested, anchor-assigned, renewed) — no separate wire field. Every node is in
+    `segment:mesh` by default; `segment:*` is the reach-all wildcard (the anchor)."""
     return {c[len("segment:"):] for c in caps if c.startswith("segment:")}
 
 
@@ -40,7 +40,7 @@ def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
     """Two nodes may hold a tunnel iff they **share a segment** (§9). Segments
     are `segment:<name>` tags; the single rule is set intersection:
 
-    - `segment:*` on either side → allowed (the reach-all wildcard: the hub,
+    - `segment:*` on either side → allowed (the reach-all wildcard: the anchor,
       which must reach every node, and any shared-services node).
     - otherwise                  → allowed iff their segment sets intersect.
     - a node in no segment at all → allowed with no one.
@@ -277,7 +277,7 @@ class ReconcileLoop:
         self._local_families = local_families
         # Both callables, resolved each cycle. The trusted-CA set is static in
         # practice (from config), but the revoke list changes at runtime when
-        # the operator runs `gw revoke` — capturing it once would mean a hub
+        # the operator runs `gw revoke` — capturing it once would mean an anchor
         # restart to pick up a revocation.
         self._get_ca_pubs = get_ca_pubs
         self._get_revoked = get_revoked

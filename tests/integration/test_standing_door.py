@@ -30,14 +30,14 @@ def _fresh_container(gw_image, gw_network) -> tuple:
     return cid, container_addr(cid, gw_network)
 
 
-def test_standing_door_lifecycle(gw_image, gw_network, gw_hub):
-    hub = gw_hub["cid"]
+def test_standing_door_lifecycle(gw_image, gw_network, gw_anchor):
+    anchor = gw_anchor["cid"]
     cids = []
     try:
         with _ENROLL_LOCK:
             # One standing token for everyone.
-            res = pexec(hub, "gw", "invite", "--standing",
-                        "--endpoint", gw_hub["ipv6"], "-q")
+            res = pexec(anchor, "gw", "invite", "--standing",
+                        "--endpoint", gw_anchor["ipv6"], "-q")
             token = _extract_token(res.stdout + "\n" + res.stderr)
 
             # Two nodes enroll on the SAME token, one after the other.
@@ -53,29 +53,29 @@ def test_standing_door_lifecycle(gw_image, gw_network, gw_hub):
                 assert j.returncode == 0, (
                     f"join #{i + 1} on the standing token failed "
                     f"(rc={j.returncode}):\n{j.stdout}\n{j.stderr}")
-                assert wait_for_hostname(hub, name, timeout=20), \
-                    f"{name} missing from hub directory after standing enroll"
+                assert wait_for_hostname(anchor, name, timeout=20), \
+                    f"{name} missing from anchor directory after standing enroll"
 
             # The door is STILL open after successful enrollments.
-            r = pexec(hub, "ip", "link", "show", "gw-door", check=False)
+            r = pexec(anchor, "ip", "link", "show", "gw-door", check=False)
             assert r.returncode == 0, "standing door interface went down after enrollments"
-            status = pexec(hub, "gw", "status").stdout
+            status = pexec(anchor, "gw", "status").stdout
             assert "OPEN (standing)" in status
             assert "2 enrolled" in status
 
             # A plain invite must refuse to silently supersede it.
-            r = pexec(hub, "gw", "invite", "--endpoint", gw_hub["ipv6"], check=False)
+            r = pexec(anchor, "gw", "invite", "--endpoint", gw_anchor["ipv6"], check=False)
             assert r.returncode != 0
             assert "STANDING door is open" in (r.stdout + r.stderr)
 
             # Revoke: close-door kills the token everywhere, permanently.
-            out = pexec(hub, "gw", "close-door").stdout
+            out = pexec(anchor, "gw", "close-door").stdout
             assert "permanently invalid" in out
-            assert _wait_iface_gone(hub, "gw-door"), \
+            assert _wait_iface_gone(anchor, "gw-door"), \
                 "gw-door still up after close-door"
 
             # A third machine holding the old (baked) token gets nothing:
-            # the guest key no longer exists on the hub, so the door handshake
+            # the guest key no longer exists on the anchor, so the door handshake
             # never completes and join gives up.
             cid, ipv6 = _fresh_container(gw_image, gw_network)
             cids.append(cid)
@@ -83,15 +83,15 @@ def test_standing_door_lifecycle(gw_image, gw_network, gw_hub):
                       "--endpoint", f"[{ipv6}]:51900", "--hostname", "too-late",
                       check=False)
             assert j.returncode != 0, "revoked standing token still enrolled a node!"
-            assert not wait_for_hostname(hub, "too-late", timeout=3)
+            assert not wait_for_hostname(anchor, "too-late", timeout=3)
 
-        # Both legitimately-enrolled nodes still verify against the hub
+        # Both legitimately-enrolled nodes still verify against the anchor
         # (their credentials come from the CA, not the door).
         for name in names:
-            assert wait_for_hostname(hub, name, timeout=5)
+            assert wait_for_hostname(anchor, name, timeout=5)
     finally:
         for cid in cids:
             podman("rm", "-f", cid, check=False)
-        # Leave the shared hub pristine for the other tests.
-        pexec(hub, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json", check=False)
-        _wait_iface_gone(hub, "gw-door")
+        # Leave the shared anchor pristine for the other tests.
+        pexec(anchor, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json", check=False)
+        _wait_iface_gone(anchor, "gw-door")

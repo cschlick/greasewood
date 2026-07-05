@@ -6,14 +6,14 @@ marked block in /etc/hosts mapping each node's overlay address to
 "<hostname>.<domain>" (domain defaults to "internal"), regenerated from the
 local directory cache each reconcile cycle. So `ping db.internal` (and psql,
 curl, anything that uses getaddrinfo) just works, with no DNS server and no
-dependency on the hub being reachable.
+dependency on the anchor being reachable.
 
 It only ever touches the region between its markers — user lines are never
 modified. Disabling it (and restarting) removes the block; so does `gw purge`.
 
 Names are sanitized to a DNS-safe form ([a-z0-9-]); collisions (two nodes whose
 names sanitize the same) are left as duplicate lines — enforce unique hostnames
-at the hub if that matters to you.
+at the anchor if that matters to you.
 """
 from __future__ import annotations
 
@@ -125,7 +125,7 @@ _warned_collisions: set = set()
 # so its addresses look foreign) is overwritten by our first sync and never
 # seen foreign again, while a truly CONCURRENT mesh re-clobbers the block and
 # is foreign again by our next cycle. One observation can't tell them apart
-# (field false-positive: a re-created hub warned about its own predecessor).
+# (field false-positive: a re-created anchor warned about its own predecessor).
 _foreign_seen: set = set()
 
 

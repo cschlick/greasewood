@@ -2,7 +2,7 @@
 Unit tests for greasewood.door — derivation vectors and token round-trips.
 
 The derivation must be deterministic: a fixed seed must produce identical
-guest_pub, psk, door_port on both hub and node.  Lock these vectors first;
+guest_pub, psk, door_port on both anchor and node.  Lock these vectors first;
 everything downstream depends on them being stable.
 """
 import base64
@@ -68,36 +68,36 @@ def test_derive_psk_length():
 
 # ── Token round-trip ─────────────────────────────────────────────────────────
 
-_HUB_DOOR_PUB = bytes(range(32))       # deterministic test value
+_ANCHOR_DOOR_PUB = bytes(range(32))       # deterministic test value
 _CA_PUB = bytes(range(32, 64))         # deterministic test value
-_HUB_HOST = "2001:db8::1"
+_ANCHOR_HOST = "2001:db8::1"
 _SEED = bytes([0xAB] * 32)
 
 
 def test_token_roundtrip():
-    token = encode_token(_HUB_DOOR_PUB, _CA_PUB, _HUB_HOST, _SEED, door_port=51999)
-    hub_door_pub, ca_pub, host, seed, door_port, _dom = decode_token(token)
-    assert hub_door_pub == _HUB_DOOR_PUB
+    token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED, door_port=51999)
+    anchor_door_pub, ca_pub, host, seed, door_port, _dom = decode_token(token)
+    assert anchor_door_pub == _ANCHOR_DOOR_PUB
     assert ca_pub == _CA_PUB
-    assert host == _HUB_HOST
+    assert host == _ANCHOR_HOST
     assert seed == _SEED
     assert door_port == 51999
 
 
 def test_token_default_door_port():
-    token = encode_token(_HUB_DOOR_PUB, _CA_PUB, _HUB_HOST, _SEED)
+    token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED)
     *_, door_port, _dom = decode_token(token)
     assert door_port == 51901  # DOOR_PORT default
 
 
 def test_token_prefix():
-    token = encode_token(_HUB_DOOR_PUB, _CA_PUB, _HUB_HOST, _SEED)
+    token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED)
     assert token.startswith(TOKEN_PREFIX)
 
 
 def test_token_opaque():
     """Token must not contain the seed in plain base64."""
-    token = encode_token(_HUB_DOOR_PUB, _CA_PUB, _HUB_HOST, _SEED)
+    token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED)
     # The seed is embedded inside a larger payload so its raw b64 won't appear
     seed_b64 = base64.b64encode(_SEED).decode()
     assert seed_b64 not in token
@@ -115,7 +115,7 @@ def test_token_truncated():
 
 def test_token_different_hosts():
     for host in ["192.0.2.1", "example.com", "2001:db8::cafe"]:
-        token = encode_token(_HUB_DOOR_PUB, _CA_PUB, host, _SEED)
+        token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, host, _SEED)
         _, _, decoded_host, _, _, _ = decode_token(token)
         assert decoded_host == host
 

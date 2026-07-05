@@ -7,14 +7,14 @@ Disaster SOPs for a greasewood fleet. Commands assume the default
 ## First, debug it: `gw diagnose`
 
 Before any recovery, find out what's actually wrong. `gw diagnose` is a
-**pairwise** tool: it lays up to two named nodes plus the hub side by side and
+**pairwise** tool: it lays up to two named nodes plus the anchor side by side and
 explains, per pair, whether a tunnel can form — and if not, which factor blocks
 it. (Fleet-wide link state is `gw status`; diagnose is the focused deep-dive.)
 
 ```
-sudo gw diagnose            # this host ↔ the hub
-sudo gw diagnose db01       # this host ↔ db01   (+ hub as reference)
-sudo gw diagnose db01 web1  # db01 ↔ web1        (+ hub as reference)
+sudo gw diagnose            # this host ↔ the anchor
+sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
+sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
 The comparison table shows each node's overlay/underlay addresses, inbound flag,
@@ -22,7 +22,7 @@ segments, credential, and firewall for the mesh UDP port. **Only this host's
 firewall is directly known**; a peer's is *inferred `OPEN`* when a handshake has
 been observed (packets flowing prove its whole inbound path — host firewall,
 any router/NAT, and daemon), and shown `???` otherwise. Run it **on the node
-that's misbehaving** (or on the hub, which has live handshakes to prove each
+that's misbehaving** (or on the anchor, which has live handshakes to prove each
 node's reachability).
 
 The per-pair verdict reads out the **directionality** — who can dial whom — and
@@ -45,35 +45,35 @@ failure); it reports the fix if it fires.
 
 ## What to back up
 
-**Use `sudo gw hub-backup` (hub only).** It writes ONE passphrase-encrypted
-file (AES-GCM, scrypt-derived key) containing the whole hub state — the CA key,
+**Use `sudo gw anchor-backup` (anchor only).** It writes ONE passphrase-encrypted
+file (AES-GCM, scrypt-derived key) containing the whole anchor state — the CA key,
 the `nodes/` registry (hostname/caps per identity), `revoked.json`, the door
-key, and the hub's own node identity (`id_priv.pem`/`wg.key`, so a restore keeps
-the hub's overlay address). Move that file **offline**. The passphrase comes
+key, and the anchor's own node identity (`id_priv.pem`/`wg.key`, so a restore keeps
+the anchor's overlay address). Move that file **offline**. The passphrase comes
 from a prompt, or `$GW_BACKUP_PASSPHRASE` for a cron job:
 
 ```
-sudo GW_BACKUP_PASSPHRASE=… gw hub-backup --out /secure/offline/hub.gwbk
+sudo GW_BACKUP_PASSPHRASE=… gw anchor-backup --out /secure/offline/anchor.gwbk
 ```
 
 Anyone with the file **and** the passphrase can impersonate your CA, so guard
 both. The passphrase is the *single* factor protecting the CA key at rest — use
-a long, high-entropy one (a diceware phrase); `gw hub-backup` warns on a short
-one. Test-restore it (`gw hub-restore … --data-dir /tmp/verify`) before you rely
+a long, high-entropy one (a diceware phrase); `gw anchor-backup` warns on a short
+one. Test-restore it (`gw anchor-restore … --data-dir /tmp/verify`) before you rely
 on it.
 
 > **`GW_BACKUP_PASSPHRASE` in the environment is readable** by root and, on many
 > systems, visible in `/proc/<pid>/environ` and process listings — and it may
 > land in shell history or a CI log. Use it only for unattended/cron backups,
 > and prefer sourcing it from a secrets manager rather than an inline
-> assignment. For interactive backups, omit it and let `gw hub-backup` prompt.
+> assignment. For interactive backups, omit it and let `gw anchor-backup` prompt.
 
 The pieces, if you back up by hand instead:
-- **`/var/lib/greasewood/ca.key`** (hub only) — the one irreplaceable secret;
+- **`/var/lib/greasewood/ca.key`** (anchor only) — the one irreplaceable secret;
   losing it means re-rooting the whole fleet.
 - The CA public key / `[ca] trusted_pubs` — also kept in every node's config.
-- `/var/lib/greasewood/nodes/` (hub) — hostname/caps per identity.
-- `/var/lib/greasewood/revoked.json` and `/var/lib/greasewood/door.key` (hub).
+- `/var/lib/greasewood/nodes/` (anchor) — hostname/caps per identity.
+- `/var/lib/greasewood/revoked.json` and `/var/lib/greasewood/door.key` (anchor).
 
 `id_priv.pem` / `wg.key` on a node are **not** worth backing up — recover a lost
 node by enrolling a fresh one (new identity).
@@ -84,8 +84,8 @@ node by enrolling a fresh one (new identity).
 
 The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 
-1. On the hub: `sudo gw revoke <id_pub_hex>`. This takes effect **live** — the
-   hub immediately refuses its renew/publish and evicts it locally; other nodes
+1. On the anchor: `sudo gw revoke <id_pub_hex>`. This takes effect **live** — the
+   anchor immediately refuses its renew/publish and evicts it locally; other nodes
    drop it within one credential TTL as its credential expires.
 2. (Optional) free its hostname: delete `/var/lib/greasewood/nodes/<id_pub_hex>.json`.
 3. Re-provision a replacement with a **fresh identity** (`gw join <new-token>`).
@@ -93,13 +93,13 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 > `gw renew-all` does **not** speed this up. Renewal refreshes each node's *own*
 > credential and carries no information about *other* nodes — a peer drops the
 > revoked node only when *its* credential expires (nodes hold no revoke list; only
-> the hub does). Revocation is deliberately anchored to expiry, a property every
+> the anchor does). Revocation is deliberately anchored to expiry, a property every
 > verifier checks independently, rather than to a signal nodes must choose to act
 > on — so it's guaranteed regardless of who is online or cooperating. Coupling it
 > to `renew-all` would make it only as strong as the least-cooperative node. To
 > tighten the window, shorten `credential_ttl`.
 
-`gw status` on the hub shows identities; `gw diagnose` confirms the peer drops.
+`gw status` on the anchor shows identities; `gw diagnose` confirms the peer drops.
 
 ## SOP: node lost / decommissioned (not compromised)
 
@@ -109,7 +109,7 @@ remove it), or for immediate cleanup `sudo gw revoke <id_pub_hex>` and remove it
 
 ## SOP: lost door key (`door.key`)
 
-Outstanding join tokens embed the hub's door public key, so they break if the key
+Outstanding join tokens embed the anchor's door public key, so they break if the key
 changes — but the door key is otherwise disposable.
 
 1. `sudo rm /var/lib/greasewood/door.key`
@@ -118,23 +118,23 @@ changes — but the door key is otherwise disposable.
 
 ## SOP: move the CA to a new key (re-root)
 
-Moving the hub/CA is a **re-root**: get the fleet to trust a new CA key,
+Moving the anchor/CA is a **re-root**: get the fleet to trust a new CA key,
 re-issue every node under it, drop the old key. `trusted_pubs` is a *set*, so you
 trust both during an overlap window and it's non-disruptive.
 
-### Graceful migration (old CA still available) — hub A → hub B
+### Graceful migration (old CA still available) — anchor A → anchor B
 
 The key requirement: **B must be a reachable mesh member and must trust A during
 the overlap**, so existing nodes can renew against it over the overlay. That's
-exactly what `hub-promote` gives you (promote an enrolled node — don't
+exactly what `anchor-promote` gives you (promote an enrolled node — don't
 `create` a fresh, unreachable host for this).
 
 1. **Enroll B as an ordinary node** in the current mesh (`gw join …`) and start
    it. It now has an overlay address every node can reach.
-2. **On B: `sudo gw hub-promote`.** It generates B's own CA, sets `role=hub`, and
+2. **On B: `sudo gw anchor-promote`.** It generates B's own CA, sets `role=anchor`, and
    keeps trusting A (its `trusted_pubs` becomes `[A, B]`). Restart the daemon
    (`sudo gw run`) — B now serves the control plane on its overlay address. Note
-   the printed **B CA pubkey** and **hub endpoint**.
+   the printed **B CA pubkey** and **anchor endpoint**.
 3. **On every node** (Ansible): add B's CA pubkey to `[ca] trusted_pubs` (keep
    A's), and repoint `root_url` + `seeds` to B's overlay control URL. Restart the
    daemon. The fleet now trusts A *and* B — this is the overlap window.
@@ -156,19 +156,19 @@ exactly what `hub-promote` gives you (promote an enrolled node — don't
 ### Emergency (old CA lost or compromised)
 
 You can't rely on the old trust (lost), or must eject the old key fast
-(compromised). Stand up a new CA (`gw create` fresh, or `hub-promote`), add
+(compromised). Stand up a new CA (`gw create` fresh, or `anchor-promote`), add
 its key to `trusted_pubs` fleet-wide, and:
 
 - **Compromised:** the attacker can mint valid creds until the old key is gone
   from *every* node's `trusted_pubs`, and `gw revoke` can't stop the CA itself.
   **Remove the compromised key immediately** — the overlap is the attacker's
   window, so make it short. Nodes whose creds already lapsed **re-join** under the
-  new hub with fresh tokens (`gw join`).
+  new anchor with fresh tokens (`gw join`).
 - **Lost:** creds keep working until they expire; migrate (renew or re-join under
-  the new hub) within one credential TTL.
+  the new anchor) within one credential TTL.
 
 Avoid the lost-key case entirely: **back up `ca.key` encrypted and offline** (then
-a dead hub is a *restore*, not a re-root — see below), and keep `trusted_pubs` a
+a dead anchor is a *restore*, not a re-root — see below), and keep `trusted_pubs` a
 set so you always have an overlap path.
 
 ## SOP: rename a mesh (`gw rename-mesh`)
@@ -180,14 +180,14 @@ each host — its config (`/etc/greasewood_<name>.toml`), data dir
 they never drift apart. It is **operator-driven on every host** — a rare,
 deliberate fleet change, not something the daemon does to itself.
 
-1. **On the hub:** `sudo gw rename-mesh <new-name>`. This migrates the hub's own
+1. **On the anchor:** `sudo gw rename-mesh <new-name>`. This migrates the anchor's own
    artifacts, starts advertising the new domain in `GET /directory`, and starts
-   a **grace window** (one credential TTL) during which the hub keeps resolving
+   a **grace window** (one credential TTL) during which the anchor keeps resolving
    both old and new names.
 
-2. **Each member, on its next directory poll**, notices the hub's domain no
+2. **Each member, on its next directory poll**, notices the anchor's domain no
    longer matches its own and records it — `gw status` then shows, loudly:
-   `rename: ⚠ the hub renamed this mesh <old> → <new>. Migrate: sudo gw
+   `rename: ⚠ the anchor renamed this mesh <old> → <new>. Migrate: sudo gw
    rename-mesh <new>`. (An un-migrated member keeps working — peering is by
    identity, not name — it's just naming-inconsistent with the fleet until you
    migrate it.)
@@ -211,32 +211,32 @@ mid-rename land on the new domain directly. `--interface` is the one artifact
 that can collide after the 15-char kernel truncation for very long names —
 `rename-mesh` refuses loudly and tells you to pass an explicit interface if so.
 
-## SOP: hub host destroyed (disk gone)
+## SOP: anchor host destroyed (disk gone)
 
-- **You have a `gw hub-backup` archive:** on the replacement host,
-  `sudo gw hub-restore hub.gwbk --data-dir /var/lib/greasewood`, write
-  `/etc/greasewood_myfleet.toml` (role = hub, `ca_key_file` pointing at the restored
+- **You have a `gw anchor-backup` archive:** on the replacement host,
+  `sudo gw anchor-restore anchor.gwbk --data-dir /var/lib/greasewood`, write
+  `/etc/greasewood_myfleet.toml` (role = anchor, `ca_key_file` pointing at the restored
   `ca.key`), then `gw run`. This is a **restore, not a re-root**: same CA key →
   same trust, so existing nodes keep trusting it with no `trusted_pubs` change.
   The restore refuses to overwrite an existing `ca.key` unless you pass
-  `--force`. Nodes reconnect on their next sync (~20s); because the hub isn't in
+  `--force`. Nodes reconnect on their next sync (~20s); because the anchor isn't in
   the data path, node↔node tunnels never went down — you just need to be back
-  within one credential TTL so nothing expired. (The backup includes the hub's
+  within one credential TTL so nothing expired. (The backup includes the anchor's
   own `id_priv`/`wg.key`, so the replacement comes up on the *same* overlay
   address — address-based `seeds`/`root_url` keep working with no edits.)
 - **No backup:** follow *CA key lost* (re-root).
 
-> **Give the hub a DNS name.** The one thing that makes the restore seamless is
-> the replacement being reachable **where the fleet expects it.** Set the hub's
-> endpoint to a hostname at setup (`gw create --endpoint hub.example.com:51900`
-> — `wg` accepts and re-resolves hostnames), so a hub move / hardware swap is
+> **Give the anchor a DNS name.** The one thing that makes the restore seamless is
+> the replacement being reachable **where the fleet expects it.** Set the anchor's
+> endpoint to a hostname at setup (`gw create --endpoint anchor.example.com:51900`
+> — `wg` accepts and re-resolves hostnames), so an anchor move / hardware swap is
 > just updating one DNS record. If instead the replacement lands on a **new IP**:
-> inbound-reachable nodes self-heal (the hub dials them, WireGuard roaming fixes
+> inbound-reachable nodes self-heal (the anchor dials them, WireGuard roaming fixes
 > the path), but **outbound-only (`inbound=no`) nodes** only knew the old address
 > and can't learn the new one on their own — re-join those few by hand. A stable
 > DNS name avoids the whole problem.
 
-Either way the data plane keeps running until credentials expire — the hub is not
+Either way the data plane keeps running until credentials expire — the anchor is not
 in the data path.
 
 ## SOP: fleet-wide teardown ("everything disconnected at once")
@@ -246,8 +246,8 @@ Usually one of:
 1. **Clock skew.** Symptoms: `gw diagnose` shows mass `credential EXPIRED` or
    renew "timestamp skew too large". Fix NTP/chrony on the affected hosts; trust
    recovers as records re-verify.
-2. **Hub unreachable past one credential TTL.** Credentials lapse fleet-wide.
-   Restore the hub (above); nodes recover on the next renewal.
+2. **Anchor unreachable past one credential TTL.** Credentials lapse fleet-wide.
+   Restore the anchor (above); nodes recover on the next renewal.
 3. **Botched re-root.** The old CA was dropped from `trusted_pubs` before every
    node had a new-CA credential. Re-add the old key fleet-wide to restore the
    overlap, let all nodes renew under the new CA, *then* drop the old key.
@@ -257,16 +257,16 @@ Usually one of:
 ## SOP: rotate a node's tunnel key (`wg_priv`)
 
 Low urgency (the key is self-limiting). Regenerate `wg.key` and restart the
-daemon; renewal carries the new `wg_pub` to the hub, and peers pick it up on
+daemon; renewal carries the new `wg_pub` to the anchor, and peers pick it up on
 their next reconcile. No CA action needed — the address is anchored to `id_pub`,
 not `wg_pub`, so it doesn't change.
 
 ## SOP: TLS service certs (`gw cert-request`) + auto-renewal
 
-`gw cert-request` gets an x509 leaf cert from the hub for a local service (e.g.
+`gw cert-request` gets an x509 leaf cert from the anchor for a local service (e.g.
 Postgres). The leaf key is generated locally and never leaves the node; the cert
-is short-lived (`[hub] tls_cert_ttl`, default 7d). The node needs the `tls`
-capability (grant it with `gw set-caps` on the hub).
+is short-lived (`[anchor] tls_cert_ttl`, default 7d). The node needs the `tls`
+capability (grant it with `gw set-caps` on the anchor).
 
 Request once, with a reload hook so the service picks up rotations:
 
@@ -309,10 +309,10 @@ credential fresh keeps service certs fresh too.
 
 Troubleshooting:
 - **Cert not renewing** (expiry creeping up in `gw cert-status`): the daemon must
-  be running and the hub reachable over the overlay, and the node must still hold
+  be running and the anchor reachable over the overlay, and the node must still hold
   the `tls` cap. Check `journalctl -u greasewood` for `TLS cert auto-renewal
-  for … failed`; run `gw diagnose` to confirm the link to the hub; confirm the cap
-  with `gw status` on the hub. A renewal failure is retried on the next cycle.
+  for … failed`; run `gw diagnose` to confirm the link to the anchor; confirm the cap
+  with `gw status` on the anchor. A renewal failure is retried on the next cycle.
 - **Cert renewed but the service still serves the old one:** the reload hook
   didn't take. The new files *are* on disk — check `journalctl` for `cert
   reload_cmd … exited`, and test the command by hand (e.g. `systemctl reload

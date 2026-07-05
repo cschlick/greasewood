@@ -1,11 +1,11 @@
 """
 Unit tests for the fleet-wide "renew asap" mechanism (gw renew-all):
 
-  - the hub writes a renew_after hint and refuses on a non-hub;
+  - the anchor writes a renew_after hint and refuses on a non-anchor;
   - sync parses the hint (both wire shapes);
   - RenewalLoop.maybe_renew_after acts only when our credential predates the
     hint, dedups, and draws its delay from a window that scales with mesh size
-    (so the hub's renewals/sec stays ~constant as the fleet grows).
+    (so the anchor's renewals/sec stays ~constant as the fleet grows).
 """
 import datetime as dt
 import types
@@ -85,7 +85,7 @@ def test_window_scales_with_mesh_size(tmp_path, monkeypatch):
         loop = _loop(tmp_path, n_nodes=n, cred=_cred(node, ca))
         loop.maybe_renew_after(future)
         # delay ~ U(0, N * spread): the window's upper bound is proportional to N,
-        # so expected renewals/sec at the hub is N/(N*spread) = 1/spread, constant.
+        # so expected renewals/sec at the anchor is N/(N*spread) = 1/spread, constant.
         assert cap["lo"] == 0.0
         assert cap["hi"] == n * loop._renew_spread
         assert _FakeTimer.last is not None                    # a renewal was scheduled
@@ -117,11 +117,11 @@ def test_dedups_same_hint(tmp_path, monkeypatch):
     assert first is not None
 
 
-# --- the hub command -------------------------------------------------------
+# --- the anchor command -------------------------------------------------------
 
-def _hub_cfg(tmp_path, role="hub"):
+def _anchor_cfg(tmp_path, role="anchor"):
     (tmp_path / "gw.toml").write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
 role = "{role}"
 [network]
@@ -129,7 +129,7 @@ interface = "gw-mesh"
 seeds = []
 [ca]
 trusted_pubs = []
-[hub]
+[anchor]
 ca_key_file = "{tmp_path}/ca.key"
 """)
     return tmp_path / "gw.toml"
@@ -137,15 +137,15 @@ ca_key_file = "{tmp_path}/ca.key"
 
 def test_renew_all_writes_hint(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
-    cfg = _hub_cfg(tmp_path)
+    cfg = _anchor_cfg(tmp_path)
     rc = cli.cmd_renew_all(types.SimpleNamespace(config=str(cfg)))
     assert rc == 0
     written = (tmp_path / "renew_after").read_text().strip()
     dt.datetime.fromisoformat(written)                        # parseable ISO timestamp
 
 
-def test_renew_all_refuses_non_hub(tmp_path):
-    cfg = _hub_cfg(tmp_path, role="node")
+def test_renew_all_refuses_non_anchor(tmp_path):
+    cfg = _anchor_cfg(tmp_path, role="node")
     with pytest.raises(SystemExit):
         cli.cmd_renew_all(types.SimpleNamespace(config=str(cfg)))
     assert not (tmp_path / "renew_after").exists()

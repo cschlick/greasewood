@@ -39,9 +39,9 @@ GARBAGE = [
 
 @pytest.fixture(scope="module")
 def fuzz_server(tmp_path_factory):
-    """One hub-mode server (CA active so /renew and /cert are live) shared by
+    """One anchor-mode server (CA active so /renew and /cert are live) shared by
     all examples — module-scoped so hypothesis may reuse it."""
-    tmp = tmp_path_factory.mktemp("fuzz-hub")
+    tmp = tmp_path_factory.mktemp("fuzz-anchor")
     ca_keys = CAKeys.generate()
     ca = CA(ca_keys, tmp)
     node = NodeKeys.generate()

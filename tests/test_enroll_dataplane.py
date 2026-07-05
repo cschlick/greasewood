@@ -1,5 +1,5 @@
 """
-EnrollServer._handle when the hub's data plane is broken (mesh interface
+EnrollServer._handle when the anchor's data plane is broken (mesh interface
 missing): the joiner must get an actionable reason — the self-heal/retry/restart
 story — not a raw CalledProcessError command dump ("internal — Command
 '['wg', 'set', ...]' returned non-zero exit status 1").
@@ -71,10 +71,10 @@ def test_peer_install_failure_reports_actionable_reason(monkeypatch):
     ok, resp = _attempt(monkeypatch, _FakeCA(), joiner)
     assert ok is False                       # attempt failed, window stays open
     assert resp["ok"] is False
-    assert resp["error"] == "hub data-plane failure"
+    assert resp["error"] == "anchor data-plane failure"
     assert "mesh interface 'gw-mesh' is missing or broken" in resp["reason"]
     assert "retry this token" in resp["reason"]           # self-heal story
-    assert "restart the hub's greasewood daemon" in resp["reason"]
+    assert "restart the anchor's greasewood daemon" in resp["reason"]
     assert "CalledProcessError" not in resp["reason"]     # no traceback leak
     assert resp["attempts_remaining"] == 2
 

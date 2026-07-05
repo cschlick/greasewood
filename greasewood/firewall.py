@@ -40,22 +40,22 @@ class Rule:
         return " ".join(parts)
 
 
-def hub_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Rule]:
+def anchor_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Rule]:
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     return [
         Rule("udp", listen_port, None, "mesh WireGuard"),
         Rule("udp", DOOR_PORT, None, "enrollment door (WireGuard)"),
-        Rule("tcp", control_port, "gw-mesh", "control plane (when hub)"),
-        Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when hub)"),
+        Rule("tcp", control_port, "gw-mesh", "control plane (when anchor)"),
+        Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when anchor)"),
     ]
 
 
 def node_rules(listen_port: int = 51900, inbound: str = "yes") -> list[Rule]:
     """Inbound rules a plain node needs. An outbound-only node (inbound=no)
-    needs none — it dials peers (and the hub's door) outbound and relies on the
+    needs none — it dials peers (and the anchor's door) outbound and relies on the
     base ct established,related rule for replies. It only opens the mesh port if
-    it accepts inbound. The door port (51901) is hub-only — a joining node
-    connects to the hub's door outbound, so it never needs it inbound."""
+    it accepts inbound. The door port (51901) is anchor-only — a joining node
+    connects to the anchor's door outbound, so it never needs it inbound."""
     if inbound == "no":
         return []
     return [Rule("udp", listen_port, None, "mesh WireGuard")]

@@ -2,13 +2,13 @@
 greasewood.renewal — credential renewal loop (§10.3).
 
 Renews at ~half the remaining TTL plus ±10% jitter, giving several retry
-windows before expiry. Jitter spreads load across the fleet so the hub
+windows before expiry. Jitter spreads load across the fleet so the anchor
 doesn't see a thundering herd at the N-hour mark.
 
 On success: embeds the new credential in a fresh NodeRecord (seq bumped),
 re-signs it, updates the local directory + cache, AND re-publishes it to the
-hub. The re-publish is essential: peers pull records from the hub, so a renewed
-credential that only lived locally would never reach them — the hub would keep
+anchor. The re-publish is essential: peers pull records from the anchor, so a renewed
+credential that only lived locally would never reach them — the anchor would keep
 serving the about-to-expire record and peers would evict this node at its old
 expiry even though it renewed. Pushing the fresh record is what keeps the mesh
 from tearing down one credential TTL after start.
@@ -74,7 +74,7 @@ class RenewalLoop:
     ) -> None:
         self._keys = node_keys
         self._directory = directory
-        # A callable returning the hub URL to renew against (the configured hub).
+        # A callable returning the anchor URL to renew against (the configured anchor).
         self._get_root_url = get_root_url
         self._cred = current_cred
         self._inbound = inbound
@@ -86,14 +86,14 @@ class RenewalLoop:
         # Fleet-wide renew hint (see gw renew-all): setting _renew_now wakes the
         # loop early. renew_spread is the jitter window PER NODE — the actual
         # window scales with the mesh size (window = N * renew_spread) so a
-        # uniform pick keeps the hub's renewals/sec roughly constant as the fleet
+        # uniform pick keeps the anchor's renewals/sec roughly constant as the fleet
         # grows, instead of an N-proportional spike.
         self._renew_now = threading.Event()
         self._renew_spread = renew_spread
         self._acted_renew_after: "dt.datetime | None" = None
 
     def maybe_renew_after(self, ts: "dt.datetime | None") -> None:
-        """Act on the hub's fleet-wide renew hint. If our current credential was
+        """Act on the anchor's fleet-wide renew hint. If our current credential was
         issued before `ts`, schedule a renewal after a jittered delay drawn
         uniformly from [0, N * renew_spread] (N = mesh size), so the fleet's
         renewals spread at a size-independent rate. Self-clearing: once we renew,
@@ -111,7 +111,7 @@ class RenewalLoop:
         n = max(1, self._directory.size())
         window = n * self._renew_spread
         delay = random.uniform(0.0, window)
-        log.info("hub requested fleet renewal (renew_after=%s); our cred predates "
+        log.info("anchor requested fleet renewal (renew_after=%s); our cred predates "
                  "it — renewing in %.0fs (window %.0fs over %d nodes)",
                  ts, delay, window, n)
         timer = threading.Timer(delay, self._renew_now.set)
@@ -142,8 +142,8 @@ class RenewalLoop:
 
     def _renew_and_publish(self) -> Credential:
         """Renew the credential, update the local directory, and re-publish the
-        fresh record to the hub. The push is not optional: peers pull records
-        from the hub, so a credential that only lived locally would never reach
+        fresh record to the anchor. The push is not optional: peers pull records
+        from the anchor, so a credential that only lived locally would never reach
         them and they would evict this node at its old expiry. Raises on any
         failure so the caller's retry/backoff loop re-attempts the whole step."""
         from .sync import push_record

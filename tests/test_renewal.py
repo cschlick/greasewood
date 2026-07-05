@@ -1,6 +1,6 @@
 """
 Unit test for RenewalLoop's retry/backoff — the resilience guarantee that keeps
-the mesh from tearing down on a transient hub failure. Integration only ever
+the mesh from tearing down on a transient anchor failure. Integration only ever
 exercises successful renewals; this drives the failure path deterministically
 (no real sleeps: _stop.wait is stubbed).
 """
@@ -40,7 +40,7 @@ def test_renewal_retries_with_exponential_backoff_then_stops(tmp_path, monkeypat
 
     def boom():
         attempts["n"] += 1
-        raise RuntimeError("hub down")
+        raise RuntimeError("anchor down")
 
     monkeypatch.setattr(loop, "_renew_and_publish", boom)
     monkeypatch.setattr(loop, "_next_delay", lambda: 0.0)
