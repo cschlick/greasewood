@@ -17,7 +17,7 @@ sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
 sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
-The comparison table shows each node's overlay/underlay addresses, inbound flag,
+The comparison table shows each node's overlay/underlay addresses, reachability,
 segments, credential, and firewall for the mesh UDP port. **Only this host's
 firewall is directly known**; a peer's is *inferred `OPEN`* when a handshake has
 been observed (packets flowing prove its whole inbound path — host firewall,
@@ -36,7 +36,7 @@ localizes the block, e.g.:
 | `no handshake` + "our host firewall CLOSED … OPEN it" | This host's own firewall blocks the port. | Open the mesh UDP port (create/join printed the rule). |
 | `no handshake` + "we can dial X but it isn't answering" | The remote isn't responding. | Check X's host firewall + upstream forward, and that its daemon is up (`gw diagnose` on X shows its own firewall). |
 | `✗ no shared segment` | They won't peer by design. | Give them a common segment. |
-| `✗ no dialable direction (both outbound-only)` | Neither accepts inbound. | Set `inbound=yes` on at least one (`gw set-inbound yes`). |
+| `✗ no dialable direction (both outbound-only)` | Neither advertises an endpoint. | Give at least one an advertised endpoint (`[node] endpoints`, or `--endpoint` at join). |
 | credential `✗ EXPIRED` / `✗ untrusted CA` / `✗ REVOKED` | Bad credential. | Renewal/clock (expired); `[ca] trusted_pubs` after a re-root (untrusted); expected (revoked). |
 
 A LINKED pair involving this host also gets a **path-MTU blackhole** check (small
@@ -294,8 +294,8 @@ that can collide after the 15-char kernel truncation for very long names —
 > endpoint to a hostname at setup (`gw create --endpoint anchor.example.com:51900`
 > — `wg` accepts and re-resolves hostnames), so an anchor move / hardware swap is
 > just updating one DNS record. If instead the replacement lands on a **new IP**:
-> inbound-reachable nodes self-heal (the anchor dials them, WireGuard roaming fixes
-> the path), but **outbound-only (`inbound=no`) nodes** only knew the old address
+> reachable nodes self-heal (the anchor dials them, WireGuard roaming fixes
+> the path), but **outbound-only nodes** (those advertising no endpoint) only knew the old address
 > and can't learn the new one on their own — re-join those few by hand. A stable
 > DNS name avoids the whole problem.
 

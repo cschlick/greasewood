@@ -432,7 +432,6 @@ def cmd_create(args) -> int:
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "anchor"
-inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
@@ -1215,15 +1214,6 @@ def cmd_join(args) -> int:
     # whatever a joiner might request is ignored by the anchor.)
     caps: list[str] = []
 
-    # inbound: "yes" (reachable, advertise endpoint) or "no" (outbound-only,
-    # suppress endpoint — peers won't dial it; it dials them).
-    if args.inbound is not None:
-        node_inbound = args.inbound
-    elif prior and getattr(prior, "inbound", None):
-        node_inbound = prior.inbound
-    else:
-        node_inbound = "yes"
-
     # Endpoint(s) = where other nodes dial this one for a direct tunnel. If not
     # given, best-effort detect a public v6 and/or v4. A node with no endpoint
     # can still reach the anchor (it initiates outbound), but peers can't dial it,
@@ -1409,16 +1399,14 @@ def cmd_join(args) -> int:
         except Exception as e:
             log.warning("anchor record verify failed: %s", e)
 
-    # Our own record. Outbound-only nodes don't advertise an endpoint, so peers
-    # don't waste handshakes dialing an address they can't reach.
+    # Our own record. We advertise whatever endpoint we detected; a node that
+    # detects none is naturally outbound-only, and peers back off a dead one.
     existing = directory.get(node_keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
-    adv_endpoints = list(node_endpoints) if node_inbound != "no" else []
     record = NodeRecord(
         id_pub=node_keys.id_pub_bytes,
         seq=seq,
-        endpoints=adv_endpoints,
-        inbound=node_inbound,
+        endpoints=list(node_endpoints),
         cred=cred,
     ).sign(node_keys.id_priv)
     directory.put(record)
@@ -1473,7 +1461,6 @@ def cmd_join(args) -> int:
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "node"
-inbound = "{node_inbound}"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
 [network]
@@ -1511,19 +1498,9 @@ trusted_pubs = ["{ca_pub_hex}"]
               "it yourself or write your own unit)")
     print()
     from . import firewall as _fw
-    if node_inbound == "no":
-        log.warning(
-            "firewall: inbound=no — outbound-only. No greasewood inbound ports "
-            "are needed (it dials peers + the anchor's door outbound); just keep "
-            "your base 'ct state established,related accept' rule for replies. "
-            "Note: this node can only pair with inbound-reachable nodes, not "
-            "with other outbound-only nodes, and cannot be promoted to anchor "
-            "without switching to inbound (gw set-inbound yes)."
-        )
-    else:
-        _print_firewall_help(listen_port)
-        print()
-        _fw.check(_fw.node_rules(listen_port, node_inbound), log)
+    _print_firewall_help(listen_port)
+    print()
+    _fw.check(_fw.node_rules(listen_port), log)
     return 0
 
 
@@ -1770,14 +1747,13 @@ def cmd_anchor_promote(args) -> int:
         sys.exit(f"no config at {cfg_path} — this command runs on an enrolled node")
     cfg = load_config(cfg_path)
 
-    # An anchor must accept inbound connections (it serves the control plane + door).
-    # An outbound-only node can't be one until it's reachable.
-    if cfg.inbound == "no":
+    # An anchor must be reachable (it serves the control plane + door), so it
+    # needs an advertised endpoint. A node that advertises none can't be one.
+    if not cfg.endpoints:
         sys.exit(
-            "this node is outbound-only (inbound=no); an anchor must accept inbound "
-            "connections. Switch it first:\n"
-            "  sudo gw set-inbound yes\n"
-            "then re-run anchor-promote."
+            "this node advertises no endpoint, so peers can't reach its control "
+            "plane — an anchor must be reachable. Set [node] endpoints in its "
+            "config first, then re-run anchor-promote."
         )
 
     keys = NodeKeys.load_or_generate(cfg.data_dir)
@@ -1814,7 +1790,6 @@ def cmd_anchor_promote(args) -> int:
 hostname = "{cfg.hostname}"
 data_dir = "{cfg.data_dir}"
 role = "anchor"
-inbound = "yes"
 caps = {json_mod.dumps(anchor_caps)}{endpoint_line}
 
 [network]
@@ -2257,48 +2232,6 @@ def cmd_cert_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# set-inbound — flip a node between reachable and outbound-only
-# ---------------------------------------------------------------------------
-
-def cmd_set_inbound(args) -> int:
-    """Change this node's reachability (yes/no). Switching to inbound
-    means peers can dial it — so it can hold direct links to outbound-only nodes
-    and be promoted to anchor — but it must accept the WireGuard port (this checks
-    and prints the rule; open it yourself). Restart the daemon to advertise."""
-    _require_root("set-inbound")
-    import re
-    from .config import load_config
-
-    cfg_path = Path(args.config)
-    if not cfg_path.exists():
-        sys.exit(f"no config at {cfg_path}")
-    cfg = load_config(cfg_path)
-    value = args.value
-
-    text = cfg_path.read_text()
-    new, n = re.subn(r'(?m)^\s*inbound\s*=\s*".*?"\s*$',
-                     f'inbound = "{value}"', text, count=1)
-    if n == 0:
-        sys.exit("could not find an [node] inbound = \"...\" line to update")
-    cfg_path.write_text(new)
-    print(f"inbound = {value} (was {cfg.inbound})")
-
-    from . import firewall as _fw
-    if value == "no":
-        print("Outbound-only: greasewood needs no inbound ports; keep your base "
-              "'ct state established,related accept' for replies. (Open ports left "
-              "in place are harmless; remove them yourself if you like.)")
-    else:
-        is_anchor = cfg.role == "anchor"
-        rules = (_fw.anchor_rules(cfg.listen_port, _control_port(cfg))
-                 if is_anchor else _fw.node_rules(cfg.listen_port, value))
-        _fw.check(rules, log)
-    print("Restart the daemon to advertise the change: sudo systemctl restart "
-          "greasewood  (or re-run sudo gw run)")
-    return 0
-
-
-# ---------------------------------------------------------------------------
 # rename — change this node's mesh hostname (anchor-validated, no re-join)
 # ---------------------------------------------------------------------------
 
@@ -2379,13 +2312,11 @@ def cmd_rename(args) -> int:
     directory = Directory.load(cfg.dir_cache_path)
     existing = directory.get(keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
-    endpoints = list(existing.endpoints) if existing else (
-        [] if cfg.inbound == "no" else cfg.endpoints)
-    inbound = existing.inbound if existing else cfg.inbound
+    endpoints = list(existing.endpoints) if existing else list(cfg.endpoints)
     aliases = list(existing.aliases) if existing else _config_aliases(cfg)
     record = NodeRecord(
         id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        inbound=inbound, cred=cred, aliases=aliases,
+        cred=cred, aliases=aliases,
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -2585,32 +2516,30 @@ def cmd_run(args) -> int:
     )
     recon.start()
 
-    # Effective advertised endpoints: outbound-only nodes (inbound=no) suppress
-    # their endpoint so peers don't waste handshakes dialing an unreachable addr.
-    eff_endpoints = [] if cfg.inbound == "no" else cfg.endpoints
+    # We advertise whatever endpoint config gives us (empty = naturally
+    # outbound-only; peers back off a dead one).
+    eff_endpoints = list(cfg.endpoints)
 
-    # Honor config changes on (re)start: if our record's inbound/endpoints/
-    # aliases no longer match config (e.g. after `gw set-inbound` or a
-    # `gw cert-request` that added a service name), re-sign it so what we
-    # advertise is current — the daemon reads config only at startup.
+    # Honor config changes on (re)start: if our record's endpoints/aliases no
+    # longer match config (e.g. a `gw cert-request` that added a service name),
+    # re-sign it so what we advertise is current — the daemon reads config only
+    # at startup.
     want_aliases = _config_aliases(cfg)
     own_record = directory.get(keys.id_pub_hex)
-    if own_record and (own_record.inbound != cfg.inbound
-                       or list(own_record.endpoints) != list(eff_endpoints)
+    if own_record and (list(own_record.endpoints) != list(eff_endpoints)
                        or sorted(own_record.aliases) != sorted(want_aliases)):
         from .wire import NodeRecord
         own_record = NodeRecord(
             id_pub=keys.id_pub_bytes,
             seq=own_record.seq + 1,
             endpoints=eff_endpoints,
-            inbound=cfg.inbound,
             cred=own_record.cred,
             aliases=want_aliases,
         ).sign(keys.id_priv)
         directory.put(own_record)
         directory.save(cfg.dir_cache_path)
-        log.info("updated own record (inbound=%s, endpoints=%s, aliases=%s)",
-                 cfg.inbound, eff_endpoints, want_aliases)
+        log.info("updated own record (endpoints=%s, aliases=%s)",
+                 eff_endpoints, want_aliases)
 
     # Push our own record so the rest of the mesh knows about us. This gets a
     # newly enrolled node into the anchor's directory; it is also how endpoint
@@ -2630,7 +2559,6 @@ def cmd_run(args) -> int:
             directory=directory,
             get_root_url=lambda: cfg.root_url,
             current_cred=own_record.cred,
-            inbound=cfg.inbound,
             hostname=cfg.hostname,
             endpoints=eff_endpoints,
             cache_path=cfg.dir_cache_path,
@@ -2722,7 +2650,7 @@ def _fmt_hs_age(age_s: float) -> str:
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                   latency=None, rates=None) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
-    every node — name, addr, inbound, segments, credential); RIGHT is THIS
+    every node — name, addr, reachable, segments, credential); RIGHT is THIS
     node's view. Without root the right side is just the policy 'would I peer'
     answer. With root it's the live link + cumulative traffic. In LIVE mode
     (latency dict supplied) the right side is link + per-second RATE + a latency
@@ -2782,7 +2710,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     for r in records:
         left_rows.append((
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            "yes" if r.inbound != "no" else "no",
+            "yes" if r.endpoints else "no",
             ",".join(_record_segments(r)) or "-", _exp(r),
         ))
         lp = (live_peers or {}).get(base64.b64encode(r.cred.wg_pub).decode())
@@ -3142,8 +3070,9 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     elif own_id:
         lines.append(f"{'cred':<9}: no self record yet (has the daemon published?)")
 
-    inb = "yes (accepts inbound)" if cfg.inbound != "no" else "no (outbound-only)"
-    lines.append(f"{'inbound':<9}: {inb}")
+    reach = ("advertises an endpoint (dialable)" if cfg.endpoints
+             else "no endpoint (outbound-only — you dial peers)")
+    lines.append(f"{'reach':<9}: {reach}")
 
     n = len(cfg.ca_pubs)
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
@@ -3384,7 +3313,7 @@ def _diag_anchor_record(directory, cfg, own_rec):
 
 class _DiagCol:
     """One column of the diagnose comparison — a node's resolved facts."""
-    __slots__ = ("label", "is_self", "rec", "addr", "u6", "u4", "inbound",
+    __slots__ = ("label", "is_self", "rec", "addr", "u6", "u4",
                  "caps", "segments", "cred", "has_ep", "ep_str", "hs", "fw")
 
 
@@ -3527,17 +3456,18 @@ def cmd_diagnose(args) -> int:
         c.addr = rec.cred.addr if rec else (own_addr or "?")
         eps = rec.endpoints if rec else cfg.endpoints
         c.u6, c.u4 = _underlay_addrs(eps)
-        c.inbound = (rec.inbound if rec else cfg.inbound)
         c.caps = list(rec.cred.caps) if rec else list(cfg.caps)
         c.segments = ",".join(_record_segments(rec)) if rec else \
             ",".join(s[len("segment:"):] for s in cfg.caps if s.startswith("segment:"))
         c.cred = _verify(rec)
-        c.has_ep = c.inbound != "no" and (c.u6 != "-" or c.u4 != "-")
+        # Reachability is emergent: a node is dialable iff it advertises an
+        # endpoint. No inbound flag anymore.
+        c.has_ep = (c.u6 != "-" or c.u4 != "-")
         c.ep_str = c.u6 if c.u6 != "-" else (c.u4 if c.u4 != "-" else "—")
         c.hs = _hs_age(rec)
         if is_self:
             c.fw = _self_firewall_port(port)
-        elif c.inbound == "no":
+        elif not c.has_ep:
             c.fw = "n/a (outbound-only)"
         elif c.hs is not None:
             c.fw = "OPEN (inferred: handshake)"
@@ -3567,8 +3497,8 @@ def cmd_diagnose(args) -> int:
     rows = [("overlay", [c.addr for c in facts]),
             ("underlay v6", [c.u6 for c in facts]),
             ("underlay v4", [c.u4 for c in facts]),
-            ("inbound", [c.inbound + ("" if c.inbound != "no" else " (outbound-only)")
-                         for c in facts]),
+            ("reachable", ["yes (advertises endpoint)" if c.has_ep
+                           else "no (outbound-only)" for c in facts]),
             ("segments", [c.segments or "-" for c in facts]),
             ("credential", [c.cred for c in facts]),
             (f"firewall udp/{port}", [c.fw for c in facts])]
@@ -3624,7 +3554,7 @@ def cmd_diagnose(args) -> int:
             continue
         print("    live: ○ no handshake yet")
         self_fw = self_col.fw
-        if self_col.inbound != "no" and self_col.has_ep:
+        if self_col.has_ep:
             if self_fw.startswith("OPEN") or self_fw.startswith("open"):
                 print(f"    ⚠ our host firewall {self_fw} for udp/{port} — so the "
                       f"block is NOT this host. If {other.label} can't reach us, "
@@ -3687,17 +3617,15 @@ def cmd_renew(args) -> int:
                  f"renewal goes over the overlay)")
 
     # Re-publish our record with the fresh credential, keeping our current seq+1,
-    # endpoints, and inbound — highest-seq-wins means peers adopt this promptly.
+    # endpoints — highest-seq-wins means peers adopt this promptly.
     directory = Directory.load(cfg.dir_cache_path)
     existing = directory.get(keys.id_pub_hex)
     seq = (existing.seq + 1) if existing else 1
-    endpoints = list(existing.endpoints) if existing else (
-        [] if cfg.inbound == "no" else cfg.endpoints)
-    inbound = existing.inbound if existing else cfg.inbound
+    endpoints = list(existing.endpoints) if existing else list(cfg.endpoints)
     aliases = list(existing.aliases) if existing else _config_aliases(cfg)
     record = NodeRecord(
         id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        inbound=inbound, cred=cred, aliases=aliases,
+        cred=cred, aliases=aliases,
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -4164,10 +4092,6 @@ def main(argv=None) -> int:
                     const=False, default=None,
                     help="don't maintain the managed /etc/hosts block "
                          "(<name>.gw.internal -> overlay addr); on by default")
-    sp.add_argument("--inbound", choices=["yes", "no"], default=None,
-                    help="can peers dial this node? 'no' = outbound-only "
-                         "(suppress endpoint, no inbound ports). Default: keep "
-                         "existing, else yes.")
     sp.add_argument("--no-service", action="store_true",
                     help="don't set up the systemd service; print the manual "
                          "'gw run' line instead (for non-systemd hosts)")
@@ -4330,12 +4254,6 @@ def main(argv=None) -> int:
     sp.add_argument("--no-color", dest="no_color", action="store_true",
                     help="disable ANSI colour")
     sp.set_defaults(fn=cmd_narrate)
-
-    # set-inbound
-    sp = sub.add_parser("set-inbound",
-                        help="change reachability: yes (dialable) / no (outbound-only)")
-    sp.add_argument("value", choices=["yes", "no"])
-    sp.set_defaults(fn=cmd_set_inbound)
 
     # rename
     sp = sub.add_parser("rename-mesh",

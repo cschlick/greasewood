@@ -44,7 +44,6 @@ def test_minimal_config_defaults(tmp_path):
     cfg = load_config(p)
     assert cfg.hostname == "n1"
     assert cfg.role == "node"
-    assert cfg.inbound == "yes"                # default
     assert cfg.wg_interface == "gw-mesh"       # default
     assert cfg.hosts_sync is True              # /etc/hosts sync on by default
     assert cfg.mesh_domain == "gw.internal"    # namespaced under reserved TLD

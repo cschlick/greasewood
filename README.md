@@ -127,7 +127,7 @@ derives from `id_pub`, check the revoke list, check the authorization policy —
 then installs or removes that peer with `wg set`. Membership changes,
 revocations, key rotations, and segmentation all reduce to "add or remove a
 peer," computed locally with no coordinator. A link forms as long as at least one
-side is reachable (see [Reachability](#reachability-inbound)); two unreachable
+side is reachable (see [Reachability](#reachability)); two unreachable
 nodes can't pair.
 
 ## IPv6 overlay
@@ -145,7 +145,7 @@ instances was the motivating use, which is exactly why the v4 underlay matters.)
 
 Still deliberately absent — **no NAT traversal, no routing, no relays**. The
 direct-or-fail model assumes the network already permits a direct connection (no
-STUN, no hole-punching). A NAT'd node is simply `inbound=no`: it dials out to
+STUN, no hole-punching). A NAT'd node simply advertises no reachable endpoint: it dials out to
 reachable peers and the anchor, but two unreachable nodes can't pair — and a v4-only
 node and a v6-only node share no underlay family, so they can't pair either
 (direct-or-fail across address families).
@@ -400,7 +400,7 @@ sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
 sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
-The comparison table shows each node's addresses, inbound flag, segments,
+The comparison table shows each node's addresses, reachability, segments,
 credential, and firewall for the mesh UDP port. Since diagnose runs on one node,
 **only this host's firewall is directly known** — a peer's is *inferred `OPEN`*
 whenever a handshake has been observed (packets flowing prove its whole inbound
@@ -467,7 +467,7 @@ it:
   `'gw <cmd>' needs root (<why>). Try: sudo gw <cmd>` — instead of failing
   partway on whichever file access breaks first. Root-needing commands: the
   data-plane set (`run`, `join`, `create`, `invite`, `purge`, `renew`,
-  `set-inbound`, `rename`, `anchor-promote`, `anchor-restore`) and the anchor
+  `rename`, `anchor-promote`, `anchor-restore`) and the anchor
   registry/key set (`revoke`, `set-caps`, `set-segments`, `renew-all`,
   `cert-request`, `anchor-backup`).
 - **Environment variables.** `sudo` strips the environment by default. This only
@@ -536,14 +536,14 @@ overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
 the underlay is WireGuard itself (UDP), which you open like for any VPN.
 
-`create`, `join`, and `set-inbound` **check** the local nftables ruleset and
+`create` and `join` **check** the local nftables ruleset and
 loudly warn if a needed port looks blocked by a default-drop policy, printing the
 exact rule to add. That's all greasewood does. You apply the printed rules yourself (put them in your nftables
 config, or however you configure your firewall).
 
 **No firewall at all? Then there's nothing to do — and nothing extra is
 exposed.** greasewood binds nothing to the underlay except its WireGuard UDP
-port(s): `51900` (mesh) on any inbound node, plus `51901` (the enrollment door)
+port(s): `51900` (mesh) on any node, plus `51901` (the enrollment door)
 on the anchor. Those are WireGuard, which is designed to face the internet — it
 silently drops any packet that isn't a valid handshake from a configured peer (no
 reply, no info leak). Everything else — the control plane (`51902`) and the
@@ -652,7 +652,7 @@ Behind NAT, advertise the **router's** public identity, not the LAN address:
 `gw join <token> --endpoint <router-public>:51900` on a node, and
 `gw invite --endpoint <router-public-or-dns>` on an anchor. With routable IPv6
 behind the router there's no DNAT — just accept the same two UDP ports in the
-router's v6 forward chain. A node running `inbound = no` needs **nothing**
+router's v6 forward chain. A node that advertises no endpoint needs **nothing**
 forwarded: it dials out and keepalives hold the mapping open. And the machine
 behind the router pairs this with the host ruleset above.
 
@@ -675,28 +675,31 @@ tunnel once it's up (identity is per-machine, not per-user). To restrict which
 users may originate overlay traffic, add an nftables owner-match on the output
 chain; see the "Multi-user hosts" section of [SECURITY.md](SECURITY.md).
 
-### Reachability (`inbound`)
+### Reachability
 
 WireGuard has no client/server roles — both peers try to handshake and the
 direction that physically works wins, then endpoint roaming pins it. So a link
 forms as long as **at least one side is reachable**: a firewalled node dials an
-open one, and the reply returns via `established,related`. Two fully-blocked
+open one, and the reply returns via the NAT hole it punched. Two fully-blocked
 nodes can't pair (direct-or-fail — no relays).
 
-Declare a node's reachability at join (`--inbound yes|no`, default `yes`) or
-change it later with `gw set-inbound`:
+Because of that, greasewood has **no `inbound` flag** — reachability is emergent.
+A node advertises whatever endpoint it detects (or the `--endpoint` you give it);
+one that advertises none is naturally **outbound-only** — it dials peers, and
+peers can't dial it. You don't declare this or get it wrong: it's just a
+consequence of whether an endpoint exists.
 
-- **`yes`**: advertises its endpoint; needs the mesh UDP port open.
-- **`no`** (outbound-only): the node advertises *no* endpoint, so peers don't
-  waste handshakes dialing it; it opens no inbound ports. It can only pair with
-  inbound-reachable nodes, and **can't be promoted to anchor** (an anchor must be
-  reachable). Switch it back with `sudo gw set-inbound yes` (then open the port).
+And guessing "reachable" when you aren't is harmless. Peers pin your advertised
+endpoint, get no handshake, and after a short probe window **drop keepalive to
+that endpoint** — so the futile poll stops and the link still works via you
+dialing out. The endpoint stays pinned, so if it later becomes reachable, the
+next packet re-establishes it automatically. `gw diagnose` shows a node's
+reachability (confirmed from an inbound handshake, or "outbound-only" if it
+advertises nothing), and the two-unreachable-nodes case surfaces as `✗ no
+dialable direction`.
 
-`inbound` is an optimization + a guard, not what decides direction — WireGuard
-does that on its own. So leaving it `yes` when you're actually unreachable doesn't
-break connectivity (you still dial out); peers just waste handshake attempts on
-your dead endpoint and converge slower — and `gw diagnose` will flag those as
-"configured but no handshake."
+An **anchor** must be reachable (it serves the control plane), so
+`anchor-promote` refuses a node that advertises no endpoint.
 
 ## Access control (segments)
 
@@ -776,7 +779,7 @@ Two properties worth knowing:
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
+| `status`           | no    | This node's health (version, credential expiry, reachability, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, reachable, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
 | `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
 | `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
 | `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
@@ -787,7 +790,6 @@ Two properties worth knowing:
 | `cert-remove <name>` | sudo | Stop managing a cert (drop it from auto-renewal + remove its profile snapshot). Leaves the placed files by default; `--delete-files` removes them too. |
 | `cert-status`      | no    | Show every daemon-managed TLS cert (expiry, renewal state, SANs, placed files, profile) from the manifest — wherever the files live. |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
-| `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename-node <name>` | yes | Change this node's mesh hostname (anchor-validated, no re-join; refused if the anchor pinned the name). |
 | `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the anchor, then on each member (surfaced in its `gw status`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
 | `renew`            | yes   | Force an immediate credential renewal for this node (applies an anchor-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
@@ -811,7 +813,6 @@ manual credential-copy path.
 [node]
 hostname = "node01"
 role     = "node"          # "anchor" | "node"
-inbound  = "yes"           # can this node accept cold inbound handshakes?
 caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
 
 [network]

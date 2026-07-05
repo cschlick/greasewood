@@ -13,12 +13,10 @@ data_dir = "/var/lib/greasewood"
 # "node"  — plain mesh participant
 role = "node"
 
-# Can this node accept cold inbound WireGuard handshakes? (§8)
-# "yes"     — open firewall, publicly reachable (cloud VMs, etc.)
-# "no"      — outbound-only: advertises no endpoint, opens no inbound ports,
-#             can only pair with inbound nodes, and can't be an anchor. Change with
-#             `gw set-inbound yes`.
-inbound = "yes"
+# (There is no "inbound" flag. Reachability is emergent: a node advertises an
+# endpoint below or it doesn't. One that advertises none is naturally
+# outbound-only — it dials peers; peers can't dial it. Peers back off a dead
+# endpoint automatically, so a wrong guess just goes quiet, not noisy.)
 
 # The node's tag set. Two kinds of tag live here:
 #   segments — "segment:<name>" controls who-talks-to-whom. Two nodes peer only
@@ -34,7 +32,7 @@ caps = ["segment:mesh"]
 
 # Underlay endpoint(s) other nodes dial to reach this one. The overlay is always
 # IPv6, but the underlay may be IPv4 or IPv6 — list v4 and/or v6 (v6 bracketed).
-# Usually set at join via --endpoint (needed for inbound v4 behind 1:1 NAT, which
+# Usually set at join via --endpoint (needed for v4 behind 1:1 NAT, which
 # can't be autodetected); leave empty for outbound-only nodes.
 # endpoints = ["203.0.113.5:51900", "[2001:db8::1]:51900"]
 

@@ -179,7 +179,7 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
 def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
                     segments: str | None = None,
-                    inbound: str | None = None, invite_hostname: str | None = None,
+                    invite_hostname: str | None = None,
                     check: bool = True):
     """
     Run one `gw invite` (on anchor_cid) → `gw join` (on node_cid) door enrollment.
@@ -189,13 +189,11 @@ def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6:
     overrides any node-side `--hostname` and locks rename.
     Returns the `gw join` CompletedProcess.
     """
-    # caps/segments are decided by the anchor at invite (no self-assertion); hostname
-    # and inbound remain node-side join flags.
+    # caps/segments are decided by the anchor at invite (no self-assertion);
+    # hostname remains a node-side join flag.
     join_extra = []
     if hostname is not None:
         join_extra += ["--hostname", hostname]
-    if inbound is not None:
-        join_extra += ["--inbound", inbound]
     invite_extra = []
     if caps is not None:
         invite_extra += ["--caps", caps]
@@ -236,22 +234,21 @@ def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6:
 def door_enroll(gw_anchor, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
                 segments: str | None = None,
-                inbound: str | None = None, invite_hostname: str | None = None,
+                invite_hostname: str | None = None,
                 check: bool = True):
     """Enroll an existing node container via the anchor (see door_enroll_via).
-    `hostname`/`caps`/`segments`/`inbound` are passed only when given, so omitting
+    `hostname`/`caps`/`segments` are passed only when given, so omitting
     them exercises join's "keep existing config" behavior. `invite_hostname` pins
     the name at the anchor; `segments` sets the node's segments at invite."""
     return door_enroll_via(
         gw_anchor["cid"], gw_anchor["ipv6"], node_cid, node_ipv6,
-        hostname=hostname, caps=caps, segments=segments, inbound=inbound,
+        hostname=hostname, caps=caps, segments=segments,
         invite_hostname=invite_hostname, check=check,
     )
 
 
 def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
                   caps: str | None = None, segments: str | None = None,
-                  inbound: str | None = None,
                   invite_hostname: str | None = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
@@ -276,7 +273,7 @@ def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
 
     ipv6 = container_addr(cid, gw_network)
     door_enroll(gw_anchor, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
-                inbound=inbound, invite_hostname=invite_hostname)
+                invite_hostname=invite_hostname)
 
     id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")

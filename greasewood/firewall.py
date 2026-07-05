@@ -1,7 +1,7 @@
 """
 greasewood.firewall — advisory firewall check (read-only).
 
-greasewood never modifies the host firewall. create / join / set-inbound
+greasewood never modifies the host firewall. create / join
 *check* the local nftables ruleset and loudly flag ports that look blocked,
 printing the exact rules to add — but applying them is always the operator's
 job (put them in your nftables config; the Ansible `nftables` role does this).
@@ -50,14 +50,12 @@ def anchor_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Ru
     ]
 
 
-def node_rules(listen_port: int = 51900, inbound: str = "yes") -> list[Rule]:
-    """Inbound rules a plain node needs. An outbound-only node (inbound=no)
-    needs none — it dials peers (and the anchor's door) outbound and relies on the
-    base ct established,related rule for replies. It only opens the mesh port if
-    it accepts inbound. The door port (51901) is anchor-only — a joining node
-    connects to the anchor's door outbound, so it never needs it inbound."""
-    if inbound == "no":
-        return []
+def node_rules(listen_port: int = 51900) -> list[Rule]:
+    """Inbound rules a plain node needs: just the mesh WireGuard UDP port. We
+    print it unconditionally — a node that turns out to be unreachable simply
+    never receives on it (and WireGuard is silent to unauthenticated packets, so
+    an open-but-unused port is near-zero surface). The door port (51901) is
+    anchor-only — a joining node dials the anchor's door outbound."""
     return [Rule("udp", listen_port, None, "mesh WireGuard")]
 
 
