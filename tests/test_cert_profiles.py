@@ -59,7 +59,7 @@ def test_resolve_owner_unknown_fails_loudly():
 
 def test_load_shipped_profiles_valid():
     names = cli._shipped_profile_names()
-    assert {"postgres", "nginx", "haproxy", "redis", "nats", "minio"} <= set(names)
+    assert {"postgres", "nginx", "haproxy", "redis", "nats", "minio", "mosquitto"} <= set(names)
     for name in names:
         p = cli._load_cert_profile(name)
         assert p["files"]

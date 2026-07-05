@@ -781,7 +781,7 @@ Two properties worth knowing:
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
 | `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon auto-renews it at ~half its TTL; `--reload-cmd` runs a command after each renewal, `--no-auto-renew` opts out. **`--profile <name\|path>`** issues + places the key/cert/ca where the service wants them (right owner/mode) and re-places on every renewal; `--profile <name> --show` prints a bundled template to adapt. |
-| `cert-profiles`    | no    | List the bundled cert profile templates (postgres, nginx, haproxy, redis, nats, minio) — starting points to copy and adapt. |
+| `cert-profiles`    | no    | List the bundled cert profile templates (postgres, nginx, haproxy, redis, nats, minio, mosquitto) — starting points to copy and adapt. |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
@@ -1096,7 +1096,7 @@ sudo gw cert-request --profile ./postgres.toml   # issue + place + register relo
 
 A profile is a set of `[[file]]` entries (`role` = `key`/`cert`/`ca`/`fullchain`/
 `bundle`, plus `path`, `owner`, `mode`) and a `reload` command. Bundled templates
-ship for **postgres, nginx, haproxy, redis, nats, minio** — they're *starting points, not
+ship for **postgres, nginx, haproxy, redis, nats, minio, mosquitto** — they're *starting points, not
 turnkey*: each records the OS/software version it was written against, and a
 wrong path or missing service user **fails loudly** at request time rather than
 mis-placing a cert. Copy one, adapt the paths to your system, pass it in.

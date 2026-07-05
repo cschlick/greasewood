@@ -4179,7 +4179,7 @@ def main(argv=None) -> int:
     # cert-profiles
     sp = sub.add_parser("cert-profiles",
                         help="list the bundled cert profile templates for common "
-                             "TLS services (postgres, nginx, haproxy, redis, nats, minio)")
+                             "TLS services (postgres, nginx, haproxy, redis, nats, minio, mosquitto)")
     sp.set_defaults(fn=cmd_cert_profiles)
 
     # cert-status
