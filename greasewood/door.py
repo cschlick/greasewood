@@ -16,6 +16,8 @@ Token wire format:
       host_len     : 1 byte
       hub_host     : host_len bytes  (underlay host)
       seed         : 32 bytes   (the only secret)
+      domain_len   : 1 byte
+      mesh_domain  : domain_len bytes  (the mesh's ONE name domain)
   )
 
 Derivation uses HKDF-SHA256 with salt="greasewood-door-v1":
@@ -120,48 +122,59 @@ def encode_token(
     hub_host: str,
     seed: bytes,
     door_port: int = DOOR_PORT,
+    mesh_domain: str = "",
 ) -> str:
     """Encode a join token. Carries the hub's door UDP port so a brand-new node
     (which has only the token) can reach the door wherever the hub configured it.
 
-    Layout: hub_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host seed[32]
+    Also carries the mesh's name domain: joiners adopt it (a mesh has ONE
+    domain everywhere), and check it against existing memberships BEFORE the
+    door dance — so a domain collision refuses without burning the invite.
+
+    Layout: hub_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host
+            seed[32] domain_len[1] domain
     """
     host_bytes = hub_host.encode()
+    domain_bytes = (mesh_domain or "").encode()
     payload = (
         hub_door_pub_bytes + ca_pub_bytes
         + struct.pack(">H", door_port)
         + bytes([len(host_bytes)]) + host_bytes + seed
+        + bytes([len(domain_bytes)]) + domain_bytes
     )
     return TOKEN_PREFIX + base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
 
 
-def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int]:
+def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
     """
     Decode a join token.
-    Returns (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port).
-    Raises ValueError on malformed input.
+    Returns (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port,
+    mesh_domain). Raises ValueError on malformed input.
     """
     if not token.startswith(TOKEN_PREFIX):
         raise ValueError(f"token must start with {TOKEN_PREFIX!r}")
     b64 = token[len(TOKEN_PREFIX):]
     payload = base64.urlsafe_b64decode(b64 + "=" * ((-len(b64)) % 4))
 
-    # hub_door_pub + ca_pub + door_port + host_len + seed (minimum, empty host)
-    if len(payload) < 32 + 32 + 2 + 1 + 32:
+    # hub_door_pub + ca_pub + door_port + host_len + seed + domain_len (minimum)
+    if len(payload) < 32 + 32 + 2 + 1 + 32 + 1:
         raise ValueError("token payload too short")
 
     hub_door_pub = payload[:32]
     ca_pub = payload[32:64]
     door_port = struct.unpack(">H", payload[64:66])[0]
     host_len = payload[66]
-    if len(payload) < 67 + host_len + 32:
+    if len(payload) < 67 + host_len + 32 + 1:
         raise ValueError("token payload truncated")
     hub_host = payload[67:67 + host_len].decode()
-    # The truncation check above guarantees ≥32 trailing bytes, so this slice is
-    # always exactly the 32-byte seed.
     seed = payload[67 + host_len:67 + host_len + 32]
+    dlen_at = 67 + host_len + 32
+    domain_len = payload[dlen_at]
+    if len(payload) < dlen_at + 1 + domain_len:
+        raise ValueError("token payload truncated (domain)")
+    mesh_domain = payload[dlen_at + 1:dlen_at + 1 + domain_len].decode()
 
-    return hub_door_pub, ca_pub, hub_host, seed, door_port
+    return hub_door_pub, ca_pub, hub_host, seed, door_port, mesh_domain
 
 
 # ---------------------------------------------------------------------------

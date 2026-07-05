@@ -705,7 +705,7 @@ def cmd_invite(args) -> int:
         }))
 
     token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
-                         cfg.door_port)
+                         cfg.door_port, mesh_domain=cfg.mesh_domain)
     print(token)
     return 0
 
@@ -901,7 +901,8 @@ def cmd_join(args) -> int:
     # Decode token → hub_door_pub, ca_pub, hub_host(s), seed, door_port.
     # Decoded FIRST because the CA pub routes the join (see below).
     try:
-        hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port = decode_token(token)
+        (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port,
+         token_domain) = decode_token(token)
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
     ca_pub_hex = ca_pub_bytes.hex()
