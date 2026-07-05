@@ -136,9 +136,10 @@ def _config_aliases(cfg) -> list:
 
 def _san_to_owned_label(san: str, cfg) -> "str | None":
     """If `san` is a strict subdomain of this node's own mesh name, return the
-    single label under it (e.g. 'pg.db01.gw.internal' → 'pg'); else None."""
+    single label under it (e.g. 'pg.db01.gw.internal' → 'pg'); else None.
+    Cert SANs live in the mesh's CANONICAL namespace (see cert-request)."""
     from . import hosts
-    own = hosts.mesh_name(cfg.hostname, cfg.mesh_domain)
+    own = hosts.mesh_name(cfg.hostname, cfg.canonical_domain)
     suffix = "." + own
     if san.endswith(suffix):
         label = san[: -len(suffix)]
@@ -940,14 +941,16 @@ def cmd_join(args) -> int:
             cfg_path, data_dir = sp["config"], sp["data_dir"]
             listen_port = sp["listen_port"]
             args.interface = sp["interface"]
-            args.mesh_domain = sp["mesh_domain"]
+            # mesh_domain is NOT preset here: the hub advertises the mesh's
+            # canonical domain in the enroll response, and the joiner adopts it
+            # when locally free — the slot name (gwN.internal) is only the
+            # collision fallback. Resolved after enrollment, below.
             slot_n = n
             log.info(
                 "token is for a mesh this host isn't on — auto-provisioning "
-                "membership #%d: config %s, data %s, interface %s, UDP %d, "
-                "names *.%s  (every value overridable with join flags)",
-                n, cfg_path, data_dir, args.interface, listen_port,
-                args.mesh_domain)
+                "membership #%d: config %s, data %s, interface %s, UDP %d "
+                "(every value overridable with join flags)",
+                n, cfg_path, data_dir, args.interface, listen_port)
 
     # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
     # address), so this just refreshes the credential. Detect it so we can (a)
@@ -1220,11 +1223,57 @@ def cmd_join(args) -> int:
     else:
         hosts_sync = "true"
     # mesh_domain / interface: explicit flag wins, else keep prior, else default.
-    mesh_domain = (args.mesh_domain or (prior.mesh_domain if prior and getattr(prior, "mesh_domain", None)
-                   else "gw.internal"))
+    # Name domain: explicit flag > prior config (a re-join never renames) >
+    # the domain the HUB advertised in the enroll response (adopted when no
+    # other membership on this host already mounts that suffix — so a mesh's
+    # canonical name is the same on every member and TLS names agree fleet-
+    # wide) > the slot fallback. When the canonical domain is locally TAKEN
+    # (two meshes both on the default), the local mount falls back to the slot
+    # name and the canonical domain is remembered separately: certs this node
+    # requests still carry the canonical name the REST of the mesh resolves it
+    # by; only this host's own outbound TLS dials need canonical-name
+    # verification (curl --connect-to / psql hostaddr= style).
+    hub_domain = resp.get("mesh_domain") or None
+    canonical_domain = None
+    slot_fallback = _slot_paths(slot_n)["mesh_domain"] if slot_n else "gw.internal"
+    if args.mesh_domain:
+        mesh_domain = args.mesh_domain
+    elif prior and getattr(prior, "mesh_domain", None):
+        mesh_domain = prior.mesh_domain
+        pc = getattr(prior, "canonical_domain", None)
+        canonical_domain = pc if pc and pc != mesh_domain else None
+    elif hub_domain:
+        taken = set()
+        for _n, _p in _mesh_slots():
+            if _p.resolve() == cfg_path.resolve():
+                continue
+            try:
+                taken.add(load_config(_p).mesh_domain)
+            except Exception:
+                continue
+        if hub_domain not in taken:
+            mesh_domain = hub_domain
+        else:
+            mesh_domain = slot_fallback
+            canonical_domain = hub_domain
+            log.warning(
+                "this mesh's canonical domain %r is already used by another "
+                "membership on this host — mounting it locally at %r instead. "
+                "Certs this node requests still carry canonical *.%s names "
+                "(the rest of the mesh verifies them fine), but TLS clients ON "
+                "THIS HOST dialing *.%s must verify against the canonical name "
+                "(e.g. curl --connect-to, psql host=/hostaddr=). To make this "
+                "go away, give one of the meshes a distinct domain at its hub.",
+                hub_domain, mesh_domain, hub_domain, mesh_domain)
+    else:
+        mesh_domain = slot_fallback
     interface = (args.interface or (prior.wg_interface if prior and getattr(prior, "wg_interface", None)
                  else "gw-mesh"))
 
+    # Written only when the local mount had to diverge from the mesh's
+    # canonical domain (collision fallback) — certs use the canonical name.
+    canonical_line = (f'canonical_domain = "{canonical_domain}"\n'
+                      if canonical_domain else "")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
@@ -1241,7 +1290,7 @@ seeds = {seeds_list}
 root_url = {root_url_val}
 hosts_sync = {hosts_sync}
 mesh_domain = "{mesh_domain}"
-
+{canonical_line}
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
 """)
@@ -1633,11 +1682,13 @@ def cmd_cert_request(args) -> int:
             dns.append(s)
 
     # Default to this node's own mesh name + overlay address, so the cert is
-    # valid for exactly the name peers resolve it by (the /etc/hosts block and
-    # the cert SAN use the same <hostname>.<mesh_domain>) plus its raw address.
+    # valid for exactly the name peers resolve it by. That's the mesh's
+    # CANONICAL domain — identical to mesh_domain except on a multi-mesh host
+    # whose local mount had to fall back (domain collision): peers still
+    # resolve this node under the canonical suffix, so that's the cert name.
     if not dns and not ips:
         from .hosts import mesh_name
-        dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
+        dns = [mesh_name(cfg.hostname, cfg.canonical_domain)]
         ips = [keys.addr]
 
     # CN is not operator-settable: it's cosmetic under verify-full (the SAN is
@@ -1723,7 +1774,7 @@ def cmd_cert_request(args) -> int:
     labels = [lbl for d in dns if (lbl := _san_to_owned_label(d, cfg))]
     if labels:
         added = _add_config_aliases(Path(args.config), cfg, labels)
-        own = _mesh_name(cfg.hostname, cfg.mesh_domain)
+        own = _mesh_name(cfg.hostname, cfg.canonical_domain)
         if added:
             print()
             print("published name(s) so peers can resolve this service on the mesh:")
@@ -2049,6 +2100,7 @@ def cmd_run(args) -> int:
             cache_path=cfg.dir_cache_path,
             control_port=_control_port(cfg),
             door_port=cfg.door_port,
+            mesh_domain=cfg.mesh_domain,
         )
         door_watcher.start()
         log.info("door watcher started")

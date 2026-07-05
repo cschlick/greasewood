@@ -118,3 +118,23 @@ def test_shared_prefix_warns_distinct_does_not(tmp_path, caplog):
         assert cli._warn_shared_overlay_prefix(
             tmp_path / "greasewood.toml", "fd8d:e5c1:db1a:7::", etc=tmp_path) is False
         assert not caplog.records
+
+
+def test_canonical_domain_defaults_and_parses(tmp_path):
+    """canonical_domain: absent → equals mesh_domain (local == canonical, the
+    normal case); present → the mesh's real namespace while mesh_domain stays
+    the local mount (the collision-fallback case)."""
+    from greasewood.config import load_config
+    ca = CAKeys.generate()
+    _write_cfg(tmp_path / "greasewood.toml", tmp_path / "d1", ca.ca_pub_hex,
+               domain="gw2.internal")
+    cfg = load_config(tmp_path / "greasewood.toml")
+    assert cfg.canonical_domain == "gw2.internal"          # defaults to local
+
+    p2 = tmp_path / "greasewood2.toml"
+    _write_cfg(p2, tmp_path / "d2", ca.ca_pub_hex, domain="gw2.internal")
+    p2.write_text(p2.read_text().replace(
+        "[network]", '[network]\ncanonical_domain = "gw.internal"'))
+    cfg2 = load_config(p2)
+    assert cfg2.mesh_domain == "gw2.internal"              # local mount
+    assert cfg2.canonical_domain == "gw.internal"          # cert namespace

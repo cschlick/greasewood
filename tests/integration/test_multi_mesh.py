@@ -142,15 +142,22 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             assert r.returncode == 0, f"auto-slot join failed:\n{r.stdout}\n{r.stderr}"
             assert "auto-provisioning" in (r.stdout + r.stderr)
 
-        # Slot 2 got the derived names, slot 1 is untouched.
+        # Slot 2 got the derived names, slot 1 is untouched. Both hubs kept the
+        # DEFAULT mesh domain, so this is the default-default domain collision:
+        # the local mount falls back to gw2.internal, the mesh's canonical
+        # domain (gw.internal) is remembered for cert names, and the join
+        # warned about the one consequence.
         cfg2 = pexec(node, "cat", "/etc/greasewood2.toml").stdout
         assert 'interface = "gw-mesh2"' in cfg2
         assert "listen_port = 51910" in cfg2
         assert 'mesh_domain = "gw2.internal"' in cfg2
+        assert 'canonical_domain = "gw.internal"' in cfg2
         assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
         assert 'data_dir = "/var/lib/greasewood2"' in cfg2
+        assert "canonical domain" in (r.stdout + r.stderr)       # the warning
         cfg1 = pexec(node, "cat", "/etc/greasewood.toml").stdout
         assert 'interface = "gw-mesh"' in cfg1 and "listen_port = 51900" in cfg1
+        assert "canonical_domain" not in cfg1                     # normal case: omitted
 
         # Both daemons up; both overlays reachable.
         podman("exec", "-d", node, "sh", "-c", "gw run >> /tmp/a.log 2>&1")

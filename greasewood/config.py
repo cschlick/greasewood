@@ -34,6 +34,12 @@ class Config:
     # TLS cert name (gw cert-request), so a node's address name == its cert SAN.
     hosts_sync: bool
     mesh_domain: str
+    # The MESH's canonical name domain, when the local mount (mesh_domain above)
+    # had to diverge from it — a multi-mesh host where two meshes claimed the
+    # same suffix. Certs use the canonical name (what the rest of the mesh
+    # resolves this node by); /etc/hosts uses the local mesh_domain. Defaults
+    # to mesh_domain (the normal case: local == canonical).
+    canonical_domain: str
     # Extra service names this node publishes into the mesh's /etc/hosts, as
     # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
     # `gw cert-request` appends one automatically for a subdomain --san.
@@ -117,6 +123,8 @@ def load_config(path: Path) -> Config:
 
         hosts_sync=bool(net.get("hosts_sync", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
+        canonical_domain=net.get("canonical_domain",
+                                 net.get("mesh_domain", "gw.internal")),
         aliases=list(net.get("aliases", [])),
         # Default to <data_dir>/audit.log; "" (explicitly empty) disables it.
         audit_log=(
