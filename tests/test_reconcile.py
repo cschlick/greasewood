@@ -201,7 +201,7 @@ class _FakeWg:
         self.set_calls += 1
         self.peers[wg_pub_b64] = LivePeer(
             wg_pub_b64=wg_pub_b64, endpoint=endpoint or "",
-            allowed_ips=f"{allowed_ip}/128",
+            allowed_ips=f"{allowed_ip}/128", keepalive=keepalive,
         )
 
     def remove_peer(self, iface, wg_pub_b64, allowed_ip=None):
@@ -292,7 +292,7 @@ class TestReconcileTrustGate:
         pub = base64.b64encode(peer.wg_pub_bytes).decode()
         fake.peers[pub] = LivePeer(          # kernel still has the old endpoint
             wg_pub_b64=pub, endpoint="[2001:db8::9]:51900",
-            allowed_ips=f"{rec.cred.addr}/128",
+            allowed_ips=f"{rec.cred.addr}/128", keepalive=25,
         )
         monkeypatch.setattr(reconcile, "wgmod", fake)
 
@@ -357,3 +357,77 @@ class TestInterfaceSelfHeal:
         monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: [])
         loop = self._loop(None)
         loop._cycle()
+
+
+class TestEndpointBackoff:
+    """A dead endpoint gets keepalive dropped to 0 (stop the futile 25s poke),
+    stays pinned for automatic recovery, and restores keepalive on a handshake."""
+
+    def test_tracker_marks_dead_after_dwell_single_endpoint(self):
+        from greasewood.reconcile import _EndpointTracker
+        t = _EndpointTracker(dwell=20.0, healthy=180.0)
+        eps = ["[2001:db8::9]:51900"]
+        assert t.choose("p", eps, hs=0, now=0.0) == eps[0]
+        assert not t.is_backoff("p")                       # fresh, still probing
+        t.choose("p", eps, hs=0, now=10.0)                 # 10s, no handshake
+        assert not t.is_backoff("p")                       # within dwell
+        t.choose("p", eps, hs=0, now=25.0)                 # past dwell, still dead
+        assert t.is_backoff("p")                           # → backoff
+
+    def test_tracker_backoff_clears_on_handshake(self):
+        from greasewood.reconcile import _EndpointTracker
+        t = _EndpointTracker(dwell=20.0, healthy=180.0)
+        eps = ["[2001:db8::9]:51900"]
+        t.choose("p", eps, hs=0, now=0.0)
+        t.choose("p", eps, hs=0, now=25.0)
+        assert t.is_backoff("p")
+        t.choose("p", eps, hs=1000, now=1010.0)            # handshake 10s ago
+        assert not t.is_backoff("p")                       # recovered
+
+    def test_tracker_two_endpoints_dead_after_full_cycle(self):
+        from greasewood.reconcile import _EndpointTracker
+        t = _EndpointTracker(dwell=20.0, healthy=180.0)
+        eps = ["[2001:db8::9]:51900", "203.0.113.7:51900"]
+        t.choose("p", eps, hs=0, now=0.0)
+        t.choose("p", eps, hs=0, now=25.0)                 # rotated to #2; 1 dwell in
+        assert not t.is_backoff("p")                       # still probing #2
+        t.choose("p", eps, hs=0, now=45.0)                 # 2 dwells → whole set dead
+        assert t.is_backoff("p")
+
+    def test_reconcile_drops_keepalive_on_dead_endpoint(self, monkeypatch):
+        """End to end: a peer whose endpoint never handshakes is re-set with
+        keepalive=0, endpoint still pinned."""
+        import base64
+        import time as _time
+        from greasewood import reconcile as rmod
+        from greasewood.reconcile import reconcile_once, _EndpointTracker
+        from greasewood.wg import LivePeer
+
+        ca = CAKeys.generate()
+        local, peer = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        rec = _make_record(peer, _make_cred(peer, ca, "peer"),
+                           endpoints=["[2001:db8::9]:51900"])
+        directory.put(rec)
+
+        fake = _FakeWg()
+        pub = base64.b64encode(peer.wg_pub_bytes).decode()
+        # Kernel already has the peer with the pinned endpoint, keepalive 25,
+        # and NO handshake (dead).
+        fake.peers[pub] = LivePeer(wg_pub_b64=pub, endpoint="[2001:db8::9]:51900",
+                                   allowed_ips=f"{rec.cred.addr}/128",
+                                   latest_handshake=0, keepalive=25)
+        monkeypatch.setattr(rmod, "wgmod", fake)
+        # Tracker already past dwell for this peer (unhealthy since t=0).
+        tracker = _EndpointTracker(dwell=20.0)
+        tracker._state[pub] = {"current": "[2001:db8::9]:51900", "since": 0.0,
+                               "unhealthy_since": 0.0, "dead": False}
+        monkeypatch.setattr(_time, "time", lambda: 1000.0)
+
+        reconcile_once("gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), endpoint_tracker=tracker)
+
+        assert fake.set_calls == 1                          # re-set for keepalive
+        assert fake.peers[pub].keepalive == 0               # futile poke stopped
+        assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"  # still pinned

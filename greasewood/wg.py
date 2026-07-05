@@ -183,6 +183,7 @@ class LivePeer:
     latest_handshake: int = 0   # unix epoch seconds; 0 = never handshaked
     rx_bytes: int = 0
     tx_bytes: int = 0
+    keepalive: int = 0          # persistent-keepalive secs (0 = off)
 
 
 def destroy_interface(iface: str) -> None:
@@ -357,5 +358,6 @@ def get_peers(iface: str) -> dict[str, LivePeer]:
             latest_handshake=_int(0),
             rx_bytes=_int(1),
             tx_bytes=_int(2),
+            keepalive=_int(3),      # "off" → 0 (via _int's ValueError guard)
         )
     return peers
