@@ -92,7 +92,7 @@ def gw_hub(gw_image, gw_network):
         ipv6 = container_addr(cid, gw_network)
         assert ipv6, "hub container got no underlay address"
 
-        pexec(cid, "gw", "create",
+        pexec(cid, "gw", "create", "testmesh",
               "--hostname", "hub",
               "--endpoint", _ep(ipv6, 51900))
 
@@ -142,7 +142,7 @@ def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
     time.sleep(1)
     ipv6 = container_addr(cid, gw_network)
     assert ipv6, "hub container got no underlay address"
-    pexec(cid, "gw", "create", "--hostname", hostname,
+    pexec(cid, "gw", "create", f"{hostname}mesh", "--hostname", hostname,
           "--endpoint", _ep(ipv6, 51900), "--credential-ttl", ttl)
     id_pub = pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip()
     ca_pub = pexec(cid, "cat", "/var/lib/greasewood/ca.pub").stdout.strip()

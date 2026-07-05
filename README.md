@@ -313,7 +313,7 @@ service](#running-as-a-service); then the workflow is just install → setup/joi
 On the machine that will hold the CA and serve enrollment:
 
 ```bash
-sudo gw create
+sudo gw create myfleet          # names live under *.myfleet.internal
 sudo gw run
 ```
 
@@ -426,7 +426,7 @@ watcher (armed immediately) and the service (for boot), and does **not** start a
 daemon until you configure the node. After it's installed:
 
 ```bash
-sudo gw create                     # on the hub        → daemon auto-starts
+sudo gw create myfleet             # on the hub        → daemon auto-starts
 sudo gw join "$TOKEN" --hostname n01  # on a node         → daemon auto-starts
 journalctl -u greasewood -f           # watch it (no live terminal anymore)
 ```
@@ -887,16 +887,18 @@ sudo gw join "$TOKEN_B"        # that's it
 `join` routes by the token's **CA**: a token for a mesh you're already on
 refreshes that membership; an unknown CA **auto-provisions the next membership
 slot** — config `/etc/greasewood2.toml`, data `/var/lib/greasewood2`, interface
-`gw-mesh2`, UDP `51910`, names under `gw2.internal` (then 3, 4, … each +10 on
-the port). If slot 1 runs as a systemd service, the new membership gets its own
-`greasewood2.service`, started and boot-enabled automatically; otherwise join
-prints the `gw -c /etc/greasewood2.toml run` line. Everything else is per
-membership via `-c`:
+`gw-mesh2`, UDP `51910` (then 3, 4, … each +10). The mesh's **name domain rides
+in the token** (declared once at `gw create <name>` → `<name>.internal`), so
+every member of a mesh — including multi-mesh hosts — mounts it under the SAME
+suffix, and TLS names agree fleet-wide with no flags.
 
-```bash
-sudo gw -c /etc/greasewood2.toml status      # mesh 2's roster, your mesh-2 identity
-ping db.gw2.internal                          # mesh 2's names, next to mesh 1's
-```
+**Domain collisions are a hard no**: a node cannot bridge two meshes with the
+same domain — no local aliasing exists (a per-host alias would diverge from the
+names in the mesh's TLS certs, a debugging trap; and rewriting is off the table
+since names are CA-attested). The join refuses *before* the door dance (the
+token is not consumed) and tells you the fix: rename one mesh on its hub.
+Requiring a mesh name at create makes this a genuine coincidence rather than
+the default-default certainty it used to be.
 
 Every derived value is still overridable — pass any of the explicit knobs and
 the auto-slotting steps aside entirely:

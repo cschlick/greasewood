@@ -28,8 +28,9 @@ def _run_container(gw_image, gw_network):
     return cid
 
 
-def _bring_up_hub(cid, ipv6, hostname, prefix):
-    pexec(cid, "gw", "create", "--hostname", hostname,
+def _bring_up_hub(cid, ipv6, hostname, prefix, mesh_name=None):
+    pexec(cid, "gw", "create", mesh_name or f"{hostname}mesh",
+          "--hostname", hostname,
           "--endpoint", f"[{ipv6}]:51900", "--overlay-prefix", prefix)
     overlay = overlay_addr_from_id_pub(
         pexec(cid, "cat", "/var/lib/greasewood/id_pub.hex").stdout.strip(), prefix)
@@ -38,7 +39,7 @@ def _bring_up_hub(cid, ipv6, hostname, prefix):
 
 
 def _join(hub_cid, hub_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
-          port, domain):
+          port):
     """Invite on the hub, join on the node into a distinct local instance."""
     with _ENROLL_LOCK:
         res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6)
@@ -46,7 +47,7 @@ def _join(hub_cid, hub_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
         # Config path is the global -c, before the subcommand.
         r = pexec(node_cid, "gw", "-c", cfg, "join", token,
                   "--data-dir", data_dir, "--interface", iface,
-                  "--listen-port", str(port), "--mesh-domain", domain,
+                  "--listen-port", str(port),
                   "--endpoint", f"[{node_ipv6}]:{port}", check=False)
         assert r.returncode == 0, f"join failed:\n{r.stdout}\n{r.stderr}"
         # let the hub tear its door down before the next invite
@@ -72,10 +73,10 @@ def test_node_on_two_meshes(gw_hub, gw_image, gw_network):
         # Join both meshes as separate local instances.
         _join(gw_hub["cid"], gw_hub["ipv6"], node, node_ipv6,
               cfg="/etc/gw-a.toml", data_dir="/var/lib/gw-a", iface="gwa",
-              port=51900, domain="alpha")
+              port=51900)
         _join(hub_b, hub_b_ipv6, node, node_ipv6,
               cfg="/etc/gw-b.toml", data_dir="/var/lib/gw-b", iface="gwb",
-              port=51910, domain="beta")
+              port=51910)
 
         # Configs carry different overlay prefixes.
         cfg_a = pexec(node, "cat", "/etc/gw-a.toml").stdout
@@ -112,7 +113,7 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
     /etc/greasewood2.toml, /var/lib/greasewood2, gw-mesh2, UDP 51910, names
     under gw2.internal — and a repeat join with the same mesh's token routes
     back to slot 2 (refresh) instead of allocating slot 3."""
-    hub_c = node = None
+    hub_c = hub_d = node = None
     try:
         hub_c = _run_container(gw_image, gw_network)
         hub_c_ipv6 = container_ipv6(hub_c, gw_network)
@@ -142,22 +143,17 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             assert r.returncode == 0, f"auto-slot join failed:\n{r.stdout}\n{r.stderr}"
             assert "auto-provisioning" in (r.stdout + r.stderr)
 
-        # Slot 2 got the derived names, slot 1 is untouched. Both hubs kept the
-        # DEFAULT mesh domain, so this is the default-default domain collision:
-        # the local mount falls back to gw2.internal, the mesh's canonical
-        # domain (gw.internal) is remembered for cert names, and the join
-        # warned about the one consequence.
+        # Slot 2 got the derived names + the mesh's OWN domain (carried in the
+        # token — a mesh has ONE domain everywhere; no local aliasing exists).
         cfg2 = pexec(node, "cat", "/etc/greasewood2.toml").stdout
         assert 'interface = "gw-mesh2"' in cfg2
         assert "listen_port = 51910" in cfg2
-        assert 'mesh_domain = "gw2.internal"' in cfg2
-        assert 'canonical_domain = "gw.internal"' in cfg2
+        assert 'mesh_domain = "hubcmesh.internal"' in cfg2
         assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
         assert 'data_dir = "/var/lib/greasewood2"' in cfg2
-        assert "canonical domain" in (r.stdout + r.stderr)       # the warning
         cfg1 = pexec(node, "cat", "/etc/greasewood.toml").stdout
         assert 'interface = "gw-mesh"' in cfg1 and "listen_port = 51900" in cfg1
-        assert "canonical_domain" not in cfg1                     # normal case: omitted
+        assert 'mesh_domain = "testmesh.internal"' in cfg1        # adopted from token
 
         # Both daemons up; both overlays reachable.
         podman("exec", "-d", node, "sh", "-c", "gw run >> /tmp/a.log 2>&1")
@@ -179,7 +175,31 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             assert "refreshing it" in (r.stdout + r.stderr)
         assert pexec(node, "test", "-e", "/etc/greasewood3.toml",
                      check=False).returncode != 0, "refresh wrongly made slot 3"
+
+        # HARD-NO collision: a third mesh whose name collides with membership
+        # #1 ("testmesh") is refused BEFORE the door dance — no alias, no new
+        # slot, and the token is NOT consumed (hub_d's window stays open).
+        hub_d = _run_container(gw_image, gw_network)
+        hub_d_ipv6 = container_ipv6(hub_d, gw_network)
+        _bring_up_hub(hub_d, hub_d_ipv6, "hubd", "fdde:cafc:ffe:d::",
+                      mesh_name="testmesh")
+        with _ENROLL_LOCK:
+            res = pexec(hub_d, "gw", "invite", "--endpoint", hub_d_ipv6)
+            tok_d = _extract_token(res.stdout + "\n" + res.stderr)
+            r = pexec(node, "gw", "join", tok_d,
+                      "--endpoint", f"[{node_ipv6}]:51920", check=False)
+            assert r.returncode != 0, "same-domain join was NOT refused!"
+            out = r.stdout + r.stderr
+            assert "cannot bridge two meshes with the same domain" in out
+            assert "set-domain" in out and "NOT consumed" in out
+            assert pexec(node, "test", "-e", "/etc/greasewood3.toml",
+                         check=False).returncode != 0, "refusal still made a slot"
+            # Token unburned: hub_d's door window is still open.
+            assert pexec(hub_d, "test", "-e",
+                         "/var/lib/greasewood/door_window.json").returncode == 0
+            pexec(hub_d, "rm", "-f", "/var/lib/greasewood/door_window.json",
+                  check=False)
     finally:
-        for cid in (hub_c, node):
+        for cid in (hub_c, hub_d, node):
             if cid:
                 podman("rm", "-f", cid, check=False)

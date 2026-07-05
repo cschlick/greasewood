@@ -37,7 +37,7 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
     try:
         hub = _run_container(gw_image, gw_network)
         hub_ipv6 = container_ipv6(hub, gw_network)
-        pexec(hub, "gw", "create", "--hostname", "customhub",
+        pexec(hub, "gw", "create", "customports", "--hostname", "customhub",
               "--endpoint", f"[{hub_ipv6}]:51900",
               "--control-port", str(CONTROL_PORT), "--door-port", str(DOOR_PORT))
         hub_overlay = overlay_addr_from_id_pub(
