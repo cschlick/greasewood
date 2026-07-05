@@ -2658,8 +2658,10 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
         sys.exit("gw status --live needs a terminal (it redraws in place); "
                  "plain 'gw status' for piped/one-shot output")
     if os.geteuid() != 0:
-        sys.exit("gw status --live needs root (it reads live WireGuard state "
-                 "and pings peers). Try: sudo gw status --live")
+        # Root is for `wg show` (live link state) — the same gate the static
+        # right-side columns have. Pinging itself is unprivileged on Linux.
+        sys.exit("gw status --live needs root — it reads live WireGuard state "
+                 "(wg show). Try: sudo gw status --live")
 
     prober = _LatencyProber()
     prober.start()
