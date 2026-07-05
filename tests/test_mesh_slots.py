@@ -154,3 +154,39 @@ def test_create_requires_valid_mesh_name(monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.cmd_create(ns)
     assert "must be a DNS label" in str(e.value)
+
+
+def test_join_derives_paths_with_no_flags(tmp_path, monkeypatch):
+    """Regression: -c/--data-dir default to None (derived from the token's mesh
+    name); cmd_join must survive its entry path — Path(None) once crashed every
+    flag-less join before the door dance. Runs join up to the door bring-up
+    (stubbed to a sentinel), proving derivation happened."""
+    import types
+    import pytest
+    from greasewood.door import encode_token, generate_seed
+
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    mp = {"config": tmp_path / "greasewood_zzz.toml",
+          "data_dir": tmp_path / "greasewood_zzz",
+          "interface": "gw_zzz", "unit": "greasewood@zzz"}
+    monkeypatch.setattr(cli, "_membership_paths", lambda key, **kw: mp)
+    monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])
+    monkeypatch.setattr(cli, "_membership_for_ca", lambda ca, etc=None: None)
+
+    class Sentinel(RuntimeError):
+        pass
+
+    def boom(*a, **k):
+        raise Sentinel("reached the door bring-up")
+    monkeypatch.setattr("greasewood.wg.ensure_node_door_interface", boom)
+
+    token = encode_token(b"\x01" * 32, b"\x02" * 32, "203.0.113.9",
+                         generate_seed(), 51901, mesh_domain="zzz.internal")
+    ns = types.SimpleNamespace(token=token, config=None, data_dir=None,
+                               listen_port=None, interface=None, hostname="n1",
+                               inbound=None, endpoint="[fd00::1]:51900",
+                               hosts_sync=None)
+    with pytest.raises(Sentinel):
+        cli.cmd_join(ns)
+    # Derivation happened: keys were generated into the derived data dir.
+    assert (tmp_path / "greasewood_zzz" / "id_pub.hex").exists()
