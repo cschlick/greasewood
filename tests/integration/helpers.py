@@ -54,6 +54,7 @@ def hub_get(hub_cid: str, path: str, port: int = 51902) -> str:
 
 
 def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 51902) -> bool:
+    iface = iface or mesh_iface(container)
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -80,19 +81,32 @@ def ping_once(container: str, addr: str, timeout: int = 2) -> bool:
     return r.returncode == 0
 
 
-def wg_peer_count(container: str, iface: str = "gw_testmesh") -> int:
+def mesh_iface(container: str) -> str:
+    """The container's mesh interface (gw_<name> — one membership per test
+    container; the door is 'gw-door', hyphen, so it never matches)."""
+    out = pexec(container, "sh", "-c",
+                "wg show interfaces 2>/dev/null || true").stdout.split()
+    for tok in out:
+        if tok.startswith("gw_"):
+            return tok
+    return "gw_none"
+
+
+def wg_peer_count(container: str, iface: "str | None" = None) -> int:
     """Number of WireGuard peers currently installed on the interface."""
+    iface = iface or mesh_iface(container)
     r = pexec(container, "wg", "show", iface, "peers", check=False)
     if r.returncode != 0:
         return 0
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
-def wg_handshake_ages(container: str, iface: str = "gw_testmesh") -> list[int]:
+def wg_handshake_ages(container: str, iface: "str | None" = None) -> list[int]:
     """Age in seconds of each peer's most recent handshake (now - latest). A
     peer that has never handshaked is reported as a very large age. Empty list
     if the interface/daemon isn't up. Used by the soak test to assert tunnels
     stay warm across renewal cycles."""
+    iface = iface or mesh_iface(container)
     r = pexec(container, "wg", "show", iface, "latest-handshakes", check=False)
     if r.returncode != 0:
         return []
@@ -110,7 +124,7 @@ def wg_handshake_ages(container: str, iface: str = "gw_testmesh") -> list[int]:
     return ages
 
 
-def wait_for_peer_count(container: str, expected: int, iface: str = "gw_testmesh",
+def wait_for_peer_count(container: str, expected: int, iface: "str | None" = None,
                         timeout: int = 90) -> int:
     """
     Block until the interface has at least `expected` peers. Returns the final
