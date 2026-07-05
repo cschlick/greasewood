@@ -782,7 +782,8 @@ Two properties worth knowing:
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
 | `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon auto-renews it at ~half its TTL; `--reload-cmd` runs a command after each renewal, `--no-auto-renew` opts out. **`--profile <name\|path>`** issues + places the key/cert/ca where the service wants them (right owner/mode) and re-places on every renewal; `--profile <name> --show` prints a bundled template to adapt. |
 | `cert-profiles`    | no    | List the bundled cert profile templates (postgres, nginx, haproxy, redis, nats, minio, mosquitto) — starting points to copy and adapt. |
-| `cert-status`      | no    | Show local TLS certs and their expiry.                     |
+| `cert-remove <name>` | sudo | Stop managing a cert (drop it from auto-renewal + remove its profile snapshot). Leaves the placed files by default; `--delete-files` removes them too. |
+| `cert-status`      | no    | Show every daemon-managed TLS cert (expiry, renewal state, SANs, placed files, profile) from the manifest — wherever the files live. |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
 | `rename-node <name>` | yes | Change this node's mesh hostname (anchor-validated, no re-join; refused if the anchor pinned the name). |
@@ -1100,6 +1101,8 @@ ship for **postgres, nginx, haproxy, redis, nats, minio, mosquitto** — they're
 turnkey*: each records the OS/software version it was written against, and a
 wrong path or missing service user **fails loudly** at request time rather than
 mis-placing a cert. Copy one, adapt the paths to your system, pass it in.
+
+`cert-request` is **idempotent**: an unchanged re-request of a still-valid cert is a no-op (safe to run from config management), so a change (new SAN, edited profile path) is what triggers a re-issue; `--renew` forces one. The profile you pass is snapshotted to `<data_dir>/tls/profiles/<name>.toml` for record-keeping (the manifest already holds the effective config). `gw cert-status` lists everything the daemon manages, and `gw cert-remove <name>` stops managing one (keeping the placed files unless `--delete-files`).
 
 The leaf private key is generated locally and never sent to the anchor; only its
 public key goes in the request, which is signed by the node's identity key. The

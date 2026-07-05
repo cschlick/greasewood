@@ -1929,6 +1929,81 @@ def cmd_cert_profiles(args) -> int:
     return 0
 
 
+def _cert_already_current(data_dir, name: str, *, dns, ips, files=None,
+                          paths=None, renew: bool) -> "dt.datetime | None":
+    """If re-requesting `name` would be a no-op — same SANs, same placement, and
+    a cert that's present and not yet due for renewal — return its expiry (so
+    the caller can say 'nothing to do'). Otherwise None: a first request, a
+    changed request (new SAN/paths), a missing/old cert, or --renew all proceed."""
+    if renew:
+        return None
+    from . import certs as certmod
+    entry = next((c for c in certmod.load_manifest(data_dir)
+                  if c.get("name") == name), None)
+    if entry is None:
+        return None
+    if sorted(entry.get("dns", [])) != sorted(dns) or \
+       sorted(entry.get("ips", [])) != sorted(ips):
+        return None
+    if files is not None:
+        if entry.get("files") != files:            # placement (paths/owner/mode) changed
+            return None
+    else:
+        if (entry.get("key_path"), entry.get("crt_path"), entry.get("ca_path")) \
+                != tuple(str(p) for p in paths):
+            return None
+    crt = certmod.entry_cert_path(entry)
+    if crt is None or certmod.cert_due_for_renewal(crt):   # missing/old → re-issue
+        return None
+    return certmod.cert_expiry(crt)
+
+
+def _print_cert_noop(name: str, exp, *, via: str) -> None:
+    left = (exp - dt.datetime.now(_UTC)).total_seconds()
+    print(f"TLS cert '{name}' already present ({via}), valid until "
+          f"{exp:%Y-%m-%d %H:%M UTC} ({_dur_short(left)}) — nothing to do.")
+    print(f"  re-issue now: --renew   ·   stop managing it: gw cert-remove {name}")
+
+
+def cmd_cert_remove(args) -> int:
+    """Stop managing a TLS cert: drop it from the auto-renewal manifest (and its
+    profile snapshot). By default the placed key/cert/ca files are LEFT in place
+    — a running service may still be reading them; pass --delete-files to remove
+    them too."""
+    from .config import load_config
+    from . import certs as certmod
+    _require_root("cert-remove",
+                  "it edits the managed-cert manifest and may delete cert files")
+    cfg = load_config(Path(args.config))
+    entries = certmod.load_manifest(cfg.data_dir)
+    entry = next((c for c in entries if c.get("name") == args.name), None)
+    if entry is None:
+        have = ", ".join(c.get("name", "?") for c in entries) or "(none managed)"
+        sys.exit(f"no managed cert named {args.name!r} — have: {have}")
+
+    certmod.remove_managed(cfg.data_dir, args.name)
+    certmod.profile_snapshot_path(cfg.data_dir, args.name).unlink(missing_ok=True)
+    print(f"deregistered '{args.name}' — the daemon will no longer renew it.")
+
+    if entry.get("files"):
+        paths = [f["path"] for f in entry["files"]]
+    else:
+        paths = [str(p) for p in certmod.entry_paths(entry)]
+    if args.delete_files:
+        for p in paths:
+            try:
+                Path(p).unlink()
+                print(f"  removed {p}")
+            except FileNotFoundError:
+                pass
+    else:
+        print("  the placed files are LEFT in place (a service may be using them):")
+        for p in paths:
+            print(f"    {p}")
+        print("  pass --delete-files to remove them too.")
+    return 0
+
+
 def cmd_cert_request(args) -> int:
     """Request an x509 TLS cert from the anchor for a local service (e.g. Postgres).
     Generates the leaf key locally; only its public key is sent to the anchor. Unless
@@ -1990,6 +2065,12 @@ def cmd_cert_request(args) -> int:
         sys.exit("no anchor URL — set root_url in config or pass --anchor")
 
     if profile:
+        # Idempotent: an unchanged re-request of a still-fresh cert is a no-op.
+        exp = _cert_already_current(cfg.data_dir, name, dns=dns, ips=ips,
+                                    files=profile["files"], renew=getattr(args, "renew", False))
+        if exp:
+            _print_cert_noop(name, exp, via=f"profile '{Path(profile['path']).name}'")
+            return 0
         # Pre-validate every owner before we bother the anchor, so a typo'd
         # user fails instantly rather than after burning a cert.
         for f in profile["files"]:
@@ -2012,8 +2093,11 @@ def cmd_cert_request(args) -> int:
         certmod.record_managed(cfg.data_dir, {
             "name": name, "cn": cn, "dns": dns, "ips": ips,
             "files": profile["files"], "reload_cmd": reload_cmd,
-            "auto_renew": auto,
+            "auto_renew": auto, "profile": Path(profile["path"]).stem,
         })
+        # Record-keeping: snapshot the exact profile used (with its provenance
+        # comments), separate from the manifest's effective config.
+        certmod.snapshot_profile(cfg.data_dir, name, profile["text"])
         print(f"TLS certificate issued + placed via profile "
               f"'{Path(profile['path']).name}'.")
         print(f"  cn / SAN : {cn}" + (f"  (+{len(dns) - 1} more)" if len(dns) > 1 else ""))
@@ -2038,6 +2122,14 @@ def cmd_cert_request(args) -> int:
     key_path = Path(args.key_out) if args.key_out else out_dir / f"{name}.key"
     crt_path = Path(args.cert_out) if args.cert_out else out_dir / f"{name}.crt"
     ca_path = Path(args.ca_out) if args.ca_out else out_dir / "ca.crt"
+
+    # Idempotent: an unchanged re-request of a still-fresh cert is a no-op.
+    exp = _cert_already_current(cfg.data_dir, name, dns=dns, ips=ips,
+                                paths=(key_path, crt_path, ca_path),
+                                renew=getattr(args, "renew", False))
+    if exp:
+        _print_cert_noop(name, exp, via=f"at {crt_path}")
+        return 0
 
     # Re-requesting an existing name RELOCATES it (record_managed keys on name).
     # Capture the prior destinations so we can flag any that are now orphaned.
@@ -2117,42 +2209,50 @@ def cmd_cert_request(args) -> int:
 
 
 def cmd_cert_status(args) -> int:
-    """Show the local TLS certs and their expiry."""
-    from cryptography import x509
+    """Show every daemon-MANAGED TLS cert (from the manifest) — its expiry,
+    renewal state, SANs, placed files, and profile — wherever the files live.
+    (Reads the cert files, so a 0600 bundle needs sudo to show its expiry.)"""
     from .config import load_config
+    from . import certs as certmod
 
     cfg = load_config(Path(args.config))
-    out_dir = Path(args.out_dir) if args.out_dir else (cfg.data_dir / "tls")
-    if not out_dir.exists():
-        print(f"no TLS certs at {out_dir}")
+    entries = sorted(certmod.load_manifest(cfg.data_dir),
+                     key=lambda e: e.get("name", ""))
+    if not entries:
+        print("no managed TLS certs — 'gw cert-request' (optionally --profile) "
+              "creates one.")
         return 0
 
     now = dt.datetime.now(_UTC)
-    found = False
-    for crt in sorted(out_dir.glob("*.crt")):
-        try:
-            cert = x509.load_pem_x509_certificate(crt.read_bytes())
-        except Exception:
-            continue
-        found = True
-        exp = getattr(cert, "not_valid_after_utc", None) or \
-            cert.not_valid_after.replace(tzinfo=_UTC)
-        cn = ""
-        try:
-            cn = cert.subject.rfc4514_string()
-        except Exception:
-            pass
-        sans = []
-        try:
-            ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            sans = [str(g.value) for g in ext.value]
-        except x509.ExtensionNotFound:
-            pass
-        left = (exp - now).days
-        print(f"{crt.name:<20} {cn:<30} expires {exp:%Y-%m-%d %H:%M} ({left}d)  "
-              f"SAN={','.join(sans) if sans else '-'}")
-    if not found:
-        print(f"no TLS certs at {out_dir}")
+    for e in entries:
+        name = e.get("name", "?")
+        head = f"● {name}"
+        if e.get("profile"):
+            head += f"   (profile: {e['profile']})"
+        print(head)
+
+        crt = certmod.entry_cert_path(e)
+        exp = certmod.cert_expiry(crt) if crt else None
+        auto = "auto-renew on" if e.get("auto_renew", True) else "auto-renew OFF"
+        if exp is None:
+            print(f"    expires : ⚠ cert file missing/unreadable ({crt}) · {auto}")
+        else:
+            left = (exp - now).total_seconds()
+            when = "EXPIRED" if left < 0 else f"in {_dur_short(left)}"
+            flag = "⚠ " if left < 0 else ""
+            print(f"    expires : {flag}{exp:%Y-%m-%d %H:%M UTC} ({when}) · {auto}")
+
+        sans = list(e.get("dns", [])) + list(e.get("ips", []))
+        if sans:
+            print(f"    SANs    : {', '.join(sans)}")
+        if e.get("files"):
+            for f in e["files"]:
+                print(f"    {f['role']:<9}: {f['path']}")
+        else:
+            k, c, a = certmod.entry_paths(e)
+            print(f"    files   : key={k}  cert={c}  ca={a}")
+        if e.get("reload_cmd"):
+            print(f"    reload  : {e['reload_cmd']}")
     return 0
 
 
@@ -4181,6 +4281,10 @@ def main(argv=None) -> int:
     sp.add_argument("--show", action="store_true",
                     help="with --profile, print that profile template (to copy "
                          "and adapt) and exit — no root/config needed")
+    sp.add_argument("--renew", action="store_true",
+                    help="re-issue even if a current cert already exists "
+                         "(cert-request is otherwise idempotent: an unchanged "
+                         "re-request of a valid cert is a no-op)")
     sp.set_defaults(fn=cmd_cert_request)
 
     # cert-profiles
@@ -4189,9 +4293,20 @@ def main(argv=None) -> int:
                              "TLS services (postgres, nginx, haproxy, redis, nats, minio, mosquitto)")
     sp.set_defaults(fn=cmd_cert_profiles)
 
+    # cert-remove
+    sp = sub.add_parser("cert-remove",
+                        help="stop managing a cert (drop it from auto-renewal); "
+                             "--delete-files also removes the placed key/cert/ca")
+    sp.add_argument("name", help="the managed cert's name (see gw cert-status)")
+    sp.add_argument("--delete-files", dest="delete_files", action="store_true",
+                    help="also delete the placed key/cert/ca files (default: "
+                         "leave them — a service may still be reading them)")
+    sp.set_defaults(fn=cmd_cert_remove)
+
     # cert-status
-    sp = sub.add_parser("cert-status", help="show local TLS certs and expiry")
-    sp.add_argument("--out-dir", dest="out_dir", default=None)
+    sp = sub.add_parser("cert-status",
+                        help="show every daemon-managed TLS cert (expiry, renewal, "
+                             "SANs, files, profile) from the manifest")
     sp.set_defaults(fn=cmd_cert_status)
 
     # narrate — translate the data-plane command trail into plain English

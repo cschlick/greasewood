@@ -215,6 +215,52 @@ def record_managed(data_dir, entry: dict) -> None:
     p.write_text(json.dumps(certs, indent=2))
 
 
+def remove_managed(data_dir, name: str) -> bool:
+    """Drop a managed-cert entry by name (stops the daemon renewing it). Returns
+    True if an entry was actually removed. The placed files are NOT touched —
+    a service may still be reading them; the caller decides."""
+    entries = load_manifest(data_dir)
+    kept = [c for c in entries if c.get("name") != name]
+    if len(kept) == len(entries):
+        return False
+    manifest_path(data_dir).write_text(json.dumps(kept, indent=2))
+    return True
+
+
+def profile_snapshot_path(data_dir, name: str) -> Path:
+    """Where the point-in-time copy of a cert's profile lives (record-keeping)."""
+    return Path(data_dir) / "tls" / "profiles" / f"{name}.toml"
+
+
+def snapshot_profile(data_dir, name: str, text: str) -> Path:
+    """Save the profile TOML used for `name` as a record of exactly what was
+    applied (with its provenance comments), separate from the manifest's
+    effective config. Returns the snapshot path."""
+    p = profile_snapshot_path(data_dir, name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+    return p
+
+
+def cert_expiry(crt_path) -> "dt.datetime | None":
+    """The not-after of a cert file as an aware UTC datetime, or None if the
+    file is missing/unparseable."""
+    from cryptography import x509
+    try:
+        cert = x509.load_pem_x509_certificate(Path(crt_path).read_bytes())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    return getattr(cert, "not_valid_after_utc", None) or \
+        cert.not_valid_after.replace(tzinfo=_UTC)
+
+
+def entry_cert_path(entry: dict) -> "Path | None":
+    """The file carrying the leaf cert for a manifest entry — the profile's
+    cert/fullchain/bundle file, or the legacy crt_path."""
+    files = entry.get("files")
+    return _profile_cert_path(files) if files else entry_paths(entry)[1]
+
+
 def entry_paths(entry: dict) -> "tuple[Path, Path, Path]":
     """The (key, cert, ca) destinations for a managed-cert entry. Prefers the
     explicit per-file paths; falls back to the legacy out_dir + name scheme so a
