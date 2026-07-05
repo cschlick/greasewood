@@ -220,3 +220,34 @@ trusted_pubs = []
     with pytest.raises(SystemExit) as e:
         cli.cmd_invite(ns)
     assert "--hostname cannot be combined with --standing" in str(e.value)
+
+
+def test_standing_window_stores_and_status_shows_token(tmp_path):
+    """A standing invite stores its token (0600 root) so it can be re-retrieved
+    for baking without re-issuing; the hub door block surfaces it."""
+    import types
+    from greasewood import cli, door
+
+    door.window_path(tmp_path).write_text(json.dumps({
+        "v": 1, "standing": True, "caps": ["segment:autoscale"], "hostname": None,
+        "guest_pub": "x", "psk": "y", "token": "gw1.THE-STANDING-TOKEN",
+    }))
+    door.mark_door_opened(tmp_path, None, caps=["segment:autoscale"], standing=True)
+    cfg = types.SimpleNamespace(data_dir=tmp_path, role="hub")
+    lines = cli._door_status_lines(cfg)
+    joined = "\n".join(lines)
+    assert "OPEN (standing)" in joined
+    assert "token: gw1.THE-STANDING-TOKEN" in joined
+
+
+def test_single_use_window_has_no_stored_token(tmp_path):
+    """Only standing tokens are stored (they're long-lived/bakeable); a
+    single-use window carries no token to leak."""
+    import types
+    from greasewood import cli, door
+    door.window_path(tmp_path).write_text(json.dumps({
+        "v": 1, "expires": "2099-01-01T00:00:00Z", "caps": [], "hostname": None,
+    }))
+    door.mark_door_opened(tmp_path, "2099-01-01T00:00:00Z")
+    lines = cli._door_status_lines(types.SimpleNamespace(data_dir=tmp_path, role="hub"))
+    assert not any("token:" in ln for ln in lines)

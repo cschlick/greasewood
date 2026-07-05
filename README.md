@@ -860,6 +860,12 @@ sudo gw close-door                 # token permanently dead, fleet-wide, instant
 sudo gw invite --standing ... -q   # fresh seed → fresh token → update user-data
 ```
 
+Lost the token? A standing token is stored (0600 root) so you can re-retrieve
+it without re-issuing — **`sudo gw status`** on the hub prints it in the door
+block while the standing door is open (root only; it's the enrollment
+credential). Re-issuing would invalidate copies already baked into images, so
+retrieve rather than re-invite.
+
 Enrolled nodes are never affected by door operations — their credentials come
 from the CA, not the door. A standing door survives hub reboots (the daemon
 re-erects it), and a plain `gw invite` refuses to silently supersede one (pass

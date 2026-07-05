@@ -681,6 +681,9 @@ def cmd_invite(args) -> int:
 
     # Write window file so the running gw-run daemon starts the enroll server.
     window_path = data_dir / "door_window.json"
+    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
+                         cfg.door_port, mesh_domain=cfg.mesh_domain)
+
     if getattr(args, "standing", False):
         # STANDING door: no expiry; serves any number of enrollments until
         # `gw close-door` (or a --supersede invite). The guest key + PSK are
@@ -688,6 +691,10 @@ def cmd_invite(args) -> int:
         # the door interface after a reboot — the window outlives the kernel
         # state. Every join is still the full one-node ceremony: fresh identity,
         # CA-signed credential, blackhole isolation, audit trail.
+        # The token itself is stored too: a standing token is long-lived and
+        # bakeable, so the operator can re-retrieve it later (via hub `gw
+        # status`) without re-issuing — re-issuing would invalidate the copies
+        # already baked into images. Same 0600-root posture as the guest key.
         window_path.write_text(json_mod.dumps({
             "v": 1,
             "standing": True,
@@ -695,6 +702,7 @@ def cmd_invite(args) -> int:
             "hostname": None,          # standing doors can't pin one name
             "guest_pub": params.guest_pub_b64,
             "psk": params.psk_b64,
+            "token": token,
         }))
         os.chmod(window_path, 0o600)   # it now carries key material
         log.info("STANDING door opened — this token enrolls any number of "
@@ -708,8 +716,6 @@ def cmd_invite(args) -> int:
             "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
         }))
 
-    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
-                         cfg.door_port, mesh_domain=cfg.mesh_domain)
     print(token)
     return 0
 
@@ -2621,6 +2627,13 @@ def _door_status_lines(cfg) -> list:
         lines.append(head)
         grants = ", ".join(st.get("caps") or []) or "(default)"
         lines.append(f"           grants: {grants} · closes only via: gw close-door")
+        # The standing token, re-retrievable for baking into new images without
+        # re-issuing. From the 0600-root window file — and this whole door block
+        # only renders for a root `gw status` (door_status.json is 0600 too), so
+        # the token (which IS the enrollment credential) never shows non-root.
+        w = door.read_window(cfg.data_dir)
+        if w and w.get("token"):
+            lines.append(f"           token: {w['token']}")
         _attempt_summary("")
     elif st.get("state") == "open":
         head = f"door     : OPEN — closes in {_fmt_until(st.get('expires',''))}"
