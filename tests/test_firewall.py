@@ -52,14 +52,10 @@ def test_anchor_rules_cover_control_and_door():
     assert ("tcp", 51903, "gw-door") in ports
 
 
-def test_node_rules_inbound_yes_is_mesh_port_only():
-    rules = fw.node_rules(inbound="yes")
+def test_node_rules_is_mesh_port_only():
+    rules = fw.node_rules()
     assert all(r.proto == "udp" and r.iif is None for r in rules)
     assert {r.port for r in rules} == {51900}  # door 51901 is anchor-only
-
-
-def test_node_rules_inbound_no_needs_nothing():
-    assert fw.node_rules(inbound="no") == []
 
 
 # --- default-drop detection ---
@@ -75,7 +71,7 @@ def test_default_drop_detected():
 def test_missing_when_port_absent():
     # ruleset has only the door port; the mesh port (51900) is missing
     rs = _ruleset(_chain("drop"), _accept_rule("udp", 51901))
-    missing = fw.missing_rules(rs, fw.node_rules(inbound="yes"))
+    missing = fw.missing_rules(rs, fw.node_rules())
     assert {r.port for r in missing} == {51900}
 
 

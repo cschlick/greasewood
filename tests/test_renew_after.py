@@ -35,7 +35,7 @@ def _loop(tmp_path, *, n_nodes, cred):
     node = NodeKeys.generate()
     loop = RenewalLoop(
         node_keys=node, directory=Directory(), get_root_url=lambda: "",
-        current_cred=cred, inbound="yes", hostname="n1", endpoints=[],
+        current_cred=cred, hostname="n1", endpoints=[],
         cache_path=tmp_path / "d.json",
     )
     loop._directory = types.SimpleNamespace(size=lambda: n_nodes)   # fake mesh size

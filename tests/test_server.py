@@ -40,7 +40,6 @@ def _make_record(node: NodeKeys, cred: Credential, seq: int = 1) -> NodeRecord:
         id_pub=node.id_pub_bytes,
         seq=seq,
         endpoints=["[2001:db8::1]:51820"],
-        inbound="yes",
         cred=cred,
     ).sign(node.id_priv)
 
@@ -526,7 +525,7 @@ class TestRenewalPropagation:
                 directory=own_dir,
                 get_root_url=lambda: f"http://[::1]:{port}",
                 current_cred=cred,
-                inbound="yes", hostname="test-node",
+                hostname="test-node",
                 endpoints=["[2001:db8::1]:51900"],
                 cache_path=tmp_path / "dir.json",
             )

@@ -65,7 +65,6 @@ class RenewalLoop:
         directory: Directory,
         get_root_url: "Callable[[], str]",
         current_cred: Credential,
-        inbound: str,
         hostname: str,
         endpoints: list[str],
         cache_path: Path,
@@ -77,7 +76,6 @@ class RenewalLoop:
         # A callable returning the anchor URL to renew against (the configured anchor).
         self._get_root_url = get_root_url
         self._cred = current_cred
-        self._inbound = inbound
         self._hostname = hostname
         self._endpoints = endpoints
         self._aliases = list(aliases or [])
@@ -132,7 +130,6 @@ class RenewalLoop:
             id_pub=self._keys.id_pub_bytes,
             seq=seq,
             endpoints=self._endpoints,
-            inbound=self._inbound,
             cred=cred,
             aliases=self._aliases,
         ).sign(self._keys.id_priv)

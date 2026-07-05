@@ -30,7 +30,6 @@ def test_renewal_retries_with_exponential_backoff_then_stops(tmp_path, monkeypat
         directory=Directory(),
         get_root_url=lambda: "http://[::1]:0",
         current_cred=_cred(node, ca),
-        inbound="yes",
         hostname="n1",
         endpoints=[],
         cache_path=tmp_path / "dir.json",

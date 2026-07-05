@@ -152,8 +152,11 @@ class NodeRecord:
     id_pub: bytes        # 32-byte Ed25519 public key
     seq: int             # monotonic; merge takes highest per id_pub
     endpoints: list[str] # ["[v6addr]:port", ...]
-    inbound: str         # "yes" | "no"  (§8)
     cred: Credential
+    inbound: str = "yes" # VESTIGIAL — always "yes". Reachability is now emergent
+                         # (advertise an endpoint or not); kept in the signed body
+                         # only so records stay verifiable across the upgrade that
+                         # dropped the flag. Nothing reads it, nothing sets it.
     aliases: list[str] = field(default_factory=list)
     sig: bytes = field(default=b"", repr=False)
 
@@ -246,7 +249,7 @@ class NodeRecord:
             id_pub=_b64d(d["id_pub"]),
             seq=d["seq"],
             endpoints=d["endpoints"],
-            inbound=d["inbound"],
+            inbound=d.get("inbound", "yes"),  # vestigial
             cred=Credential.from_dict(d["cred"]),
             aliases=list(d.get("aliases", [])),
             sig=_b64d(d["sig"]),
