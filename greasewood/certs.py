@@ -157,14 +157,52 @@ def cert_due_for_renewal(crt_path) -> bool:
     return (dt.datetime.now(_UTC) - nb) >= (na - nb) / 2
 
 
+def _rename_grace_old_domain(data_dir) -> "str | None":
+    """The old mesh domain of an ACTIVE rename-mesh grace window (from
+    <data_dir>/rename_grace.json), or None. Shared shape with the reconcile
+    loop's hosts grace, so old TLS names and old /etc/hosts names retire
+    together."""
+    import datetime as dt
+    from pathlib import Path
+    p = Path(data_dir) / "rename_grace.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        until = dt.datetime.fromisoformat(data["until"])
+    except Exception:
+        return None
+    if dt.datetime.now(dt.timezone.utc) >= until:
+        return None
+    return data.get("old_domain")
+
+
+def _grace_dual_names(dns: list, current_domain: str, old_domain: str) -> list:
+    """Augment `dns` so every name under EITHER the current or the old mesh
+    domain has both-domain variants — the renewed cert then verifies whether a
+    client dials the new or the old name during the grace window. Robust to a
+    manifest frozen with the pre-rename (old-domain) names."""
+    out = set(dns)
+    for name in dns:
+        for a, b in ((current_domain, old_domain), (old_domain, current_domain)):
+            if name.endswith("." + a):
+                out.add(name[: -len(a)] + b)
+    return sorted(out)
+
+
 class CertRenewalLoop:
     """Re-issue each managed cert at ~half its lifetime and run its reload_cmd."""
 
     def __init__(self, node_keys, get_hub_url: "Callable[[], str]", data_dir,
+                 mesh_domain: "str | None" = None,
                  check_interval: float = 3600.0) -> None:
         self._keys = node_keys
         self._get_hub_url = get_hub_url
         self._data_dir = data_dir
+        # The mesh's CURRENT domain — during a rename-mesh grace window, renewed
+        # certs must cover BOTH the new and the old name so TLS clients dialing
+        # either verify (the hosts block already resolves both during grace).
+        self._mesh_domain = mesh_domain
         self._check_interval = check_interval
         self._stop = threading.Event()
 
@@ -187,14 +225,18 @@ class CertRenewalLoop:
 
     def check_all(self) -> None:
         hub_url = self._get_hub_url()
+        grace_old = _rename_grace_old_domain(self._data_dir)
         for entry in load_manifest(self._data_dir):
             if not entry.get("auto_renew", True):
                 continue
             key_path, crt_path, ca_path = entry_paths(entry)
             if not cert_due_for_renewal(crt_path):
                 continue
+            dns = entry.get("dns", [])
+            if grace_old and self._mesh_domain:
+                dns = _grace_dual_names(dns, self._mesh_domain, grace_old)
             try:
-                issue_cert(hub_url, self._keys, dns=entry.get("dns", []),
+                issue_cert(hub_url, self._keys, dns=dns,
                            ips=entry.get("ips", []), cn=entry["cn"],
                            key_path=key_path, crt_path=crt_path, ca_path=ca_path)
                 log.info("auto-renewed TLS cert %r", entry["name"])

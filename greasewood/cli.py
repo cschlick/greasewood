@@ -983,6 +983,12 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     mp["config"].write_text(text)
     cfg_path.unlink()
 
+    # Re-point the TLS cert manifest at the new domain: each managed cert's
+    # SANs move old→new so renewals AFTER grace use the new names; during
+    # grace the cert loop adds the old name back as an extra SAN, so clients
+    # dialing either verify throughout (see certs._grace_dual_names).
+    _rewrite_cert_manifest_domain(new_data, cfg.mesh_domain, new_domain)
+
     # Grace: old names keep resolving for one credential TTL, then retire.
     until = (dt.datetime.now(_UTC) + cfg.credential_ttl).replace(microsecond=0)
     (new_data / "rename_grace.json").write_text(_json.dumps(
@@ -992,6 +998,35 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
         subprocess.run([systemctl, "enable", "--now",
                         f"greasewood@{new_key}.service"], check=False)
     return mp["config"]
+
+
+def _rewrite_cert_manifest_domain(data_dir: "Path", old_domain: str,
+                                  new_domain: str) -> None:
+    """Swap old_domain → new_domain in every managed cert's SANs/CN, so cert
+    auto-renewal targets the mesh's new names once the rename grace ends. A
+    no-op if there's no manifest. Explicit non-mesh SANs are left untouched."""
+    import json as _json
+    from . import certs as certmod
+    mpath = certmod.manifest_path(data_dir)
+    if not mpath.exists():
+        return
+    try:
+        entries = _json.loads(mpath.read_text())
+    except (OSError, ValueError):
+        return
+
+    def _swap(name: str) -> str:
+        return (name[: -len(old_domain)] + new_domain
+                if name.endswith("." + old_domain) else name)
+
+    for e in entries:
+        e["dns"] = [_swap(n) for n in e.get("dns", [])]
+        if e.get("cn"):
+            e["cn"] = _swap(e["cn"])
+    try:
+        mpath.write_text(_json.dumps(entries, indent=2))
+    except OSError:
+        pass
 
 
 def cmd_rename_mesh(args) -> int:
@@ -2371,7 +2406,8 @@ def cmd_run(args) -> int:
     cert_renewal = None
     _managed = _load_cert_manifest(cfg.data_dir)
     if _managed:
-        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_hub_url(cfg), cfg.data_dir)
+        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_hub_url(cfg),
+                                       cfg.data_dir, mesh_domain=cfg.mesh_domain)
         cert_renewal.start()
         log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
 
