@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — Eclipse Mosquitto (MQTT broker)
+#
+#  original template based on :  Debian 13 (trixie)  ·  Eclipse Mosquitto 2.0
+#  adapted for this host      :  ..............................................
+#
+#  Writes the leaf key/cert and the mesh CA under /etc/mosquitto/certs. If your
+#  layout or service user differs, edit the [[file]] paths (and the 'mosquitto'
+#  owner) and fill the blank above. A wrong path or a missing 'mosquitto' user
+#  fails LOUDLY at `gw cert-request` time; it never silently mis-places a cert.
+#
+#  Then, in /etc/mosquitto/conf.d/tls.conf (or mosquitto.conf):
+#    listener 8883
+#    cafile   /etc/mosquitto/certs/ca.crt
+#    certfile /etc/mosquitto/certs/server.crt
+#    keyfile  /etc/mosquitto/certs/server.key
+#    # require_certificate true      # require client certs (mTLS)
+#
+#  The reload below is a SIGHUP; Mosquitto 2.0 re-reads its certificate files
+#  on reload. SANs default to <hostname>.<mesh_domain>; pass --san to override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reload = "systemctl reload mosquitto"
+
+[[file]]
+role  = "key"
+path  = "/etc/mosquitto/certs/server.key"
+owner = "mosquitto:mosquitto"
+mode  = "0600"
+
+[[file]]
+role  = "cert"
+path  = "/etc/mosquitto/certs/server.crt"
+owner = "mosquitto:mosquitto"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/etc/mosquitto/certs/ca.crt"
+owner = "mosquitto:mosquitto"
+mode  = "0644"
