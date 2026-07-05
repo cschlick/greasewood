@@ -38,14 +38,12 @@ class CertRejected(RuntimeError):
     """The anchor refused the request (4xx) — won't change on retry."""
 
 
-def issue_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
-               key_path, crt_path, ca_path, timeout: float = 10.0,
-               attempts: int = 5) -> "tuple[Path, Path, Path]":
-    """Request a leaf TLS cert from the anchor and write the leaf key, leaf cert,
-    and CA cert to their three (independent) paths — they need not share a
-    directory. The leaf private key is generated locally, written 0600, and
-    never sent. Returns (key_path, crt_path, ca_path). Raises CertRejected on a
-    anchor 4xx (no retry) or RuntimeError after exhausting retries."""
+def fetch_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
+               timeout: float = 10.0, attempts: int = 5) -> "tuple[str, str, str]":
+    """Request a leaf TLS cert from the anchor and return (key_pem, cert_pem,
+    ca_pem) as PEM strings. The leaf private key is generated locally and never
+    sent. Raises CertRejected on a anchor 4xx (no retry) or RuntimeError after
+    exhausting retries. Callers place the PEMs (see issue_cert / place_cert_files)."""
     import time as _t
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -93,18 +91,104 @@ def issue_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str
     leaf_key_pem = leaf.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
-    )
+    ).decode()
+    return leaf_key_pem, data["cert"], data["ca_cert"]
+
+
+def issue_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str,
+               key_path, crt_path, ca_path, timeout: float = 10.0,
+               attempts: int = 5) -> "tuple[Path, Path, Path]":
+    """Request a leaf TLS cert and write the leaf key, leaf cert, and CA cert to
+    their three (independent) paths — they need not share a directory. The key
+    is written 0600. Returns (key_path, crt_path, ca_path)."""
+    key_pem, cert_pem, ca_pem = fetch_cert(
+        anchor_url, keys, dns=dns, ips=ips, cn=cn, timeout=timeout, attempts=attempts)
     key_path, crt_path, ca_path = Path(key_path), Path(crt_path), Path(ca_path)
     for p in (key_path, crt_path, ca_path):
         p.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, leaf_key_pem)
+        os.write(fd, key_pem.encode())
     finally:
         os.close(fd)
-    crt_path.write_text(data["cert"])
-    ca_path.write_text(data["ca_cert"])
+    crt_path.write_text(cert_pem)
+    ca_path.write_text(ca_pem)
     return key_path, crt_path, ca_path
+
+
+# --- cert PROFILES: place composed files where a service expects them ------
+
+_ROLE_MODE = {"key": 0o600, "cert": 0o644, "ca": 0o644,
+              "fullchain": 0o644, "bundle": 0o600}
+
+
+def compose_role(role: str, key_pem: str, cert_pem: str, ca_pem: str) -> str:
+    """The file content for a profile [[file]] role:
+      key        leaf private key
+      cert       leaf certificate
+      ca         mesh CA certificate
+      fullchain  cert + CA (servers that want the chain in one file)
+      bundle     cert + CA + key (haproxy-style single PEM)"""
+    def nl(s):
+        return s if s.endswith("\n") else s + "\n"
+    parts = {"key": [key_pem], "cert": [cert_pem], "ca": [ca_pem],
+             "fullchain": [cert_pem, ca_pem], "bundle": [cert_pem, ca_pem, key_pem]}
+    if role not in parts:
+        raise ValueError(f"unknown cert file role {role!r} "
+                         f"(key|cert|ca|fullchain|bundle)")
+    return "".join(nl(p) for p in parts[role])
+
+
+def _resolve_owner(owner: str) -> "tuple[int, int]":
+    """('user:group' | 'user') → (uid, gid). Raises a clear error if the user or
+    group doesn't exist on this host — the loud failure that tells you to
+    install the service (or fix the profile) rather than mis-own a key."""
+    import grp
+    import pwd
+    user, _, group = owner.partition(":")
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise RuntimeError(
+            f"profile owner {user!r}: no such user on this host — install the "
+            f"service first, or correct the [[file]] owner in the profile") from None
+    if not group:
+        return pw.pw_uid, pw.pw_gid
+    try:
+        return pw.pw_uid, grp.getgrnam(group).gr_gid
+    except KeyError:
+        raise RuntimeError(f"profile owner group {group!r}: no such group on "
+                           f"this host") from None
+
+
+def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> None:
+    """Write each profile [[file]] with its composed content, mode, and owner —
+    atomically (temp + rename), so a service reading the file never sees a
+    half-written cert or a wrong-mode key. Fails loudly on a bad role, an
+    unwritable directory, or an unknown owner; never silently mis-places."""
+    for f in files:
+        role, dest = f["role"], Path(f["path"])
+        content = compose_role(role, key_pem, cert_pem, ca_pem).encode()
+        mode = int(f["mode"], 8) if f.get("mode") else _ROLE_MODE.get(role, 0o644)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".gwtmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            os.write(fd, content)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, mode)                      # O_CREAT mode is umask-masked
+        if f.get("owner"):
+            os.chown(tmp, *_resolve_owner(f["owner"]))
+        os.replace(tmp, dest)                    # atomic swap
+
+
+def _profile_cert_path(files: list) -> "Path | None":
+    """The file in a profile that carries the leaf cert (for the expiry check)."""
+    for f in files:
+        if f.get("role") in ("cert", "fullchain", "bundle"):
+            return Path(f["path"])
+    return None
 
 
 # --- manifest of daemon-managed certs -------------------------------------
@@ -229,16 +313,28 @@ class CertRenewalLoop:
         for entry in load_manifest(self._data_dir):
             if not entry.get("auto_renew", True):
                 continue
-            key_path, crt_path, ca_path = entry_paths(entry)
-            if not cert_due_for_renewal(crt_path):
+            files = entry.get("files")            # profile-placed cert?
+            crt_path = (_profile_cert_path(files) if files
+                        else entry_paths(entry)[1])
+            if not crt_path or not cert_due_for_renewal(crt_path):
                 continue
             dns = entry.get("dns", [])
             if grace_old and self._mesh_domain:
                 dns = _grace_dual_names(dns, self._mesh_domain, grace_old)
             try:
-                issue_cert(anchor_url, self._keys, dns=dns,
-                           ips=entry.get("ips", []), cn=entry["cn"],
-                           key_path=key_path, crt_path=crt_path, ca_path=ca_path)
+                if files:
+                    # Re-fetch and RE-PLACE every file with its owner/mode, so a
+                    # service's key stays readable by its user across renewals
+                    # (the whole point of profiles — not just first issuance).
+                    key_pem, cert_pem, ca_pem = fetch_cert(
+                        anchor_url, self._keys, dns=dns,
+                        ips=entry.get("ips", []), cn=entry["cn"])
+                    place_cert_files(files, key_pem, cert_pem, ca_pem)
+                else:
+                    key_path, cp, ca_path = entry_paths(entry)
+                    issue_cert(anchor_url, self._keys, dns=dns,
+                               ips=entry.get("ips", []), cn=entry["cn"],
+                               key_path=key_path, crt_path=cp, ca_path=ca_path)
                 log.info("auto-renewed TLS cert %r", entry["name"])
                 self._run_reload(entry.get("reload_cmd"))
             except Exception as e:

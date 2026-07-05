@@ -780,7 +780,8 @@ Two properties worth knowing:
 | `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
-| `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon then auto-renews it at ~half its TTL; `--reload-cmd` runs a command (e.g. `systemctl reload postgresql`) after each renewal, `--no-auto-renew` opts out. |
+| `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon auto-renews it at ~half its TTL; `--reload-cmd` runs a command after each renewal, `--no-auto-renew` opts out. **`--profile <name\|path>`** issues + places the key/cert/ca where the service wants them (right owner/mode) and re-places on every renewal; `--profile <name> --show` prints a bundled template to adapt. |
+| `cert-profiles`    | no    | List the bundled cert profile templates (postgres, nginx, haproxy, redis) — starting points to copy and adapt. |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
@@ -1078,6 +1079,27 @@ sudo gw cert-request --name postgres \
 
 gw cert-status                       # list issued certs and their expiry
 ```
+
+**Profiles — one command, files in the right place.** Assembling the per-file
+flags (and getting the *ownership* right so the service can read its own key) is
+the fiddly part — and worse, plain `--cert-out` leaves files `root:root`, so
+auto-renewal months later rewrites them as `root:root` and silently breaks a
+service running as `postgres`. A **profile** fixes the whole lifecycle: a small
+TOML that says where each file goes, who owns it, and how to reload — and the
+daemon **re-places and re-owns on every renewal**, not just the first issue.
+
+```bash
+gw cert-profiles                              # list bundled templates
+gw cert-request --profile postgres --show     # print one to copy + adapt
+sudo gw cert-request --profile ./postgres.toml   # issue + place + register reload
+```
+
+A profile is a set of `[[file]]` entries (`role` = `key`/`cert`/`ca`/`fullchain`/
+`bundle`, plus `path`, `owner`, `mode`) and a `reload` command. Bundled templates
+ship for **postgres, nginx, haproxy, redis** — they're *starting points, not
+turnkey*: each records the OS/software version it was written against, and a
+wrong path or missing service user **fails loudly** at request time rather than
+mis-placing a cert. Copy one, adapt the paths to your system, pass it in.
 
 The leaf private key is generated locally and never sent to the anchor; only its
 public key goes in the request, which is signed by the node's identity key. The

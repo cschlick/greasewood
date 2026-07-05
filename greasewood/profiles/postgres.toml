@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — PostgreSQL
+#
+#  original template based on :  Debian 13 (trixie)  ·  PostgreSQL 17
+#  adapted for this host      :  ..............................................
+#
+#  The paths below are the Debian/PostgreSQL 17 cluster defaults. If the
+#  "based on" line doesn't match your system (a different Debian release, or
+#  PostgreSQL 15/16/18), edit the [[file]] paths to your cluster's data dir —
+#  and fill the blank above so future-you knows what this was tuned for. A
+#  wrong path or a missing 'postgres' user fails LOUDLY at `gw cert-request`
+#  time; it never silently mis-places a cert.
+#
+#  Then, in postgresql.conf:
+#    ssl = on
+#    ssl_cert_file = '.../server.crt'
+#    ssl_key_file  = '.../server.key'
+#    ssl_ca_file   = '.../root.crt'      # only if you verify client certs
+#
+#  SANs default to this node's <hostname>.<mesh_domain>; pass --san to override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reload = "systemctl reload postgresql"
+
+[[file]]
+role  = "key"
+path  = "/var/lib/postgresql/17/main/server.key"
+owner = "postgres:postgres"
+mode  = "0600"
+
+[[file]]
+role  = "cert"
+path  = "/var/lib/postgresql/17/main/server.crt"
+owner = "postgres:postgres"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/var/lib/postgresql/17/main/root.crt"
+owner = "postgres:postgres"
+mode  = "0644"
