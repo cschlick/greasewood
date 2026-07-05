@@ -80,6 +80,66 @@ node by enrolling a fresh one (new identity).
 
 ---
 
+## SOP: upgrade greasewood without dropping the mesh
+
+**The upgrade is near-seamless, by design.** WireGuard lives in the kernel; the
+`gw` daemon is only its control plane (reconcile, sync, renewal). Two facts make
+an upgrade low-risk:
+
+- Replacing the package files does **not** touch the running daemon — it already
+  imported the old code and keeps running until you restart it.
+- On restart the daemon **reuses** the existing interface (it never tears the
+  mesh interface down on stop), so the kernel keeps forwarding tunnel traffic
+  the whole time. Established peer sessions survive; only the control-plane
+  loops blip for a second.
+
+Do it in this order:
+
+1. **Read the release notes** for wire/config/format changes. greasewood is
+   early-stage and carries **no backward-compat shims** — a token/config/record
+   format change means the fleet must move to compatible versions together (the
+   directory sync tolerates old/new shapes, but join tokens and configs may not).
+2. **Back up the config** (and, on the anchor, the CA — see above):
+   `cp /etc/greasewood_<mesh>.toml /etc/greasewood_<mesh>.toml.bak`.
+3. **Upgrade in place** — same environment, so the service unit's `ExecStart`
+   path to `gw` stays valid:
+   ```
+   sudo pip install -U greasewood      # or: pipx upgrade greasewood
+   #   from a source checkout instead:  git pull && sudo pip install .
+   gw --version                         # confirm the new version
+   ```
+   The running daemon is unaffected at this point.
+4. **Sanity-check the new binary before restarting** — it reads the config with
+   the *new* code, so a config-format problem shows up here, not mid-restart:
+   ```
+   gw -c /etc/greasewood_<mesh>.toml status
+   ```
+5. **Restart to apply**, once per mesh (live tunnels survive):
+   ```
+   sudo systemctl restart greasewood@<mesh>     # or: 'greasewood@*' for all
+   gw status                                    # links still up?
+   sudo journalctl -u greasewood@<mesh> -n 30   # clean start, no crash loop?
+   ```
+6. **Roll out gradually.** Upgrade and verify **one node first**, then the rest.
+   The anchor can be upgraded anytime — nodes run from cache while it restarts
+   (offline-tolerant), so there's no fleet-wide window from the anchor alone.
+
+**Rollback:** `sudo pip install greasewood==<old-version>` then restart. Because
+the live process is untouched until you restart, if the new `gw` CLI misbehaves
+you can downgrade *before* restarting and never disturb the tunnel at all.
+
+Notes:
+- **Don't move the binary.** Upgrading in the same venv/pipx keeps the `gw` path
+  the service unit was written with. A reinstall that relocates `gw` leaves
+  `ExecStart` pointing at the old path — re-point the unit, or reinstall in the
+  original environment.
+- **Not on systemd?** Restart your `gw … run` process by hand; the interface
+  survives the same way.
+- Avoid upgrading the anchor while a `gw invite` window is open — the restart
+  closes the door; re-invite afterward.
+
+---
+
 ## SOP: node identity compromised
 
 The node's `id_priv` leaked. The attacker can impersonate *that node only*.
