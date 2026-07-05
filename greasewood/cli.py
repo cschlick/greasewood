@@ -1538,13 +1538,12 @@ def cmd_revoke(args) -> int:
     # never reaches a traceback.
     cfg, ca = _load_anchor_ca(args, "revoke")
 
-    try:
-        id_pub_bytes = bytes.fromhex(args.id_pub_hex)
-    except ValueError:
-        sys.exit("id_pub_hex must be a 64-character hex string")
+    # Accept a hostname / mesh name as well as a raw id hex; a hostname resolves
+    # via the registry, a raw id is honored even if already forgotten.
+    id_pub_bytes, name = _resolve_node(ca, cfg, args.node, require_enrolled=False)
 
     freed = ca.add_revoke(id_pub_bytes)
-    print(f"revoked: {args.id_pub_hex}")
+    print(f"revoked: {name}  ({id_pub_bytes.hex()})")
     if freed:
         print("Its hostname is now free for reuse by a different node.")
     print("Takes effect live — the running daemon refuses its renew/publish and "
@@ -1575,21 +1574,28 @@ def _load_anchor_ca(args, cmd: str):
     return cfg, CA(ca_keys, cfg.data_dir)
 
 
-def _resolve_node(ca, cfg, handle: str):
-    """Resolve a node handle — a hostname (with or without the `.<mesh_domain>`
-    suffix) or a full 64-char id_pub hex — to (id_pub_bytes, hostname)."""
+def _resolve_node(ca, cfg, handle: str, *, require_enrolled: bool = True):
+    """Resolve a node handle — a hostname, a full `<host>.<mesh_domain>` mesh
+    name, or a 64-char id_pub hex — to (id_pub_bytes, hostname). A hostname
+    always needs the anchor's registry (the only name→id map). With
+    require_enrolled=False a raw id hex is accepted even if the node isn't in
+    the registry — so `revoke` can still deny an already-forgotten identity."""
     s = handle.strip()
     if len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s):
         info = ca.node_info(bytes.fromhex(s))
         if info is None:
-            sys.exit(f"no enrolled node with id {s[:16]}…")
+            if require_enrolled:
+                sys.exit(f"no enrolled node with id {s[:16]}…")
+            return bytes.fromhex(s), s[:16] + "…"      # raw id, name unknown
         return bytes.fromhex(s), info[0]
     suffix = "." + cfg.mesh_domain
     if s.endswith(suffix):
         s = s[: -len(suffix)]
     owner = ca.hostname_owner(s)
     if owner is None:
-        sys.exit(f"no node named {handle!r} on this anchor (see `gw status`)")
+        sys.exit(f"no node named {handle!r} on this anchor — pass its hostname, "
+                 f"its <host>.{cfg.mesh_domain} name, or its 64-char id_pub hex "
+                 f"(see `gw status`)")
     return bytes.fromhex(owner), s
 
 
@@ -4109,7 +4115,8 @@ def main(argv=None) -> int:
 
     # revoke
     sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the anchor)")
-    sp.add_argument("id_pub_hex", help="64-char hex identity public key")
+    sp.add_argument("node", help="the node: its hostname, its <host>.<mesh_domain> "
+                    "mesh name, or its 64-char id_pub hex")
     sp.set_defaults(fn=cmd_revoke)
 
     # set-caps (anchor) — change an enrolled node's full tag set
