@@ -101,3 +101,78 @@ def test_node_on_two_meshes(gw_hub, gw_image, gw_network):
         for cid in (hub_b, node):
             if cid:
                 podman("rm", "-f", cid, check=False)
+
+
+PREFIX_C = "fdde:cafc:ffe:f::"   # distinct overlay /64 for the auto-slot fleet
+
+
+def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
+    """`gw join <token>` with NO location flags: the first mesh lands in the
+    default slot; a token from a second mesh auto-provisions slot 2 —
+    /etc/greasewood2.toml, /var/lib/greasewood2, gw-mesh2, UDP 51910, names
+    under gw2.internal — and a repeat join with the same mesh's token routes
+    back to slot 2 (refresh) instead of allocating slot 3."""
+    hub_c = node = None
+    try:
+        hub_c = _run_container(gw_image, gw_network)
+        hub_c_ipv6 = container_ipv6(hub_c, gw_network)
+        overlay_c = _bring_up_hub(hub_c, hub_c_ipv6, "hubc", PREFIX_C)
+
+        node = _run_container(gw_image, gw_network)
+        node_ipv6 = container_ipv6(node, gw_network)
+
+        with _ENROLL_LOCK:
+            # Mesh A: plain join, all defaults → the unsuffixed slot 1.
+            res = pexec(gw_hub["cid"], "gw", "invite", "--endpoint", gw_hub["ipv6"])
+            tok_a = _extract_token(res.stdout + "\n" + res.stderr)
+            r = pexec(node, "gw", "join", tok_a,
+                      "--endpoint", f"[{node_ipv6}]:51900", check=False)
+            assert r.returncode == 0, f"mesh A join failed:\n{r.stdout}\n{r.stderr}"
+            for _ in range(20):
+                if pexec(gw_hub["cid"], "ip", "link", "show", "gw-door",
+                         check=False).returncode != 0:
+                    break
+                time.sleep(0.5)
+
+            # Mesh C: ALSO a plain join — the unknown CA auto-provisions slot 2.
+            res = pexec(hub_c, "gw", "invite", "--endpoint", hub_c_ipv6)
+            tok_c = _extract_token(res.stdout + "\n" + res.stderr)
+            r = pexec(node, "gw", "join", tok_c,
+                      "--endpoint", f"[{node_ipv6}]:51910", check=False)
+            assert r.returncode == 0, f"auto-slot join failed:\n{r.stdout}\n{r.stderr}"
+            assert "auto-provisioning" in (r.stdout + r.stderr)
+
+        # Slot 2 got the derived names, slot 1 is untouched.
+        cfg2 = pexec(node, "cat", "/etc/greasewood2.toml").stdout
+        assert 'interface = "gw-mesh2"' in cfg2
+        assert "listen_port = 51910" in cfg2
+        assert 'mesh_domain = "gw2.internal"' in cfg2
+        assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
+        assert 'data_dir = "/var/lib/greasewood2"' in cfg2
+        cfg1 = pexec(node, "cat", "/etc/greasewood.toml").stdout
+        assert 'interface = "gw-mesh"' in cfg1 and "listen_port = 51900" in cfg1
+
+        # Both daemons up; both overlays reachable.
+        podman("exec", "-d", node, "sh", "-c", "gw run >> /tmp/a.log 2>&1")
+        podman("exec", "-d", node, "sh", "-c",
+               "gw -c /etc/greasewood2.toml run >> /tmp/c.log 2>&1")
+        assert wait_for_ping(node, gw_hub["overlay"], timeout=45), \
+            "node could not reach mesh A's hub"
+        assert wait_for_ping(node, overlay_c, timeout=45), \
+            "node could not reach the auto-slotted mesh's hub"
+
+        # Re-join mesh C with a fresh token, still no flags: routes to slot 2
+        # (same identity — "re-enrolling"), never allocates slot 3.
+        with _ENROLL_LOCK:
+            res = pexec(hub_c, "gw", "invite", "--endpoint", hub_c_ipv6)
+            tok_c2 = _extract_token(res.stdout + "\n" + res.stderr)
+            r = pexec(node, "gw", "join", tok_c2,
+                      "--endpoint", f"[{node_ipv6}]:51910", check=False)
+            assert r.returncode == 0, f"slot-2 refresh failed:\n{r.stdout}\n{r.stderr}"
+            assert "refreshing it" in (r.stdout + r.stderr)
+        assert pexec(node, "test", "-e", "/etc/greasewood3.toml",
+                     check=False).returncode != 0, "refresh wrongly made slot 3"
+    finally:
+        for cid in (hub_c, node):
+            if cid:
+                podman("rm", "-f", cid, check=False)
