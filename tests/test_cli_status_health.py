@@ -51,7 +51,7 @@ def test_health_block_shows_self_facts(tmp_path, capsys):
     assert "version  :" in out
     assert "cred     : expires" in out and "in 17h" in out     # 18h ttl, ~17h left
     assert "inbound  : yes" in out
-    assert "trust    : 1 trusted CA · hub http://[fd8d" in out
+    assert "trust    : 1 trusted CA · anchor http://[fd8d" in out
     assert "sync     : directory synced 0s ago" in out
 
 
@@ -70,7 +70,7 @@ def test_never_synced_and_stale(tmp_path, capsys):
     sync.stamp_sync_path(tmp_path).write_text(old.replace(microsecond=0).isoformat())
     cli.cmd_status(args)
     out = capsys.readouterr().out
-    assert "sync     : ⚠" in out and "hub unreachable?" in out
+    assert "sync     : ⚠" in out and "anchor unreachable?" in out
 
 
 def test_outbound_only_posture(tmp_path, capsys):
@@ -79,9 +79,9 @@ def test_outbound_only_posture(tmp_path, capsys):
     assert "inbound  : no (outbound-only)" in capsys.readouterr().out
 
 
-def test_hub_has_no_sync_line(tmp_path, capsys):
-    # The hub is the source of truth — nothing to be 'stale' against.
-    args = _node(tmp_path, role="hub")
+def test_anchor_has_no_sync_line(tmp_path, capsys):
+    # The anchor is the source of truth — nothing to be 'stale' against.
+    args = _node(tmp_path, role="anchor")
     cli.cmd_status(args)
     out = capsys.readouterr().out
     assert "version  :" in out                                 # block still shows

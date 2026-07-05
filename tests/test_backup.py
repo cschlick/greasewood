@@ -1,10 +1,10 @@
 """
-Hub backup/restore. The RUNBOOK's headline SOP is "back up ca.key encrypted +
+Anchor backup/restore. The RUNBOOK's headline SOP is "back up ca.key encrypted +
 offline" — this makes it one command instead of a manual ritual. The archive is
 a single passphrase-encrypted blob (AES-GCM, scrypt-derived key) holding the
-hub's whole trust state: CA key, the nodes/ registry, the revoke list, the door
+anchor's whole trust state: CA key, the nodes/ registry, the revoke list, the door
 key. Restoring the SAME key onto a new host is a non-event trust-wise (no
-re-root), so this turns "hub died" into a chore.
+re-root), so this turns "anchor died" into a chore.
 """
 import pytest
 
@@ -89,21 +89,21 @@ def test_not_a_backup_rejected():
 
 
 def test_collect_and_restore_files(tmp_path):
-    # Lay out a hub data dir, collect it, restore into a fresh dir, compare.
-    src = tmp_path / "hub"
+    # Lay out an anchor data dir, collect it, restore into a fresh dir, compare.
+    src = tmp_path / "anchor"
     (src / "nodes").mkdir(parents=True)
     (src / "ca.key").write_bytes(b"KEYDATA")
     (src / "ca.key.pub").write_text("pub\n")
     (src / "revoked.json").write_text('{"revoked": []}')
     (src / "door.key").write_text("door\n")
-    (src / "id_priv.pem").write_text("HUBID\n")  # hub's own identity → same addr
-    (src / "wg.key").write_text("HUBWG\n")
+    (src / "id_priv.pem").write_text("ANCHORID\n")  # anchor's own identity → same addr
+    (src / "wg.key").write_text("ANCHORWG\n")
     (src / "nodes" / "abcd.json").write_text('{"hostname": "n1", "caps": []}')
-    (src / "directory.json").write_text("[]")  # NOT hub state — excluded
+    (src / "directory.json").write_text("[]")  # NOT anchor state — excluded
 
-    files = backup.collect_hub_state(src, ca_key_file=src / "ca.key")
+    files = backup.collect_anchor_state(src, ca_key_file=src / "ca.key")
     assert "ca.key" in files and "nodes/abcd.json" in files
-    assert "id_priv.pem" in files  # hub's overlay address is preserved on restore
+    assert "id_priv.pem" in files  # anchor's overlay address is preserved on restore
     assert "directory.json" not in files  # rebuilt from live records on sync
 
     dst = tmp_path / "restored"

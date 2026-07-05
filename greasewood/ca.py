@@ -1,15 +1,15 @@
 """
-greasewood.ca — certificate authority operations (hub only).
+greasewood.ca — certificate authority operations (anchor only).
 
 The CA signs Credentials only. It never generates or sees any private key
 other than ca_priv.
 
-CA.issue() is called by the hub during enrollment (over the transient door, see
+CA.issue() is called by the anchor during enrollment (over the transient door, see
 greasewood.enroll) and renewal — never directly by an operator, and never over a
 network-reachable endpoint.
 
 Revoke list: revoked.json — a set of id_pub hex strings, re-read live by the
-  daemon. Revoking refuses the node's renew/publish at the hub immediately and
+  daemon. Revoking refuses the node's renew/publish at the anchor immediately and
   frees its hostname; its credential also expires on its own, so other nodes
   evict it within one credential TTL (expiry-based revocation, no CRL).
 
@@ -94,7 +94,7 @@ class CA:
         caps: list[str],
     ) -> Credential:
         """
-        Sign a credential for a node (hub-side; called during enrollment/renewal).
+        Sign a credential for a node (anchor-side; called during enrollment/renewal).
         Persists node caps so renewal can re-use them without operator input.
         Raises ValueError if id_pub is revoked or the hostname is already taken
         by a different node (enforced on the sanitized name, so db/DB collide).
@@ -158,11 +158,11 @@ class CA:
             if req.hostname and req.hostname != hostname:
                 # Rename (gw rename): issue() enforces uniqueness on the new name
                 # and rewrites nodes/<id>.json, which frees the old name for
-                # reuse. But a hub-pinned node (enrolled via `gw invite
-                # --hostname`) may not rename itself — the name is the hub's.
+                # reuse. But an anchor-pinned node (enrolled via `gw invite
+                # --hostname`) may not rename itself — the name is the anchor's.
                 if "hostname-pinned" in caps:
                     raise ValueError(
-                        "hostname is hub-pinned for this node; rename disabled "
+                        "hostname is anchor-pinned for this node; rename disabled "
                         "(re-invite with a new --hostname to change it)"
                     )
                 log.info("renaming %s -> %s", hostname, req.hostname)
@@ -201,7 +201,7 @@ class CA:
         return tlsca.cert_pem(leaf), tlsca.cert_pem(ca_cert)
 
     def ca_cert_pem(self) -> str:
-        """The hub's self-signed x509 CA certificate (the TLS trust anchor)."""
+        """The anchor's self-signed x509 CA certificate (the TLS trust anchor)."""
         from . import tlsca
         with self._lock:
             cert = tlsca.ensure_ca_cert(

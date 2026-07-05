@@ -12,7 +12,7 @@ its features!
 
 - **[Private.](#membership)** Membership is gated by a certificate authority;
   revoke a node by not renewing it.
-- **[Self-contained.](#the-hub)** The hub is just a normal node with a CA — no
+- **[Self-contained.](#the-anchor)** The anchor is just a normal node with a CA — no
   coordination service, no SaaS.
 - **[Direct-or-fail.](#direct-or-fail)** No routing, no relays. A link comes up
   directly or it honestly fails.
@@ -24,7 +24,7 @@ its features!
   talks to whom.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
-- **[Offline-tolerant.](#offline-tolerance)** The hub can be down for a credential
+- **[Offline-tolerant.](#offline-tolerance)** The anchor can be down for a credential
   lifetime — nodes run from cache.
 - **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
   you apply them.
@@ -49,7 +49,7 @@ the "more" is consistent:
 - **More infrastructure to get peers connected.** Relays and hole-punching
   (Tailscale), lighthouses and hole-punching (Nebula), a coordination server
   (innernet) — plus an always-on control plane or registry. greasewood does none
-  of it: the hub is a normal node that can be *offline* for a credential
+  of it: the anchor is a normal node that can be *offline* for a credential
   lifetime, and links are **direct-or-fail** — no traversal, no relays.
 - **They assign addresses.** A control plane hands them out, or they're baked
   into the cert. greasewood **derives** the address from the identity key — no
@@ -89,8 +89,8 @@ list to push around and no CRL. Two keys and two signed objects carry it:
   plus fast-moving facts (endpoints, a sequence number); its `hostname` is read
   from the credential. This is what gets published through the directory.
 
-**Revocation is expiry-based (no CRL).** `gw revoke <id>` on the hub takes effect
-there immediately — the hub re-reads its revoke list each reconcile cycle,
+**Revocation is expiry-based (no CRL).** `gw revoke <id>` on the anchor takes effect
+there immediately — the anchor re-reads its revoke list each reconcile cycle,
 dropping the node from its own interface within seconds, and refuses the node's
 renewals from then on. It does **not** reach the rest of the fleet instantly:
 other nodes keep trusting the node's credential until it expires. But since the
@@ -98,9 +98,9 @@ node can no longer renew, that credential lapses within at most one
 `credential_ttl`, at which point every node rejects it — the fleet-wide eviction.
 Shorten `credential_ttl` for a tighter bound.
 
-## The hub
+## The anchor
 
-The hub is **just a normal mesh node** that additionally holds the CA key and
+The anchor is **just a normal mesh node** that additionally holds the CA key and
 runs a small HTTP **control plane** — `GET /directory`, `POST /publish`, `POST
 /renew`, `GET /health` — bound to its overlay address (reachable only through the
 mesh, never the underlay). There is no separate coordination service, no SaaS,
@@ -108,8 +108,8 @@ nothing always-on in the data path. Nodes poll `/directory`, merge records by
 highest sequence number, and cache them locally.
 
 Because trust is anchored to the CA *key* (not a machine), any node can become
-the hub — restore the key onto a replacement, or stand up a new CA and re-point
-the fleet. See [Moving the hub](#moving-the-hub-re-root).
+the anchor — restore the key onto a replacement, or stand up a new CA and re-point
+the fleet. See [Moving the anchor](#moving-the-anchor-re-root).
 
 ## Direct-or-fail
 
@@ -144,7 +144,7 @@ instances was the motivating use, which is exactly why the v4 underlay matters.)
 Still deliberately absent — **no NAT traversal, no routing, no relays**. The
 direct-or-fail model assumes the network already permits a direct connection (no
 STUN, no hole-punching). A NAT'd node is simply `inbound=no`: it dials out to
-reachable peers and the hub, but two unreachable nodes can't pair — and a v4-only
+reachable peers and the anchor, but two unreachable nodes can't pair — and a v4-only
 node and a v6-only node share no underlay family, so they can't pair either
 (direct-or-fail across address families).
 
@@ -181,7 +181,7 @@ colon-hex is only how those bytes are printed. (Those 64 bits of entropy are als
 where the ~2⁶⁴ collision figure below comes from.)
 
 **Why it can't be spoofed.** To be accepted at an address you present a signed
-record, and every verifier (any potential peer, and the hub) runs two independent
+record, and every verifier (any potential peer, and the anchor) runs two independent
 checks: `address == hash(id_pub)`
 (the address is the legitimate derivation of the key), and the record is
 **self-signed by `id_priv`** (you actually hold that key). To steal node `db`'s
@@ -209,10 +209,10 @@ address is the identity, and nobody assigns it."
 ## Offline tolerance
 
 Every node caches the directory on disk and keeps its tunnels running from that
-cache, so the **hub can be down for up to one credential lifetime** and existing
-node↔node links are unaffected — the hub is never in the data path. Only new
-enrollments and credential renewals need a reachable hub. Restore or replace the
-hub within that window (see [Moving the hub](#moving-the-hub-re-root) and the
+cache, so the **anchor can be down for up to one credential lifetime** and existing
+node↔node links are unaffected — the anchor is never in the data path. Only new
+enrollments and credential renewals need a reachable anchor. Restore or replace the
+anchor within that window (see [Moving the anchor](#moving-the-anchor-re-root) and the
 [RUNBOOK](RUNBOOK.md)) and nothing ever drops.
 
 ## Linux-only
@@ -308,7 +308,7 @@ service](#running-as-a-service); then the workflow is just install → setup/joi
 
 ## Quickstart
 
-### 1. Bootstrap the hub
+### 1. Bootstrap the anchor
 
 On the machine that will hold the CA and serve enrollment:
 
@@ -318,18 +318,18 @@ sudo gw run
 ```
 
 `create` generates the CA, the persistent door key, the policy routing for
-the enrollment door, and the hub's own credential, then writes
+the enrollment door, and the anchor's own credential, then writes
 `/etc/greasewood_myfleet.toml`. `gw run` starts the daemon: it brings up the `gw_myfleet`
 WireGuard interface, serves the control plane, and watches for door windows.
 
-The hub takes this machine's hostname like any other node — it isn't named
-anything special. You tell which node is the hub from `role: hub` in
+The anchor takes this machine's hostname like any other node — it isn't named
+anything special. You tell which node is the anchor from `role: anchor` in
 `gw status`, not from its name. (Pass `--hostname <name>` to override the default.)
 
 ### 2. Enroll a node
 
 Enrollment uses a transient WireGuard "door" — no SSH, no HTTP exposed on the
-underlay. On the hub, open a window and create a single-use token:
+underlay. On the anchor, open a window and create a single-use token:
 
 ```bash
 TOKEN=$(sudo gw invite)
@@ -344,20 +344,20 @@ sudo gw run
 ```
 
 `join` derives a throwaway guest key from the token, stands up a temporary
-`gw-door` tunnel to the hub, receives a CA-signed credential over it, tears the
+`gw-door` tunnel to the anchor, receives a CA-signed credential over it, tears the
 door down, and writes the node's config. `gw run` then brings the node into the
 mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
 
 **Why a door — why can't the token just contain everything to peer over
 your mesh interface?** Because WireGuard peering is *mutual*: to bring up a tunnel to the
-hub over any interface, the hub must already have **your** public key in its peer
+anchor over any interface, the anchor must already have **your** public key in its peer
 list. At invite time your real keys don't exist yet — they're generated locally
-at `join`, and private keys never travel — so the hub cannot pre-authorize your
-real identity key. Handing you the hub's mesh-interface details in the token gets you
-nowhere: the hub would drop your handshake, never having heard of your key.
+at `join`, and private keys never travel — so the anchor cannot pre-authorize your
+real identity key. Handing you the anchor's mesh-interface details in the token gets you
+nowhere: the anchor would drop your handshake, never having heard of your key.
 
 What the token *can* do is carry a 32-byte seed that **both sides expand (HKDF)
-into the same throwaway door keypair + PSK**. The hub derives that throwaway
+into the same throwaway door keypair + PSK**. The anchor derives that throwaway
 pubkey from the seed it minted and pre-installs it as a peer; you derive the
 matching private key — so now a tunnel can actually form. But it forms under a
 **disposable, credential-less key, not your identity** — and a non-member key
@@ -387,15 +387,15 @@ sudo wg show gw_myfleet    # live WireGuard peers
 ```
 
 `gw diagnose` is the tool to reach for when a peer won't connect. It's
-**pairwise**: it lays up to two named nodes plus the hub side by side and
+**pairwise**: it lays up to two named nodes plus the anchor side by side and
 explains, per pair, whether a tunnel can form — segments, reachability, and the
 firewall/routing directionality that's usually the real question. (`gw status`
 is the fleet-wide link overview; diagnose is the focused deep-dive.)
 
 ```bash
-sudo gw diagnose            # this host ↔ the hub
-sudo gw diagnose db01       # this host ↔ db01   (+ hub as reference)
-sudo gw diagnose db01 web1  # db01 ↔ web1        (+ hub as reference)
+sudo gw diagnose            # this host ↔ the anchor
+sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
+sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
 The comparison table shows each node's addresses, inbound flag, segments,
@@ -424,7 +424,7 @@ every mesh as its own instance `greasewood@<name>` (survives reboots, restarts
 on failure, logs to the journal), so the whole workflow is just:
 
 ```bash
-sudo gw create myfleet                # hub  → greasewood@myfleet installed + running
+sudo gw create myfleet                # anchor  → greasewood@myfleet installed + running
 sudo gw join "$TOKEN" --hostname n01  # node → greasewood@<mesh> installed + running
 journalctl -u greasewood@myfleet -f   # watch a mesh's daemon
 systemctl status 'greasewood@*'       # all of them
@@ -441,7 +441,7 @@ template when it's the last mesh) — a from-scratch reset in one command.
 - Instances run `gw run` as root (they manage WireGuard interfaces and
   routing). Don't also run `gw run` by hand while an instance is up — both
   would fight over the interface.
-- A **config-changing re-join** (new hub, new caps) isn't auto-detected — the
+- A **config-changing re-join** (new anchor, new caps) isn't auto-detected — the
   daemon reads its config at startup, so run `sudo systemctl restart greasewood@<name>`
   afterward.
 
@@ -465,9 +465,9 @@ it:
   `'gw <cmd>' needs root (<why>). Try: sudo gw <cmd>` — instead of failing
   partway on whichever file access breaks first. Root-needing commands: the
   data-plane set (`run`, `join`, `create`, `invite`, `purge`, `renew`,
-  `set-inbound`, `rename`, `hub-promote`, `hub-restore`) and the hub
+  `set-inbound`, `rename`, `anchor-promote`, `anchor-restore`) and the anchor
   registry/key set (`revoke`, `set-caps`, `set-segments`, `renew-all`,
-  `cert-request`, `hub-backup`).
+  `cert-request`, `anchor-backup`).
 - **Environment variables.** `sudo` strips the environment by default. This only
   matters if you protect the CA key with `ca_key_passphrase_env`: a var exported
   in your shell won't reach `sudo gw` (you'd get "environment variable is
@@ -479,14 +479,14 @@ it:
 
 ## Provisioning many nodes
 
-Enrollment tokens are **pushed by the hub, never pulled by nodes**. A node
-cannot request admission; you (or an orchestrator acting on the hub) decide to
+Enrollment tokens are **pushed by the anchor, never pulled by nodes**. A node
+cannot request admission; you (or an orchestrator acting on the anchor) decide to
 admit a machine, run `gw invite`, and deliver the token out of band. The node
 only redeems what it was handed. The door is **single-slot by construction**:
-each invite opens one enrollment window, and the hub closes it the instant that
+each invite opens one enrollment window, and the anchor closes it the instant that
 node finishes joining — so provisioning is one node at a time.
 
-**The usual way is copy-paste.** On the hub:
+**The usual way is copy-paste.** On the anchor:
 
 ```bash
 sudo gw invite            # prints a one-time token
@@ -506,7 +506,7 @@ generate another. (If you do overwrite an unused token, `gw invite` warns you �
 on stderr, so the new token still prints cleanly to stdout and `TOKEN=$(gw
 invite)` keeps working.)
 
-On the hub, **`gw status` shows what the door is doing** — open (with the
+On the anchor, **`gw status` shows what the door is doing** — open (with the
 minutes until it closes, the caps it grants, any failed attempts and their
 source IPs, and attempts remaining) or closed (how long ago and why: enrolled,
 expired, or too many failed attempts). Handy for watching an enrollment or
@@ -542,7 +542,7 @@ config, or however you configure your firewall).
 **No firewall at all? Then there's nothing to do — and nothing extra is
 exposed.** greasewood binds nothing to the underlay except its WireGuard UDP
 port(s): `51900` (mesh) on any inbound node, plus `51901` (the enrollment door)
-on the hub. Those are WireGuard, which is designed to face the internet — it
+on the anchor. Those are WireGuard, which is designed to face the internet — it
 silently drops any packet that isn't a valid handshake from a configured peer (no
 reply, no info leak). Everything else — the control plane (`51902`) and the
 enrollment exchange (`51903`) — binds to the overlay address or the door tunnel,
@@ -557,9 +557,9 @@ On a default-drop host, allow (nftables):
 |------------|-------------------------------|--------------------------------------|
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
 | underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
-| `lo`       | `iifname "lo" accept`         | the hub talks to itself (`::1:51902`)|
-| `gw_<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the hub** |
-| `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when hub** |
+| `lo`       | `iifname "lo" accept`         | the anchor talks to itself (`::1:51902`)|
+| `gw_<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the anchor** |
+| `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when anchor** |
 
 ```
 udp dport { 51900, 51901 } accept
@@ -571,7 +571,7 @@ iifname "gw-door" tcp dport 51903 accept
 The four ports sit in one contiguous block, **51900–51903**, deliberately clear
 of the WireGuard default (51820) and Docker Swarm / Serf (7946) so greasewood
 doesn't squat a port something else likely wants. All are configurable: mesh
-`[network] listen_port`, control `[hub] control_listen`, door `[hub] door_port`
+`[network] listen_port`, control `[anchor] control_listen`, door `[anchor] door_port`
 (or `create --listen-port/--control-port/--door-port`). The door port rides
 in join tokens and the control port in the enrollment response, so nodes pick up
 non-default values automatically — no client config. (The internal enrollment
@@ -579,14 +579,14 @@ port lives inside the door tunnel and can't collide, so it isn't a knob.)
 
 ### Worked example: a default-drop host
 
-A complete, loadable ruleset for a hub host running `policy drop`. It's safe
+A complete, loadable ruleset for an anchor host running `policy drop`. It's safe
 verbatim on plain nodes too — the `gw-door` rules never match where no door
-exists, and `51902` only matters where a hub listens (greasewood's rules are
+exists, and `51902` only matters where an anchor listens (greasewood's rules are
 the same on every node by design):
 
 ```nft
 #!/usr/sbin/nft -f
-table inet gw_hub {
+table inet gw_anchor {
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -596,9 +596,9 @@ table inet gw_hub {
 
         # --- underlay: the only internet-facing surface, both UDP.
         # Non-peers get silence from WireGuard itself; the door port is
-        # inert unless a window / standing door is open (hub only).
+        # inert unless a window / standing door is open (anchor only).
         udp dport 51900 accept comment "greasewood mesh WG"
-        udp dport 51901 accept comment "greasewood door WG (hub only)"
+        udp dport 51901 accept comment "greasewood door WG (anchor only)"
 
         # --- tunnel-internal services (TCP), scoped to their interface.
         # 51902 is reachable only as a verified mesh peer; 51903 only
@@ -619,10 +619,10 @@ binds only overlay+loopback and `51903` binds only the door IP, so they're
 unreachable from the underlay even without these rules — the scoped accepts
 just make the firewall *state* the architecture.
 
-### Worked example: hub (or node) behind a NAT router
+### Worked example: anchor (or node) behind a NAT router
 
 On the **router**, only the two WireGuard UDP ports ever get forwarded —
-`51900` always, `51901` only if the *hub* is the machine behind this router.
+`51900` always, `51901` only if the *anchor* is the machine behind this router.
 Never forward `51902/51903`: they aren't on the underlay at all.
 
 ```nft
@@ -634,13 +634,13 @@ table ip gw_forward {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
         iifname $WAN_IF udp dport 51900 dnat to $GW_HOST comment "greasewood mesh WG"
-        iifname $WAN_IF udp dport 51901 dnat to $GW_HOST comment "greasewood door WG (hub only — delete on a plain node)"
+        iifname $WAN_IF udp dport 51901 dnat to $GW_HOST comment "greasewood door WG (anchor only — delete on a plain node)"
     }
     chain forward {
         type filter hook forward priority filter; policy accept;
         # If your forward policy is drop (it should be), allow the DNATed flows:
         ip daddr $GW_HOST udp dport 51900 accept comment "greasewood mesh WG"
-        ip daddr $GW_HOST udp dport 51901 accept comment "greasewood door WG (hub only)"
+        ip daddr $GW_HOST udp dport 51901 accept comment "greasewood door WG (anchor only)"
         ip saddr $GW_HOST ct state established,related accept
     }
 }
@@ -648,7 +648,7 @@ table ip gw_forward {
 
 Behind NAT, advertise the **router's** public identity, not the LAN address:
 `gw join <token> --endpoint <router-public>:51900` on a node, and
-`gw invite --endpoint <router-public-or-dns>` on a hub. With routable IPv6
+`gw invite --endpoint <router-public-or-dns>` on an anchor. With routable IPv6
 behind the router there's no DNAT — just accept the same two UDP ports in the
 router's v6 forward chain. A node running `inbound = no` needs **nothing**
 forwarded: it dials out and keepalives hold the mapping open. And the machine
@@ -656,16 +656,16 @@ behind the router pairs this with the host ruleset above.
 
 Your base default-drop ruleset should also include `ct state established,related
 accept`. It's what lets an **outbound-only** node work:
-such a node opens *no* greasewood inbound ports — it dials peers and the hub,
+such a node opens *no* greasewood inbound ports — it dials peers and the anchor,
 and the replies come back through `established,related`.
 
 **Recommended posture: apply the same ruleset on *every* node, not just the
-current hub.** Any node can be promoted to hub ([Moving the
-hub](#moving-the-hub-re-root)), so a uniform ruleset means a hub handover
+current anchor.** Any node can be promoted to anchor ([Moving the
+anchor](#moving-the-anchor-re-root)), so a uniform ruleset means an anchor handover
 needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
-isn't a hub is harmless: nothing is bound there, so the kernel just refuses the
-connection until that node actually becomes a hub and binds it. Plain nodes run
-no control plane, so on a node that will never be a hub you *could* omit the mesh-interface/
+isn't an anchor is harmless: nothing is bound there, so the kernel just refuses the
+connection until that node actually becomes an anchor and binds it. Plain nodes run
+no control plane, so on a node that will never be an anchor you *could* omit the mesh-interface/
 `gw-door` TCP rules and open only the two UDP ports if you really want the most minimal config.
 
 **Multi-user hosts:** the overlay is host-wide — *any* local user can use the
@@ -687,7 +687,7 @@ change it later with `gw set-inbound`:
 - **`yes`**: advertises its endpoint; needs the mesh UDP port open.
 - **`no`** (outbound-only): the node advertises *no* endpoint, so peers don't
   waste handshakes dialing it; it opens no inbound ports. It can only pair with
-  inbound-reachable nodes, and **can't be promoted to hub** (a hub must be
+  inbound-reachable nodes, and **can't be promoted to anchor** (an anchor must be
   reachable). Switch it back with `sudo gw set-inbound yes` (then open the port).
 
 `inbound` is an optimization + a guard, not what decides direction — WireGuard
@@ -704,23 +704,23 @@ only if they **share a segment**; every node is in `segment:mesh` by default (th
 flat default pool), and putting a node in another segment isolates it.
 
 Segments are `segment:<name>` tags in the node's CA-signed credential. Crucially,
-**the hub assigns them at `gw invite` — a joining node cannot choose its own** (no
+**the anchor assigns them at `gw invite` — a joining node cannot choose its own** (no
 self-assertion). Whoever you hand a token to gets exactly the segments that invite
 specified:
 
 ```bash
-# On the hub — the invite decides the node's segments:
+# On the anchor — the invite decides the node's segments:
 TOKEN=$(sudo gw invite --segments prod,web)   # a token for a node in prod + web
 # On the new node — join takes no segment flags; it gets what the token granted:
 sudo gw join "$TOKEN" --hostname web1
 ```
 
 A node's segments show up in `gw status` (a `segments` column). To change them
-later **without re-joining**, run `gw set-segments <node> prod,web` on the hub —
+later **without re-joining**, run `gw set-segments <node> prod,web` on the anchor —
 it takes effect at the node's next renewal (or re-invite + re-join for an
 immediate change).
 
-**Defaults for new nodes** live in the hub's config — `[hub] default_segments`
+**Defaults for new nodes** live in the anchor's config — `[anchor] default_segments`
 (ships `["mesh"]`) and `default_caps` (ships `["tls"]`, so TLS is on by default).
 A plain `gw invite` with no `--segments`/`--caps` uses them; the flags override
 per token. They're read fresh at each invite, so **editing the config changes
@@ -735,7 +735,7 @@ The rule is one line — **share a segment** (`reconcile.default_policy`):
   sharing one — a "bridge" node).
 - **default** → every node gets `segment:mesh`, so a fleet with no segments set is
   one open mesh (everyone shares `mesh`).
-- **`segment:*`** on either side → reaches everyone. The hub carries it
+- **`segment:*`** on either side → reaches everyone. The anchor carries it
   automatically (it must serve every node); grant it to a shared-services node
   with `gw invite --segments '*'`.
 - **no shared segment** → **denied** (putting a node in `segment:prod` drops it
@@ -755,7 +755,7 @@ ordinary name that reaches only other `mesh` nodes; `*` is the reach-all wildcar
 
 Two properties worth knowing:
 
-- **Hub-assigned, attested, mutually enforced.** Segments are decided by the hub
+- **Anchor-assigned, attested, mutually enforced.** Segments are decided by the anchor
   at admission and bound into the CA-signed credential — a node **can't
   self-assert** a segment it wasn't granted. A tunnel needs *both* ends to install
   each other, and each side reads the *other's* segments from its credential, so a
@@ -769,33 +769,33 @@ Two properties worth knowing:
 
 | Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
-| `create`        | yes   | One-shot hub bootstrap: CA, door key, routing, self-cred. |
+| `create`        | yes   | One-shot anchor bootstrap: CA, door key, routing, self-cred. |
 | `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the hub it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
-| `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the hub side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ hub. |
-| `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
-| `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
-| `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |
-| `hub-promote`      | yes   | Turn this enrolled node into a hub (generate its own CA key).  |
-| `cert-request`     | no    | Get an x509 TLS cert from the hub for a local service. The daemon then auto-renews it at ~half its TTL; `--reload-cmd` runs a command (e.g. `systemctl reload postgresql`) after each renewal, `--no-auto-renew` opts out. |
+| `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
+| `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
+| `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the anchor).          |
+| `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
+| `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
+| `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
+| `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon then auto-renews it at ~half its TTL; `--reload-cmd` runs a command (e.g. `systemctl reload postgresql`) after each renewal, `--no-auto-renew` opts out. |
 | `cert-status`      | no    | Show local TLS certs and their expiry.                     |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `set-inbound`      | yes   | Change reachability (yes/no).                              |
-| `rename-node <name>` | yes | Change this node's mesh hostname (hub-validated, no re-join; refused if the hub pinned the name). |
-| `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the hub, then on each member (surfaced in its `gw status`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
-| `renew`            | yes   | Force an immediate credential renewal for this node (applies a hub-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
-| `renew-all`        | no    | On the hub: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the hub's rate stays ~constant with mesh size). |
-| `hub-backup`       | no    | On the hub: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and hub identity. Store it offline. |
-| `hub-restore`      | yes   | Restore a `hub-backup` archive onto a replacement host (same CA key → a restore, not a re-root). |
+| `rename-node <name>` | yes | Change this node's mesh hostname (anchor-validated, no re-join; refused if the anchor pinned the name). |
+| `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the anchor, then on each member (surfaced in its `gw status`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
+| `renew`            | yes   | Force an immediate credential renewal for this node (applies an anchor-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
+| `renew-all`        | no    | On the anchor: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the anchor's rate stays ~constant with mesh size). |
+| `anchor-backup`       | no    | On the anchor: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and anchor identity. Store it offline. |
+| `anchor-restore`      | yes   | Restore a `anchor-backup` archive onto a replacement host (same CA key → a restore, not a re-root). |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default: discovered — with one mesh on the host every command finds its config unaided; with several, gw lists them and asks for `-c`) and
 `-v/--verbose`. Both must precede the subcommand (`gw -v run`, not `gw run -v`).
 
-Enrollment is door-only: `invite` on the hub, `join` on the node. There is no
+Enrollment is door-only: `invite` on the anchor, `join` on the node. There is no
 manual credential-copy path.
 
 ## Configuration
@@ -806,7 +806,7 @@ manual credential-copy path.
 ```toml
 [node]
 hostname = "node01"
-role     = "node"          # "hub" | "node"
+role     = "node"          # "anchor" | "node"
 inbound  = "yes"           # can this node accept cold inbound handshakes?
 caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
 
@@ -814,15 +814,15 @@ caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows c
 interface  = "gw_myfleet"
 listen_port = 51900
 overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
-seeds    = ["http://[<hub-overlay>]:51902"]  # directory URLs to pull (the hub)
-root_url = "http://[<hub-overlay>]:51902"    # where to publish / renew
+seeds    = ["http://[<anchor-overlay>]:51902"]  # directory URLs to pull (the anchor)
+root_url = "http://[<anchor-overlay>]:51902"    # where to publish / renew
 hosts_sync  = true                           # manage /etc/hosts names (on by default)
 mesh_domain = "myfleet.internal"             # the mesh's ONE domain (from create <name>)
 
 [ca]
 trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
 
-[hub]                        # hub role only
+[anchor]                        # anchor role only
 ca_key_file    = "/var/lib/greasewood/ca.key"
 control_listen = ":51902"
 credential_ttl = "24h"
@@ -835,8 +835,8 @@ autoscaling groups — where instances must enroll themselves at first boot —
 open a **standing door** instead:
 
 ```bash
-# On the hub, once per fleet:
-sudo gw invite --standing --segments autoscale --endpoint hub.example.com -q
+# On the anchor, once per fleet:
+sudo gw invite --standing --segments autoscale --endpoint anchor.example.com -q
 # → ONE token. Put it in the image or launch template's user-data.
 ```
 
@@ -851,7 +851,7 @@ Threat model, honestly: a leaked standing token lets its holder **enroll a
 rogue node** into the pinned segment — a bounded, visible (`gw status` shows
 `door: OPEN (standing) — N enrolled`; every join is in the audit trail), and
 reversible (`gw revoke`) failure. That is the deliberate trade against the
-alternatives (e.g. giving instances SSH to the hub, whose failure mode is hub
+alternatives (e.g. giving instances SSH to the anchor, whose failure mode is anchor
 compromise). Contain it with a quarantine segment and rotate freely:
 
 ```bash
@@ -860,20 +860,20 @@ sudo gw invite --standing ... -q   # fresh seed → fresh token → update user-
 ```
 
 Lost the token? A standing token is stored (0600 root) so you can re-retrieve
-it without re-issuing — **`sudo gw status`** on the hub prints it in the door
+it without re-issuing — **`sudo gw status`** on the anchor prints it in the door
 block while the standing door is open (root only; it's the enrollment
 credential). Re-issuing would invalidate copies already baked into images, so
 retrieve rather than re-invite.
 
 Enrolled nodes are never affected by door operations — their credentials come
-from the CA, not the door. A standing door survives hub reboots (the daemon
+from the CA, not the door. A standing door survives anchor reboots (the daemon
 re-erects it), and a plain `gw invite` refuses to silently supersede one (pass
 `--supersede` or `close-door` first), so a one-off invite can't accidentally
 invalidate the token baked into your image pipeline.
 
 ### Roles
 
-- **hub** — holds the CA private key; serves the control plane and the
+- **anchor** — holds the CA private key; serves the control plane and the
   enrollment door; participates in the mesh.
 - **node** — a plain mesh participant.
 
@@ -884,7 +884,7 @@ The overlay `/64` is configurable (`[network] overlay_prefix`, set at
 node learns and verifies addresses prefix-agnostically — the self-certifying
 part is the host bits, `blake2s(id_pub)`, and the CA signature attests the
 prefix — so **one host can be a plain node on two independent meshes at once**
-(hub-in-two-meshes is not supported). Joining a second mesh is just:
+(anchor-in-two-meshes is not supported). Joining a second mesh is just:
 
 ```bash
 sudo gw join "$TOKEN_B"        # that's it
@@ -902,7 +902,7 @@ suffix, and TLS names agree fleet-wide with no flags.
 same domain — no local aliasing exists (a per-host alias would diverge from the
 names in the mesh's TLS certs, a debugging trap; and rewriting is off the table
 since names are CA-attested). The join refuses *before* the door dance (the
-token is not consumed) and tells you the fix: rename one mesh on its hub.
+token is not consumed) and tells you the fix: rename one mesh on its anchor.
 Requiring a mesh name at create makes this a genuine coincidence rather than
 the default-default certainty it used to be.
 
@@ -964,7 +964,7 @@ fd8d:e5c1:db1a:7:…  node01.myfleet.internal
 ```
 
 So `ping db.myfleet.internal`, `ssh db.myfleet.internal`, etc. just work — no DNS
-server, and it keeps resolving even if the hub is down (it's from the cache,
+server, and it keeps resolving even if the anchor is down (it's from the cache,
 for as long as the cached credentials remain valid — one credential TTL, the
 same horizon as the tunnels themselves). It
 only ever touches the region between its markers; your own `/etc/hosts` lines are
@@ -978,11 +978,11 @@ TLS section for how this ties cert SANs to resolvable names.
 
 **Who chooses the name.** By default a node names itself at `gw join` (defaulting
 to its machine hostname) and can change it later with `gw rename-node`. If you'd rather
-the hub control it, **pin it at invite**: `gw invite --hostname db` fixes the name
+the anchor control it, **pin it at invite**: `gw invite --hostname db` fixes the name
 at enrollment (the joiner's requested name is ignored) and marks the credential so
 the node **can't `gw rename-node` itself** — to change a pinned name, re-invite with a
 new `--hostname`. Either way the name is CA-attested; pinning just moves the
-decision from the node to the hub.
+decision from the node to the anchor.
 
 Two things make defaulting this on safe:
 - **Names are CA-attested** (the hostname lives in the signed credential), so a
@@ -998,19 +998,19 @@ name(s) a certificate is valid for).
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
 it later with `sudo gw rename-node <newname>` (then restart the daemon). Rename goes
-through the hub, so it's uniqueness-checked and frees the old name — the keys and
+through the anchor, so it's uniqueness-checked and frees the old name — the keys and
 overlay address don't change. (Editing `hostname` in the config directly is not
-enough: the hub wouldn't know, so always use `gw rename-node`.)
+enough: the anchor wouldn't know, so always use `gw rename-node`.)
 
 > Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`) and must
 > be **unique**. For a self-chosen name, uniqueness is checked at enrollment: a
 > `join` whose (sanitized) name is already taken is refused — but the token isn't
 > burned, so the joiner is told how many attempts remain and can retry with a
-> different `--hostname` (a few tries per window). For a **hub-pinned** name
+> different `--hostname` (a few tries per window). For a **anchor-pinned** name
 > (`gw invite --hostname`), uniqueness is checked at *invite* instead, so a
 > pinned name is guaranteed free before the token goes out and can't collide at
 > enrollment (the joiner couldn't fix it anyway). Either way, a decommissioned
-> node keeps its name until its `nodes/<id>.json` is removed on the hub, which
+> node keeps its name until its `nodes/<id>.json` is removed on the anchor, which
 > frees it for reuse.
 
 ## TLS certificates for services
@@ -1041,7 +1041,7 @@ cert only for opportunistic encryption (no SAN check) *is* just redundant with
 WireGuard.
 
 A node may request certs only if its credential carries the **`tls`**
-capability. It's granted by the hub, and **ships on by default** (`[hub]
+capability. It's granted by the anchor, and **ships on by default** (`[anchor]
 default_caps = ["tls"]`), so a plain `gw invite` already yields a cert-capable
 node — no extra flag:
 
@@ -1050,14 +1050,14 @@ TOKEN=$(sudo gw invite)                 # tls is in the default caps
 sudo gw join "$TOKEN" --hostname dbnode
 ```
 
-To make `tls` opt-in instead, set `default_caps = []` in `[hub]` (effective on
+To make `tls` opt-in instead, set `default_caps = []` in `[anchor]` (effective on
 the next invite) and grant it per-node with `gw invite --caps tls` or later with
 `gw set-caps <node> …`. Either way `tls` is bounded by SAN authorization (below),
 so a cert-capable node can still only get certs for its *own* names.
 
 Then, on that node. A node can only get a cert for names it **owns**: its own
 `<hostname>.<mesh_domain>`, any **subdomain** of that, and its own overlay
-address. The hub (the CA) enforces this, so a node can never obtain a valid cert
+address. The anchor (the CA) enforces this, so a node can never obtain a valid cert
 for *another* node's name and impersonate its service to TLS clients.
 
 ```bash
@@ -1079,12 +1079,12 @@ sudo gw cert-request --name postgres \
 gw cert-status                       # list issued certs and their expiry
 ```
 
-The leaf private key is generated locally and never sent to the hub; only its
+The leaf private key is generated locally and never sent to the anchor; only its
 public key goes in the request, which is signed by the node's identity key. The
-hub returns the leaf cert plus the CA cert. Point the service at them — e.g.
+anchor returns the leaf cert plus the CA cert. Point the service at them — e.g.
 Postgres `ssl_cert_file=postgres.crt`, `ssl_key_file=postgres.key`, and clients
 `sslrootcert=ca.crt` with `sslmode=verify-full`. Certs are short-lived (default 7
-days, `[hub] tls_cert_ttl`), and **the daemon auto-renews each one at ~half its
+days, `[anchor] tls_cert_ttl`), and **the daemon auto-renews each one at ~half its
 TTL** into whatever paths you chose — pass `--reload-cmd "systemctl reload
 postgresql"` so the service picks up the rotation (or `--no-auto-renew` for a
 one-shot). Managed certs are keyed by `--name`, so re-running `cert-request` with
@@ -1118,10 +1118,10 @@ the manifest holds the per-cert paths. `cert-request` prints both so you always
 know which config it read and where the renewal record is.
 
 > **SANs are constrained to what the node owns** (its CA-registered
-> `<hostname>.<mesh_domain>`, subdomains, and its overlay address) — the hub
+> `<hostname>.<mesh_domain>`, subdomains, and its overlay address) — the anchor
 > refuses a cert for another node's name, so a `tls`-capable node can't
 > impersonate a service it doesn't run. The `tls` capability is still the gate;
-> grant it only to nodes that run services. The hub's CA cert is also at
+> grant it only to nodes that run services. The anchor's CA cert is also at
 > `GET /ca-cert`. (After a re-root the CA changes; re-request to pick up the new
 > issuer.)
 
@@ -1131,7 +1131,7 @@ This wires up a Postgres server that authenticates clients by their mesh
 identity, with certs that rotate transparently. Nothing below hardcodes a
 hostname: greasewood **binds the cert's CN and SAN to the node's own attested
 `<hostname>.<mesh_domain>` automatically** — you can't set them to another
-identity (the hub *refuses* a SAN the node doesn't own and *forces* the CN to the
+identity (the anchor *refuses* a SAN the node doesn't own and *forces* the CN to the
 node's own name), so each host gets a cert for exactly its own identity with no
 name typed.
 
@@ -1232,22 +1232,22 @@ identities may connect, and each entry is that node's own automatic name.
 > and let the fleet re-issue together; don't swap a CA independently, or client
 > certs signed by the old one stop validating.
 
-## Moving the hub (re-root)
+## Moving the anchor (re-root)
 
 No node is forever-critical: because a node trusts a CA **key**, not a machine,
-any node that holds the CA authority and serves the directory *is* the hub.
-Moving the hub is therefore a deliberate **re-root** — swap which CA key the
+any node that holds the CA authority and serves the directory *is* the anchor.
+Moving the anchor is therefore a deliberate **re-root** — swap which CA key the
 fleet trusts — not an automatic handover. `trusted_pubs` is a **set**, so you
 trust the old and new CA during an overlap and the move is non-disruptive.
 
-The CA private key never moves: the new hub generates its own key, and you push
-the new *public* key into every node's `trusted_pubs`. Migrating from hub **A**
+The CA private key never moves: the new anchor generates its own key, and you push
+the new *public* key into every node's `trusted_pubs`. Migrating from anchor **A**
 to a new node **B**:
 
 1. **Enroll B as an ordinary node** (`gw join …`) and start it — so it's a
    reachable mesh member every node can renew against over the overlay.
-2. **Promote B:** `sudo gw hub-promote` generates B's own CA key and flips it to
-   `role=hub` (keeping trust in A), printing B's CA pubkey + control endpoint;
+2. **Promote B:** `sudo gw anchor-promote` generates B's own CA key and flips it to
+   `role=anchor` (keeping trust in A), printing B's CA pubkey + control endpoint;
    then `sudo gw run`, and B serves the control plane on its own overlay address.
 3. **On every node** (Ansible): add B's CA pubkey to `[ca] trusted_pubs` (keep
    A's) and repoint `root_url` + `seeds` to B; restart the daemon. The fleet now
@@ -1259,12 +1259,12 @@ to a new node **B**:
 5. **Once every node holds a B-signed credential,** drop A's CA pubkey from
    `trusted_pubs` fleet-wide, then decommission A.
 
-Throughout, **A and B both run as hubs** — that's the point of the overlap, and
-there's no clash: each hub's control plane binds to its *own* overlay address
+Throughout, **A and B both run as anchors** — that's the point of the overlap, and
+there's no clash: each anchor's control plane binds to its *own* overlay address
 (the hash of its own identity key), the fleet trusts both CAs at once, and the
 directory is eventually-consistent (records merge by highest sequence number, and
-each node renews against the one hub its `root_url` points at). Existing tunnels
-stay up throughout (the data plane never depends on the hub), so the handover is
+each node renews against the one anchor its `root_url` points at). Existing tunnels
+stay up throughout (the data plane never depends on the anchor), so the handover is
 non-disruptive. Plan the overlap to last at least one credential TTL so every node
 renews under B in time. See [RUNBOOK.md](RUNBOOK.md) for the full graceful vs
 emergency (compromised/lost-key) procedures.
@@ -1282,7 +1282,7 @@ WireGuard kernel module:
 
 ```bash
 # Functional tests: mesh connectivity, re-enrollment, rename, TLS, reboot
-# survival, and a full hub re-root A→B (two live hubs, fleet migrates to B's CA) —
+# survival, and a full anchor re-root A→B (two live anchors, fleet migrates to B's CA) —
 # all on real containers, under tests/integration/
 python -m pytest tests/integration/
 
@@ -1330,13 +1330,13 @@ cross-platform — aren't missing, they're the point. A few internal ideas are
 make them worth building:
 
 - **Gossip between nodes** — if the network ever genuinely partitions (today every
-  node pulls the directory from the hub).
+  node pulls the directory from the anchor).
 - **Lazy, on-demand tunnels** — at hundreds of nodes, if a full peer mesh becomes
   too many links to hold open.
-- **Threshold CA** — if single-hub-key compromise becomes unacceptable.
+- **Threshold CA** — if single-anchor-key compromise becomes unacceptable.
 - **CA cross-signing to smooth re-root** — let the old CA sign a short-lived,
   directory-distributed "also trust the new CA" delegation, so a graceful
-  [re-root](#moving-the-hub-re-root) doesn't require pushing the new key into every
+  [re-root](#moving-the-anchor-re-root) doesn't require pushing the new key into every
   node's `trusted_pubs` up front (the config edit becomes a calm, batchable
   follow-up instead of a race against credential expiry). Trigger: re-root friction
   in practice. Would be opt-in, short-lived, and logged, since it loosens the
@@ -1347,13 +1347,13 @@ make them worth building:
 timestamp comparison against a credential expiry, so run NTP/chrony on every
 node.
 
-**CA trust is a set, not a single key.** The CA (and hub) is moved by a
+**CA trust is a set, not a single key.** The CA (and anchor) is moved by a
 re-root — trust the new key alongside the old during an overlap, then drop the
-old — don't move the private key to a new machine. See [Moving the hub](#moving-the-hub-re-root).
+old — don't move the private key to a new machine. See [Moving the anchor](#moving-the-anchor-re-root).
 
 ## Security & operations
 
 - **[SECURITY.md](SECURITY.md)** — trust boundaries, what the 7-step check
   enforces, accepted risks, and the results of the security review.
 - **[RUNBOOK.md](RUNBOOK.md)** — disaster SOPs: compromised node, lost/leaked CA
-  key, destroyed hub, fleet-wide teardown, and how to read `gw diagnose`.
+  key, destroyed anchor, fleet-wide teardown, and how to read `gw diagnose`.

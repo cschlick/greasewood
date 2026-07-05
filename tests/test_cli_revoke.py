@@ -13,16 +13,16 @@ from greasewood.ca import CA
 from greasewood.keys import CAKeys, NodeKeys
 
 
-def _hub_cfg(tmp_path, ca_key):
+def _anchor_cfg(tmp_path, ca_key):
     p = tmp_path / "gw.toml"
     p.write_text(f'''[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
-role = "hub"
+role = "anchor"
 [network]
 seeds = []
 root_url = ""
-[hub]
+[anchor]
 ca_key_file = "{ca_key}"
 ''')
     return p
@@ -38,7 +38,7 @@ def test_revoke_adds_id_and_frees_hostname(tmp_path, capsys, monkeypatch):
     node = NodeKeys.generate()
     ca.issue(node.id_pub_bytes, node.wg_pub_bytes, "db", ["mesh"])
 
-    cfg = _hub_cfg(tmp_path, ca_key)
+    cfg = _anchor_cfg(tmp_path, ca_key)
     args = types.SimpleNamespace(config=str(cfg), id_pub_hex=node.id_pub_hex)
     assert cli.cmd_revoke(args) == 0
 
@@ -52,7 +52,7 @@ def test_revoke_bad_hex_exits(tmp_path):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    cfg = _hub_cfg(tmp_path, ca_key)
+    cfg = _anchor_cfg(tmp_path, ca_key)
     args = types.SimpleNamespace(config=str(cfg), id_pub_hex="not-hex")
     with pytest.raises(SystemExit):
         cli.cmd_revoke(args)

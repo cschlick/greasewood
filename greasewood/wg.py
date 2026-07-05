@@ -207,16 +207,16 @@ def rename_interface(old: str, new: str) -> None:
 def setup_door_routing() -> None:
     """
     One-time idempotent setup of the door subnet's policy routing.
-    Call from create and from gw-run (hub role) to survive reboots.
+    Call from create and from gw-run (anchor role) to survive reboots.
 
     Isolation mechanism: packets sourced from GUEST_DOOR_IP consult DOOR_TABLE,
     which contains only a blackhole default.  This prevents a joining node from
-    reaching the mesh even if the hub has IPv6 forwarding enabled.
+    reaching the mesh even if the anchor has IPv6 forwarding enabled.
 
-    The rule is scoped to GUEST_DOOR_IP, NOT the full DOOR_SUBNET — HUB_DOOR_IP
+    The rule is scoped to GUEST_DOOR_IP, NOT the full DOOR_SUBNET — ANCHOR_DOOR_IP
     must NOT match or the enroll daemon's TCP replies are blackholed too.
     WireGuard's allowed-ips already enforces that only GUEST_DOOR_IP can inject
-    packets into the hub via gw-door; the policy rule adds a second layer for
+    packets into the anchor via gw-door; the policy rule adds a second layer for
     forwarded traffic only.
     """
     from .door import GUEST_DOOR_IP, DOOR_TABLE, DOOR_RULE_PRIO
@@ -231,7 +231,7 @@ def setup_door_routing() -> None:
             log.info("door routing: blackhole default in table %d", DOOR_TABLE)
 
         # Source rule: packets FROM GUEST_DOOR_IP → DOOR_TABLE.
-        # Do NOT use the full /64 — HUB_DOOR_IP is in that range and must route normally.
+        # Do NOT use the full /64 — ANCHOR_DOOR_IP is in that range and must route normally.
         r = _run("ip", "-6", "rule", "show", check=False)
         if str(DOOR_TABLE) not in r.stdout or GUEST_DOOR_IP not in r.stdout:
             _run("ip", "-6", "rule", "add",
@@ -242,17 +242,17 @@ def setup_door_routing() -> None:
         log.info("door routing: source rule for %s → table %d", GUEST_DOOR_IP, DOOR_TABLE)
 
 
-def ensure_hub_door_interface(
+def ensure_anchor_door_interface(
     door_key_path: Path,
     guest_pub_b64: str,
     psk_b64: str,
     door_port: "int | None" = None,
 ) -> None:
     """
-    Bring up the hub's gw-door interface for one enrollment window.
+    Bring up the anchor's gw-door interface for one enrollment window.
     Destroys any existing gw-door first so each invite gets a clean start.
     """
-    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
+    from .door import ANCHOR_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
     door_port = DOOR_PORT if door_port is None else door_port
 
     destroy_interface(DOOR_IFACE)
@@ -268,24 +268,24 @@ def ensure_hub_door_interface(
              "preshared-key", psk_path,
              "allowed-ips", f"{GUEST_DOOR_IP}/128")
 
-    _run("ip", "-6", "addr", "add", f"{HUB_DOOR_IP}/128", "dev", DOOR_IFACE)
+    _run("ip", "-6", "addr", "add", f"{ANCHOR_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
     _run("ip", "-6", "route", "replace", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("hub door interface %s up on port %d", DOOR_IFACE, door_port)
+    log.info("anchor door interface %s up on port %d", DOOR_IFACE, door_port)
 
 
 def ensure_node_door_interface(
     guest_priv_bytes: bytes,
-    hub_door_pub_b64: str,
+    anchor_door_pub_b64: str,
     psk_b64: str,
-    hub_host: str,
+    anchor_host: str,
     door_port: "int | None" = None,
 ) -> None:
     """
     Bring up the node's transient gw-door interface for the enrollment dance.
     """
     import base64
-    from .door import HUB_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
+    from .door import ANCHOR_DOOR_IP, GUEST_DOOR_IP, DOOR_IFACE, DOOR_PORT
     door_port = DOOR_PORT if door_port is None else door_port
 
     destroy_interface(DOOR_IFACE)
@@ -298,16 +298,16 @@ def ensure_node_door_interface(
              "private-key", key_path,
              "listen-port", str(door_port))
         _run("wg", "set", DOOR_IFACE,
-             "peer", hub_door_pub_b64,
+             "peer", anchor_door_pub_b64,
              "preshared-key", psk_path,
-             "endpoint", format_endpoint(hub_host, door_port),
-             "allowed-ips", f"{HUB_DOOR_IP}/128",
+             "endpoint", format_endpoint(anchor_host, door_port),
+             "allowed-ips", f"{ANCHOR_DOOR_IP}/128",
              "persistent-keepalive", "5")
 
     _run("ip", "-6", "addr", "add", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
-    _run("ip", "-6", "route", "replace", f"{HUB_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, hub_host, DOOR_PORT)
+    _run("ip", "-6", "route", "replace", f"{ANCHOR_DOOR_IP}/128", "dev", DOOR_IFACE)
+    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, anchor_host, DOOR_PORT)
 
 
 @contextlib.contextmanager

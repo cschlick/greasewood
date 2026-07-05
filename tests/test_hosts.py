@@ -177,7 +177,7 @@ def test_shared_domain_collision_warns_on_reclobber(tmp_path, caplog):
 
 
 def test_stale_block_from_previous_mesh_does_not_warn(tmp_path, caplog):
-    """Field false-positive: a purged + re-created hub (new identity, same
+    """Field false-positive: a purged + re-created anchor (new identity, same
     mesh_domain) found its predecessor's block — foreign addresses, but NOT a
     concurrent mesh. First sync overwrites it; there must be no warning."""
     import logging

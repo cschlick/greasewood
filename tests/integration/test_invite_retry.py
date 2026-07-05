@@ -2,7 +2,7 @@
 Integration test for the multi-attempt door window.
 
 A rejected enrollment (e.g. a hostname collision) no longer burns the whole
-invite: the hub keeps the door open for a few attempts and tells the joiner how
+invite: the anchor keeps the door open for a few attempts and tells the joiner how
 many remain. This verifies that a failed join followed by a corrected one — on
 the SAME token — succeeds.
 """
@@ -17,7 +17,7 @@ from .helpers import container_ipv6, pexec, podman, wait_for_hostname
 pytestmark = pytest.mark.integration
 
 
-def test_failed_join_keeps_window_open_for_retry(gw_hub, gw_image, gw_network):
+def test_failed_join_keeps_window_open_for_retry(gw_anchor, gw_image, gw_network):
     node = None
     try:
         node = podman(
@@ -31,12 +31,12 @@ def test_failed_join_keeps_window_open_for_retry(gw_hub, gw_image, gw_network):
 
         # One token, two attempts. Serialize on the shared single-slot door.
         with _ENROLL_LOCK:
-            res = pexec(gw_hub["cid"], "gw", "invite", "--endpoint", gw_hub["ipv6"])
+            res = pexec(gw_anchor["cid"], "gw", "invite", "--endpoint", gw_anchor["ipv6"])
             token = _extract_token(res.stdout + "\n" + res.stderr)
 
-            # Attempt 1: collide with the hub's own hostname "hub" → refused,
+            # Attempt 1: collide with the anchor's own hostname "anchor" → refused,
             # but the window must stay open and report attempts remaining.
-            r1 = pexec(node, "gw", "join", token, "--hostname", "hub",
+            r1 = pexec(node, "gw", "join", token, "--hostname", "anchor",
                        "--endpoint", f"[{node_ipv6}]:51900", check=False)
             out1 = r1.stdout + r1.stderr
             assert r1.returncode != 0, out1
@@ -49,9 +49,9 @@ def test_failed_join_keeps_window_open_for_retry(gw_hub, gw_image, gw_network):
                        "--endpoint", f"[{node_ipv6}]:51900", check=False)
             assert r2.returncode == 0, out1 + "\n--- retry ---\n" + r2.stdout + r2.stderr
 
-        # The successful enrollment's door publish put the node in the hub directory.
-        assert wait_for_hostname(gw_hub["cid"], good, timeout=20), \
-            "retried node never reached the hub directory"
+        # The successful enrollment's door publish put the node in the anchor directory.
+        assert wait_for_hostname(gw_anchor["cid"], good, timeout=20), \
+            "retried node never reached the anchor directory"
     finally:
         if node:
             podman("rm", "-f", node, check=False)

@@ -41,7 +41,7 @@ _NETWORK_SUBNET = "fd52:ba5e::/64"
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped: image, network, hub node
+# Session-scoped: image, network, anchor node
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
@@ -64,13 +64,13 @@ def gw_network():
 
 
 @pytest.fixture(scope="session")
-def gw_hub(gw_image, gw_network):
+def gw_anchor(gw_image, gw_network):
     """
-    Start the hub container, run create, launch daemon.
+    Start the anchor container, run create, launch daemon.
 
     The control plane binds only to the overlay address + loopback (never the
     underlay), so it is not reachable from the host. Tests query it from inside
-    the hub container over loopback via helpers.hub_get(cid, path).
+    the anchor container over loopback via helpers.anchor_get(cid, path).
 
     Yields a dict:
       cid        — container ID (also the handle for control-plane queries)
@@ -90,10 +90,10 @@ def gw_hub(gw_image, gw_network):
         time.sleep(1)  # wait for network address assignment
 
         ipv6 = container_addr(cid, gw_network)
-        assert ipv6, "hub container got no underlay address"
+        assert ipv6, "anchor container got no underlay address"
 
         pexec(cid, "gw", "create", "testmesh",
-              "--hostname", "hub",
+              "--hostname", "anchor",
               "--endpoint", _ep(ipv6, 51900))
 
         overlay = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
@@ -103,7 +103,7 @@ def gw_hub(gw_image, gw_network):
         podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
 
         assert wait_for_control_plane(cid, timeout=20), \
-            "hub daemon did not start — check /tmp/gw.log in the container"
+            "anchor daemon did not start — check /tmp/gw.log in the container"
 
         yield {
             "cid": cid,
@@ -130,10 +130,10 @@ def overlay_addr_from_id_pub(id_pub_hex: str,
     return str(ipaddress.IPv6Address(pfx + digest[:8]))
 
 
-def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
-    """Spin up a DEDICATED hub container (own CA) — for tests that must not
-    pollute the shared session `gw_hub` (revoke, short-TTL renewal, etc.) or that
-    need a second hub. Same shape as the gw_hub fixture. CALLER owns cleanup."""
+def make_anchor(gw_image, gw_network, *, ttl="24h", hostname="anchor") -> dict:
+    """Spin up a DEDICATED anchor container (own CA) — for tests that must not
+    pollute the shared session `gw_anchor` (revoke, short-TTL renewal, etc.) or that
+    need a second anchor. Same shape as the gw_anchor fixture. CALLER owns cleanup."""
     cid = podman(
         "run", "-d", "--privileged", "--network", gw_network,
         "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
@@ -141,13 +141,13 @@ def make_hub(gw_image, gw_network, *, ttl="24h", hostname="hub") -> dict:
     ).stdout.strip()
     time.sleep(1)
     ipv6 = container_addr(cid, gw_network)
-    assert ipv6, "hub container got no underlay address"
+    assert ipv6, "anchor container got no underlay address"
     pexec(cid, "gw", "create", f"{hostname}mesh", "--hostname", hostname,
           "--endpoint", _ep(ipv6, 51900), "--credential-ttl", ttl)
     id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
     ca_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/ca.pub").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
-    assert wait_for_control_plane(cid, timeout=20), "dedicated hub daemon did not start"
+    assert wait_for_control_plane(cid, timeout=20), "dedicated anchor daemon did not start"
     return {"cid": cid, "ipv6": ipv6, "ca_pub": ca_pub,
             "overlay": overlay_addr_from_id_pub(id_pub)}
 
@@ -176,20 +176,20 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
     return False
 
 
-def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, *,
+def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
                     segments: str | None = None,
                     inbound: str | None = None, invite_hostname: str | None = None,
                     check: bool = True):
     """
-    Run one `gw invite` (on hub_cid) → `gw join` (on node_cid) door enrollment.
-    `hub_ipv6` is the hub's underlay address (the door endpoint). Generalized
-    over the hub so a test can enroll via a successor hub, not just the original one.
+    Run one `gw invite` (on anchor_cid) → `gw join` (on node_cid) door enrollment.
+    `anchor_ipv6` is the anchor's underlay address (the door endpoint). Generalized
+    over the anchor so a test can enroll via a successor anchor, not just the original one.
     `invite_hostname` pins the name at invite (`gw invite --hostname`), which
     overrides any node-side `--hostname` and locks rename.
     Returns the `gw join` CompletedProcess.
     """
-    # caps/segments are decided by the hub at invite (no self-assertion); hostname
+    # caps/segments are decided by the anchor at invite (no self-assertion); hostname
     # and inbound remain node-side join flags.
     join_extra = []
     if hostname is not None:
@@ -207,7 +207,7 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
     with _ENROLL_LOCK:
         # invite --endpoint takes a BARE address; the door port is fixed and the
         # token carries only the host.
-        res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6, *invite_extra)
+        res = pexec(anchor_cid, "gw", "invite", "--endpoint", anchor_ipv6, *invite_extra)
         token = _extract_token(res.stdout + "\n" + res.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
@@ -219,37 +219,37 @@ def door_enroll_via(hub_cid: str, hub_ipv6: str, node_cid: str, node_ipv6: str, 
             )
 
         if j.returncode == 0:
-            # On success the hub closes the window and destroys gw-door; wait for
+            # On success the anchor closes the window and destroys gw-door; wait for
             # that before releasing the lock so the next invite doesn't race it.
-            assert _wait_iface_gone(hub_cid, "gw-door"), \
-                "hub did not tear down gw-door after enrollment"
+            assert _wait_iface_gone(anchor_cid, "gw-door"), \
+                "anchor did not tear down gw-door after enrollment"
         else:
             # A failed attempt deliberately leaves the door open for retries.
             # Force-close it for test isolation: drop the window file and let
             # the DoorWatcher tear the interface down.
-            pexec(hub_cid, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
+            pexec(anchor_cid, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
                   check=False)
-            _wait_iface_gone(hub_cid, "gw-door")
+            _wait_iface_gone(anchor_cid, "gw-door")
     return j
 
 
-def door_enroll(gw_hub, node_cid: str, node_ipv6: str, *,
+def door_enroll(gw_anchor, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
                 segments: str | None = None,
                 inbound: str | None = None, invite_hostname: str | None = None,
                 check: bool = True):
-    """Enroll an existing node container via the hub (see door_enroll_via).
+    """Enroll an existing node container via the anchor (see door_enroll_via).
     `hostname`/`caps`/`segments`/`inbound` are passed only when given, so omitting
     them exercises join's "keep existing config" behavior. `invite_hostname` pins
-    the name at the hub; `segments` sets the node's segments at invite."""
+    the name at the anchor; `segments` sets the node's segments at invite."""
     return door_enroll_via(
-        gw_hub["cid"], gw_hub["ipv6"], node_cid, node_ipv6,
+        gw_anchor["cid"], gw_anchor["ipv6"], node_cid, node_ipv6,
         hostname=hostname, caps=caps, segments=segments, inbound=inbound,
         invite_hostname=invite_hostname, check=check,
     )
 
 
-def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
+def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
                   caps: str | None = None, segments: str | None = None,
                   inbound: str | None = None,
                   invite_hostname: str | None = None) -> dict:
@@ -259,7 +259,7 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     Enrollment uses the real `gw invite` / `gw join` flow — the only supported
     path (see door_enroll). Container creation and `gw run` stay parallel; only
     the door section serializes. `caps` (abilities, e.g. "tls") and `segments`
-    (e.g. "prod,web") are granted by the hub at `gw invite` — the joiner can't
+    (e.g. "prod,web") are granted by the anchor at `gw invite` — the joiner can't
     self-assert either.
 
     Returns {cid, hostname, overlay, id_pub}. The CALLER owns cleanup.
@@ -275,7 +275,7 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
     time.sleep(1)  # wait for network address assignment
 
     ipv6 = container_addr(cid, gw_network)
-    door_enroll(gw_hub, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
+    door_enroll(gw_anchor, cid, ipv6, hostname=hostname, caps=caps, segments=segments,
                 inbound=inbound, invite_hostname=invite_hostname)
 
     id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
@@ -290,7 +290,7 @@ def bring_up_node(gw_image, gw_network, gw_hub, hostname: str | None = None,
 
 
 @pytest.fixture
-def gw_node(gw_image, gw_network, gw_hub):
+def gw_node(gw_image, gw_network, gw_anchor):
     """
     Start a node container, enroll it into the mesh, launch daemon.
 
@@ -302,7 +302,7 @@ def gw_node(gw_image, gw_network, gw_hub):
     """
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_hub)
+        node = bring_up_node(gw_image, gw_network, gw_anchor)
         yield node
     finally:
         if node:

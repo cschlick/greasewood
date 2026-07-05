@@ -1,7 +1,7 @@
 """
 Integration test for the managed /etc/hosts block (name resolution, on by default).
 
-A hub should, once its daemon is up, write a marked block mapping its overlay
+An anchor should, once its daemon is up, write a marked block mapping its overlay
 address to "<hostname>.<mesh>.internal" — validating the config-write → reconcile →
 /etc/hosts path end to end. hosts_sync is on by default (no flag needed).
 """
@@ -14,7 +14,7 @@ from .helpers import container_ipv6, pexec, podman, wait_for_control_plane
 pytestmark = pytest.mark.integration
 
 
-def test_hub_writes_managed_hosts_block(gw_image, gw_network):
+def test_anchor_writes_managed_hosts_block(gw_image, gw_network):
     cid = None
     try:
         cid = podman(
@@ -25,7 +25,7 @@ def test_hub_writes_managed_hosts_block(gw_image, gw_network):
         time.sleep(1)
         ipv6 = container_ipv6(cid, gw_network)
 
-        pexec(cid, "gw", "create", "hostsync", "--hostname", "hubby",
+        pexec(cid, "gw", "create", "hostsync", "--hostname", "anchorby",
               "--endpoint", f"[{ipv6}]:51900")   # hosts_sync on by default
         cfg = pexec(cid, "sh", "-c", "cat /etc/greasewood_*.toml").stdout
         assert "hosts_sync = true" in cfg, cfg
@@ -36,12 +36,12 @@ def test_hub_writes_managed_hosts_block(gw_image, gw_network):
         block = ""
         for _ in range(15):
             block = pexec(cid, "cat", "/etc/hosts").stdout
-            if "BEGIN greasewood" in block and "hubby.hostsync.internal" in block:
+            if "BEGIN greasewood" in block and "anchorby.hostsync.internal" in block:
                 break
             time.sleep(2)
         assert "BEGIN greasewood" in block, f"no managed block:\n{block}"
         # the overlay address maps to the mesh name
-        assert any("hubby.hostsync.internal" in ln and "fd8d:" in ln
+        assert any("anchorby.hostsync.internal" in ln and "fd8d:" in ln
                    for ln in block.splitlines()), block
         # user lines preserved
         assert "localhost" in block

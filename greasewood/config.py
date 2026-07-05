@@ -1,8 +1,8 @@
 """
 greasewood.config — TOML configuration loading.
 
-All nodes share one config format. Role ("hub", "node") is a runtime setting,
-not a build distinction. A hub is just a node that additionally holds ca_priv
+All nodes share one config format. Role ("anchor", "node") is a runtime setting,
+not a build distinction. An anchor is just a node that additionally holds ca_priv
 and serves the control plane + enrollment door.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ class Config:
     # Node identity
     data_dir: Path
     hostname: str
-    role: str              # "hub" | "node"
+    role: str              # "anchor" | "node"
     inbound: str           # "yes" | "no"
     caps: list[str]
     endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51900"]
@@ -49,7 +49,7 @@ class Config:
     # CA trust set — list of hex-encoded raw Ed25519 public keys
     ca_pubs: list[str]
 
-    # Hub-only (written under the [hub] section)
+    # Anchor-only (written under the [anchor] section)
     ca_key_file: Path | None
     ca_key_passphrase_env: str | None
     control_listen: str
@@ -91,7 +91,7 @@ def load_config(path: Path) -> Config:
     node = raw.get("node", {})
     net = raw.get("network", {})
     ca_sec = raw.get("ca", {})
-    hub = raw.get("hub", {})
+    anchor = raw.get("anchor", {})
 
     if not node.get("hostname"):
         sys.exit("config: [node] hostname is required")
@@ -127,16 +127,16 @@ def load_config(path: Path) -> Config:
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 
-        ca_key_file=Path(hub["ca_key_file"]).expanduser() if "ca_key_file" in hub else None,
-        ca_key_passphrase_env=hub.get("ca_key_passphrase_env"),
-        control_listen=hub.get("control_listen", ":51902"),
-        credential_ttl=_parse_duration(hub.get("credential_ttl", "24h")),
-        renew_before=_parse_duration(hub.get("renew_before", "12h")),
-        door_window=_parse_duration(hub.get("door_window", "15m")),
-        tls_cert_ttl=_parse_duration(hub.get("tls_cert_ttl", "7d")),
-        door_port=int(hub.get("door_port", 51901)),
-        default_segments=list(hub.get("default_segments", ["mesh"])),
-        default_caps=list(hub.get("default_caps", ["tls"])),
+        ca_key_file=Path(anchor["ca_key_file"]).expanduser() if "ca_key_file" in anchor else None,
+        ca_key_passphrase_env=anchor.get("ca_key_passphrase_env"),
+        control_listen=anchor.get("control_listen", ":51902"),
+        credential_ttl=_parse_duration(anchor.get("credential_ttl", "24h")),
+        renew_before=_parse_duration(anchor.get("renew_before", "12h")),
+        door_window=_parse_duration(anchor.get("door_window", "15m")),
+        tls_cert_ttl=_parse_duration(anchor.get("tls_cert_ttl", "7d")),
+        door_port=int(anchor.get("door_port", 51901)),
+        default_segments=list(anchor.get("default_segments", ["mesh"])),
+        default_caps=list(anchor.get("default_caps", ["tls"])),
     )
 
     # Activate this config's overlay prefix process-wide, so address

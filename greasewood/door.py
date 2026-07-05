@@ -1,20 +1,20 @@
 """
 greasewood.door — door enrollment protocol: key derivation and token encoding.
 
-The door is a transient WireGuard interface the hub uses to admit a joining node
+The door is a transient WireGuard interface the anchor uses to admit a joining node
 without SSH, without exposing the main mesh, and without any HTTP reachable from
 the underlay network.  A join token is a high-entropy 32-byte seed; everything
 else — guest keypair, PSK — is derived deterministically from it by both sides
-independently.  The door UDP port is a single port (configurable per hub,
+independently.  The door UDP port is a single port (configurable per anchor,
 default DOOR_PORT), carried in the token so a brand-new node can reach it.
 
 Token wire format:
   "gw1." + base64url_nopad(
-      hub_door_pub : 32 bytes   (hub's persistent door WG pubkey)
+      anchor_door_pub : 32 bytes   (anchor's persistent door WG pubkey)
       ca_pub       : 32 bytes   (CA public key — so join needs no --ca-pub flag)
-      door_port    : 2 bytes BE (hub's door UDP port)
+      door_port    : 2 bytes BE (anchor's door UDP port)
       host_len     : 1 byte
-      hub_host     : host_len bytes  (underlay host)
+      anchor_host     : host_len bytes  (underlay host)
       seed         : 32 bytes   (the only secret)
       domain_len   : 1 byte
       mesh_domain  : domain_len bytes  (the mesh's ONE name domain)
@@ -41,11 +41,11 @@ _INFO_GUEST = b"gw/door/guest-x25519/v1"
 _INFO_PSK = b"gw/door/psk/v1"
 
 # Door subnet — a throwaway /64 used only during the enrollment window.
-HUB_DOOR_IP = "fd8d:e5c1:db1a:d::1"
+ANCHOR_DOOR_IP = "fd8d:e5c1:db1a:d::1"
 GUEST_DOOR_IP = "fd8d:e5c1:db1a:d::2"
 DOOR_SUBNET = "fd8d:e5c1:db1a:d::/64"
 
-# Policy-routing isolation (set once at hub setup, never changed again).
+# Policy-routing isolation (set once at anchor setup, never changed again).
 DOOR_TABLE = 51820
 DOOR_RULE_PRIO = 100
 
@@ -62,14 +62,14 @@ TOKEN_PREFIX = "gw1."
 @dataclass
 class DoorParams:
     guest_priv_bytes: bytes  # 32-byte X25519 private key (RFC 7748-clamped)
-    guest_pub_b64: str       # base64 WG public key — hub adds this as its peer
+    guest_pub_b64: str       # base64 WG public key — anchor adds this as its peer
     psk_b64: str             # base64 pre-shared key for the door WG tunnel
 
 
 def derive_door_params(seed: bytes) -> DoorParams:
     """
     Derive door parameters from a 32-byte seed using HKDF-SHA256.
-    Hub (at invite) and node (at join) run this identically — no extra comm needed.
+    Anchor (at invite) and node (at join) run this identically — no extra comm needed.
     """
     import hmac
     import hashlib
@@ -117,27 +117,27 @@ def generate_seed() -> bytes:
 
 
 def encode_token(
-    hub_door_pub_bytes: bytes,
+    anchor_door_pub_bytes: bytes,
     ca_pub_bytes: bytes,
-    hub_host: str,
+    anchor_host: str,
     seed: bytes,
     door_port: int = DOOR_PORT,
     mesh_domain: str = "",
 ) -> str:
-    """Encode a join token. Carries the hub's door UDP port so a brand-new node
-    (which has only the token) can reach the door wherever the hub configured it.
+    """Encode a join token. Carries the anchor's door UDP port so a brand-new node
+    (which has only the token) can reach the door wherever the anchor configured it.
 
     Also carries the mesh's name domain: joiners adopt it (a mesh has ONE
     domain everywhere), and check it against existing memberships BEFORE the
     door dance — so a domain collision refuses without burning the invite.
 
-    Layout: hub_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host
+    Layout: anchor_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host
             seed[32] domain_len[1] domain
     """
-    host_bytes = hub_host.encode()
+    host_bytes = anchor_host.encode()
     domain_bytes = (mesh_domain or "").encode()
     payload = (
-        hub_door_pub_bytes + ca_pub_bytes
+        anchor_door_pub_bytes + ca_pub_bytes
         + struct.pack(">H", door_port)
         + bytes([len(host_bytes)]) + host_bytes + seed
         + bytes([len(domain_bytes)]) + domain_bytes
@@ -148,7 +148,7 @@ def encode_token(
 def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
     """
     Decode a join token.
-    Returns (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port,
+    Returns (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
     mesh_domain). Raises ValueError on malformed input.
     """
     if not token.startswith(TOKEN_PREFIX):
@@ -156,17 +156,17 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
     b64 = token[len(TOKEN_PREFIX):]
     payload = base64.urlsafe_b64decode(b64 + "=" * ((-len(b64)) % 4))
 
-    # hub_door_pub + ca_pub + door_port + host_len + seed + domain_len (minimum)
+    # anchor_door_pub + ca_pub + door_port + host_len + seed + domain_len (minimum)
     if len(payload) < 32 + 32 + 2 + 1 + 32 + 1:
         raise ValueError("token payload too short")
 
-    hub_door_pub = payload[:32]
+    anchor_door_pub = payload[:32]
     ca_pub = payload[32:64]
     door_port = struct.unpack(">H", payload[64:66])[0]
     host_len = payload[66]
     if len(payload) < 67 + host_len + 32 + 1:
         raise ValueError("token payload truncated")
-    hub_host = payload[67:67 + host_len].decode()
+    anchor_host = payload[67:67 + host_len].decode()
     seed = payload[67 + host_len:67 + host_len + 32]
     dlen_at = 67 + host_len + 32
     domain_len = payload[dlen_at]
@@ -174,18 +174,18 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
         raise ValueError("token payload truncated (domain)")
     mesh_domain = payload[dlen_at + 1:dlen_at + 1 + domain_len].decode()
 
-    return hub_door_pub, ca_pub, hub_host, seed, door_port, mesh_domain
+    return anchor_door_pub, ca_pub, anchor_host, seed, door_port, mesh_domain
 
 
 # ---------------------------------------------------------------------------
-# Hub door key — persisted X25519 keypair for the door WG interface.
-# Its public key is the hub_door_pub baked into every token, so it is stable
+# Anchor door key — persisted X25519 keypair for the door WG interface.
+# Its public key is the anchor_door_pub baked into every token, so it is stable
 # across invite calls.  Lose it and you must re-issue all outstanding tokens.
 # ---------------------------------------------------------------------------
 
 def load_or_generate_door_key(data_dir: Path) -> bytes:
     """
-    Load the hub's door WG private key (raw 32 bytes).
+    Load the anchor's door WG private key (raw 32 bytes).
     Generates and saves it at 0600 if it doesn't exist.
     """
     key_path = data_dir / "door.key"
@@ -204,7 +204,7 @@ def load_or_generate_door_key(data_dir: Path) -> bytes:
 
 
 def window_path(data_dir: Path) -> Path:
-    """Path to the single door-window file the hub uses as its enrollment slot."""
+    """Path to the single door-window file the anchor uses as its enrollment slot."""
     return data_dir / "door_window.json"
 
 
@@ -234,7 +234,7 @@ def read_window(data_dir: Path) -> "dict | None":
 
 
 # ---------------------------------------------------------------------------
-# Door status/history — a small record of the door's lifecycle the hub daemon
+# Door status/history — a small record of the door's lifecycle the anchor daemon
 # maintains (open/close times + reason, failed attempts + source IPs, the last
 # enrollment). `gw status` reads it to show what the door is doing. Written 0600
 # because it contains source IP addresses.
@@ -325,7 +325,7 @@ def active_window_expiry(data_dir: Path) -> str | None:
     The door admits one node at a time, so this doubles as a "slot occupied?"
     check: `gw invite` uses it to warn before clobbering a live window, and an
     orderly provisioner can poll it to know when the door is free again (the
-    window file is removed by the hub when an enrollment completes).
+    window file is removed by the anchor when an enrollment completes).
     """
     import datetime as dt
     import json

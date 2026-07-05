@@ -1,5 +1,5 @@
 """
-`gw status` shows the enrollment door's state (hub only):
+`gw status` shows the enrollment door's state (anchor only):
   - open  → time-to-close, granted caps, failed attempts + IPs, attempts left;
   - closed → how long ago + why, and the last window's failed attempts.
 Driven by a fabricated door_status.json (the daemon writes it; here we stand it
@@ -14,10 +14,10 @@ from greasewood.keys import NodeKeys
 _UTC = dt.timezone.utc
 
 
-def _hub(tmp_path, role="hub"):
+def _anchor(tmp_path, role="anchor"):
     NodeKeys.load_or_generate(tmp_path)
     (tmp_path / "gw.toml").write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
 role = "{role}"
 [network]
@@ -34,7 +34,7 @@ def _iso(delta_s):
 
 
 def test_open_door_shows_countdown_attempts_and_caps(tmp_path, capsys):
-    args = _hub(tmp_path)
+    args = _anchor(tmp_path)
     door.mark_door_opened(tmp_path, _iso(600), caps=["segment:mesh", "tls"],
                           max_attempts=3)
     door.mark_door_attempt(tmp_path, "fd52::9", "hostname already in use")
@@ -48,7 +48,7 @@ def test_open_door_shows_countdown_attempts_and_caps(tmp_path, capsys):
 
 
 def test_closed_door_shows_time_ago_and_reason(tmp_path, capsys):
-    args = _hub(tmp_path)
+    args = _anchor(tmp_path)
     door.mark_door_opened(tmp_path, _iso(-1))
     door.mark_door_attempt(tmp_path, "fd52::9", "revoked")
     door.mark_door_enrolled(tmp_path, "fd52::a", "db01")
@@ -61,21 +61,21 @@ def test_closed_door_shows_time_ago_and_reason(tmp_path, capsys):
 
 
 def test_never_opened(tmp_path, capsys):
-    cli.cmd_status(_hub(tmp_path))
+    cli.cmd_status(_anchor(tmp_path))
     assert "door     : closed (never opened)" in capsys.readouterr().out
 
 
 def test_expired_reason_phrase(tmp_path, capsys):
-    args = _hub(tmp_path)
+    args = _anchor(tmp_path)
     door.mark_door_opened(tmp_path, _iso(-1))
     door.mark_door_closed(tmp_path, "expired")
     cli.cmd_status(args)
     assert "window expired with no enrollment" in capsys.readouterr().out
 
 
-def test_non_hub_has_no_door_block(tmp_path, capsys):
-    # A node isn't a hub; even if a stray status file existed, don't show it.
-    args = _hub(tmp_path, role="node")
+def test_non_anchor_has_no_door_block(tmp_path, capsys):
+    # A node isn't an anchor; even if a stray status file existed, don't show it.
+    args = _anchor(tmp_path, role="node")
     door.mark_door_opened(tmp_path, _iso(600))
     cli.cmd_status(args)
     assert "door" not in capsys.readouterr().out.lower()

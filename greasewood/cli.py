@@ -4,7 +4,7 @@ gw — CLI entry point.
 Enrollment is door-based: a transient WireGuard tunnel, no SSH, no HTTP on the
 underlay.
 
-  On the hub:
+  On the anchor:
     gw create          # one-shot: CA, door key, routing, self-credential
     gw run                # start the daemon (serves control plane + door)
     gw invite             # open a 15-min window, print a single-use join token
@@ -14,7 +14,7 @@ underlay.
     gw run                # join the mesh
 
 Other subcommands:
-  revoke <id_pub>     Add a node to the revoke list (on the hub).
+  revoke <id_pub>     Add a node to the revoke list (on the anchor).
   status              Show local node and directory state.
   purge               Remove all local greasewood state.
 """
@@ -173,24 +173,24 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) ->
     exposed on the underlay regardless of firewall. On a default-drop host you
     still allow the few things below to *reach* those sockets.
 
-    Recommended: apply the SAME rules on EVERY node, not just the current hub.
-    Since any node can be promoted to hub (gw hub-promote), a uniform ruleset
-    means a hub handover needs no firewall change anywhere. A rule allowing a
+    Recommended: apply the SAME rules on EVERY node, not just the current anchor.
+    Since any node can be promoted to anchor (gw anchor-promote), a uniform ruleset
+    means an anchor handover needs no firewall change anywhere. A rule allowing a
     port nothing is bound to is harmless — the kernel just refuses the
-    connection until that node actually becomes a hub and binds it.
+    connection until that node actually becomes an anchor and binds it.
     """
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     print("Firewall (greasewood never edits it). Recommended posture — the SAME")
-    print("rules on every node, so any node can become the hub with no firewall")
+    print("rules on every node, so any node can become the anchor with no firewall")
     print("change. On a default-drop host, allow (nftables):")
     print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept            # WireGuard (underlay)")
-    print(f"  iifname \"lo\" accept                          # hub talks to itself")
-    print(f"  iifname \"gw-mesh\" tcp dport {control_port} accept        # control plane (when hub)")
-    print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept    # enrollment (when hub)")
+    print(f"  iifname \"lo\" accept                          # anchor talks to itself")
+    print(f"  iifname \"gw-mesh\" tcp dport {control_port} accept        # control plane (when anchor)")
+    print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept    # enrollment (when anchor)")
 
 
 # ---------------------------------------------------------------------------
-# create  (one-shot hub bootstrap: CA + door key + routing + self-credential)
+# create  (one-shot anchor bootstrap: CA + door key + routing + self-credential)
 # ---------------------------------------------------------------------------
 
 def _detect_public_ipv6() -> str | None:
@@ -359,14 +359,14 @@ def cmd_create(args) -> int:
     cfg_path = Path(args.config) if args.config else _mp["config"]
     data_dir = Path(args.data_dir) if args.data_dir else _mp["data_dir"]
     ca_key_path = data_dir / "ca.key"
-    # The role is "hub"; the hostname is just this machine's name by default
+    # The role is "anchor"; the hostname is just this machine's name by default
     # (short form, no domain), overridable with --hostname.
     import socket
     from .keys import set_overlay_prefix, parse_overlay_prefix
-    hostname = args.hostname or socket.gethostname().split(".")[0] or "hub"
+    hostname = args.hostname or socket.gethostname().split(".")[0] or "anchor"
     listen_port = args.listen_port if args.listen_port is not None else _free_listen_port()
     control_port = args.control_port
-    # The hub must reach every segment (it serves the control plane + door), so
+    # The anchor must reach every segment (it serves the control plane + door), so
     # it carries the reach-all wildcard segment. Plus any ability caps (--caps).
     caps = ["segment:*"]
     if args.caps:
@@ -383,7 +383,7 @@ def cmd_create(args) -> int:
     # The mesh's ONE name domain, everywhere, forever (changed only by a
     # deliberate fleet-wide set-domain). Rides in every join token.
     mesh_domain = args.mesh_domain or f"{args.name}.internal"
-    # Activate this fleet's overlay /64 before we derive the hub's own address.
+    # Activate this fleet's overlay /64 before we derive the anchor's own address.
     try:
         set_overlay_prefix(parse_overlay_prefix(overlay_prefix))
     except Exception:
@@ -431,7 +431,7 @@ def cmd_create(args) -> int:
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
 data_dir = "{data_dir}"
-role = "hub"
+role = "anchor"
 inbound = "yes"
 caps = {json_mod.dumps(caps)}{endpoint_line}
 
@@ -447,7 +447,7 @@ mesh_domain = "{mesh_domain}"
 [ca]
 trusted_pubs = ["{ca_pub_hex}"]
 
-[hub]
+[anchor]
 ca_key_file = "{ca_key_path}"
 control_listen = ":{control_port}"
 credential_ttl = "{args.credential_ttl}"
@@ -482,7 +482,7 @@ default_caps = ["tls"]
     # nodes use — not the underlay endpoint.
     control_url = f"http://[{node_keys.addr}]:{control_port}"
 
-    print(f"\nHub setup complete.")
+    print(f"\nAnchor setup complete.")
     print(f"  overlay addr : {node_keys.addr}")
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
@@ -497,12 +497,12 @@ default_caps = ["tls"]
     _print_firewall_help(listen_port, control_port)
     print()
     from . import firewall as _fw
-    _fw.check(_fw.hub_rules(listen_port, control_port), log)
+    _fw.check(_fw.anchor_rules(listen_port, control_port), log)
     return 0
 
 
 # ---------------------------------------------------------------------------
-# invite  (hub — generate a join token and open a door window)
+# invite  (anchor — generate a join token and open a door window)
 # ---------------------------------------------------------------------------
 
 def _extract_token(text: str) -> str:
@@ -537,17 +537,17 @@ def cmd_invite(args) -> int:
     from . import wg as wgmod
 
     cfg = load_config(Path(args.config))
-    if cfg.role != "hub":
-        sys.exit("gw invite must be run on the hub node (role = hub)")
+    if cfg.role != "anchor":
+        sys.exit("gw invite must be run on the anchor node (role = anchor)")
     if cfg.ca_key_file is None:
-        sys.exit("invite requires ca_key_file in [hub]")
+        sys.exit("invite requires ca_key_file in [anchor]")
 
     # Preflight: a token is only redeemable if the daemon is up (it hosts the
     # enroll server) with its mesh interface present (it installs the joiner as
     # a peer). Catch both NOW, when the operator can act — not minutes later as
     # a cryptic rejection on the joining node.
     if not wgmod.interface_exists(cfg.wg_interface):
-        sys.exit(f"the hub's mesh interface {cfg.wg_interface!r} doesn't exist — "
+        sys.exit(f"the anchor's mesh interface {cfg.wg_interface!r} doesn't exist — "
                  f"the daemon isn't running (or the interface was deleted under "
                  f"it). A joiner would be rejected at enrollment. Start the "
                  f"daemon first: sudo systemctl start {_unit_for_config(args.config)}   "
@@ -558,7 +558,7 @@ def cmd_invite(args) -> int:
     try:
         _url.urlopen(f"http://[::1]:{_control_port(cfg)}/directory", timeout=3)
     except Exception:
-        sys.exit(f"the hub daemon isn't answering on loopback (port "
+        sys.exit(f"the anchor daemon isn't answering on loopback (port "
                  f"{_control_port(cfg)}) — it hosts the enroll server, so this "
                  f"token could never be redeemed. Start it first: "
                  f"sudo systemctl start {_unit_for_config(args.config)}   "
@@ -597,40 +597,40 @@ def cmd_invite(args) -> int:
         )
 
     door_key_raw = load_or_generate_door_key(data_dir)
-    hub_door_pub = door_pub_bytes_from_key(door_key_raw)
+    anchor_door_pub = door_pub_bytes_from_key(door_key_raw)
     import base64
     door_key_b64 = base64.b64encode(door_key_raw).decode()
 
     from .keys import CAKeys
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
 
-    # Hub underlay host(s) for the token (bare addresses; the joiner adds the
-    # door port). Carry v6 and/or v4 so a joiner reaches the hub over whichever
+    # Anchor underlay host(s) for the token (bare addresses; the joiner adds the
+    # door port). Carry v6 and/or v4 so a joiner reaches the anchor over whichever
     # family it has — stored comma-separated in the token's single host field
     # (a v6 literal has colons but never commas, so the split is unambiguous).
     if args.endpoint:
-        hub_hosts = [args.endpoint]
+        anchor_hosts = [args.endpoint]
     else:
-        hub_hosts = []
+        anchor_hosts = []
         v6 = _detect_public_ipv6()
         if v6:
-            hub_hosts.append(v6)
+            anchor_hosts.append(v6)
         v4 = _detect_public_ipv4()
         if v4:
-            hub_hosts.append(v4)
-        if not hub_hosts:
+            anchor_hosts.append(v4)
+        if not anchor_hosts:
             sys.exit("could not detect a public address; use --endpoint <addr>")
-    endpoint = ",".join(hub_hosts)
+    endpoint = ",".join(anchor_hosts)
 
     window = cfg.door_window
 
-    # The hub decides caps + segments HERE and issues them to whoever redeems the
+    # The anchor decides caps + segments HERE and issues them to whoever redeems the
     # token — the joiner does not choose (no self-assertion). They're stored in
     # the door window; the enroll server issues from them, ignoring the joiner's.
     #   segments (segment:<name>) control who-talks-to-whom.
     #   --caps grants abilities, e.g. tls.
-    # When a flag is omitted, fall back to the hub's configured defaults for new
-    # nodes ([hub] default_segments / default_caps, read fresh each invite — so
+    # When a flag is omitted, fall back to the anchor's configured defaults for new
+    # nodes ([anchor] default_segments / default_caps, read fresh each invite — so
     # editing them changes what future enrollments get). --segments/--caps
     # override for this one token.
     if args.segments is not None:
@@ -642,13 +642,13 @@ def cmd_invite(args) -> int:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     else:
         caps += list(cfg.default_caps)
-    # --hostname pins the name: the hub fixes it at enrollment (the joiner's
+    # --hostname pins the name: the anchor fixes it at enrollment (the joiner's
     # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
     # join and may `gw rename-node` later (today's behavior).
     pinned_hostname = args.hostname
     if pinned_hostname:
-        # The hub is choosing the name, so it verifies uniqueness NOW — a pinned
+        # The anchor is choosing the name, so it verifies uniqueness NOW — a pinned
         # name is guaranteed free before the token goes out, so it can't collide
         # at enrollment (the joiner can't fix a name it didn't pick). Unpinned
         # names are still checked at enroll, where the node can retry a new one.
@@ -657,7 +657,7 @@ def cmd_invite(args) -> int:
         if owner is not None:
             sys.exit(
                 f"hostname {pinned_hostname!r} is already in use (node {owner[:16]}…). "
-                "Free it first (revoke + remove the old node on the hub) or pin a "
+                "Free it first (revoke + remove the old node on the anchor) or pin a "
                 "different name."
             )
         caps.append("hostname-pinned")
@@ -672,17 +672,17 @@ def cmd_invite(args) -> int:
     # Set up door routing (idempotent — survives reboots if called here too)
     wgmod.setup_door_routing()
 
-    # Bring up the hub's door WG interface on the configured door port
+    # Bring up the anchor's door WG interface on the configured door port
     door_key_path = data_dir / "door.key"
     from . import audit
     audit.attach_file(data_dir / "audit.log")   # one-shot door commands → the trail
-    with audit.context("invite: bring up hub door interface"):
-        wgmod.ensure_hub_door_interface(door_key_path, params.guest_pub_b64,
+    with audit.context("invite: bring up anchor door interface"):
+        wgmod.ensure_anchor_door_interface(door_key_path, params.guest_pub_b64,
                                         params.psk_b64, cfg.door_port)
 
     # Write window file so the running gw-run daemon starts the enroll server.
     window_path = data_dir / "door_window.json"
-    token = encode_token(hub_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
+    token = encode_token(anchor_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
                          cfg.door_port, mesh_domain=cfg.mesh_domain)
 
     if getattr(args, "standing", False):
@@ -693,7 +693,7 @@ def cmd_invite(args) -> int:
         # state. Every join is still the full one-node ceremony: fresh identity,
         # CA-signed credential, blackhole isolation, audit trail.
         # The token itself is stored too: a standing token is long-lived and
-        # bakeable, so the operator can re-retrieve it later (via hub `gw
+        # bakeable, so the operator can re-retrieve it later (via anchor `gw
         # status`) without re-issuing — re-issuing would invalidate the copies
         # already baked into images. Same 0600-root posture as the guest key.
         window_path.write_text(json_mod.dumps({
@@ -722,7 +722,7 @@ def cmd_invite(args) -> int:
 
 
 def cmd_close_door(args) -> int:
-    """[hub] Close the current door window — the issued token (standing or
+    """[anchor] Close the current door window — the issued token (standing or
     single-use) is permanently invalid from this moment: the guest key and PSK
     live only in the window, and seeds are never reused, so nothing can ever
     handshake against it again. Enrolled nodes are untouched (their credentials
@@ -732,10 +732,10 @@ def cmd_close_door(args) -> int:
     from . import door as doormod
     from . import wg as wgmod
 
-    _require_root("close-door", "it removes the hub's door window and interface")
+    _require_root("close-door", "it removes the anchor's door window and interface")
     cfg = load_config(Path(args.config))
-    if cfg.role != "hub":
-        sys.exit("gw close-door must be run on the hub (role = hub)")
+    if cfg.role != "anchor":
+        sys.exit("gw close-door must be run on the anchor (role = anchor)")
 
     window = doormod.read_window(cfg.data_dir)
     wpath = doormod.window_path(cfg.data_dir)
@@ -870,7 +870,7 @@ def _discover_config(etc: "Path" = Path("/etc")) -> "Path":
         return ms[0][1]
     if not ms:
         sys.exit("no greasewood mesh is configured on this host — run "
-                 "'sudo gw create <name>' (hub) or 'sudo gw join <token>' first")
+                 "'sudo gw create <name>' (anchor) or 'sudo gw join <token>' first")
     listing = "\n".join(f"  -c {p}   ({k})" for k, p in ms)
     sys.exit(f"this host is on {len(ms)} meshes — say which one:\n{listing}")
 
@@ -1000,7 +1000,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     _rewrite_cert_manifest_domain(new_data, cfg.mesh_domain, new_domain)
 
     # This membership just migrated — drop the pending-rename flag the sync
-    # loop raised (a member adopting the hub's rename), so `gw status` clears.
+    # loop raised (a member adopting the anchor's rename), so `gw status` clears.
     (new_data / "pending_rename.json").unlink(missing_ok=True)
 
     # Grace: old names keep resolving for one credential TTL, then retire.
@@ -1045,9 +1045,9 @@ def _rewrite_cert_manifest_domain(data_dir: "Path", old_domain: str,
 
 def cmd_rename_mesh(args) -> int:
     """Rename THIS membership's mesh — domain, config, data dir, interface,
-    service — in one consistent move. Run on the HUB to rename the mesh itself
+    service — in one consistent move. Run on the ANCHOR to rename the mesh itself
     (members are then told on their next directory poll, with the exact command
-    to migrate themselves); run on a member to adopt a rename the hub already
+    to migrate themselves); run on a member to adopt a rename the anchor already
     made."""
     from .config import load_config
     from .hosts import valid_label
@@ -1068,7 +1068,7 @@ def cmd_rename_mesh(args) -> int:
     print(f"  service   : greasewood@{args.new_name} (old instance disabled)")
     print(f"Old *.{old_domain} names keep resolving for one credential TTL, "
           f"then retire.")
-    if cfg.role == "hub":
+    if cfg.role == "anchor":
         print("Members will see the rename on their next directory poll and be "
               "told to run:  sudo gw rename-mesh " + args.new_name)
         print("New invites/tokens already carry the new name.")
@@ -1094,10 +1094,10 @@ def cmd_join(args) -> int:
     # works even without `invite -q`.
     token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
 
-    # Decode token → hub_door_pub, ca_pub, hub_host(s), seed, door_port.
+    # Decode token → anchor_door_pub, ca_pub, anchor_host(s), seed, door_port.
     # Decoded FIRST because the CA pub routes the join (see below).
     try:
-        (hub_door_pub_bytes, ca_pub_bytes, hub_host, seed, door_port,
+        (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
          token_domain) = decode_token(token)
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
@@ -1130,8 +1130,8 @@ def cmd_join(args) -> int:
                      "(config %s)", known, cfg_path)
         else:
             if not token_domain:
-                sys.exit("token carries no mesh domain (older hub?) — re-issue "
-                         "the invite on a current hub, or pass -c/--data-dir/"
+                sys.exit("token carries no mesh domain (older anchor?) — re-issue "
+                         "the invite on a current anchor, or pass -c/--data-dir/"
                          "--interface/--listen-port explicitly")
             key = _membership_key(token_domain)
             mp = _membership_paths(key)
@@ -1181,7 +1181,7 @@ def cmd_join(args) -> int:
                         f"this mesh's domain {token_domain!r} is already used by "
                         f"membership {_n!r} ({_p}) — a node cannot bridge two "
                         f"meshes with the same domain. Rename one of them on its "
-                        f"hub (gw rename-mesh <new-name>) and re-run this join. "
+                        f"anchor (gw rename-mesh <new-name>) and re-run this join. "
                         f"The token was NOT consumed.")
             except SystemExit:
                 raise
@@ -1209,10 +1209,10 @@ def cmd_join(args) -> int:
         # Default to the machine's short hostname (first label, no domain).
         hostname = socket.gethostname().split(".")[0] or "node"
 
-    # Caps/segments are NOT chosen here. The hub decides them at `gw invite` and
+    # Caps/segments are NOT chosen here. The anchor decides them at `gw invite` and
     # binds them into the credential issued over the door; we read them back
     # from that credential below and write them to config. (No self-assertion:
-    # whatever a joiner might request is ignored by the hub.)
+    # whatever a joiner might request is ignored by the anchor.)
     caps: list[str] = []
 
     # inbound: "yes" (reachable, advertise endpoint) or "no" (outbound-only,
@@ -1226,7 +1226,7 @@ def cmd_join(args) -> int:
 
     # Endpoint(s) = where other nodes dial this one for a direct tunnel. If not
     # given, best-effort detect a public v6 and/or v4. A node with no endpoint
-    # can still reach the hub (it initiates outbound), but peers can't dial it,
+    # can still reach the anchor (it initiates outbound), but peers can't dial it,
     # so node<->node links won't form unless the other side is reachable.
     node_endpoints = _advertised_endpoints(
         args.endpoint, listen_port,
@@ -1237,18 +1237,18 @@ def cmd_join(args) -> int:
     else:
         log.warning(
             "no public endpoint detected — this node will be reachable only by "
-            "initiating outbound (e.g. to the hub); other nodes cannot dial it, "
+            "initiating outbound (e.g. to the anchor); other nodes cannot dial it, "
             "so direct node-to-node links may not form. Pass --endpoint <addr> "
             "if this node is publicly reachable.")
 
     # (token was decoded up top — its CA pub routed the join to a slot)
-    # The token may carry several hub underlay hosts (v4 and/or v6, comma-sep);
+    # The token may carry several anchor underlay hosts (v4 and/or v6, comma-sep);
     # dial one this node can actually reach.
-    hub_host = _pick_reachable_host(hub_host.split(","))
+    anchor_host = _pick_reachable_host(anchor_host.split(","))
 
-    hub_door_pub_b64 = base64.b64encode(hub_door_pub_bytes).decode()
+    anchor_door_pub_b64 = base64.b64encode(anchor_door_pub_bytes).decode()
 
-    # Derive door params from seed (same derivation the hub ran at invite time)
+    # Derive door params from seed (same derivation the anchor ran at invite time)
     params = derive_door_params(seed)
     log.info("guest_pub: ...%s", params.guest_pub_b64[-8:])
 
@@ -1267,7 +1267,7 @@ def cmd_join(args) -> int:
     if already_enrolled:
         log.info(
             "re-enrolling existing node %s (keys reused; refreshing credential, "
-            "hostname=%s; caps assigned by the hub)", node_keys.addr, hostname,
+            "hostname=%s; caps assigned by the anchor)", node_keys.addr, hostname,
         )
     log.info("overlay addr: %s", node_keys.addr)
 
@@ -1276,19 +1276,19 @@ def cmd_join(args) -> int:
     audit.attach_file(data_dir / "audit.log")   # one-shot door commands → the trail
     with audit.context("join: bring up node door interface"):
         wgmod.ensure_node_door_interface(
-            params.guest_priv_bytes, hub_door_pub_b64, params.psk_b64, hub_host,
+            params.guest_priv_bytes, anchor_door_pub_b64, params.psk_b64, anchor_host,
             door_port,
         )
 
-    # Connect to hub's enroll daemon via the door tunnel (retry for WG handshake)
-    from .door import HUB_DOOR_IP, ENROLL_PORT
-    log.info("connecting to enroll daemon at [%s]:%d ...", HUB_DOOR_IP, ENROLL_PORT)
+    # Connect to anchor's enroll daemon via the door tunnel (retry for WG handshake)
+    from .door import ANCHOR_DOOR_IP, ENROLL_PORT
+    log.info("connecting to enroll daemon at [%s]:%d ...", ANCHOR_DOOR_IP, ENROLL_PORT)
     conn: socket.socket | None = None
     for attempt in range(15):
         try:
             s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             s.settimeout(5)
-            s.connect((HUB_DOOR_IP, ENROLL_PORT))
+            s.connect((ANCHOR_DOOR_IP, ENROLL_PORT))
             conn = s
             break
         except OSError:
@@ -1296,11 +1296,11 @@ def cmd_join(args) -> int:
                 time.sleep(1)
     if conn is None:
         wgmod.destroy_interface("gw-door")
-        sys.exit(f"could not connect to enroll daemon at [{HUB_DOOR_IP}]:{ENROLL_PORT} — is the hub daemon running and the token valid?")
+        sys.exit(f"could not connect to enroll daemon at [{ANCHOR_DOOR_IP}]:{ENROLL_PORT} — is the anchor daemon running and the token valid?")
 
     # The 5s above was only for *reaching* the daemon. The exchange itself (the
-    # hub signs a credential, runs `wg set peer`, merges our record, and replies)
-    # can take much longer when the hub is under load — e.g. enrolling a burst of
+    # anchor signs a credential, runs `wg set peer`, merges our record, and replies)
+    # can take much longer when the anchor is under load — e.g. enrolling a burst of
     # nodes while already serving a large mesh — so give it a generous timeout.
     # Both legs (cred fetch + record push) share this socket.
     conn.settimeout(30)
@@ -1349,13 +1349,13 @@ def cmd_join(args) -> int:
         msg = f"enrollment rejected: {resp.get('error')} — {resp.get('reason')}"
         left = resp.get("attempts_remaining")
         if isinstance(left, int) and left > 0:
-            # The hub keeps the door open for a few attempts — retry on the SAME
+            # The anchor keeps the door open for a few attempts — retry on the SAME
             # token (it rebuilds the door tunnel and reconnects).
             plural = "s" if left != 1 else ""
             msg += (f"\n{left} attempt{plural} left in this window — fix it and retry:\n"
                     f"  sudo gw join <token> --hostname <unique-name>")
         else:
-            msg += ("\nNo attempts left — run 'sudo gw invite' on the hub for a "
+            msg += ("\nNo attempts left — run 'sudo gw invite' on the anchor for a "
                     "fresh token.")
         sys.exit(msg)
 
@@ -1367,14 +1367,14 @@ def cmd_join(args) -> int:
         wgmod.destroy_interface("gw-door")
         sys.exit(f"credential verification failed: {e}")
 
-    # The hub decided our name + caps; adopt them from the issued credential
+    # The anchor decided our name + caps; adopt them from the issued credential
     # (the authoritative record of what we were granted) so config matches. For
-    # a hub-pinned hostname, cred.hostname differs from what we requested.
+    # an anchor-pinned hostname, cred.hostname differs from what we requested.
     caps = list(cred.caps)
     if cred.hostname != hostname:
-        log.info("hub assigned hostname %r (requested %r)", cred.hostname, hostname)
+        log.info("anchor assigned hostname %r (requested %r)", cred.hostname, hostname)
     hostname = cred.hostname
-    log.info("hub assigned caps=%s", caps)
+    log.info("anchor assigned caps=%s", caps)
     if cred.id_pub != node_keys.id_pub_bytes:
         wgmod.destroy_interface("gw-door")
         sys.exit("credential id_pub mismatch — something went wrong")
@@ -1391,23 +1391,23 @@ def cmd_join(args) -> int:
     # Multi-mesh legibility check: same /64 as another membership on this host?
     _warn_shared_overlay_prefix(cfg_path, overlay_prefix)
 
-    # Build directory with our record + hub's record
+    # Build directory with our record + anchor's record
     dir_cache = data_dir / "directory.json"
     directory = Directory.load(dir_cache)
 
-    # Hub's record — pre-seeds so the daemon knows the hub immediately. The hub
+    # Anchor's record — pre-seeds so the daemon knows the anchor immediately. The anchor
     # tells us its control port (it's configurable) so we build the right URL.
-    hub_control_port = int(resp.get("control_port", 51902))
-    hub_overlay_url = ""
-    if resp.get("hub_record"):
-        hub_rec = NodeRecord.from_dict(resp["hub_record"])
+    anchor_control_port = int(resp.get("control_port", 51902))
+    anchor_overlay_url = ""
+    if resp.get("anchor_record"):
+        anchor_rec = NodeRecord.from_dict(resp["anchor_record"])
         try:
-            hub_rec.verify([ca_pub_bytes], set())
-            directory.put(hub_rec)
-            log.info("pre-seeded hub record (hostname=%s)", hub_rec.hostname)
-            hub_overlay_url = f"http://[{hub_rec.cred.addr}]:{hub_control_port}"
+            anchor_rec.verify([ca_pub_bytes], set())
+            directory.put(anchor_rec)
+            log.info("pre-seeded anchor record (hostname=%s)", anchor_rec.hostname)
+            anchor_overlay_url = f"http://[{anchor_rec.cred.addr}]:{anchor_control_port}"
         except Exception as e:
-            log.warning("hub record verify failed: %s", e)
+            log.warning("anchor record verify failed: %s", e)
 
     # Our own record. Outbound-only nodes don't advertise an endpoint, so peers
     # don't waste handshakes dialing an address they can't reach.
@@ -1424,7 +1424,7 @@ def cmd_join(args) -> int:
     directory.put(record)
     directory.save(dir_cache)
 
-    # Send our signed record back over the SAME door connection; the hub merges
+    # Send our signed record back over the SAME door connection; the anchor merges
     # it into its directory so the ReconcileLoop keeps the peer it just installed
     # (the bootstrap chicken-and-egg). Doing this on the door tunnel — rather
     # than a separate POST /publish — means the control plane never has to listen
@@ -1433,11 +1433,11 @@ def cmd_join(args) -> int:
         _send_framed(conn, {"v": 1, "record": record.to_dict()})
         ack = _recv_framed(conn)
         if ack.get("ok"):
-            log.info("published record to hub via door tunnel")
+            log.info("published record to anchor via door tunnel")
         else:
-            log.warning("hub rejected door publish: %s", ack.get("error"))
+            log.warning("anchor rejected door publish: %s", ack.get("error"))
     except Exception as e:
-        log.warning("door publish failed (hub learns this node on next sync): %s", e)
+        log.warning("door publish failed (anchor learns this node on next sync): %s", e)
     finally:
         try:
             conn.close()
@@ -1448,8 +1448,8 @@ def cmd_join(args) -> int:
     wgmod.destroy_interface("gw-door")
 
     endpoint_line = f'\nendpoints = {json_mod.dumps(node_endpoints)}' if node_endpoints else ""
-    seeds_list = json_mod.dumps([hub_overlay_url]) if hub_overlay_url else "[]"
-    root_url_val = json_mod.dumps(hub_overlay_url) if hub_overlay_url else '""'
+    seeds_list = json_mod.dumps([anchor_overlay_url]) if anchor_overlay_url else "[]"
+    root_url_val = json_mod.dumps(anchor_overlay_url) if anchor_overlay_url else '""'
     # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
     # previously-disabled setting.
     if getattr(args, "hosts_sync", None) is False:      # --no-hosts-sync given
@@ -1459,7 +1459,7 @@ def cmd_join(args) -> int:
     else:
         hosts_sync = "true"
     # Name domain: the mesh has exactly ONE, carried in the token (declared at
-    # its hub's create / set-domain). The joiner adopts it, period — a collision
+    # its anchor's create / set-domain). The joiner adopts it, period — a collision
     # with another membership already hard-refused before the door dance. A
     # re-join of an existing membership keeps its config; token wins if both.
     mesh_domain = (token_domain
@@ -1494,8 +1494,8 @@ trusted_pubs = ["{ca_pub_hex}"]
     print(f"  hostname     : {hostname}")
     print(f"  overlay addr : {node_keys.addr}")
     print(f"  credential   : expires {cred.exp:%Y-%m-%d %H:%M UTC}")
-    if hub_overlay_url:
-        print(f"  hub control  : {hub_overlay_url}")
+    if anchor_overlay_url:
+        print(f"  anchor control  : {anchor_overlay_url}")
     print()
     if membership_key:
         # Name-keyed path → the greasewood@ template can serve it. Install +
@@ -1514,10 +1514,10 @@ trusted_pubs = ["{ca_pub_hex}"]
     if node_inbound == "no":
         log.warning(
             "firewall: inbound=no — outbound-only. No greasewood inbound ports "
-            "are needed (it dials peers + the hub's door outbound); just keep "
+            "are needed (it dials peers + the anchor's door outbound); just keep "
             "your base 'ct state established,related accept' rule for replies. "
             "Note: this node can only pair with inbound-reachable nodes, not "
-            "with other outbound-only nodes, and cannot be promoted to hub "
+            "with other outbound-only nodes, and cannot be promoted to anchor "
             "without switching to inbound (gw set-inbound yes)."
         )
     else:
@@ -1533,10 +1533,10 @@ trusted_pubs = ["{ca_pub_hex}"]
 # ---------------------------------------------------------------------------
 
 def cmd_revoke(args) -> int:
-    # Same hub-only guard as set-caps/set-segments: explicit role check first,
-    # then ca_key_file + CA load — so a non-hub fails with one clear message and
+    # Same anchor-only guard as set-caps/set-segments: explicit role check first,
+    # then ca_key_file + CA load — so a non-anchor fails with one clear message and
     # never reaches a traceback.
-    cfg, ca = _load_hub_ca(args, "revoke")
+    cfg, ca = _load_anchor_ca(args, "revoke")
 
     try:
         id_pub_bytes = bytes.fromhex(args.id_pub_hex)
@@ -1553,11 +1553,11 @@ def cmd_revoke(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# set-caps / set-segments — change an enrolled node's caps on the hub
+# set-caps / set-segments — change an enrolled node's caps on the anchor
 # ---------------------------------------------------------------------------
 
-def _load_hub_ca(args, cmd: str):
-    """Shared setup for hub-side registry commands: load config + CA."""
+def _load_anchor_ca(args, cmd: str):
+    """Shared setup for anchor-side registry commands: load config + CA."""
     from .config import load_config
     from .keys import CAKeys
     from .ca import CA
@@ -1565,12 +1565,12 @@ def _load_hub_ca(args, cmd: str):
     # these commands write them. Without this, a non-root run fails partway with
     # whatever file access breaks first — historically misread as the node not
     # existing at all.
-    _require_root(cmd, "it reads and writes the hub's registry and CA key")
+    _require_root(cmd, "it reads and writes the anchor's registry and CA key")
     cfg = load_config(Path(args.config))
-    if cfg.role != "hub":
-        sys.exit(f"gw {cmd} must be run on the hub (role = hub)")
+    if cfg.role != "anchor":
+        sys.exit(f"gw {cmd} must be run on the anchor (role = anchor)")
     if cfg.ca_key_file is None:
-        sys.exit(f"{cmd} requires ca_key_file in [hub]")
+        sys.exit(f"{cmd} requires ca_key_file in [anchor]")
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
     return cfg, CA(ca_keys, cfg.data_dir)
 
@@ -1589,7 +1589,7 @@ def _resolve_node(ca, cfg, handle: str):
         s = s[: -len(suffix)]
     owner = ca.hostname_owner(s)
     if owner is None:
-        sys.exit(f"no node named {handle!r} on this hub (see `gw status`)")
+        sys.exit(f"no node named {handle!r} on this anchor (see `gw status`)")
     return bytes.fromhex(owner), s
 
 
@@ -1600,7 +1600,7 @@ _NEXT_RENEWAL_NOTE = (
 
 
 def cmd_set_caps(args) -> int:
-    cfg, ca = _load_hub_ca(args, "set-caps")
+    cfg, ca = _load_anchor_ca(args, "set-caps")
     id_pub, name = _resolve_node(ca, cfg, args.node)
     caps = [c.strip() for c in args.caps.split(",") if c.strip()]
     if not any(c.startswith("segment:") for c in caps):
@@ -1613,7 +1613,7 @@ def cmd_set_caps(args) -> int:
 
 
 def cmd_set_segments(args) -> int:
-    cfg, ca = _load_hub_ca(args, "set-segments")
+    cfg, ca = _load_anchor_ca(args, "set-segments")
     id_pub, name = _resolve_node(ca, cfg, args.node)
     _, current = ca.node_info(id_pub)
     # Replace only the segment: tags; keep tls/hostname-pinned and anything else.
@@ -1628,7 +1628,7 @@ def cmd_set_segments(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# hub-promote — turn an enrolled node into a hub (generate a CA)
+# anchor-promote — turn an enrolled node into an anchor (generate a CA)
 # ---------------------------------------------------------------------------
 
 def _control_port(cfg) -> int:
@@ -1749,12 +1749,12 @@ def _print_daemon_guidance(key: str, cfg_path, then: str = "",
         print(f"  or run it in the foreground to watch:  sudo gw -c {cfg_path} run")
 
 
-def cmd_hub_promote(args) -> int:
-    """On a prospective new hub (currently a node): generate its own CA key and
-    rewrite its config to role=hub, so a restart makes it serve as a hub.
+def cmd_anchor_promote(args) -> int:
+    """On a prospective new anchor (currently a node): generate its own CA key and
+    rewrite its config to role=anchor, so a restart makes it serve as an anchor.
     Prints the CA public key + control endpoint to add to the fleet's
     trusted_pubs (a manual re-root — see the printed steps)."""
-    _require_root("hub-promote")
+    _require_root("anchor-promote")
     import json as json_mod
     from .config import load_config
     from .keys import CAKeys, NodeKeys
@@ -1764,14 +1764,14 @@ def cmd_hub_promote(args) -> int:
         sys.exit(f"no config at {cfg_path} — this command runs on an enrolled node")
     cfg = load_config(cfg_path)
 
-    # A hub must accept inbound connections (it serves the control plane + door).
+    # An anchor must accept inbound connections (it serves the control plane + door).
     # An outbound-only node can't be one until it's reachable.
     if cfg.inbound == "no":
         sys.exit(
-            "this node is outbound-only (inbound=no); a hub must accept inbound "
+            "this node is outbound-only (inbound=no); an anchor must accept inbound "
             "connections. Switch it first:\n"
             "  sudo gw set-inbound yes\n"
-            "then re-run hub-promote."
+            "then re-run anchor-promote."
         )
 
     keys = NodeKeys.load_or_generate(cfg.data_dir)
@@ -1786,19 +1786,19 @@ def cmd_hub_promote(args) -> int:
     ca_pub_hex = ca_keys.ca_pub_bytes.hex()
 
     control_port = args.control_port
-    # Nodes reach the hub control plane over the overlay, so advertise the
+    # Nodes reach the anchor control plane over the overlay, so advertise the
     # overlay address (not the underlay).
     endpoint = f"http://[{keys.addr}]:{control_port}"
 
     # Trust our own CA as a root, in addition to whatever we already trust, so
-    # this hub accepts the credentials it issues.
+    # this anchor accepts the credentials it issues.
     trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
 
-    # A hub must reach every segment — ensure the wildcard segment. (Its own
+    # An anchor must reach every segment — ensure the wildcard segment. (Its own
     # credential picks this up on the next renewal under the new CA.)
-    hub_caps = list(cfg.caps)
-    if "segment:*" not in hub_caps:
-        hub_caps.append("segment:*")
+    anchor_caps = list(cfg.caps)
+    if "segment:*" not in anchor_caps:
+        anchor_caps.append("segment:*")
 
     endpoint_line = (
         f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
@@ -1807,9 +1807,9 @@ def cmd_hub_promote(args) -> int:
     cfg_path.write_text(f"""[node]
 hostname = "{cfg.hostname}"
 data_dir = "{cfg.data_dir}"
-role = "hub"
+role = "anchor"
 inbound = "yes"
-caps = {json_mod.dumps(hub_caps)}{endpoint_line}
+caps = {json_mod.dumps(anchor_caps)}{endpoint_line}
 
 [network]
 interface = "{cfg.wg_interface}"
@@ -1823,7 +1823,7 @@ mesh_domain = "{cfg.mesh_domain}"
 [ca]
 trusted_pubs = {json_mod.dumps(trusted)}
 
-[hub]
+[anchor]
 ca_key_file = "{ca_key_path}"
 control_listen = ":{control_port}"
 credential_ttl = "{args.credential_ttl}"
@@ -1834,23 +1834,23 @@ door_port = {cfg.door_port}
 default_segments = ["mesh"]
 default_caps = ["tls"]
 """)
-    log.info("promoted to hub role in %s", cfg_path)
+    log.info("promoted to anchor role in %s", cfg_path)
 
-    print("\nReady to become a hub. CA key generated; config set to role=hub.")
+    print("\nReady to become an anchor. CA key generated; config set to role=anchor.")
     print(f"  CA pub key   : {ca_pub_hex}")
-    print(f"  hub endpoint : {endpoint}")
+    print(f"  anchor endpoint : {endpoint}")
     print()
-    print("To move the fleet to this hub (manual re-root — live tunnels stay up):")
+    print("To move the fleet to this anchor (manual re-root — live tunnels stay up):")
     print("  1. Add this CA pub to [ca] trusted_pubs on EVERY node (keep the old")
     print("     one during the overlap), e.g. via Ansible, and restart their daemons:")
     print(f"       {ca_pub_hex}")
-    print(f"  2. Repoint nodes' root_url + seeds to this hub: {endpoint}")
+    print(f"  2. Repoint nodes' root_url + seeds to this anchor: {endpoint}")
     print("  3. Once every node has renewed here, drop the old CA pub from")
-    print("     trusted_pubs fleet-wide. Then decommission the old hub.")
+    print("     trusted_pubs fleet-wide. Then decommission the old anchor.")
     print("Start the daemon here:  sudo gw run")
     print()
     from . import firewall as _fw
-    _fw.check(_fw.hub_rules(cfg.listen_port, control_port), log)
+    _fw.check(_fw.anchor_rules(cfg.listen_port, control_port), log)
     return 0
 
 
@@ -1858,14 +1858,14 @@ default_caps = ["tls"]
 # TLS service certificates (§12) — cert-request / cert-status
 # ---------------------------------------------------------------------------
 
-def _resolve_hub_url(cfg) -> str:
-    """The control-plane URL to talk to: the configured hub."""
+def _resolve_anchor_url(cfg) -> str:
+    """The control-plane URL to talk to: the configured anchor."""
     return cfg.root_url
 
 
 def cmd_cert_request(args) -> int:
-    """Request an x509 TLS cert from the hub for a local service (e.g. Postgres).
-    Generates the leaf key locally; only its public key is sent to the hub. Unless
+    """Request an x509 TLS cert from the anchor for a local service (e.g. Postgres).
+    Generates the leaf key locally; only its public key is sent to the anchor. Unless
     --no-auto-renew is given, the cert is recorded so the daemon renews it at
     ~half its TTL (and runs --reload-cmd afterward)."""
     import ipaddress
@@ -1898,7 +1898,7 @@ def cmd_cert_request(args) -> int:
         ips = [keys.addr]
 
     # CN is not operator-settable: it's cosmetic under verify-full (the SAN is
-    # what's checked) and the hub constrains it to an owned name anyway, so we
+    # what's checked) and the anchor constrains it to an owned name anyway, so we
     # just derive it from the first SAN.
     cn = dns[0] if dns else (ips[0] if ips else keys.addr)
     name = args.name or (dns[0] if dns else "service")
@@ -1916,18 +1916,18 @@ def cmd_cert_request(args) -> int:
     prior = [c for c in certmod.load_manifest(cfg.data_dir) if c.get("name") == name]
     old_paths = set(certmod.entry_paths(prior[0])) if prior else set()
 
-    hub_url = args.hub or _resolve_hub_url(cfg)
-    if not hub_url:
-        sys.exit("no hub URL — set root_url in config or pass --hub")
+    anchor_url = args.anchor or _resolve_anchor_url(cfg)
+    if not anchor_url:
+        sys.exit("no anchor URL — set root_url in config or pass --anchor")
 
     try:
         key_path, crt_path, ca_path = certmod.issue_cert(
-            hub_url, keys, dns=dns, ips=ips, cn=cn,
+            anchor_url, keys, dns=dns, ips=ips, cn=cn,
             key_path=key_path, crt_path=crt_path, ca_path=ca_path)
     except certmod.CertRejected as e:
         sys.exit(f"cert request rejected: {e}")
     except RuntimeError as e:
-        sys.exit(f"cert request to {hub_url} failed: {e}")
+        sys.exit(f"cert request to {anchor_url} failed: {e}")
 
     # Record it for the daemon's auto-renewal loop (skipped iff --no-auto-renew).
     auto = not args.no_auto_renew
@@ -2039,7 +2039,7 @@ def cmd_cert_status(args) -> int:
 def cmd_set_inbound(args) -> int:
     """Change this node's reachability (yes/no). Switching to inbound
     means peers can dial it — so it can hold direct links to outbound-only nodes
-    and be promoted to hub — but it must accept the WireGuard port (this checks
+    and be promoted to anchor — but it must accept the WireGuard port (this checks
     and prints the rule; open it yourself). Restart the daemon to advertise."""
     _require_root("set-inbound")
     import re
@@ -2065,9 +2065,9 @@ def cmd_set_inbound(args) -> int:
               "'ct state established,related accept' for replies. (Open ports left "
               "in place are harmless; remove them yourself if you like.)")
     else:
-        is_hub = cfg.role == "hub"
-        rules = (_fw.hub_rules(cfg.listen_port, _control_port(cfg))
-                 if is_hub else _fw.node_rules(cfg.listen_port, value))
+        is_anchor = cfg.role == "anchor"
+        rules = (_fw.anchor_rules(cfg.listen_port, _control_port(cfg))
+                 if is_anchor else _fw.node_rules(cfg.listen_port, value))
         _fw.check(rules, log)
     print("Restart the daemon to advertise the change: sudo systemctl restart "
           "greasewood  (or re-run sudo gw run)")
@@ -2075,15 +2075,15 @@ def cmd_set_inbound(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# rename — change this node's mesh hostname (hub-validated, no re-join)
+# rename — change this node's mesh hostname (anchor-validated, no re-join)
 # ---------------------------------------------------------------------------
 
 def cmd_rename(args) -> int:
-    """Rename this node in the mesh without re-joining. Asks the hub to re-issue
-    the credential under the new name over the existing control plane; the hub
+    """Rename this node in the mesh without re-joining. Asks the anchor to re-issue
+    the credential under the new name over the existing control plane; the anchor
     enforces uniqueness (refused if taken) and frees the old name. Keys and the
     overlay address are unchanged. Requires the mesh to be up (the daemon
-    running) so the hub is reachable."""
+    running) so the anchor is reachable."""
     _require_root("rename-node")
     import re
     import secrets
@@ -2106,22 +2106,22 @@ def cmd_rename(args) -> int:
         print(f"already named {newname!r} — nothing to do")
         return 0
 
-    # Hub-pinned nodes (enrolled via `gw invite --hostname`) can't rename. Fail
-    # fast locally; the hub enforces this too (defense in depth).
+    # Anchor-pinned nodes (enrolled via `gw invite --hostname`) can't rename. Fail
+    # fast locally; the anchor enforces this too (defense in depth).
     if "hostname-pinned" in cfg.caps:
-        sys.exit("this node's hostname is hub-pinned; rename is disabled. "
-                 "To change it, re-invite the node with a new --hostname on the hub.")
+        sys.exit("this node's hostname is anchor-pinned; rename is disabled. "
+                 "To change it, re-invite the node with a new --hostname on the anchor.")
 
     try:
         keys = NodeKeys.load(cfg.data_dir)
     except FileNotFoundError:
         sys.exit("this node isn't enrolled yet (no keys) — run 'gw join' first")
 
-    hub_url = cfg.root_url
-    if not hub_url:
-        sys.exit("no hub URL known — is this node enrolled and the mesh up?")
+    anchor_url = cfg.root_url
+    if not anchor_url:
+        sys.exit("no anchor URL known — is this node enrolled and the mesh up?")
 
-    # Ask the hub to re-issue under the new name (same authenticated path as
+    # Ask the anchor to re-issue under the new name (same authenticated path as
     # renewal; the hostname field turns it into a rename).
     req = RenewRequest(
         id_pub=keys.id_pub_bytes,
@@ -2132,7 +2132,7 @@ def cmd_rename(args) -> int:
     ).sign(keys.id_priv)
 
     body = json.dumps(req.to_dict()).encode()
-    url = f"{hub_url.rstrip('/')}/renew"
+    url = f"{anchor_url.rstrip('/')}/renew"
     http_req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"})
     try:
@@ -2144,9 +2144,9 @@ def cmd_rename(args) -> int:
         except Exception:
             data = {"error": f"HTTP {e.code}"}
     except urllib.error.URLError as e:
-        sys.exit(f"could not reach the hub at {hub_url}: {e} — is the mesh up?")
+        sys.exit(f"could not reach the anchor at {anchor_url}: {e} — is the mesh up?")
     if "error" in data:
-        sys.exit(f"rename rejected by hub: {data['error']}")
+        sys.exit(f"rename rejected by anchor: {data['error']}")
 
     cred = Credential.from_dict(data)
 
@@ -2167,9 +2167,9 @@ def cmd_rename(args) -> int:
     directory.save(cfg.dir_cache_path)
     from .sync import push_record
     try:
-        push_record(hub_url, record)
+        push_record(anchor_url, record)
     except Exception as e:
-        log.warning("published locally but push to hub failed (will sync): %s", e)
+        log.warning("published locally but push to anchor failed (will sync): %s", e)
 
     # Persist the new name in config.
     text = cfg_path.read_text()
@@ -2234,7 +2234,7 @@ def cmd_run(args) -> int:
     directory = Directory.load(cfg.dir_cache_path)
 
     # Trust is static, straight from config: the trusted CA set, the seeds to
-    # pull the directory from, and the hub URL. (Moving the hub is a deliberate
+    # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
     def get_ca_pubs():
@@ -2261,11 +2261,11 @@ def cmd_run(args) -> int:
     # without a daemon restart — both for control-plane refusal and local
     # eviction. Plain nodes have no revoke list (expiry-based revocation).
     get_revoked: "callable" = set
-    is_hub = cfg.role == "hub"
+    is_anchor = cfg.role == "anchor"
 
-    if is_hub:
+    if is_anchor:
         if not cfg.ca_key_file:
-            sys.exit("hub role requires ca_key_file in [hub]")
+            sys.exit("anchor role requires ca_key_file in [anchor]")
         ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
         ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
         get_revoked = ca.load_revoked_set
@@ -2274,13 +2274,13 @@ def cmd_run(args) -> int:
         wgmod.setup_door_routing()
 
         # Bind the control plane to the overlay address (reachable only through
-        # the mesh) and loopback (for the hub talking to itself) — NOT "::".
+        # the mesh) and loopback (for the anchor talking to itself) — NOT "::".
         # This keeps it off the underlay structurally, no firewall rule needed.
         port = _control_port(cfg)
         listen_addrs = [f"[{keys.addr}]:{port}", f"[::1]:{port}"]
 
         # Fleet-wide renew hint (gw renew-all): served in /directory, re-read
-        # per request so a bump takes effect without restarting the hub.
+        # per request so a bump takes effect without restarting the anchor.
         def _read_renew_after():
             try:
                 return (cfg.data_dir / "renew_after").read_text().strip() or None
@@ -2317,9 +2317,9 @@ def cmd_run(args) -> int:
         door_watcher.start()
         log.info("door watcher started")
 
-    # Directory sync — pull from the configured seeds (the hub). The renewal loop
+    # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval
-    # out), so acting on the hub's fleet renew hint needs no reordering.
+    # out), so acting on the anchor's fleet renew hint needs no reordering.
     sync = SyncLoop(
         directory, lambda: cfg.seeds, cfg.dir_cache_path,
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
@@ -2389,7 +2389,7 @@ def cmd_run(args) -> int:
                  cfg.inbound, eff_endpoints, want_aliases)
 
     # Push our own record so the rest of the mesh knows about us. This gets a
-    # newly enrolled node into the hub's directory; it is also how endpoint
+    # newly enrolled node into the anchor's directory; it is also how endpoint
     # changes propagate without waiting for the next renewal cycle.
     if own_record:
         for seed in cfg.seeds:
@@ -2399,7 +2399,7 @@ def cmd_run(args) -> int:
             except Exception as e:
                 log.warning("push to %s failed (will retry on next sync): %s", seed, e)
 
-    # Renewal loop — targets the configured hub.
+    # Renewal loop — targets the configured anchor.
     if own_record:
         renewal = RenewalLoop(
             node_keys=keys,
@@ -2422,7 +2422,7 @@ def cmd_run(args) -> int:
     cert_renewal = None
     _managed = _load_cert_manifest(cfg.data_dir)
     if _managed:
-        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_hub_url(cfg),
+        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_anchor_url(cfg),
                                        cfg.data_dir, mesh_domain=cfg.mesh_domain)
         cert_renewal.start()
         log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
@@ -2754,7 +2754,7 @@ def _fmt_until(iso: str) -> str:
 
 
 def _door_status_lines(cfg) -> list:
-    """The `door:` block for `gw status` — hub only. Shows whether the
+    """The `door:` block for `gw status` — anchor only. Shows whether the
     enrollment door is open (and time-to-close) or closed (and how long ago),
     plus failed attempts + source IPs and the last enrollment."""
     from . import door
@@ -2923,14 +2923,14 @@ def _self_health_lines(cfg, directory, own_id) -> list:
 
     n = len(cfg.ca_pubs)
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
-                 f"hub {cfg.root_url or '(none configured)'}")
+                 f"anchor {cfg.root_url or '(none configured)'}")
 
     # Sync freshness — nodes read a *cache*, so a stale roster is worth flagging.
-    # The hub is the source of truth, so it has nothing to be 'stale' against.
-    if cfg.role != "hub":
+    # The anchor is the source of truth, so it has nothing to be 'stale' against.
+    if cfg.role != "anchor":
         last = syncmod.read_last_sync(cfg.data_dir)
         if last is None:
-            lines.append(f"{'sync':<9}: never (is the daemon running / reaching the hub?)")
+            lines.append(f"{'sync':<9}: never (is the daemon running / reaching the anchor?)")
         else:
             try:
                 age = (dt.datetime.now(_UTC)
@@ -2939,10 +2939,10 @@ def _self_health_lines(cfg, directory, own_id) -> list:
             except (ValueError, AttributeError):
                 age = 0
             flag = "⚠ " if age > 120 else ""
-            tail = " — hub unreachable?" if age > 120 else ""
+            tail = " — anchor unreachable?" if age > 120 else ""
             lines.append(f"{'sync':<9}: {flag}directory synced {_fmt_ago(last)}{tail}")
 
-    # A pending mesh rename the daemon detected from the hub — persisted so it
+    # A pending mesh rename the daemon detected from the anchor — persisted so it
     # doesn't scroll past in the log. Needs an operator action, so it's loud.
     import json as _json
     pend = cfg.data_dir / "pending_rename.json"
@@ -2950,7 +2950,7 @@ def _self_health_lines(cfg, directory, own_id) -> list:
         try:
             d = _json.loads(pend.read_text())
             newk = _membership_key(d["new_domain"])
-            lines.append(f"{'rename':<9}: ⚠ the hub renamed this mesh "
+            lines.append(f"{'rename':<9}: ⚠ the anchor renamed this mesh "
                          f"{d.get('old_domain','?')} → {d['new_domain']}. "
                          f"Migrate: sudo gw rename-mesh {newk}")
         except Exception:
@@ -2994,8 +2994,8 @@ def cmd_status(args) -> int:
     # Self/health — local facts about THIS node (fast, no root, no network).
     for line in _self_health_lines(cfg, directory, own_id):
         print(line)
-    # The enrollment door only exists on the hub — show its state there.
-    if cfg.role == "hub":
+    # The enrollment door only exists on the anchor — show its state there.
+    if cfg.role == "anchor":
         for line in _door_status_lines(cfg):
             print(line)
     print()
@@ -3053,9 +3053,9 @@ def cmd_status(args) -> int:
 # diagnose — explain why a peer link is or isn't forming
 # ---------------------------------------------------------------------------
 
-def _hub_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
-    """Local-minus-hub clock difference in seconds via /health's 'now' stamp,
-    or None if the hub is unreachable or doesn't send one (older hub)."""
+def _anchor_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
+    """Local-minus-anchor clock difference in seconds via /health's 'now' stamp,
+    or None if the anchor is unreachable or doesn't send one (older anchor)."""
     import urllib.request
     try:
         with urllib.request.urlopen(f"{root_url.rstrip('/')}/health",
@@ -3063,8 +3063,8 @@ def _hub_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
             raw = json.loads(resp.read()).get("now")
         if not raw:
             return None
-        hub_now = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return (dt.datetime.now(_UTC) - hub_now).total_seconds()
+        anchor_now = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return (dt.datetime.now(_UTC) - anchor_now).total_seconds()
     except Exception:
         return None
 
@@ -3141,11 +3141,11 @@ def _self_firewall_port(port: int) -> str:
     return "CLOSED — blocked!" if missing else "OPEN"
 
 
-def _diag_hub_record(directory, cfg, own_rec):
-    """The hub's directory record. If this host IS the hub, that's our own
+def _diag_anchor_record(directory, cfg, own_rec):
+    """The anchor's directory record. If this host IS the anchor, that's our own
     record; otherwise the node at the control-plane URL (root_url) address.
     None if unresolvable / not yet in cache."""
-    if cfg.role == "hub":
+    if cfg.role == "anchor":
         return own_rec
     import re
     m = re.search(r"\[([0-9a-fA-F:]+)\]", cfg.root_url or "")
@@ -3167,13 +3167,13 @@ class _DiagCol:
 def cmd_diagnose(args) -> int:
     """
     Pairwise link diagnosis. `gw diagnose [A [B]]` lays up to two named nodes
-    plus the hub side by side and explains, per pair, whether a WireGuard tunnel
+    plus the anchor side by side and explains, per pair, whether a WireGuard tunnel
     can form — and if not, WHICH factor blocks it, with the firewall/reachability
     directionality that's usually the real question.
 
-      gw diagnose            this node ↔ the hub
-      gw diagnose A          this node ↔ A            (+ hub as reference)
-      gw diagnose A B        A ↔ B                    (+ hub as reference)
+      gw diagnose            this node ↔ the anchor
+      gw diagnose A          this node ↔ A            (+ anchor as reference)
+      gw diagnose A B        A ↔ B                    (+ anchor as reference)
 
     Only THIS host's firewall is directly knowable; a peer's is inferred OPEN
     from an observed handshake (packets flowing prove its whole inbound path —
@@ -3227,7 +3227,7 @@ def cmd_diagnose(args) -> int:
     now_epoch = int(_time.time())
     own_rec = directory.get(own_id)
 
-    # ---- resolve the requested nodes → up to three columns (pair + hub) ------
+    # ---- resolve the requested nodes → up to three columns (pair + anchor) ------
     def _find(name):
         from .hosts import sanitize
         want = sanitize(name)
@@ -3244,14 +3244,14 @@ def cmd_diagnose(args) -> int:
             sys.exit(f"no node named {name!r} in the directory cache (see gw status)")
         picks.append((r.hostname, r, r.id_pub == own_id_bytes))
 
-    if not requested:                           # 0 args: self ↔ hub
+    if not requested:                           # 0 args: self ↔ anchor
         picks.append((cfg.hostname, own_rec, True))
     elif len(requested) == 1:                   # 1 arg: self ↔ A
         picks.insert(0, (cfg.hostname, own_rec, True))
 
-    hub_rec = _diag_hub_record(directory, cfg, own_rec)  # always add the hub as reference
-    if hub_rec is not None:
-        picks.append((hub_rec.hostname, hub_rec, hub_rec.id_pub == own_id_bytes))
+    anchor_rec = _diag_anchor_record(directory, cfg, own_rec)  # always add the anchor as reference
+    if anchor_rec is not None:
+        picks.append((anchor_rec.hostname, anchor_rec, anchor_rec.id_pub == own_id_bytes))
 
     # Dedup by overlay address, cap at three, keep order.
     cols, seen = [], set()
@@ -3327,11 +3327,11 @@ def cmd_diagnose(args) -> int:
     if not ca_pubs:
         print("  ⚠ no trusted CA keys — nothing will verify (check [ca] trusted_pubs)")
     if cfg.root_url:
-        skew = _hub_clock_skew(cfg.root_url)
+        skew = _anchor_clock_skew(cfg.root_url)
         if skew is None:
-            print("  clock: hub unreachable — skew check skipped")
+            print("  clock: anchor unreachable — skew check skipped")
         elif abs(skew) >= 60:
-            print(f"  ⚠ clock {skew:+.0f}s off the hub — FIX NTP (past ±300s "
+            print(f"  ⚠ clock {skew:+.0f}s off the anchor — FIX NTP (past ±300s "
                   f"renewals refused; expiry checks misfire earlier)")
     if os.geteuid() != 0:
         print("  ⚠ not root — no live WireGuard state; link status & firewall "
@@ -3365,7 +3365,7 @@ def cmd_diagnose(args) -> int:
             print("    ✗ no shared segment — they won't peer by design "
                   "(give them a common segment to change this)")
             continue
-        seg = "hub is reach-all *" if ("*" in x.segments or "*" in y.segments) \
+        seg = "anchor is reach-all *" if ("*" in x.segments or "*" in y.segments) \
             else "share " + repr(",".join(sorted(
                 set(x.segments.split(",")) & set(y.segments.split(",")))) or "?")
         print(f"    segment: ✓ {seg}")
@@ -3427,13 +3427,13 @@ def cmd_renew(args) -> int:
     """
     Force an immediate credential renewal for THIS node. Normally the daemon
     renews on its own (~half the credential TTL); this fetches a fresh credential
-    from the hub right now, re-publishes the record so peers stop serving the old
-    expiry, and adopts any caps/segments the hub changed in the meantime (so
+    from the anchor right now, re-publishes the record so peers stop serving the old
+    expiry, and adopts any caps/segments the anchor changed in the meantime (so
     `gw set-caps` / `gw set-segments` take effect immediately instead of at the
     next scheduled renewal).
 
-    Run it ON THE NODE: renewal is self-signed by the node's id_priv, so the hub
-    cannot renew a node on its behalf — there is no "renew everyone from the hub".
+    Run it ON THE NODE: renewal is self-signed by the node's id_priv, so the anchor
+    cannot renew a node on its behalf — there is no "renew everyone from the anchor".
     """
     _require_root("renew")
     from .config import load_config
@@ -3454,12 +3454,12 @@ def cmd_renew(args) -> int:
     except Exception:
         sys.exit("this node isn't enrolled yet (no keys) — run 'gw join <token>' first")
     if not cfg.root_url:
-        sys.exit("no hub URL configured (root_url) — is this node enrolled?")
+        sys.exit("no anchor URL configured (root_url) — is this node enrolled?")
 
     try:
         cred = _do_renew(cfg.root_url, keys)
     except Exception as e:
-        sys.exit(f"renew failed: {e}\n(is the mesh up and the hub reachable? "
+        sys.exit(f"renew failed: {e}\n(is the mesh up and the anchor reachable? "
                  f"renewal goes over the overlay)")
 
     # Re-publish our record with the fresh credential, keeping our current seq+1,
@@ -3480,11 +3480,11 @@ def cmd_renew(args) -> int:
     try:
         push_record(cfg.root_url, record)
     except Exception as e:
-        log.warning("published locally but push to hub failed (will sync): %s", e)
+        log.warning("published locally but push to anchor failed (will sync): %s", e)
 
     print(f"renewed — credential now expires {cred.exp:%Y-%m-%d %H:%M UTC}")
 
-    # Adopt caps/segments if the hub changed them since we last renewed. Editing
+    # Adopt caps/segments if the anchor changed them since we last renewed. Editing
     # this line grants nothing on its own (peers enforce against the credential),
     # but the daemon reads its LOCAL side of the peering policy from here, so we
     # keep it in sync with what the CA just issued.
@@ -3494,9 +3494,9 @@ def cmd_renew(args) -> int:
                          f'caps = {json_mod.dumps(list(cred.caps))}', text, count=1)
         if n:
             cfg_path.write_text(new)
-            print(f"caps updated by the hub: {list(cfg.caps)} -> {list(cred.caps)}")
+            print(f"caps updated by the anchor: {list(cfg.caps)} -> {list(cred.caps)}")
         else:
-            log.warning("hub changed caps to %s but couldn't update %s — edit by hand",
+            log.warning("anchor changed caps to %s but couldn't update %s — edit by hand",
                         list(cred.caps), cfg_path)
 
     print("Restart the daemon to fully adopt it: "
@@ -3505,15 +3505,15 @@ def cmd_renew(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# renew-all  (hub: advertise a fleet-wide "renew asap" hint)
+# renew-all  (anchor: advertise a fleet-wide "renew asap" hint)
 # ---------------------------------------------------------------------------
 
 def cmd_renew_all(args) -> int:
     """
-    [hub] Request a fleet-wide credential renewal. Writes renew_after = now, which
-    the hub advertises in GET /directory; every cooperating node whose credential
+    [anchor] Request a fleet-wide credential renewal. Writes renew_after = now, which
+    the anchor advertises in GET /directory; every cooperating node whose credential
     was issued before that timestamp renews after a jittered delay. The jitter
-    window scales with the mesh size (window = N * spread), so the hub's
+    window scales with the mesh size (window = N * spread), so the anchor's
     renewals/sec stays roughly constant no matter how big the fleet is.
 
     Pull-based, not a push: nodes act on their next directory poll, and a node
@@ -3522,10 +3522,10 @@ def cmd_renew_all(args) -> int:
     window closes) or any fleet-wide policy change.
     """
     from .config import load_config
-    _require_root("renew-all", "it writes the hub's root-owned renewal state")
+    _require_root("renew-all", "it writes the anchor's root-owned renewal state")
     cfg = load_config(Path(args.config))
-    if cfg.role != "hub":
-        sys.exit("gw renew-all must be run on the hub (role = hub)")
+    if cfg.role != "anchor":
+        sys.exit("gw renew-all must be run on the anchor (role = anchor)")
 
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     (cfg.data_dir / "renew_after").write_text(now.isoformat())
@@ -3537,7 +3537,7 @@ def cmd_renew_all(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# hub-backup / hub-restore  (encrypted CA + registry snapshot)
+# anchor-backup / anchor-restore  (encrypted CA + registry snapshot)
 # ---------------------------------------------------------------------------
 
 def _backup_passphrase(confirm: bool) -> bytes:
@@ -3555,28 +3555,28 @@ def _backup_passphrase(confirm: bool) -> bytes:
     return pw.encode()
 
 
-def cmd_hub_backup(args) -> int:
-    """Write a single encrypted archive of this hub's trust state (CA key, the
+def cmd_anchor_backup(args) -> int:
+    """Write a single encrypted archive of this anchor's trust state (CA key, the
     nodes/ registry, revoke list, door key). Restoring the same key onto a new
     host is a restore, not a re-root — no fleet-wide trust change."""
     from .config import load_config
     from . import backup as bak
 
-    _require_root("hub-backup", "it reads the CA key and the hub registry")
+    _require_root("anchor-backup", "it reads the CA key and the anchor registry")
     cfg = load_config(Path(args.config))
-    if cfg.role != "hub":
-        sys.exit("gw hub-backup must be run on the hub (role = hub)")
+    if cfg.role != "anchor":
+        sys.exit("gw anchor-backup must be run on the anchor (role = anchor)")
     if cfg.ca_key_file is None:
-        sys.exit("hub-backup requires ca_key_file in [hub]")
+        sys.exit("anchor-backup requires ca_key_file in [anchor]")
 
-    files = bak.collect_hub_state(cfg.data_dir, cfg.ca_key_file)
+    files = bak.collect_anchor_state(cfg.data_dir, cfg.ca_key_file)
     if "ca.key" not in files:
         sys.exit(f"CA key not found at {cfg.ca_key_file} — nothing to back up")
 
     out = Path(args.out) if args.out else \
-        cfg.data_dir / f"greasewood-hub-backup-{cfg.hostname}.gwbk"
+        cfg.data_dir / f"greasewood-anchor-backup-{cfg.hostname}.gwbk"
     passphrase = _backup_passphrase(confirm=True)
-    # This passphrase is the ONLY thing protecting the CA key (and hub id_priv)
+    # This passphrase is the ONLY thing protecting the CA key (and anchor id_priv)
     # at rest — a weak one undoes the whole backup. Warn, but don't block.
     if len(passphrase) < 12:
         print(f"⚠ warning: backup passphrase is short ({len(passphrase)} chars). "
@@ -3590,26 +3590,26 @@ def cmd_hub_backup(args) -> int:
     finally:
         os.close(fd)
     node_count = sum(1 for n in files if n.startswith("nodes/"))
-    print(f"wrote encrypted hub backup → {out}")
+    print(f"wrote encrypted anchor backup → {out}")
     print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
     print("Store it OFFLINE. Anyone with this file AND the passphrase can "
           "impersonate your CA. Test-restore it before you rely on it.")
     return 0
 
 
-def cmd_hub_restore(args) -> int:
-    """Decrypt a hub backup into a data dir. For standing up a replacement hub
-    on the same CA key (see RUNBOOK 'destroyed hub')."""
-    _require_root("hub-restore")
+def cmd_anchor_restore(args) -> int:
+    """Decrypt an anchor backup into a data dir. For standing up a replacement anchor
+    on the same CA key (see RUNBOOK 'destroyed anchor')."""
+    _require_root("anchor-restore")
     from . import backup as bak
 
     blob = Path(args.archive).read_bytes()
     data_dir = Path(args.data_dir).expanduser()
 
-    # Guard against clobbering a live hub's CA key by accident.
+    # Guard against clobbering a live anchor's CA key by accident.
     if (data_dir / "ca.key").exists() and not args.force:
         sys.exit(f"{data_dir / 'ca.key'} already exists — refusing to overwrite "
-                 f"a live hub. Pass --force if you really mean to restore over it.")
+                 f"a live anchor. Pass --force if you really mean to restore over it.")
 
     passphrase = _backup_passphrase(confirm=False)
     try:
@@ -3622,7 +3622,7 @@ def cmd_hub_restore(args) -> int:
     print(f"restored {len(written)} file(s) into {data_dir}")
     print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
     print("Next: write /etc/greasewood.toml pointing ca_key_file at "
-          f"{data_dir / 'ca.key'} (role = hub), then `sudo gw run`. Because the "
+          f"{data_dir / 'ca.key'} (role = anchor), then `sudo gw run`. Because the "
           "CA key is unchanged, existing nodes keep trusting it — no re-root.")
     return 0
 
@@ -3672,7 +3672,7 @@ def cmd_purge(args) -> int:
     # Stop the daemon FIRST. A daemon left running through a purge haunts the
     # next mesh on this host: it keeps its stale CA and keys in memory, keeps
     # serving door enrollments, and its mesh interface is gone — so every join
-    # against the re-created hub fails with a peer-install error.
+    # against the re-created anchor fails with a peer-install error.
     systemctl = shutil.which("systemctl")
     if systemctl:
         r = subprocess.run([systemctl, "is-active", "--quiet", unit],
@@ -3816,7 +3816,7 @@ def main(argv=None) -> int:
         description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
         epilog=(
             "sudo requirements:\n"
-            "  sudo gw create            -- one-shot hub bootstrap\n"
+            "  sudo gw create            -- one-shot anchor bootstrap\n"
             "  sudo gw invite                 -- open a door window, print join token\n"
             "  sudo gw join <token> ...     -- enroll this machine (creates WG interfaces)\n"
             "  sudo gw run                  -- start the daemon\n"
@@ -3838,14 +3838,14 @@ def main(argv=None) -> int:
 
     # create
     sp = sub.add_parser("create",
-                        help="[sudo] one-shot hub bootstrap: CA + door key + routing + self-credential")
+                        help="[sudo] one-shot anchor bootstrap: CA + door key + routing + self-credential")
     sp.add_argument("name",
                     help="the mesh's name (a DNS label, e.g. 'prod-fleet') — "
                          "members resolve as <hostname>.<name>.internal. "
                          "Required so no two meshes sit on the same default: "
                          "a node can never bridge two meshes with one domain.")
     sp.add_argument("--hostname", default=None,
-                    help="this hub's hostname in the mesh "
+                    help="this anchor's hostname in the mesh "
                          "(default: the machine's hostname)")
     sp.add_argument("--data-dir", dest="data_dir", default=None,
                     help="state directory (default: /var/lib/greasewood_<name>)")
@@ -3864,7 +3864,7 @@ def main(argv=None) -> int:
     sp.add_argument("--mesh-domain", dest="mesh_domain", default=None,
                     help="full domain override (default: <name>.internal)")
     sp.add_argument("--caps", default="",
-                    help="extra ability caps for the hub (it always carries "
+                    help="extra ability caps for the anchor (it always carries "
                          "segment:* to reach every segment), e.g. 'tls'")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
@@ -3880,19 +3880,19 @@ def main(argv=None) -> int:
     sp = sub.add_parser("invite",
                         help="[sudo] open a 15-min door window and print a single-use join token")
     sp.add_argument("--hostname", default=None,
-                    help="pin the invited node's mesh hostname (the hub fixes it; "
+                    help="pin the invited node's mesh hostname (the anchor fixes it; "
                          "the joiner can't choose or later `gw rename-node` it). Omit "
                          "to let the node name itself at join.")
     sp.add_argument("--segments", default=None, metavar="S1,S2",
                     help="segments the invited node belongs to (comma-sep). The "
-                         "hub decides this — the joiner cannot. A node peers only "
-                         "with nodes sharing a segment. Omitted → the hub's "
-                         "[hub] default_segments (ships as 'mesh', the flat default "
+                         "anchor decides this — the joiner cannot. A node peers only "
+                         "with nodes sharing a segment. Omitted → the anchor's "
+                         "[anchor] default_segments (ships as 'mesh', the flat default "
                          "pool). Naming other segments isolates the node; list "
                          "several to bridge them.")
     sp.add_argument("--caps", default=None,
                     help="ability caps granted to the invited node (comma-sep), "
-                         "e.g. 'tls'. Omitted → the hub's [hub] default_caps "
+                         "e.g. 'tls'. Omitted → the anchor's [anchor] default_caps "
                          "(ships as 'tls'). Segmentation is set with --segments.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address to embed in token (auto-detected if omitted)")
@@ -3912,7 +3912,7 @@ def main(argv=None) -> int:
 
     # close-door
     sp = sub.add_parser("close-door",
-                        help="[sudo, hub] close the current door window — "
+                        help="[sudo, anchor] close the current door window — "
                              "permanently invalidates its token (standing or "
                              "single-use); enrolled nodes are unaffected")
     sp.set_defaults(fn=cmd_close_door)
@@ -3980,47 +3980,47 @@ def main(argv=None) -> int:
     # diagnose
     sp = sub.add_parser(
         "diagnose",
-        help="pairwise link diagnosis: compare up to two nodes + the hub side "
+        help="pairwise link diagnosis: compare up to two nodes + the anchor side "
              "by side and explain whether a tunnel can form (segments, "
-             "reachability, firewall directionality). No args = this host ↔ hub.")
+             "reachability, firewall directionality). No args = this host ↔ anchor.")
     sp.add_argument("nodes", nargs="*", metavar="NODE",
-                    help="0, 1, or 2 node hostnames. none → this host ↔ hub; "
-                         "one → this host ↔ NODE; two → NODE ↔ NODE (hub shown "
+                    help="0, 1, or 2 node hostnames. none → this host ↔ anchor; "
+                         "one → this host ↔ NODE; two → NODE ↔ NODE (anchor shown "
                          "as reference either way)")
     sp.set_defaults(fn=cmd_diagnose)
 
     # revoke
-    sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the hub)")
+    sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the anchor)")
     sp.add_argument("id_pub_hex", help="64-char hex identity public key")
     sp.set_defaults(fn=cmd_revoke)
 
-    # set-caps (hub) — change an enrolled node's full tag set
+    # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",
-                        help="[hub] change an enrolled node's caps (effective next renewal)")
+                        help="[anchor] change an enrolled node's caps (effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("caps", help="comma-separated full tag set, e.g. "
                                  "'segment:prod,tls' (replaces the node's current caps)")
     sp.set_defaults(fn=cmd_set_caps)
 
-    # set-segments (hub) — change only a node's segments
+    # set-segments (anchor) — change only a node's segments
     sp = sub.add_parser("set-segments",
-                        help="[hub] change an enrolled node's segments "
+                        help="[anchor] change an enrolled node's segments "
                              "(effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("segments", help="comma-separated segments, e.g. 'prod,web' "
                                      "(replaces segment tags; keeps tls; empty = mesh default)")
     sp.set_defaults(fn=cmd_set_segments)
 
-    # hub-promote (on the prospective new hub)
-    sp = sub.add_parser("hub-promote",
-                        help="[sudo] turn this enrolled node into a hub (generate CA key, set role=hub)")
+    # anchor-promote (on the prospective new anchor)
+    sp = sub.add_parser("anchor-promote",
+                        help="[sudo] turn this enrolled node into an anchor (generate CA key, set role=anchor)")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
-    sp.set_defaults(fn=cmd_hub_promote)
+    sp.set_defaults(fn=cmd_anchor_promote)
 
     # cert-request (on a node with the 'tls' capability)
     sp = sub.add_parser("cert-request",
-                        help="request an x509 TLS cert from the hub for a local service")
+                        help="request an x509 TLS cert from the anchor for a local service")
     sp.add_argument("--san", action="append", default=[], metavar="NAME|IP",
                     help="subject alternative name (repeatable; DNS or IP). "
                          "Must be a name the node owns (its <hostname>.<mesh_domain>, "
@@ -4038,7 +4038,7 @@ def main(argv=None) -> int:
                     help="exact path for the leaf certificate (overrides --out-dir)")
     sp.add_argument("--ca-out", dest="ca_out", default=None, metavar="PATH",
                     help="exact path for the CA certificate (overrides --out-dir)")
-    sp.add_argument("--hub", default=None, help="override the hub control-plane URL")
+    sp.add_argument("--anchor", default=None, help="override the anchor control-plane URL")
     sp.add_argument("--reload-cmd", dest="reload_cmd", default=None, metavar="CMD",
                     help="command the daemon runs after auto-renewing this cert, "
                          "e.g. 'systemctl reload postgresql'. Run as an argv, not "
@@ -4086,51 +4086,51 @@ def main(argv=None) -> int:
     sp = sub.add_parser("rename-mesh",
                         help="[sudo] rename this mesh — domain, config, data "
                              "dir, interface, and service move together (run on "
-                             "the hub to rename the mesh; on a member to adopt "
-                             "a rename the hub made). Old names resolve for one "
+                             "the anchor to rename the mesh; on a member to adopt "
+                             "a rename the anchor made). Old names resolve for one "
                              "credential TTL.")
     sp.add_argument("new_name", help="the mesh's new name (a DNS label)")
     sp.set_defaults(fn=cmd_rename_mesh)
 
     sp = sub.add_parser("rename-node",
-                        help="[sudo] change this node's mesh hostname (hub-validated, no re-join)")
+                        help="[sudo] change this node's mesh hostname (anchor-validated, no re-join)")
     sp.add_argument("hostname", help="the new hostname")
     sp.set_defaults(fn=cmd_rename)
 
     # renew
     sp = sub.add_parser("renew",
                         help="[sudo] force an immediate credential renewal for THIS "
-                             "node (applies a hub-side set-caps/set-segments now, "
+                             "node (applies an anchor-side set-caps/set-segments now, "
                              "instead of waiting ~half the TTL)")
     sp.set_defaults(fn=cmd_renew)
 
     # renew-all
     sp = sub.add_parser("renew-all",
-                        help="[hub] request a fleet-wide renewal — advertise "
+                        help="[anchor] request a fleet-wide renewal — advertise "
                              "renew_after=now so cooperating nodes renew (jittered, "
                              "rate ~constant with mesh size)")
     sp.set_defaults(fn=cmd_renew_all)
 
-    # hub-backup
-    sp = sub.add_parser("hub-backup",
-                        help="[hub] write an encrypted backup of the CA key + "
+    # anchor-backup
+    sp = sub.add_parser("anchor-backup",
+                        help="[anchor] write an encrypted backup of the CA key + "
                              "node registry + revoke list (passphrase via prompt "
                              "or $GW_BACKUP_PASSPHRASE)")
     sp.add_argument("--out", default=None, metavar="PATH",
-                    help="output file (default: <data_dir>/greasewood-hub-backup-"
+                    help="output file (default: <data_dir>/greasewood-anchor-backup-"
                          "<hostname>.gwbk)")
-    sp.set_defaults(fn=cmd_hub_backup)
+    sp.set_defaults(fn=cmd_anchor_backup)
 
-    # hub-restore
-    sp = sub.add_parser("hub-restore",
-                        help="[sudo] restore a hub backup into a data dir (stand "
-                             "up a replacement hub on the same CA key — not a re-root)")
+    # anchor-restore
+    sp = sub.add_parser("anchor-restore",
+                        help="[sudo] restore an anchor backup into a data dir (stand "
+                             "up a replacement anchor on the same CA key — not a re-root)")
     sp.add_argument("archive", help="the .gwbk backup file")
     sp.add_argument("--data-dir", default="/var/lib/greasewood",
                     help="where to restore (default: /var/lib/greasewood)")
     sp.add_argument("--force", action="store_true",
                     help="overwrite an existing ca.key in the target dir")
-    sp.set_defaults(fn=cmd_hub_restore)
+    sp.set_defaults(fn=cmd_anchor_restore)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

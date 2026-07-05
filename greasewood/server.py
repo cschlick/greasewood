@@ -1,10 +1,10 @@
 """
-greasewood.server — HTTP control plane (hub role).
+greasewood.server — HTTP control plane (anchor role).
 
 Endpoints:
   GET  /directory   → {"records": [NodeRecord, ...], "renew_after": <iso ts|null>}
   POST /publish     → accept a self-signed, CA-credentialed NodeRecord
-  POST /renew       → RenewRequest → Credential  (hub only)
+  POST /renew       → RenewRequest → Credential  (anchor only)
   GET  /health      → {"status": "ok"}
 
 There is no /enroll endpoint here. Enrollment happens out of band — over the
@@ -13,7 +13,7 @@ by manually copying a credential from `gw issue`. This server is intended to
 run on the overlay address so all traffic goes through the WireGuard tunnel.
 
 /publish is the exception that may be called before a node is fully in the
-mesh: a newly installed node POSTs its own signed record so the hub can
+mesh: a newly installed node POSTs its own signed record so the anchor can
 configure a WireGuard peer for it. It is safe to expose because it requires
 a fully valid, CA-signed NodeRecord — a bad actor cannot forge one without
 ca_priv, and the worst they can do with a valid record is cause a failed
@@ -108,7 +108,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _now_iso() -> str:
-        """The hub's UTC time, stamped into /directory and /health so nodes can
+        """The anchor's UTC time, stamped into /directory and /health so nodes can
         detect clock skew (sync loop warning, gw diagnose) instead of
         mis-reading it as credential failures."""
         import datetime as dt
@@ -143,12 +143,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_publish(body)
         elif self.path == "/renew":
             if self.ca is None:
-                self.send_error(403, "not a hub")
+                self.send_error(403, "not an anchor")
             else:
                 self._handle_renew(body)
         elif self.path == "/cert":
             if self.ca is None:
-                self.send_error(403, "not a hub")
+                self.send_error(403, "not an anchor")
             else:
                 self._handle_cert(body)
         else:
@@ -197,10 +197,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(cred.to_dict())
 
     def _reroot_reissue(self, req, orig_err):
-        """Re-root fallback. This hub never enrolled the requester (no local
-        node_info), but a *manual re-root* points existing nodes at a new hub
+        """Re-root fallback. This anchor never enrolled the requester (no local
+        node_info), but a *manual re-root* points existing nodes at a new anchor
         that didn't issue them. If we hold a directory record for that identity
-        signed by a currently-trusted CA — the outgoing hub, during the overlap
+        signed by a currently-trusted CA — the outgoing anchor, during the overlap
         window — re-issue under THIS CA using the record's CA-attested (level-b)
         hostname + caps. Returns the new Credential, or None to surface the
         original error.
@@ -306,7 +306,7 @@ class _IPv6Server(HTTPServer):
     handler also has a socket `timeout` that drops a client which stops sending),
     but capped: at most `max_workers` requests run at once. Over that, further
     connections are shed immediately rather than spawning threads/sockets without
-    bound — so a connection flood from a mesh member can't exhaust the hub. The
+    bound — so a connection flood from a mesh member can't exhaust the anchor. The
     nodes' renew/publish/cert loops already retry with backoff, so a shed
     connection is retried, not lost."""
     address_family = socket.AF_INET6
@@ -392,7 +392,7 @@ class ControlServer:
         Handler.get_renew_after = staticmethod(get_renew_after)
         Handler.replay = _ReplayGuard()
 
-        # Bind one socket per address — typically the hub's overlay address and
+        # Bind one socket per address — typically the anchor's overlay address and
         # loopback, NOT "::". The control plane is then unreachable on the
         # underlay by construction, no firewall rule required.
         # greasewood is IPv6-only: every listen address is IPv6 (the overlay

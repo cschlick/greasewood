@@ -1,8 +1,8 @@
 """
-Unit tests for `gw hub-backup` / `gw hub-restore` (CLI wiring around
+Unit tests for `gw anchor-backup` / `gw anchor-restore` (CLI wiring around
 greasewood.backup). The module-level roundtrip/crypto is covered in
 test_backup.py; here we check the command plumbing: role guard, passphrase via
-env, the produced file, and a full backup→restore of a real hub data dir onto a
+env, the produced file, and a full backup→restore of a real anchor data dir onto a
 fresh dir with the same CA key.
 """
 import types
@@ -14,22 +14,22 @@ from greasewood.ca import CA
 from greasewood.keys import CAKeys, NodeKeys
 
 
-def _hub_cfg(tmp_path, ca_key, role="hub"):
+def _anchor_cfg(tmp_path, ca_key, role="anchor"):
     p = tmp_path / "gw.toml"
     p.write_text(f'''[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
 role = "{role}"
 [network]
 seeds = []
 root_url = ""
-[hub]
+[anchor]
 ca_key_file = "{ca_key}"
 ''')
     return p
 
 
-def _make_hub(tmp_path):
+def _make_anchor(tmp_path):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
@@ -43,19 +43,19 @@ def _make_hub(tmp_path):
 
 def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gated command
-    ca_keys, ca_key = _make_hub(tmp_path)
-    cfg = _hub_cfg(tmp_path, ca_key)
+    ca_keys, ca_key = _make_anchor(tmp_path)
+    cfg = _anchor_cfg(tmp_path, ca_key)
     monkeypatch.setenv("GW_BACKUP_PASSPHRASE", "s3kret")
 
-    out = tmp_path / "hub.gwbk"
-    rc = cli.cmd_hub_backup(types.SimpleNamespace(config=str(cfg), out=str(out)))
+    out = tmp_path / "anchor.gwbk"
+    rc = cli.cmd_anchor_backup(types.SimpleNamespace(config=str(cfg), out=str(out)))
     assert rc == 0 and out.exists()
     assert "enrolled node" in capsys.readouterr().out
 
     # Restore into a pristine dir; skip the root check.
     monkeypatch.setattr(cli, "_require_root", lambda *_a, **_k: None)
-    dst = tmp_path / "new-hub"
-    rc = cli.cmd_hub_restore(types.SimpleNamespace(
+    dst = tmp_path / "new-anchor"
+    rc = cli.cmd_anchor_restore(types.SimpleNamespace(
         archive=str(out), data_dir=str(dst), force=False))
     assert rc == 0
 
@@ -67,23 +67,23 @@ def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
     assert restored_ca.load_revoked_set()          # revoke list survived
 
 
-def test_backup_refuses_non_hub(tmp_path, monkeypatch):
+def test_backup_refuses_non_anchor(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gate passes; role check fires
-    _, ca_key = _make_hub(tmp_path)
-    cfg = _hub_cfg(tmp_path, ca_key, role="node")
-    with pytest.raises(SystemExit, match="must be run on the hub"):
-        cli.cmd_hub_backup(types.SimpleNamespace(config=str(cfg), out=None))
+    _, ca_key = _make_anchor(tmp_path)
+    cfg = _anchor_cfg(tmp_path, ca_key, role="node")
+    with pytest.raises(SystemExit, match="must be run on the anchor"):
+        cli.cmd_anchor_backup(types.SimpleNamespace(config=str(cfg), out=None))
 
 
 def test_restore_refuses_overwrite_without_force(tmp_path, monkeypatch):
-    ca_keys, ca_key = _make_hub(tmp_path)
-    cfg = _hub_cfg(tmp_path, ca_key)
+    ca_keys, ca_key = _make_anchor(tmp_path)
+    cfg = _anchor_cfg(tmp_path, ca_key)
     monkeypatch.setenv("GW_BACKUP_PASSPHRASE", "pw")
     monkeypatch.setattr(cli, "_require_root", lambda *_a, **_k: None)
-    out = tmp_path / "hub.gwbk"
-    cli.cmd_hub_backup(types.SimpleNamespace(config=str(cfg), out=str(out)))
+    out = tmp_path / "anchor.gwbk"
+    cli.cmd_anchor_backup(types.SimpleNamespace(config=str(cfg), out=str(out)))
 
-    # data_dir already has a ca.key (it's the live hub) → refuse without --force.
+    # data_dir already has a ca.key (it's the live anchor) → refuse without --force.
     with pytest.raises(SystemExit, match="refusing to overwrite"):
-        cli.cmd_hub_restore(types.SimpleNamespace(
+        cli.cmd_anchor_restore(types.SimpleNamespace(
             archive=str(out), data_dir=str(tmp_path), force=False))

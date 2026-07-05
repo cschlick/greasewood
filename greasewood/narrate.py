@@ -189,7 +189,7 @@ def describe_operation(ctx: str) -> "str | None":
     if head == "invite":
         return f"`gw invite` opened the enrollment door — {rest}."
     if head == "join":
-        return f"`gw join` dialed the hub's enrollment door — {rest}."
+        return f"`gw join` dialed the anchor's enrollment door — {rest}."
     if head == "door":
         return f"Door isolation setup — {rest}."
     return ctx

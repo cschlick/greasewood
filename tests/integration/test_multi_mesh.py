@@ -1,10 +1,10 @@
 """
 Integration test: one host is a NODE on two independent greasewood meshes at
-once (hub-in-two is explicitly out of scope).
+once (anchor-in-two is explicitly out of scope).
 
 Fleet A uses the default overlay prefix; fleet B a custom one. A single node
 container joins both — distinct config, data dir, interface, port, and mesh
-domain per membership — runs both daemons, and reaches both hubs' overlays.
+domain per membership — runs both daemons, and reaches both anchors' overlays.
 This exercises configurable overlay prefixes, prefix-agnostic verification, and
 per-interface isolation.
 """
@@ -28,7 +28,7 @@ def _run_container(gw_image, gw_network):
     return cid
 
 
-def _bring_up_hub(cid, ipv6, hostname, prefix, mesh_name=None):
+def _bring_up_anchor(cid, ipv6, hostname, prefix, mesh_name=None):
     pexec(cid, "gw", "create", mesh_name or f"{hostname}mesh",
           "--hostname", hostname,
           "--endpoint", f"[{ipv6}]:51900", "--overlay-prefix", prefix)
@@ -38,11 +38,11 @@ def _bring_up_hub(cid, ipv6, hostname, prefix, mesh_name=None):
     return overlay
 
 
-def _join(hub_cid, hub_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
+def _join(anchor_cid, anchor_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
           port):
-    """Invite on the hub, join on the node into a distinct local instance."""
+    """Invite on the anchor, join on the node into a distinct local instance."""
     with _ENROLL_LOCK:
-        res = pexec(hub_cid, "gw", "invite", "--endpoint", hub_ipv6)
+        res = pexec(anchor_cid, "gw", "invite", "--endpoint", anchor_ipv6)
         token = _extract_token(res.stdout + "\n" + res.stderr)
         # Config path is the global -c, before the subcommand.
         r = pexec(node_cid, "gw", "-c", cfg, "join", token,
@@ -50,31 +50,31 @@ def _join(hub_cid, hub_ipv6, node_cid, node_ipv6, *, cfg, data_dir, iface,
                   "--listen-port", str(port),
                   "--endpoint", f"[{node_ipv6}]:{port}", check=False)
         assert r.returncode == 0, f"join failed:\n{r.stdout}\n{r.stderr}"
-        # let the hub tear its door down before the next invite
+        # let the anchor tear its door down before the next invite
         for _ in range(20):
-            if pexec(hub_cid, "ip", "link", "show", "gw-door",
+            if pexec(anchor_cid, "ip", "link", "show", "gw-door",
                      check=False).returncode != 0:
                 break
             time.sleep(0.5)
 
 
-def test_node_on_two_meshes(gw_hub, gw_image, gw_network):
-    hub_b = node = None
+def test_node_on_two_meshes(gw_anchor, gw_image, gw_network):
+    anchor_b = node = None
     try:
-        # Fleet A = the default gw_hub fixture. Fleet B = a fresh hub with a
+        # Fleet A = the default gw_anchor fixture. Fleet B = a fresh anchor with a
         # custom overlay prefix.
-        hub_b = _run_container(gw_image, gw_network)
-        hub_b_ipv6 = container_ipv6(hub_b, gw_network)
-        overlay_b = _bring_up_hub(hub_b, hub_b_ipv6, "hubb", PREFIX_B)
+        anchor_b = _run_container(gw_image, gw_network)
+        anchor_b_ipv6 = container_ipv6(anchor_b, gw_network)
+        overlay_b = _bring_up_anchor(anchor_b, anchor_b_ipv6, "anchorb", PREFIX_B)
 
         node = _run_container(gw_image, gw_network)
         node_ipv6 = container_ipv6(node, gw_network)
 
         # Join both meshes as separate local instances.
-        _join(gw_hub["cid"], gw_hub["ipv6"], node, node_ipv6,
+        _join(gw_anchor["cid"], gw_anchor["ipv6"], node, node_ipv6,
               cfg="/etc/gw-a.toml", data_dir="/var/lib/gw-a", iface="gwa",
               port=51900)
-        _join(hub_b, hub_b_ipv6, node, node_ipv6,
+        _join(anchor_b, anchor_b_ipv6, node, node_ipv6,
               cfg="/etc/gw-b.toml", data_dir="/var/lib/gw-b", iface="gwb",
               port=51910)
 
@@ -89,17 +89,17 @@ def test_node_on_two_meshes(gw_hub, gw_image, gw_network):
         podman("exec", "-d", node, "sh", "-c", "gw -c /etc/gw-a.toml run >> /tmp/a.log 2>&1")
         podman("exec", "-d", node, "sh", "-c", "gw -c /etc/gw-b.toml run >> /tmp/b.log 2>&1")
 
-        # The node reaches BOTH hubs' overlays — on different prefixes.
-        assert wait_for_ping(node, gw_hub["overlay"], timeout=45), \
-            "node could not reach fleet A hub"
+        # The node reaches BOTH anchors' overlays — on different prefixes.
+        assert wait_for_ping(node, gw_anchor["overlay"], timeout=45), \
+            "node could not reach fleet An anchor"
         assert wait_for_ping(node, overlay_b, timeout=45), \
-            "node could not reach fleet B hub"
+            "node could not reach fleet B anchor"
 
         # Both mesh interfaces are up with addresses on their own prefix.
         links = pexec(node, "ip", "-6", "addr").stdout
         assert "gwa" in links and "gwb" in links
     finally:
-        for cid in (hub_b, node):
+        for cid in (anchor_b, node):
             if cid:
                 podman("rm", "-f", cid, check=False)
 
@@ -107,36 +107,36 @@ def test_node_on_two_meshes(gw_hub, gw_image, gw_network):
 PREFIX_C = "fdde:cafc:ffe:f::"   # distinct overlay /64 for the auto-slot fleet
 
 
-def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
+def test_second_mesh_auto_slots(gw_anchor, gw_image, gw_network):
     """`gw join <token>` with NO location flags: the first mesh lands in the
     default slot; a token from a second mesh auto-provisions slot 2 —
     /etc/greasewood_<name>.toml, /var/lib/greasewood_<name>, gw_<name>, names
     under gw2.internal — and a repeat join with the same mesh's token routes
     back to slot 2 (refresh) instead of allocating slot 3."""
-    hub_c = hub_d = node = None
+    anchor_c = anchor_d = node = None
     try:
-        hub_c = _run_container(gw_image, gw_network)
-        hub_c_ipv6 = container_ipv6(hub_c, gw_network)
-        overlay_c = _bring_up_hub(hub_c, hub_c_ipv6, "hubc", PREFIX_C)
+        anchor_c = _run_container(gw_image, gw_network)
+        anchor_c_ipv6 = container_ipv6(anchor_c, gw_network)
+        overlay_c = _bring_up_anchor(anchor_c, anchor_c_ipv6, "anchorc", PREFIX_C)
 
         node = _run_container(gw_image, gw_network)
         node_ipv6 = container_ipv6(node, gw_network)
 
         with _ENROLL_LOCK:
             # Mesh A: plain join, all defaults → the unsuffixed slot 1.
-            res = pexec(gw_hub["cid"], "gw", "invite", "--endpoint", gw_hub["ipv6"])
+            res = pexec(gw_anchor["cid"], "gw", "invite", "--endpoint", gw_anchor["ipv6"])
             tok_a = _extract_token(res.stdout + "\n" + res.stderr)
             r = pexec(node, "gw", "join", tok_a,
                       "--endpoint", f"[{node_ipv6}]:51900", check=False)
             assert r.returncode == 0, f"mesh A join failed:\n{r.stdout}\n{r.stderr}"
             for _ in range(20):
-                if pexec(gw_hub["cid"], "ip", "link", "show", "gw-door",
+                if pexec(gw_anchor["cid"], "ip", "link", "show", "gw-door",
                          check=False).returncode != 0:
                     break
                 time.sleep(0.5)
 
             # Mesh C: ALSO a plain join — the unknown CA auto-provisions slot 2.
-            res = pexec(hub_c, "gw", "invite", "--endpoint", hub_c_ipv6)
+            res = pexec(anchor_c, "gw", "invite", "--endpoint", anchor_c_ipv6)
             tok_c = _extract_token(res.stdout + "\n" + res.stderr)
             r = pexec(node, "gw", "join", tok_c,
                       "--endpoint", f"[{node_ipv6}]:51910", check=False)
@@ -145,12 +145,12 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
 
         # Slot 2 got the derived names + the mesh's OWN domain (carried in the
         # token — a mesh has ONE domain everywhere; no local aliasing exists).
-        cfg2 = pexec(node, "cat", "/etc/greasewood_hubcmesh.toml").stdout
-        assert 'interface = "gw_hubcmesh"' in cfg2
+        cfg2 = pexec(node, "cat", "/etc/greasewood_anchorcmesh.toml").stdout
+        assert 'interface = "gw_anchorcmesh"' in cfg2
         assert "listen_port = 51910" in cfg2
-        assert 'mesh_domain = "hubcmesh.internal"' in cfg2
+        assert 'mesh_domain = "anchorcmesh.internal"' in cfg2
         assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
-        assert 'data_dir = "/var/lib/greasewood_hubcmesh"' in cfg2
+        assert 'data_dir = "/var/lib/greasewood_anchorcmesh"' in cfg2
         cfg1 = pexec(node, "cat", "/etc/greasewood_testmesh.toml").stdout
         assert 'interface = "gw_testmesh"' in cfg1 and "listen_port = 51900" in cfg1
         assert 'mesh_domain = "testmesh.internal"' in cfg1        # adopted from token
@@ -161,16 +161,16 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
         podman("exec", "-d", node, "sh", "-c",
                "gw -c /etc/greasewood_testmesh.toml run >> /tmp/a.log 2>&1")
         podman("exec", "-d", node, "sh", "-c",
-               "gw -c /etc/greasewood_hubcmesh.toml run >> /tmp/c.log 2>&1")
-        assert wait_for_ping(node, gw_hub["overlay"], timeout=45), \
-            "node could not reach mesh A's hub"
+               "gw -c /etc/greasewood_anchorcmesh.toml run >> /tmp/c.log 2>&1")
+        assert wait_for_ping(node, gw_anchor["overlay"], timeout=45), \
+            "node could not reach mesh A's anchor"
         assert wait_for_ping(node, overlay_c, timeout=45), \
-            "node could not reach the auto-slotted mesh's hub"
+            "node could not reach the auto-slotted mesh's anchor"
 
         # Re-join mesh C with a fresh token, still no flags: routes to slot 2
         # (same identity — "re-enrolling"), never allocates slot 3.
         with _ENROLL_LOCK:
-            res = pexec(hub_c, "gw", "invite", "--endpoint", hub_c_ipv6)
+            res = pexec(anchor_c, "gw", "invite", "--endpoint", anchor_c_ipv6)
             tok_c2 = _extract_token(res.stdout + "\n" + res.stderr)
             r = pexec(node, "gw", "join", tok_c2,
                       "--endpoint", f"[{node_ipv6}]:51910", check=False)
@@ -182,13 +182,13 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
 
         # HARD-NO collision: a third mesh whose name collides with membership
         # #1 ("testmesh") is refused BEFORE the door dance — no alias, no new
-        # slot, and the token is NOT consumed (hub_d's window stays open).
-        hub_d = _run_container(gw_image, gw_network)
-        hub_d_ipv6 = container_ipv6(hub_d, gw_network)
-        _bring_up_hub(hub_d, hub_d_ipv6, "hubd", "fdde:cafc:ffe:d::",
+        # slot, and the token is NOT consumed (anchor_d's window stays open).
+        anchor_d = _run_container(gw_image, gw_network)
+        anchor_d_ipv6 = container_ipv6(anchor_d, gw_network)
+        _bring_up_anchor(anchor_d, anchor_d_ipv6, "anchord", "fdde:cafc:ffe:d::",
                       mesh_name="testmesh")
         with _ENROLL_LOCK:
-            res = pexec(hub_d, "gw", "invite", "--endpoint", hub_d_ipv6)
+            res = pexec(anchor_d, "gw", "invite", "--endpoint", anchor_d_ipv6)
             tok_d = _extract_token(res.stdout + "\n" + res.stderr)
             r = pexec(node, "gw", "join", tok_d,
                       "--endpoint", f"[{node_ipv6}]:51920", check=False)
@@ -199,12 +199,12 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             n_cfgs = pexec(node, "sh", "-c",
                            "ls /etc/greasewood_*.toml | wc -l").stdout.strip()
             assert n_cfgs == "2", "refusal still made a membership"
-            # Token unburned: hub_d's door window is still open.
-            assert pexec(hub_d, "test", "-e",
+            # Token unburned: anchor_d's door window is still open.
+            assert pexec(anchor_d, "test", "-e",
                          "/var/lib/greasewood_testmesh/door_window.json").returncode == 0
-            pexec(hub_d, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
+            pexec(anchor_d, "sh", "-c", "rm -f /var/lib/greasewood_*/door_window.json",
                   check=False)
     finally:
-        for cid in (hub_c, hub_d, node):
+        for cid in (anchor_c, anchor_d, node):
             if cid:
                 podman("rm", "-f", cid, check=False)

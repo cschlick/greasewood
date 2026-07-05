@@ -100,13 +100,13 @@ def test_cert_loop_renews_due_and_runs_reload(tmp_path, monkeypatch):
     issued, reloads = [], []
     monkeypatch.setattr(certs, "cert_due_for_renewal", lambda p: True)
     monkeypatch.setattr(certs, "issue_cert",
-                        lambda hub, keys, **kw: issued.append(kw))
+                        lambda anchor, keys, **kw: issued.append(kw))
     monkeypatch.setattr(certs.subprocess, "run",
                         lambda cmd, **kw: reloads.append(cmd) or
                         types.SimpleNamespace(returncode=0, stderr=""))
 
     loop = certs.CertRenewalLoop(node_keys=object(),
-                                 get_hub_url=lambda: "http://hub", data_dir=tmp_path)
+                                 get_anchor_url=lambda: "http://anchor", data_dir=tmp_path)
     loop.check_all()
     # Only the auto-renew cert, re-issued to its explicit per-file paths.
     assert len(issued) == 1
@@ -142,7 +142,7 @@ trusted_pubs = []
     ns = types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                san=["db.gw.internal"], name="db",
                                out_dir=None, key_out=None, cert_out=None,
-                               ca_out=None, hub=None,
+                               ca_out=None, anchor=None,
                                reload_cmd="systemctl reload pg", no_auto_renew=False)
     assert cli.cmd_cert_request(ns) == 0
     m = certs.load_manifest(tmp_path)
@@ -188,7 +188,7 @@ trusted_pubs = []
 
     def ns(**o):
         base = dict(config=str(cfg_path), san=[], name="svc", out_dir=None,
-                    key_out=None, cert_out=None, ca_out=None, hub=None,
+                    key_out=None, cert_out=None, ca_out=None, anchor=None,
                     reload_cmd=None, no_auto_renew=False)
         base.update(o); return types.SimpleNamespace(**base)
 
@@ -201,7 +201,7 @@ trusted_pubs = []
     assert cli.cmd_cert_request(ns(san=["metrics.db01.gw.internal"], name="m")) == 0
     assert load_config(cfg_path).aliases == ["metrics", "pg"]
 
-    # A foreign name (someone else's) is NOT registered (and the hub would refuse
+    # A foreign name (someone else's) is NOT registered (and the anchor would refuse
     # the cert anyway); the bare own-name isn't a subdomain, so not registered.
     assert cli.cmd_cert_request(ns(san=["evil.other.gw.internal"], name="x")) == 0
     assert cli.cmd_cert_request(ns(san=["db01.gw.internal"], name="base")) == 0
@@ -241,7 +241,7 @@ trusted_pubs = []
     def ns(**over):
         base = dict(config=str(tmp_path / "gw.toml"), san=["db.gw.internal"],
                     name="db", out_dir=None, key_out=None, cert_out=None,
-                    ca_out=None, hub=None, reload_cmd=None, no_auto_renew=False)
+                    ca_out=None, anchor=None, reload_cmd=None, no_auto_renew=False)
         base.update(over)
         return types.SimpleNamespace(**base)
 

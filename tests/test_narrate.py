@@ -26,7 +26,7 @@ def test_parse_line_marks_failure_via_stderr():
 
 
 def test_parse_line_ignores_non_command_lines():
-    assert N.parse_line("22:10:01 INFO greasewood: starting — role=hub") is None
+    assert N.parse_line("22:10:01 INFO greasewood: starting — role=anchor") is None
     assert N.parse_line("") is None
 
 

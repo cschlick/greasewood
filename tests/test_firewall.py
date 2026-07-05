@@ -43,8 +43,8 @@ def _ruleset(*items):
 
 # --- required rule sets ---
 
-def test_hub_rules_cover_control_and_door():
-    rules = fw.hub_rules()
+def test_anchor_rules_cover_control_and_door():
+    rules = fw.anchor_rules()
     ports = {(r.proto, r.port, r.iif) for r in rules}
     assert ("udp", 51900, None) in ports
     assert ("udp", 51901, None) in ports
@@ -55,7 +55,7 @@ def test_hub_rules_cover_control_and_door():
 def test_node_rules_inbound_yes_is_mesh_port_only():
     rules = fw.node_rules(inbound="yes")
     assert all(r.proto == "udp" and r.iif is None for r in rules)
-    assert {r.port for r in rules} == {51900}  # door 51901 is hub-only
+    assert {r.port for r in rules} == {51900}  # door 51901 is anchor-only
 
 
 def test_node_rules_inbound_no_needs_nothing():
@@ -97,12 +97,12 @@ def test_iifname_scoped_rule_must_match_interface():
     # requires iifname gw-mesh... actually it does (broader allow). But a rule
     # scoped to the WRONG interface must not count.
     rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="eth0"))
-    hub = [r for r in fw.hub_rules() if r.port == 51902]
-    assert fw.missing_rules(rs, hub) == hub  # gw-mesh rule still missing
+    anchor = [r for r in fw.anchor_rules() if r.port == 51902]
+    assert fw.missing_rules(rs, anchor) == anchor  # gw-mesh rule still missing
 
 
 def test_iifname_match_satisfies():
     rs = _ruleset(_chain("drop"), _accept_rule("tcp", 51902, iif="gw-mesh"))
-    hub = [r for r in fw.hub_rules() if r.port == 51902]
-    assert fw.missing_rules(rs, hub) == []
+    anchor = [r for r in fw.anchor_rules() if r.port == 51902]
+    assert fw.missing_rules(rs, anchor) == []
 

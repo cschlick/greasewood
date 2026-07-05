@@ -1,10 +1,10 @@
 """
 Integration test for configurable ports.
 
-Stand up a hub on non-default door + control ports and enroll a node. Proves
-the door port travels in the token (the node reaches the door where the hub put
+Stand up an anchor on non-default door + control ports and enroll a node. Proves
+the door port travels in the token (the node reaches the door where the anchor put
 it) and the control port travels in the enroll response (the node builds the
-right hub URL and publishes there).
+right anchor URL and publishes there).
 """
 import time
 
@@ -33,24 +33,24 @@ def _run_container(gw_image, gw_network):
 
 
 def test_custom_door_and_control_ports(gw_image, gw_network):
-    hub = node = None
+    anchor = node = None
     try:
-        hub = _run_container(gw_image, gw_network)
-        hub_ipv6 = container_ipv6(hub, gw_network)
-        pexec(hub, "gw", "create", "customports", "--hostname", "customhub",
-              "--endpoint", f"[{hub_ipv6}]:51900",
+        anchor = _run_container(gw_image, gw_network)
+        anchor_ipv6 = container_ipv6(anchor, gw_network)
+        pexec(anchor, "gw", "create", "customports", "--hostname", "customanchor",
+              "--endpoint", f"[{anchor_ipv6}]:51900",
               "--control-port", str(CONTROL_PORT), "--door-port", str(DOOR_PORT))
-        hub_overlay = overlay_addr_from_id_pub(
-            pexec(hub, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip())
-        podman("exec", "-d", hub, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
-        assert wait_for_control_plane(hub, timeout=20, port=CONTROL_PORT), \
-            "hub control plane not up on the custom port"
+        anchor_overlay = overlay_addr_from_id_pub(
+            pexec(anchor, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip())
+        podman("exec", "-d", anchor, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
+        assert wait_for_control_plane(anchor, timeout=20, port=CONTROL_PORT), \
+            "anchor control plane not up on the custom port"
 
         node = _run_container(gw_image, gw_network)
         node_ipv6 = container_ipv6(node, gw_network)
         # invite (embeds DOOR_PORT in the token) + join (reads it). The enroll
-        # response carries CONTROL_PORT so the node builds the right hub URL.
-        door_enroll_via(hub, hub_ipv6, node, node_ipv6, hostname="cnode")
+        # response carries CONTROL_PORT so the node builds the right anchor URL.
+        door_enroll_via(anchor, anchor_ipv6, node, node_ipv6, hostname="cnode")
 
         # Node config points root_url at the custom control port.
         cfg = pexec(node, "sh", "-c", "cat /etc/greasewood_*.toml").stdout
@@ -59,18 +59,18 @@ def test_custom_door_and_control_ports(gw_image, gw_network):
         podman("exec", "-d", node, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
 
         # Mesh forms over the custom door port…
-        assert wait_for_ping(node, hub_overlay, timeout=30), \
-            "node could not reach the hub overlay"
-        # …and the node published to the hub on the custom control port.
+        assert wait_for_ping(node, anchor_overlay, timeout=30), \
+            "node could not reach the anchor overlay"
+        # …and the node published to the anchor on the custom control port.
         deadline = time.time() + 30
         names = set()
         while time.time() < deadline:
-            names = {r["cred"]["hostname"] for r in directory_records(hub, port=CONTROL_PORT)}
+            names = {r["cred"]["hostname"] for r in directory_records(anchor, port=CONTROL_PORT)}
             if "cnode" in names:
                 break
             time.sleep(2)
         assert "cnode" in names, f"node never published to the custom control port: {names}"
     finally:
-        for cid in (hub, node):
+        for cid in (anchor, node):
             if cid:
                 podman("rm", "-f", cid, check=False)

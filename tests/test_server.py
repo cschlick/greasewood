@@ -121,7 +121,7 @@ class TestCertSanAuthorization:
     subdomains of it, and its own overlay address. Otherwise a tls-capable node
     could mint a cert for another node's name and impersonate it."""
 
-    def _hub_with_tls_node(self, tmp_path, hostname="db"):
+    def _anchor_with_tls_node(self, tmp_path, hostname="db"):
         ca_keys = CAKeys.generate()
         ca = CA(ca_keys, tmp_path)
         node = NodeKeys.generate()
@@ -146,7 +146,7 @@ class TestCertSanAuthorization:
         ).sign(node.id_priv).to_dict()
 
     def test_own_name_issued(self, tmp_path):
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             status, body = _post(port, "/cert", self._req(node, dns=["db.internal"]))
             assert status == 200 and "cert" in body
@@ -154,7 +154,7 @@ class TestCertSanAuthorization:
             srv.stop()
 
     def test_subdomain_of_own_name_issued(self, tmp_path):
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             status, body = _post(port, "/cert", self._req(node, dns=["pg.db.internal"]))
             assert status == 200, body
@@ -162,7 +162,7 @@ class TestCertSanAuthorization:
             srv.stop()
 
     def test_foreign_name_refused(self, tmp_path):
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             status, body = _post(port, "/cert", self._req(node, dns=["other.internal"]))
             assert status == 403 and "not authorized" in body["error"]
@@ -170,7 +170,7 @@ class TestCertSanAuthorization:
             srv.stop()
 
     def test_foreign_ip_refused(self, tmp_path):
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             status, body = _post(port, "/cert",
                                  self._req(node, ips=["fd8d:e5c1:db1a:7::dead"]))
@@ -179,7 +179,7 @@ class TestCertSanAuthorization:
             srv.stop()
 
     def test_default_san_is_own_name(self, tmp_path):
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             status, body = _post(port, "/cert", self._req(node))  # no SANs
             assert status == 200 and "cert" in body
@@ -191,7 +191,7 @@ class TestCertSanAuthorization:
         a clean 400 — not a 500 from Ed25519PublicKey.from_public_bytes blowing
         up deep inside issuance. (The fuzz suite can't reach this: it mutates
         after signing, so a bad leaf_pub breaks the self-sig first.)"""
-        srv, port, node = self._hub_with_tls_node(tmp_path, "db")
+        srv, port, node = self._anchor_with_tls_node(tmp_path, "db")
         try:
             req = CertRequest(
                 id_pub=node.id_pub_bytes, leaf_pub=b"short", cn="",
@@ -206,14 +206,14 @@ class TestCertSanAuthorization:
 
 
 class TestRerootReissue:
-    """The re-root fallback: a hub that never enrolled a node (no local
+    """The re-root fallback: an anchor that never enrolled a node (no local
     node_info) still renews it if it holds a directory record for that identity
     signed by a currently-trusted CA — using the record's CA-attested
-    hostname/caps. This is what lets nodes migrate to a new hub without copying
+    hostname/caps. This is what lets nodes migrate to a new anchor without copying
     the nodes/ directory."""
 
-    def _hub_b(self, tmp_path, trusted, directory):
-        """Server for hub B (its own CA) that trusts the CAs in `trusted`."""
+    def _anchor_b(self, tmp_path, trusted, directory):
+        """Server for anchor B (its own CA) that trusts the CAs in `trusted`."""
         b_ca = CAKeys.generate()
         srv = ControlServer(
             listen="[::1]:0", directory=directory,
@@ -229,14 +229,14 @@ class TestRerootReissue:
         ).sign(node.id_priv).to_dict()
 
     def test_reissues_from_trusted_old_record(self, tmp_path):
-        a_ca = CAKeys.generate()          # the outgoing hub's CA
+        a_ca = CAKeys.generate()          # the outgoing anchor's CA
         node = NodeKeys.generate()
-        # A record issued by the OLD hub (A), present in B's directory.
+        # A record issued by the OLD anchor (A), present in B's directory.
         cred_a = _make_cred(node, a_ca, hostname="db")
         directory = Directory()
         directory.put(_make_record(node, cred_a))
         # B trusts both its own CA and A during the overlap.
-        srv, port, b_ca = self._hub_b(tmp_path, trusted=[a_ca], directory=directory)
+        srv, port, b_ca = self._anchor_b(tmp_path, trusted=[a_ca], directory=directory)
         srv.start()
         try:
             status, body = _post(port, "/renew", self._renew_req(node))
@@ -250,7 +250,7 @@ class TestRerootReissue:
     def test_unknown_without_record_still_refused(self, tmp_path):
         a_ca = CAKeys.generate()
         node = NodeKeys.generate()
-        srv, port, _ = self._hub_b(tmp_path, trusted=[a_ca], directory=Directory())
+        srv, port, _ = self._anchor_b(tmp_path, trusted=[a_ca], directory=Directory())
         srv.start()
         try:
             status, body = _post(port, "/renew", self._renew_req(node))
@@ -264,7 +264,7 @@ class TestRerootReissue:
         directory = Directory()
         directory.put(_make_record(node, _make_cred(node, a_ca, hostname="db")))
         # B trusts only itself — the old record's CA is not in the trusted set.
-        srv, port, _ = self._hub_b(tmp_path, trusted=[], directory=directory)
+        srv, port, _ = self._anchor_b(tmp_path, trusted=[], directory=directory)
         srv.start()
         try:
             status, body = _post(port, "/renew", self._renew_req(node))
@@ -283,7 +283,7 @@ class TestRerootReissue:
         directory.put(_make_record(node, _make_cred(node, a_ca, hostname="db")))
         b_ca = CAKeys.generate()
         b = CA(b_ca, tmp_path)
-        b.add_revoke(node.id_pub_bytes)                 # revoked on the new hub
+        b.add_revoke(node.id_pub_bytes)                 # revoked on the new anchor
         srv = ControlServer(listen="[::1]:0", directory=directory,
                             get_ca_pubs=lambda: [a_ca.ca_pub_bytes],
                             get_revoked=set, ca=b)
@@ -298,7 +298,7 @@ class TestRerootReissue:
 
 
 class TestCaCertEndpoint:
-    def test_ca_cert_served_when_hub_has_ca(self, tmp_path):
+    def test_ca_cert_served_when_anchor_has_ca(self, tmp_path):
         ca_keys = CAKeys.generate()
         ca = CA(ca_keys, tmp_path)
         srv = ControlServer(
@@ -321,8 +321,8 @@ class TestCaCertEndpoint:
         assert e.value.code == 404
 
 
-class TestHubClock:
-    """The hub stamps its own UTC time into /health and /directory so nodes
+class TestAnchorClock:
+    """The anchor stamps its own UTC time into /health and /directory so nodes
     (sync loop, gw diagnose) can detect clock skew — the silent killer of an
     expiry-based trust system — instead of mis-diagnosing it as bad creds."""
 
@@ -331,12 +331,12 @@ class TestHubClock:
         assert ts.tzinfo is not None
         assert abs((dt.datetime.now(_UTC) - ts).total_seconds()) < 30
 
-    def test_health_carries_hub_time(self, running_server):
+    def test_health_carries_anchor_time(self, running_server):
         _, port, *_ = running_server
         data = _get(port, "/health")
         self._assert_recent_utc(data["now"])
 
-    def test_directory_carries_hub_time(self, running_server):
+    def test_directory_carries_anchor_time(self, running_server):
         _, port, *_ = running_server
         data = _get(port, "/directory")
         self._assert_recent_utc(data["now"])
@@ -496,9 +496,9 @@ class TestRenewEndpoint:
 
 
 class TestRenewalPropagation:
-    def test_renewal_republishes_to_hub(self, tmp_path):
-        """After renewing, the node must re-publish so the hub (and thus peers,
-        which pull from the hub) sees the fresh credential — otherwise the mesh
+    def test_renewal_republishes_to_anchor(self, tmp_path):
+        """After renewing, the node must re-publish so the anchor (and thus peers,
+        which pull from the anchor) sees the fresh credential — otherwise the mesh
         tears down one credential TTL after start."""
         from greasewood.renewal import RenewalLoop
 
@@ -507,13 +507,13 @@ class TestRenewalPropagation:
         cred = _make_cred(node, ca, ttl=3600)
         record = _make_record(node, cred, seq=1)
 
-        hub_dir = Directory()          # the hub's directory
-        hub_dir.put(record)            # node's initial (seq=1) record on the hub
+        anchor_dir = Directory()          # the anchor's directory
+        anchor_dir.put(record)            # node's initial (seq=1) record on the anchor
         ca_obj = CA(ca, tmp_path)
         ca_obj._save_node_caps(node.id_pub_bytes, "test-node", ["mesh"])
 
         srv = ControlServer(
-            listen="[::1]:0", directory=hub_dir,
+            listen="[::1]:0", directory=anchor_dir,
             get_ca_pubs=lambda: [ca.ca_pub_bytes], get_revoked=set, ca=ca_obj,
         )
         port = srv._server.server_address[1]
@@ -531,10 +531,10 @@ class TestRenewalPropagation:
                 cache_path=tmp_path / "dir.json",
             )
             loop._renew_and_publish()
-            # The hub's directory now carries the renewed (seq=2) record.
-            on_hub = hub_dir.get(node.id_pub_hex)
-            assert on_hub is not None and on_hub.seq == 2
-            on_hub.cred.verify([ca.ca_pub_bytes])  # fresh, valid credential
+            # The anchor's directory now carries the renewed (seq=2) record.
+            on_anchor = anchor_dir.get(node.id_pub_hex)
+            assert on_anchor is not None and on_anchor.seq == 2
+            on_anchor.cred.verify([ca.ca_pub_bytes])  # fresh, valid credential
         finally:
             srv.stop()
 
@@ -575,7 +575,7 @@ class TestControlServerConcurrency:
         clients, a further connection is dropped promptly (not queued forever
         and not spawning an unbounded thread) — and capacity returns once the
         stalls clear. This is the load-shedding backstop for the threaded
-        server: a connection flood can't exhaust the hub."""
+        server: a connection flood can't exhaust the anchor."""
         import socket as _socket
         ca, node, cred, record = ca_and_node
         srv = ControlServer(

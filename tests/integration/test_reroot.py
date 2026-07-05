@@ -1,12 +1,12 @@
 """
-Integration: graceful re-root (hub A → hub B) on real containers.
+Integration: graceful re-root (anchor A → anchor B) on real containers.
 
 Exercises the end-to-end flow the README/RUNBOOK describe: B is enrolled as an
-ordinary node, promoted to a hub with its own CA (still trusting A), the fleet is
+ordinary node, promoted to an anchor with its own CA (still trusting A), the fleet is
 repointed to trust A+B and renew against B, and `gw renew-all` pulls everyone over.
 The nodes migrate to B-signed credentials WITHOUT copying A's nodes/ registry —
 via the directory-record renewal fallback — and the mesh stays fully linked
-throughout (two hubs run simultaneously with no collision).
+throughout (two anchors run simultaneously with no collision).
 """
 import time
 
@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey  # noqa: F401
 from greasewood.wire import Credential
 
-from .conftest import bring_up_node, make_hub
+from .conftest import bring_up_node, make_anchor
 from .helpers import directory_records, pexec, podman, wait_for_peer_count
 
 pytestmark = pytest.mark.integration
@@ -29,7 +29,7 @@ def _restart_daemon(cid: str) -> None:
 
 
 def _repoint_to_b(cid: str, a_ca: str, b_ca: str, b_ctrl: str) -> None:
-    """Rewrite the node's config to trust A+B and use B as hub+seed (Ansible's job
+    """Rewrite the node's config to trust A+B and use B as anchor+seed (Ansible's job
     in production). We know both CA pubkeys, so we just set the list outright."""
     # Replace whole single-line entries (all templates write these on one line).
     # A content regex like \[.*?\] would mis-stop at the ']' inside a v6 URL.
@@ -45,10 +45,10 @@ def _repoint_to_b(cid: str, a_ca: str, b_ca: str, b_ctrl: str) -> None:
     pexec(cid, "python3", "-c", script)
 
 
-def _all_signed_by(hub_cid: str, ca_hex: str, hostnames) -> bool:
+def _all_signed_by(anchor_cid: str, ca_hex: str, hostnames) -> bool:
     """True once every named host's directory record is signed by ca_hex."""
     ca = bytes.fromhex(ca_hex)
-    by_host = {r["cred"]["hostname"]: r for r in directory_records(hub_cid)}
+    by_host = {r["cred"]["hostname"]: r for r in directory_records(anchor_cid)}
     for h in hostnames:
         rec = by_host.get(h)
         if rec is None:
@@ -63,20 +63,20 @@ def _all_signed_by(hub_cid: str, ca_hex: str, hostnames) -> bool:
 def test_graceful_reroot_a_to_b(gw_image, gw_network):
     cids = []
     try:
-        # Hub A + a node, then B enrolled as an ordinary node in A's mesh.
-        a = make_hub(gw_image, gw_network, hostname="huba")
+        # Anchor A + a node, then B enrolled as an ordinary node in A's mesh.
+        a = make_anchor(gw_image, gw_network, hostname="anchora")
         cids.append(a["cid"])
         n1 = bring_up_node(gw_image, gw_network, a, hostname="noden1")
         cids.append(n1["cid"])
-        b = bring_up_node(gw_image, gw_network, a, hostname="hubb")
+        b = bring_up_node(gw_image, gw_network, a, hostname="anchorb")
         cids.append(b["cid"])
 
         # 3-node mesh: everyone peered with everyone.
         for c in (a["cid"], n1["cid"], b["cid"]):
             assert wait_for_peer_count(c, 2) == 2, "initial mesh didn't form"
 
-        # Promote B — it generates its own CA (keeps trusting A) and becomes a hub.
-        promo = pexec(b["cid"], "gw", "hub-promote")
+        # Promote B — it generates its own CA (keeps trusting A) and becomes an anchor.
+        promo = pexec(b["cid"], "gw", "anchor-promote")
         b_ca = None
         for line in promo.stdout.splitlines():
             if "CA pub key" in line:
@@ -87,12 +87,12 @@ def test_graceful_reroot_a_to_b(gw_image, gw_network):
         b_ctrl = f"http://[{b['overlay']}]:51902"
 
         # Repoint the migrating nodes to trust A+B and renew against B, then
-        # restart their daemons. (A stays as-is; it's the outgoing hub.)
+        # restart their daemons. (A stays as-is; it's the outgoing anchor.)
         for c in (n1["cid"], b["cid"]):
             _repoint_to_b(c, a["ca_pub"], b_ca, b_ctrl)
             _restart_daemon(c)
 
-        # Mesh must not drop while both hubs run + configs flip.
+        # Mesh must not drop while both anchors run + configs flip.
         for c in (a["cid"], n1["cid"], b["cid"]):
             assert wait_for_peer_count(c, 2) == 2, "mesh dropped during re-root"
 
@@ -104,7 +104,7 @@ def test_graceful_reroot_a_to_b(gw_image, gw_network):
         deadline = time.time() + 150
         migrated = False
         while time.time() < deadline:
-            if _all_signed_by(b["cid"], b_ca, ["noden1", "hubb"]):
+            if _all_signed_by(b["cid"], b_ca, ["noden1", "anchorb"]):
                 migrated = True
                 break
             time.sleep(3)

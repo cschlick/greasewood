@@ -1,6 +1,6 @@
 """
 Unit tests for the inbound/reachability CLI plumbing: set-inbound rewrites
-config, and hub-promote refuses an outbound-only node.
+config, and anchor-promote refuses an outbound-only node.
 """
 import types
 
@@ -48,11 +48,11 @@ def test_set_inbound_to_yes_rewrites_config(tmp_path):
     assert 'inbound = "yes"' in cfg.read_text()
 
 
-def test_hub_promote_refuses_outbound_only(tmp_path):
+def test_anchor_promote_refuses_outbound_only(tmp_path):
     cfg = tmp_path / "gw.toml"
     _write_cfg(cfg, "no")
     args = types.SimpleNamespace(config=str(cfg), control_port=51902,
                                  credential_ttl="24h")
     with pytest.raises(SystemExit) as e:
-        cli.cmd_hub_promote(args)
+        cli.cmd_anchor_promote(args)
     assert "outbound-only" in str(e.value)

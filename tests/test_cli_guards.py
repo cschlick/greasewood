@@ -23,7 +23,7 @@ def _as_user(monkeypatch):
 
 
 @pytest.mark.parametrize("cmd", ["run", "create", "join", "invite", "purge",
-                                 "hub-promote", "set-inbound"])
+                                 "anchor-promote", "set-inbound"])
 def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
     _as_user(monkeypatch)
     with pytest.raises(SystemExit) as e:
@@ -38,10 +38,10 @@ def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
     ("set-segments", "cmd_set_segments"),
     ("renew-all", "cmd_renew_all"),
     ("cert-request", "cmd_cert_request"),
-    ("hub-backup", "cmd_hub_backup"),
+    ("anchor-backup", "cmd_anchor_backup"),
 ])
 def test_registry_commands_complain_loudly_without_root(cmd, fn, monkeypatch):
-    """The hub registry/key commands gate on root FIRST — before touching config
+    """The anchor registry/key commands gate on root FIRST — before touching config
     or any file — so a non-root run gets 'needs root … try sudo', never a
     partial failure like the historical \"no node named X\" (an unreadable
     registry scanning as empty)."""
@@ -65,9 +65,9 @@ def test_require_root_passes_as_root(monkeypatch):
     ("set-segments", "cmd_set_segments"),
     ("renew-all", "cmd_renew_all"),
 ])
-def test_hub_commands_refuse_non_hub(cmd, fn, tmp_path, monkeypatch):
-    """Every hub-only command run on a role=node config exits with the same clear
-    'must be run on the hub' message — the root gate passes (faked), then the
+def test_anchor_commands_refuse_non_anchor(cmd, fn, tmp_path, monkeypatch):
+    """Every anchor-only command run on a role=node config exits with the same clear
+    'must be run on the anchor' message — the root gate passes (faked), then the
     role check fires before any mutation."""
     import types
     _as_root(monkeypatch)
@@ -86,7 +86,7 @@ trusted_pubs = []
                               node="n1", caps="tls", segments="mesh")
     with pytest.raises(SystemExit) as e:
         getattr(cli, fn)(ns)
-    assert "must be run on the hub" in str(e.value)
+    assert "must be run on the anchor" in str(e.value)
     # nothing was written (e.g. renew-all's hint file)
     assert not (tmp_path / "renew_after").exists()
 
@@ -193,17 +193,17 @@ trusted_pubs = []
         data.chmod(0o755)
 
 
-def _hub_cfg(tmp_path):
+def _anchor_cfg(tmp_path):
     (tmp_path / "ca.key").write_text("placeholder")
     cfg = tmp_path / "gw.toml"
     cfg.write_text(f"""[node]
-hostname = "hub"
+hostname = "anchor"
 data_dir = "{tmp_path}"
-role = "hub"
+role = "anchor"
 [network]
 interface = "gw-mesh"
 seeds = []
-[hub]
+[anchor]
 ca_key_file = "{tmp_path}/ca.key"
 [ca]
 trusted_pubs = []
@@ -220,7 +220,7 @@ def test_invite_preflight_requires_mesh_interface(tmp_path, monkeypatch):
     _as_root(monkeypatch)
     monkeypatch.setattr("greasewood.wg.interface_exists", lambda iface: False)
     with pytest.raises(SystemExit) as e:
-        cli.cmd_invite(_hub_cfg(tmp_path))
+        cli.cmd_invite(_anchor_cfg(tmp_path))
     msg = str(e.value)
     assert "mesh interface 'gw-mesh' doesn't exist" in msg
     assert "systemctl start greasewood" in msg
@@ -237,7 +237,7 @@ def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
         raise OSError("connection refused")
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
     with pytest.raises(SystemExit) as e:
-        cli.cmd_invite(_hub_cfg(tmp_path))
+        cli.cmd_invite(_anchor_cfg(tmp_path))
     msg = str(e.value)
     assert "isn't answering on loopback" in msg
     assert "token could never be redeemed" in msg

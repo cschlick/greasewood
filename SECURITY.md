@@ -10,10 +10,10 @@ enforced, the accepted risks, and the results of the security review.
 
 | Secret | Held by | Blast radius if leaked | Protection |
 |--------|---------|------------------------|------------|
-| `ca.key` (Ed25519) | the hub | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to another node. Moving the hub should generate a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
+| `ca.key` (Ed25519) | the anchor | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to another node. Moving the anchor should generate a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
 | `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | On-disk at `0600` on server VMs (the primary deployment; no TPM expected — hardware-backed identity is a v2 item, see the founding doc). Treat a leak as "that node is compromised" → revoke. |
 | `wg_priv` (X25519) | each node | **Impersonate that node on the wire.** Contained by expiry, not a CRL: a `wg_pub` is accepted only while a live credential binds it, so `gw revoke` (or rotating `wg_priv`) drops it fleet-wide within one credential TTL on the next reconcile. **Not** auto-contained while the node keeps renewing — act on a known leak. | On-disk at `0600`; on-disk exposure is an accepted, bounded risk. |
-| join token / door seed | transient | Enroll **one** node during a single open window. The hub still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |
+| join token / door seed | transient | Enroll **one** node during a single open window. The anchor still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |
 
 ## Network exposure
 
@@ -37,7 +37,7 @@ Every peer a node installs has passed the 7-step reconcile check (`reconcile.py`
 3. **Self-signature** — the record is signed by the identity it claims.
 4. **Address derivation** — `addr == truncate64(blake2s(id_pub))`; addresses are
    self-certifying, so a node cannot claim an address it didn't derive.
-5. **Revocation** — the identity is not on the hub's revoke list.
+5. **Revocation** — the identity is not on the anchor's revoke list.
 6. **Authorization policy** — capability check (e.g. `mesh ↔ mesh`).
 7. **Data plane** — install/remove the WireGuard peer to match.
 
@@ -68,39 +68,39 @@ Additional control-plane protections:
   publish a name the CA didn't issue it, so plain name resolution (the managed
   `/etc/hosts` block) can't be hijacked by a member claiming another's name.
   One deliberate consequence: *unused* names are first-come-first-served — a
-  joiner names itself unless the hub pins the name, so any enrolled node could
+  joiner names itself unless the anchor pins the name, so any enrolled node could
   claim a sensitive name nobody holds yet (and, with the `tls` cap, get a cert
   for it). **Pin names that matter** (`gw invite --hostname db`): a pinned name
-  is checked free at invite, assigned by the hub, and the node can't rename.
+  is checked free at invite, assigned by the anchor, and the node can't rename.
 - **Name resolution follows the trust gate** — the `/etc/hosts` block is built
   from the records that pass the reconcile loop's *full* verification (CA
   signature, expiry, revocation), never from the raw directory cache. Revoking
   a node removes its name on the same reconcile cycle that removes its tunnel;
   an expired credential drops out of resolution the same way.
-- **Caps/segments are hub-decided, not self-asserted** — a node's capabilities
-  (e.g. `tls`) and segments (`segment:<name>` tags) are chosen by the hub at
+- **Caps/segments are anchor-decided, not self-asserted** — a node's capabilities
+  (e.g. `tls`) and segments (`segment:<name>` tags) are chosen by the anchor at
   `gw invite` and bound into the CA-signed credential; the enroll server issues
   from the door window and ignores anything the joiner sends. A member cannot
   grant itself a capability or place itself in a segment it wasn't issued (e.g.
   `segment:prod`, or the reach-all `segment:*`). Renewal re-issues from the tags
-  the hub already recorded, so they can't drift upward at renew either — and
-  `gw set-segments`/`gw set-caps` let the hub change them later (effective next
+  the anchor already recorded, so they can't drift upward at renew either — and
+  `gw set-segments`/`gw set-caps` let the anchor change them later (effective next
   renewal). This is what makes segmentation a real boundary, not just
   honest-node configuration.
 - **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
   only from the CA keys they are configured to trust. Moving the CA is a
   deliberate re-root (a config change to that set), not an automatic runtime
-  handoff, so a decommissioned or leaked hub key cannot inject itself into the
+  handoff, so a decommissioned or leaked anchor key cannot inject itself into the
   fleet's trust; it stays trusted only as long as it's in `trusted_pubs`.
 
 ## Accepted risks / non-goals
 
-- **A malicious *current* hub can deny service** (withhold directory entries,
-  refuse renewals). Trust is rooted in the hub by design; the "hub may be offline
-  for one credential TTL" window limits the damage, but a live, malicious hub is
+- **A malicious *current* anchor can deny service** (withhold directory entries,
+  refuse renewals). Trust is rooted in the anchor by design; the "anchor may be offline
+  for one credential TTL" window limits the damage, but a live, malicious anchor is
   outside the threat model. It still cannot **intercept** traffic — it never
   holds any node's `wg_priv` or `id_priv`.
-- **Revocation is expiry-based on nodes** (no CRL push). At the hub a revocation
+- **Revocation is expiry-based on nodes** (no CRL push). At the anchor a revocation
   is immediate (refuses renew/publish and evicts locally, live — no restart). On
   other nodes a revoked peer falls out within at most one credential TTL as its
   credential expires. Shorten `credential_ttl` if you need a tighter bound.

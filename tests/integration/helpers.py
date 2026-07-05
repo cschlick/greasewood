@@ -37,7 +37,7 @@ def container_addr(container: str, network: str) -> str:
 
 
 # The control plane binds only to the overlay address + loopback, so it is NOT
-# reachable from the host. Query it from inside the hub container over loopback.
+# reachable from the host. Query it from inside the anchor container over loopback.
 _GET_SNIPPET = (
     "import sys,urllib.request;"
     "sys.stdout.write(urllib.request.urlopen("
@@ -45,19 +45,19 @@ _GET_SNIPPET = (
 )
 
 
-def hub_get(hub_cid: str, path: str, port: int = 51902) -> str:
-    """GET a control-plane path from inside the hub container (via ::1)."""
-    r = pexec(hub_cid, "python3", "-c", _GET_SNIPPET, path, str(port), check=False)
+def anchor_get(anchor_cid: str, path: str, port: int = 51902) -> str:
+    """GET a control-plane path from inside the anchor container (via ::1)."""
+    r = pexec(anchor_cid, "python3", "-c", _GET_SNIPPET, path, str(port), check=False)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or "control-plane GET failed")
     return r.stdout
 
 
-def wait_for_control_plane(hub_cid: str, timeout: int = 20, port: int = 51902) -> bool:
+def wait_for_control_plane(anchor_cid: str, timeout: int = 20, port: int = 51902) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            hub_get(hub_cid, "/health", port)
+            anchor_get(anchor_cid, "/health", port)
             return True
         except Exception:
             time.sleep(0.5)
@@ -139,28 +139,28 @@ def wait_for_peer_count(container: str, expected: int, iface: "str | None" = Non
     return last
 
 
-def directory_records(hub_cid: str, port: int = 51902) -> list:
-    raw = json.loads(hub_get(hub_cid, "/directory", port))
+def directory_records(anchor_cid: str, port: int = 51902) -> list:
+    raw = json.loads(anchor_get(anchor_cid, "/directory", port))
     # /directory is now {"records": [...], "renew_after": ...}; tolerate the old
     # bare-list shape too.
     return raw["records"] if isinstance(raw, dict) else raw
 
 
-def directory_hostnames(hub_cid: str) -> set[str]:
-    return {r["cred"]["hostname"] for r in directory_records(hub_cid)}
+def directory_hostnames(anchor_cid: str) -> set[str]:
+    return {r["cred"]["hostname"] for r in directory_records(anchor_cid)}
 
 
-def directory_size(hub_cid: str) -> int:
-    return len(directory_records(hub_cid))
+def directory_size(anchor_cid: str) -> int:
+    return len(directory_records(anchor_cid))
 
 
-def wait_for_directory_size(hub_cid: str, expected: int, timeout: int = 60) -> int:
-    """Block until the hub's directory holds at least `expected` records."""
+def wait_for_directory_size(anchor_cid: str, expected: int, timeout: int = 60) -> int:
+    """Block until the anchor's directory holds at least `expected` records."""
     deadline = time.time() + timeout
     last = 0
     while time.time() < deadline:
         try:
-            last = directory_size(hub_cid)
+            last = directory_size(anchor_cid)
         except Exception:
             last = 0
         if last >= expected:
@@ -169,11 +169,11 @@ def wait_for_directory_size(hub_cid: str, expected: int, timeout: int = 60) -> i
     return last
 
 
-def wait_for_hostname(hub_cid: str, hostname: str, timeout: int = 20) -> bool:
+def wait_for_hostname(anchor_cid: str, hostname: str, timeout: int = 20) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            if hostname in directory_hostnames(hub_cid):
+            if hostname in directory_hostnames(anchor_cid):
                 return True
         except Exception:
             pass

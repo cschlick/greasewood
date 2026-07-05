@@ -177,7 +177,7 @@ def test_reload_cmd_runs_argv_without_shell(tmp_path):
     explicitly with `sh -c '...'`."""
     from greasewood.certs import CertRenewalLoop
 
-    loop = CertRenewalLoop(node_keys=None, get_hub_url=lambda: "",
+    loop = CertRenewalLoop(node_keys=None, get_anchor_url=lambda: "",
                            data_dir=tmp_path)
     marker = tmp_path / "ran"
     loop._run_reload(f"touch {marker}")
