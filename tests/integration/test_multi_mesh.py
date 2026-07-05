@@ -156,7 +156,10 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
         assert 'mesh_domain = "testmesh.internal"' in cfg1        # adopted from token
 
         # Both daemons up; both overlays reachable.
-        podman("exec", "-d", node, "sh", "-c", "gw run >> /tmp/a.log 2>&1")
+        # Two memberships now → bare `gw run` is ambiguous (discovery refuses),
+        # so name each mesh's config explicitly.
+        podman("exec", "-d", node, "sh", "-c",
+               "gw -c /etc/greasewood_testmesh.toml run >> /tmp/a.log 2>&1")
         podman("exec", "-d", node, "sh", "-c",
                "gw -c /etc/greasewood_hubcmesh.toml run >> /tmp/c.log 2>&1")
         assert wait_for_ping(node, gw_hub["overlay"], timeout=45), \
@@ -192,7 +195,7 @@ def test_second_mesh_auto_slots(gw_hub, gw_image, gw_network):
             assert r.returncode != 0, "same-domain join was NOT refused!"
             out = r.stdout + r.stderr
             assert "cannot bridge two meshes with the same domain" in out
-            assert "set-domain" in out and "NOT consumed" in out
+            assert "rename-mesh" in out and "NOT consumed" in out
             n_cfgs = pexec(node, "sh", "-c",
                            "ls /etc/greasewood_*.toml | wc -l").stdout.strip()
             assert n_cfgs == "2", "refusal still made a membership"

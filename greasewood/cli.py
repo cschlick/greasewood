@@ -1101,10 +1101,15 @@ def cmd_join(args) -> int:
     # HARD domain-collision refusal, BEFORE the door dance (so a refusal never
     # burns the invite): a mesh has ONE domain everywhere, and a node cannot
     # bridge two meshes that share one — no alias, no flag, no exception. The
-    # membership being refreshed (same config path) doesn't count against itself.
+    # only membership that may legitimately carry this domain is the one being
+    # REFRESHED — identified by CA, not by config path: a *different* mesh with
+    # the same name derives the same config path, so excluding by path would
+    # mask exactly the collision we must catch.
     if token_domain:
+        _rk = _membership_for_ca(ca_pub_hex)
+        _refresh_cfg = _membership_paths(_rk)["config"].resolve() if _rk else None
         for _n, _p in _memberships():
-            if _p.resolve() == cfg_path.resolve():
+            if _refresh_cfg is not None and _p.resolve() == _refresh_cfg:
                 continue
             try:
                 if load_config(_p).mesh_domain == token_domain:
@@ -1112,7 +1117,7 @@ def cmd_join(args) -> int:
                         f"this mesh's domain {token_domain!r} is already used by "
                         f"membership {_n!r} ({_p}) — a node cannot bridge two "
                         f"meshes with the same domain. Rename one of them on its "
-                        f"hub (gw set-domain <new-name>) and re-run this join. "
+                        f"hub (gw rename-mesh <new-name>) and re-run this join. "
                         f"The token was NOT consumed.")
             except SystemExit:
                 raise
