@@ -577,6 +577,83 @@ in join tokens and the control port in the enrollment response, so nodes pick up
 non-default values automatically — no client config. (The internal enrollment
 port lives inside the door tunnel and can't collide, so it isn't a knob.)
 
+### Worked example: a default-drop host
+
+A complete, loadable ruleset for a hub host running `policy drop`. It's safe
+verbatim on plain nodes too — the `gw-door` rules never match where no door
+exists, and `51902` only matters where a hub listens (greasewood's rules are
+the same on every node by design):
+
+```nft
+#!/usr/sbin/nft -f
+table inet gw_hub {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        ct state invalid drop
+        iifname "lo" accept                     # control plane also binds ::1
+
+        # --- underlay: the only internet-facing surface, both UDP.
+        # Non-peers get silence from WireGuard itself; the door port is
+        # inert unless a window / standing door is open (hub only).
+        udp dport 51900 accept comment "greasewood mesh WG"
+        udp dport 51901 accept comment "greasewood door WG (hub only)"
+
+        # --- tunnel-internal services (TCP), scoped to their interface.
+        # 51902 is reachable only as a verified mesh peer; 51903 only
+        # through a token's door tunnel.
+        iifname "gw-mesh" tcp dport 51902 accept comment "control plane"
+        iifname "gw-door" tcp dport 51903 accept comment "enroll server"
+
+        # --- your own management access — adjust to taste ------------------
+        tcp dport 22 accept                     # don't lock yourself out
+        ip6 nexthdr ipv6-icmp accept            # ND/PMTU — required for v6 at all
+        ip protocol icmp accept
+    }
+}
+```
+
+The `iifname` scoping is belt-and-braces rather than load-bearing: `51902`
+binds only overlay+loopback and `51903` binds only the door IP, so they're
+unreachable from the underlay even without these rules — the scoped accepts
+just make the firewall *state* the architecture.
+
+### Worked example: hub (or node) behind a NAT router
+
+On the **router**, only the two WireGuard UDP ports ever get forwarded —
+`51900` always, `51901` only if the *hub* is the machine behind this router.
+Never forward `51902/51903`: they aren't on the underlay at all.
+
+```nft
+#!/usr/sbin/nft -f
+define GW_HOST   = 192.168.1.50        # LAN address of the greasewood machine
+define WAN_IF    = "eth0"              # router's upstream interface
+
+table ip gw_forward {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname $WAN_IF udp dport 51900 dnat to $GW_HOST comment "greasewood mesh WG"
+        iifname $WAN_IF udp dport 51901 dnat to $GW_HOST comment "greasewood door WG (hub only — delete on a plain node)"
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        # If your forward policy is drop (it should be), allow the DNATed flows:
+        ip daddr $GW_HOST udp dport 51900 accept comment "greasewood mesh WG"
+        ip daddr $GW_HOST udp dport 51901 accept comment "greasewood door WG (hub only)"
+        ip saddr $GW_HOST ct state established,related accept
+    }
+}
+```
+
+Behind NAT, advertise the **router's** public identity, not the LAN address:
+`gw join <token> --endpoint <router-public>:51900` on a node, and
+`gw invite --endpoint <router-public-or-dns>` on a hub. With routable IPv6
+behind the router there's no DNAT — just accept the same two UDP ports in the
+router's v6 forward chain. A node running `inbound = no` needs **nothing**
+forwarded: it dials out and keepalives hold the mapping open. And the machine
+behind the router pairs this with the host ruleset above.
+
 Your base default-drop ruleset should also include `ct state established,related
 accept`. It's what lets an **outbound-only** node work:
 such a node opens *no* greasewood inbound ports — it dials peers and the hub,
