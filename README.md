@@ -381,31 +381,40 @@ exactly what the door exists to prevent.
 ### 3. Check it
 
 ```bash
-gw status               # local node + directory view
-sudo gw diagnose        # per-peer: why each link is/isn't forming
+gw status                  # local node + directory view (fleet-wide link state)
+sudo gw diagnose db01 web1 # pairwise: can db01 and web1 form a tunnel?
 sudo wg show gw_myfleet    # live WireGuard peers
 ```
 
-`gw diagnose` is the tool to reach for when a peer won't connect. Because the
-mesh is direct-or-fail, a link that doesn't form is otherwise silent; diagnose
-runs the full verification chain per peer and overlays the live WireGuard
-handshake state, so it tells you *which* step failed — expired credential,
-untrusted CA, policy denial, or "configured but no handshake, check the peer's
-firewall."
+`gw diagnose` is the tool to reach for when a peer won't connect. It's
+**pairwise**: it lays up to two named nodes plus the hub side by side and
+explains, per pair, whether a tunnel can form — segments, reachability, and the
+firewall/routing directionality that's usually the real question. (`gw status`
+is the fleet-wide link overview; diagnose is the focused deep-dive.)
 
-It's a **local view, not a fleet dashboard** — run it *on the node that's having
-trouble*. It judges each link from *that* node's own directory cache, trusted-CA
-set, and live tunnels, so every verdict means "can **this** node reach that peer"
-(e.g. `REJECTED` = this node won't install it; `LINKED` = this node has a live
-tunnel to it) — not the peer's status everywhere. See [RUNBOOK.md](RUNBOOK.md)
-for how to read it and what to do next.
+```bash
+sudo gw diagnose            # this host ↔ the hub
+sudo gw diagnose db01       # this host ↔ db01   (+ hub as reference)
+sudo gw diagnose db01 web1  # db01 ↔ web1        (+ hub as reference)
+```
 
-For each `LINKED` peer it also runs a **path-MTU probe** — a don't-fragment ping
-at the tunnel's interface MTU. WireGuard-over-cloud MTU blackholes are nasty:
-small traffic and SSH work, but TLS handshakes and large transfers hang because
-full-size tunnel packets exceed the underlay path MTU. If the small ping passes
-but the full-size one is dropped, diagnose flags it and suggests lowering the
-tunnel MTU. Pass `--no-mtu-probe` to skip the extra pings.
+The comparison table shows each node's addresses, inbound flag, segments,
+credential, and firewall for the mesh UDP port. Since diagnose runs on one node,
+**only this host's firewall is directly known** — a peer's is *inferred `OPEN`*
+whenever a handshake has been observed (packets flowing prove its whole inbound
+path: host firewall, any router/NAT, and daemon), and shown `???` otherwise.
+The per-pair verdict reads out who can dial whom and the live status, and when a
+pair involves this host and there's no handshake it localizes the block — e.g.
+"our host firewall is open, so a peer that still can't reach us points at an
+upstream router/NAT not forwarding the port." See [RUNBOOK.md](RUNBOOK.md) for
+the full verdict table.
+
+A `LINKED` pair involving this host also gets a **path-MTU probe** — a
+don't-fragment ping at the tunnel's interface MTU. WireGuard-over-cloud MTU
+blackholes are nasty: small traffic and SSH work, but TLS handshakes and large
+transfers hang because full-size tunnel packets exceed the underlay path MTU. If
+the small ping passes but the full-size one is dropped, diagnose flags it and
+suggests lowering the tunnel MTU.
 
 ## Running as a service
 
@@ -766,6 +775,7 @@ Two properties worth knowing:
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the hub it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
+| `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the hub side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ hub. |
 | `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the hub).          |
 | `set-segments <node> <s>` | no | Change a node's segments (on the hub; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the hub; effective next renewal). |

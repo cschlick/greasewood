@@ -54,11 +54,11 @@ trusted_pubs = ["{ca_hex}"]
     return p
 
 
-def test_diagnose_classifies_rejections(tmp_path, capsys, monkeypatch):
-    # No live WireGuard state (deterministic, no wg binary / interface needed).
+def test_diagnose_credential_column_flags_bad_creds(tmp_path, capsys, monkeypatch):
+    """The credential row surfaces the rejection reason for each named node:
+    untrusted CA and expired (revoked covered separately)."""
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: {})
-
-    NodeKeys.load_or_generate(tmp_path)  # own identity → _own_identity works
+    NodeKeys.load_or_generate(tmp_path)
     trusted = CAKeys.generate()
     evil = CAKeys.generate()
     cfg = _write_cfg(tmp_path, trusted.ca_pub_hex)
@@ -68,27 +68,60 @@ def test_diagnose_classifies_rejections(tmp_path, capsys, monkeypatch):
     directory.put(_record(n1, _cred(n1, evil, "untrusted")))            # untrusted CA
     n2 = NodeKeys.generate()
     directory.put(_record(n2, _cred(n2, trusted, "expired", ttl=-10)))  # expired
-    n3 = NodeKeys.generate()
-    directory.put(_record(n3, _cred(n3, trusted, "revoked-node")))      # revoked
-    (tmp_path / "revoked.json").write_text(
-        json.dumps({"revoked": [n3.id_pub_hex]}))
-    n4 = NodeKeys.generate()
-    directory.put(_record(n4, _cred(n4, trusted, "policy",
-                                    caps=("segment:prod",))))  # different segment
     directory.save(tmp_path / "directory.json")
 
-    args = types.SimpleNamespace(config=str(cfg), hostname=None)
+    args = types.SimpleNamespace(config=str(cfg), nodes=["untrusted", "expired"])
     assert cli.cmd_diagnose(args) == 0
-
     out = capsys.readouterr().out
-    assert "not from a trusted CA" in out
-    assert "credential EXPIRED" in out
-    assert "node is REVOKED" in out
-    assert "policy denies" in out
-    assert "rejected" in out and "policy-denied" in out  # summary line
+    assert "untrusted CA" in out
+    assert "EXPIRED" in out
+
+
+def test_diagnose_revoked_and_missing(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: {})
+    NodeKeys.load_or_generate(tmp_path)
+    trusted = CAKeys.generate()
+    cfg = _write_cfg(tmp_path, trusted.ca_pub_hex)
+    directory = Directory()
+    n3 = NodeKeys.generate()
+    directory.put(_record(n3, _cred(n3, trusted, "banned")))
+    (tmp_path / "revoked.json").write_text(json.dumps({"revoked": [n3.id_pub_hex]}))
+    directory.save(tmp_path / "directory.json")
+
+    assert cli.cmd_diagnose(types.SimpleNamespace(config=str(cfg),
+                                                  nodes=["banned"])) == 0
+    assert "REVOKED" in capsys.readouterr().out
+    # An unknown name exits with a clear error, not a crash.
+    import pytest
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_diagnose(types.SimpleNamespace(config=str(cfg), nodes=["ghost"]))
+    assert "no node named 'ghost'" in str(e.value)
+
+
+def test_diagnose_pairwise_no_shared_segment(tmp_path, capsys, monkeypatch):
+    """Two nodes in different segments → the pairwise verdict says they won't
+    peer by design (not a firewall/reachability problem)."""
+    monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: {})
+    NodeKeys.load_or_generate(tmp_path)
+    trusted = CAKeys.generate()
+    cfg = _write_cfg(tmp_path, trusted.ca_pub_hex)
+    directory = Directory()
+    a = NodeKeys.generate()
+    directory.put(_record(a, _cred(a, trusted, "web", caps=("segment:web",))))
+    b = NodeKeys.generate()
+    directory.put(_record(b, _cred(b, trusted, "db", caps=("segment:db",))))
+    directory.save(tmp_path / "directory.json")
+
+    assert cli.cmd_diagnose(types.SimpleNamespace(config=str(cfg),
+                                                  nodes=["web", "db"])) == 0
+    out = capsys.readouterr().out
+    assert "web ↔ db" in out
+    assert "no shared segment" in out
 
 
 def test_diagnose_targeted_single_peer(tmp_path, capsys, monkeypatch):
+    """`diagnose keep` compares self ↔ keep only — an unrelated peer isn't
+    dragged in."""
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: {})
     NodeKeys.load_or_generate(tmp_path)
     trusted = CAKeys.generate()
@@ -96,13 +129,13 @@ def test_diagnose_targeted_single_peer(tmp_path, capsys, monkeypatch):
 
     directory = Directory()
     keep = NodeKeys.generate()
-    directory.put(_record(keep, _cred(keep, trusted, "keep", ttl=-10)))
+    directory.put(_record(keep, _cred(keep, trusted, "keep")))
     other = NodeKeys.generate()
-    directory.put(_record(other, _cred(other, trusted, "other", ttl=-10)))
+    directory.put(_record(other, _cred(other, trusted, "other")))
     directory.save(tmp_path / "directory.json")
 
-    args = types.SimpleNamespace(config=str(cfg), hostname="keep")
-    assert cli.cmd_diagnose(args) == 0
+    assert cli.cmd_diagnose(types.SimpleNamespace(config=str(cfg),
+                                                  nodes=["keep"])) == 0
     out = capsys.readouterr().out
     assert "keep" in out
-    assert "other" not in out.split("summary")[0]  # only the targeted peer shown
+    assert "other" not in out
