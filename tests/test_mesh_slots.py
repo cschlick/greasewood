@@ -190,3 +190,101 @@ def test_join_derives_paths_with_no_flags(tmp_path, monkeypatch):
         cli.cmd_join(ns)
     # Derivation happened: keys were generated into the derived data dir.
     assert (tmp_path / "greasewood_zzz" / "id_pub.hex").exists()
+
+
+def test_migrate_membership_moves_everything(tmp_path, monkeypatch):
+    """rename-mesh's engine: config renamed + rewritten (domain/interface/
+    data_dir), data dir moved, grace marker dropped, old config gone."""
+    import json
+    etc = tmp_path / "etc"; var = tmp_path / "var"
+    etc.mkdir(); var.mkdir()
+    old_data = var / "greasewood_alpha"; old_data.mkdir()
+    (old_data / "id_pub.hex").write_text("aa")
+    ca = CAKeys.generate()
+    cfg = etc / "greasewood_alpha.toml"
+    _write_cfg(cfg, old_data, ca.ca_pub_hex, iface="gw_alpha",
+               domain="alpha.internal")
+    monkeypatch.setattr("greasewood.wg.interface_exists", lambda i: False)
+    monkeypatch.setattr("shutil.which", lambda n: None)       # no systemctl
+
+    new_cfg = cli._migrate_membership(cfg, "beta", etc=etc, var=var)
+    assert new_cfg == etc / "greasewood_beta.toml"
+    assert not cfg.exists()
+    text = new_cfg.read_text()
+    assert 'mesh_domain = "beta.internal"' in text
+    assert 'interface = "gw_beta"' in text
+    assert f'data_dir = "{var / "greasewood_beta"}"' in text
+    assert (var / "greasewood_beta" / "id_pub.hex").read_text() == "aa"
+    assert not old_data.exists()
+    marker = json.loads((var / "greasewood_beta" / "rename_grace.json").read_text())
+    assert marker["old_domain"] == "alpha.internal"
+    assert "until" in marker
+
+
+def test_migrate_membership_refuses_collisions(tmp_path, monkeypatch):
+    etc = tmp_path / "etc"; var = tmp_path / "var"
+    etc.mkdir(); var.mkdir()
+    ca = CAKeys.generate()
+    (var / "greasewood_alpha").mkdir()
+    cfg = etc / "greasewood_alpha.toml"
+    _write_cfg(cfg, var / "greasewood_alpha", ca.ca_pub_hex,
+               iface="gw_alpha", domain="alpha.internal")
+    _write_cfg(etc / "greasewood_beta.toml", var / "gb", ca.ca_pub_hex,
+               iface="gw_beta", domain="beta.internal")
+    import pytest
+    with pytest.raises(SystemExit) as e:
+        cli._migrate_membership(cfg, "beta", etc=etc, var=var)
+    assert "already exists" in str(e.value)
+    assert cfg.exists()                                      # nothing moved
+
+
+def test_sync_warns_on_mesh_rename(tmp_path, caplog):
+    """A member whose hub advertises a different domain gets the exact
+    migration command, once."""
+    import logging
+    from greasewood.directory import Directory
+    from greasewood import sync as syncmod
+    loop = syncmod.SyncLoop(Directory(), lambda: [], tmp_path / "d.json",
+                            expected_domain="alpha.internal")
+    with caplog.at_level(logging.WARNING, logger="greasewood.sync"):
+        loop._note_mesh_domain("beta.internal")
+        loop._note_mesh_domain("beta.internal")              # warned once
+        loop._note_mesh_domain("alpha.internal")             # match: silent
+    warns = [r for r in caplog.records if "renamed this mesh" in r.message]
+    assert len(warns) == 1
+    assert "gw rename-mesh beta" in warns[0].message
+
+
+def test_reconcile_rename_grace_dual_then_retire(tmp_path, monkeypatch):
+    """During grace the OLD domain's names are synced too; past the deadline
+    the old block and marker retire."""
+    import datetime as dt
+    import json
+    from greasewood.reconcile import ReconcileLoop
+    from greasewood.directory import Directory
+
+    calls = []
+    class FakeHosts:
+        @staticmethod
+        def sync(records, domain, path=None):
+            calls.append(("sync", domain))
+        @staticmethod
+        def remove_block(domain, path=None):
+            calls.append(("remove", domain))
+    loop = ReconcileLoop(iface="gw_x", directory=Directory(),
+                         local_id_pub=b"\x01" * 32, local_caps=[],
+                         get_ca_pubs=lambda: [], get_revoked=set,
+                         hosts_domain="beta.internal", data_dir=tmp_path)
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+    (tmp_path / "rename_grace.json").write_text(json.dumps(
+        {"old_domain": "alpha.internal", "until": future}))
+    loop._rename_grace([], FakeHosts)
+    assert ("sync", "alpha.internal") in calls               # dual during grace
+
+    calls.clear()
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
+    (tmp_path / "rename_grace.json").write_text(json.dumps(
+        {"old_domain": "alpha.internal", "until": past}))
+    loop._rename_grace([], FakeHosts)
+    assert ("remove", "alpha.internal") in calls             # retired
+    assert not (tmp_path / "rename_grace.json").exists()

@@ -119,6 +119,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({
                 "records": [r.to_dict() for r in self.directory.all()],
                 "renew_after": self.get_renew_after(),
+                "mesh_domain": self.mesh_domain,
                 "now": self._now_iso(),
             })
         elif self.path == "/ca-cert":

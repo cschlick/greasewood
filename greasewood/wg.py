@@ -140,6 +140,17 @@ def destroy_interface(iface: str) -> None:
         log.info("destroyed interface %s", iface)
 
 
+def rename_interface(old: str, new: str) -> None:
+    """Rename a live WireGuard interface (peers/keys ride along; routes bound
+    to the device survive the rename). Brief data-plane blip: the link must be
+    down for the kernel to accept a new name."""
+    from . import audit
+    with audit.context(f"rename-mesh: interface {old} -> {new}"):
+        _run("ip", "link", "set", old, "down")
+        _run("ip", "link", "set", old, "name", new)
+        _run("ip", "link", "set", new, "up")
+
+
 def setup_door_routing() -> None:
     """
     One-time idempotent setup of the door subnet's policy routing.

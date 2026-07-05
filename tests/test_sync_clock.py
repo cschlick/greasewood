@@ -32,7 +32,7 @@ def test_pull_directory_returns_hub_time(tmp_path):
     port = srv._server.server_address[1]
     srv.start()
     try:
-        records, renew_after, hub_now = pull_directory(f"http://[::1]:{port}")
+        records, renew_after, hub_now, _dom = pull_directory(f"http://[::1]:{port}")
         assert records == [] and renew_after is None
         assert hub_now is not None and hub_now.tzinfo is not None
         assert abs((dt.datetime.now(_UTC) - hub_now).total_seconds()) < 30

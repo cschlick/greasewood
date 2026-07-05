@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import logging
 import threading
+from pathlib import Path
 import time
 from typing import Callable
 
@@ -254,7 +255,12 @@ class ReconcileLoop:
         hosts_domain: str | None = None,
         local_families: "set[int] | None" = None,
         ensure_iface: "Callable[[], None] | None" = None,
+        data_dir: "Path | None" = None,
     ) -> None:
+        # For the rename-mesh grace marker (rename_grace.json): while it's
+        # live, the OLD domain's names keep resolving alongside the new; at
+        # the deadline the old block + marker retire.
+        self._data_dir = data_dir
         self._iface = iface
         # Recreates the mesh interface (a closure over the daemon's config +
         # keys). The daemon creates the interface once at startup, but it can
@@ -323,8 +329,34 @@ class ReconcileLoop:
                 # or expired node must drop out of name resolution on the same
                 # cycle its WireGuard peer is removed.
                 hosts.sync(trusted, self._hosts_domain)
+                self._rename_grace(trusted, hosts)
             except Exception as e:
                 log.error("hosts sync error: %s", e)
+
+    def _rename_grace(self, trusted, hosts) -> None:
+        """During a rename-mesh grace window, keep the OLD domain's names
+        resolving too (dual names, so nothing dials into a void mid-rename);
+        at the deadline, retire the old block and the marker."""
+        if self._data_dir is None:
+            return
+        import datetime as dt
+        import json
+        marker = Path(self._data_dir) / "rename_grace.json"
+        if not marker.exists():
+            return
+        try:
+            data = json.loads(marker.read_text())
+            old_domain = data["old_domain"]
+            until = dt.datetime.fromisoformat(data["until"])
+        except Exception:
+            marker.unlink(missing_ok=True)
+            return
+        if dt.datetime.now(dt.timezone.utc) < until:
+            hosts.sync(trusted, old_domain)
+        else:
+            hosts.remove_block(old_domain)
+            marker.unlink(missing_ok=True)
+            log.info("rename grace over — retired the old *.%s names", old_domain)
 
     def start(self) -> threading.Thread:
         t = threading.Thread(target=self.run, name="reconcile", daemon=True)

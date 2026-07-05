@@ -644,7 +644,7 @@ def cmd_invite(args) -> int:
     # --hostname pins the name: the hub fixes it at enrollment (the joiner's
     # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
-    # join and may `gw rename` later (today's behavior).
+    # join and may `gw rename-node` later (today's behavior).
     pinned_hostname = args.hostname
     if pinned_hostname:
         # The hub is choosing the name, so it verifies uniqueness NOW — a pinned
@@ -913,6 +913,102 @@ def _membership_service(key: str) -> str:
         return "active"
     subprocess.run([systemctl, "enable", "--now", unit], check=True)
     return "installed"
+
+
+def _migrate_membership(cfg_path: "Path", new_key: str,
+                        etc: "Path" = Path("/etc"),
+                        var: "Path" = Path("/var/lib")) -> "Path":
+    """Move a membership old-name → new-name: config file, data dir, kernel
+    interface, systemd instance, name domain — everything is keyed to the mesh
+    name, so a rename renames it all (brief tunnel blip at the interface
+    rename). Leaves the OLD domain's /etc/hosts block in place and drops a
+    grace marker in the new data dir: the daemon keeps old names resolving
+    until the grace deadline, then retires them. Returns the new config path."""
+    import json as _json
+    import shutil
+    import subprocess
+    from .config import load_config
+    from . import wg as wgmod
+
+    cfg = load_config(cfg_path)
+    old_key = _membership_key(cfg.mesh_domain)
+    new_domain = f"{new_key}.internal"
+    mp = _membership_paths(new_key, etc=etc, var=var)
+    if mp["config"].exists():
+        sys.exit(f"{mp['config']} already exists — is this host already on a "
+                 f"mesh named {new_key!r}?")
+    clash = _iface_collision(mp["interface"], mp["config"], etc=etc)
+    if clash:
+        sys.exit(f"derived interface {mp['interface']!r} is already used by "
+                 f"{clash} — rename to something whose first 12 chars differ")
+
+    systemctl = shutil.which("systemctl")
+    old_unit = f"greasewood@{old_key}.service"
+    if systemctl:
+        subprocess.run([systemctl, "disable", "--now", old_unit],
+                       capture_output=True)
+
+    # Data dir moves first (the new config points at it).
+    new_data = mp["data_dir"]
+    if Path(cfg.data_dir).resolve() != new_data.resolve():
+        shutil.move(str(cfg.data_dir), str(new_data))
+
+    if wgmod.interface_exists(cfg.wg_interface):
+        wgmod.rename_interface(cfg.wg_interface, mp["interface"])
+
+    # Rewrite the three name-keyed fields; everything else carries over.
+    import re as _re
+    text = cfg_path.read_text()
+    text = _re.sub(r'(?m)^mesh_domain\s*=.*$',
+                   f'mesh_domain = "{new_domain}"', text)
+    text = _re.sub(r'(?m)^interface\s*=.*$',
+                   f'interface = "{mp["interface"]}"', text)
+    text = _re.sub(r'(?m)^data_dir\s*=.*$',
+                   f'data_dir = "{new_data}"', text)
+    mp["config"].write_text(text)
+    cfg_path.unlink()
+
+    # Grace: old names keep resolving for one credential TTL, then retire.
+    until = (dt.datetime.now(_UTC) + cfg.credential_ttl).replace(microsecond=0)
+    (new_data / "rename_grace.json").write_text(_json.dumps(
+        {"old_domain": cfg.mesh_domain, "until": until.isoformat()}))
+
+    if systemctl and (_UNIT_DIR / "greasewood@.service").exists():
+        subprocess.run([systemctl, "enable", "--now",
+                        f"greasewood@{new_key}.service"], check=False)
+    return mp["config"]
+
+
+def cmd_rename_mesh(args) -> int:
+    """Rename THIS membership's mesh — domain, config, data dir, interface,
+    service — in one consistent move. Run on the HUB to rename the mesh itself
+    (members are then told on their next directory poll, with the exact command
+    to migrate themselves); run on a member to adopt a rename the hub already
+    made."""
+    from .config import load_config
+    from .hosts import valid_label
+
+    _require_root("rename-mesh", "it moves this mesh's config/state/interface")
+    if not valid_label(args.new_name):
+        sys.exit(f"mesh name {args.new_name!r} must be a DNS label "
+                 "(lowercase letters/digits/hyphens)")
+    cfg_path = Path(args.config)
+    cfg = load_config(cfg_path)
+    old_domain = cfg.mesh_domain
+    new_cfg = _migrate_membership(cfg_path, args.new_name)
+
+    print(f"mesh renamed: {old_domain} → {args.new_name}.internal")
+    print(f"  config    : {new_cfg}")
+    print(f"  data dir  : /var/lib/greasewood_{args.new_name}")
+    print(f"  interface : gw_{args.new_name[:12].rstrip('-')}")
+    print(f"  service   : greasewood@{args.new_name} (old instance disabled)")
+    print(f"Old *.{old_domain} names keep resolving for one credential TTL, "
+          f"then retire.")
+    if cfg.role == "hub":
+        print("Members will see the rename on their next directory poll and be "
+              "told to run:  sudo gw rename-mesh " + args.new_name)
+        print("New invites/tokens already carry the new name.")
+    return 0
 
 
 def cmd_join(args) -> int:
@@ -1908,7 +2004,7 @@ def cmd_rename(args) -> int:
     enforces uniqueness (refused if taken) and frees the old name. Keys and the
     overlay address are unchanged. Requires the mesh to be up (the daemon
     running) so the hub is reachable."""
-    _require_root("rename")
+    _require_root("rename-node")
     import re
     import secrets
     import urllib.error
@@ -1925,7 +2021,7 @@ def cmd_rename(args) -> int:
 
     newname = args.hostname.strip()
     if not newname:
-        sys.exit("provide a non-empty hostname: gw rename <newname>")
+        sys.exit("provide a non-empty hostname: gw rename-node <newname>")
     if newname == cfg.hostname:
         print(f"already named {newname!r} — nothing to do")
         return 0
@@ -2141,6 +2237,7 @@ def cmd_run(args) -> int:
     sync = SyncLoop(
         directory, lambda: cfg.seeds, cfg.dir_cache_path,
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
+        expected_domain=cfg.mesh_domain,
     )
     sync.start()
 
@@ -2174,6 +2271,7 @@ def cmd_run(args) -> int:
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
         local_families=_local_families(),
         ensure_iface=_ensure_mesh_iface,
+        data_dir=cfg.data_dir,
     )
     recon.start()
 
@@ -3500,7 +3598,7 @@ def main(argv=None) -> int:
                         help="[sudo] open a 15-min door window and print a single-use join token")
     sp.add_argument("--hostname", default=None,
                     help="pin the invited node's mesh hostname (the hub fixes it; "
-                         "the joiner can't choose or later `gw rename` it). Omit "
+                         "the joiner can't choose or later `gw rename-node` it). Omit "
                          "to let the node name itself at join.")
     sp.add_argument("--segments", default=None, metavar="S1,S2",
                     help="segments the invited node belongs to (comma-sep). The "
@@ -3704,7 +3802,16 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_set_inbound)
 
     # rename
-    sp = sub.add_parser("rename",
+    sp = sub.add_parser("rename-mesh",
+                        help="[sudo] rename this mesh — domain, config, data "
+                             "dir, interface, and service move together (run on "
+                             "the hub to rename the mesh; on a member to adopt "
+                             "a rename the hub made). Old names resolve for one "
+                             "credential TTL.")
+    sp.add_argument("new_name", help="the mesh's new name (a DNS label)")
+    sp.set_defaults(fn=cmd_rename_mesh)
+
+    sp = sub.add_parser("rename-node",
                         help="[sudo] change this node's mesh hostname (hub-validated, no re-join)")
     sp.add_argument("hostname", help="the new hostname")
     sp.set_defaults(fn=cmd_rename)
