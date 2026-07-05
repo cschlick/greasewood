@@ -84,11 +84,13 @@ node by enrolling a fresh one (new identity).
 
 The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 
-1. On the anchor: `sudo gw revoke <id_pub_hex>`. This takes effect **live** — the
-   anchor immediately refuses its renew/publish and evicts it locally; other nodes
-   drop it within one credential TTL as its credential expires.
-2. (Optional) free its hostname: delete `/var/lib/greasewood/nodes/<id_pub_hex>.json`.
-3. Re-provision a replacement with a **fresh identity** (`gw join <new-token>`).
+1. On the anchor: `sudo gw revoke <node>` — where `<node>` is the node's
+   **hostname** (`db01`), its full `<host>.<mesh_domain>` mesh name, or its
+   64-char `id_pub` hex. This takes effect **live** — the anchor immediately
+   refuses its renew/publish, evicts it locally, **and frees its hostname for
+   reuse**; other nodes drop it within one credential TTL as its credential
+   expires. (A raw id hex is honored even if the node was already forgotten.)
+2. Re-provision a replacement with a **fresh identity** (`gw join <new-token>`).
 
 > `gw renew-all` does **not** speed this up. Renewal refreshes each node's *own*
 > credential and carries no information about *other* nodes — a peer drops the
@@ -104,8 +106,9 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 ## SOP: node lost / decommissioned (not compromised)
 
 Either let it expire (do nothing — its credential lapses within one TTL and peers
-remove it), or for immediate cleanup `sudo gw revoke <id_pub_hex>` and remove its
-`nodes/<id>.json` to release the hostname.
+remove it), or for immediate cleanup `sudo gw revoke <hostname>` (which also
+releases the hostname). On the node itself, `sudo gw purge` tears down its local
+config, data dir, interface, and service.
 
 ## SOP: lost door key (`door.key`)
 

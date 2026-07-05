@@ -776,7 +776,7 @@ Two properties worth knowing:
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `status`           | no    | This node's health (version, credential expiry, inbound posture, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, inbound, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
 | `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
-| `revoke <id_pub>`  | no    | Add an identity to the revoke list (on the anchor).          |
+| `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
 | `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
