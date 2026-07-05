@@ -288,3 +288,46 @@ def test_reconcile_rename_grace_dual_then_retire(tmp_path, monkeypatch):
     loop._rename_grace([], FakeHosts)
     assert ("remove", "alpha.internal") in calls             # retired
     assert not (tmp_path / "rename_grace.json").exists()
+
+
+def test_join_refuses_same_name_different_mesh(tmp_path, monkeypatch):
+    """A NEW mesh (unknown CA) whose name collides with an existing membership
+    derives the SAME config path — the refusal must still fire (the earlier
+    exclude-by-path logic masked exactly this). Refusal is pre-door: no keys
+    written, token not consumed."""
+    import types
+    import pytest
+    from greasewood.door import encode_token, generate_seed
+
+    etc_dir = tmp_path / "etc"; etc_dir.mkdir()
+    ca_existing = CAKeys.generate()
+    # Existing membership 'prod' with domain prod.internal, CA = ca_existing.
+    _write_cfg(etc_dir / "greasewood_prod.toml", tmp_path / "dp", ca_existing.ca_pub_hex,
+               iface="gw_prod", domain="prod.internal")
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    # Redirect the two leaf helpers to the tmp /etc and data root, matching
+    # their real signatures; _membership_for_ca / _iface_collision / _free_
+    # listen_port all route through _memberships, so they follow automatically.
+    _orig_memberships = cli._memberships
+    _orig_paths = cli._membership_paths
+    monkeypatch.setattr(cli, "_memberships",
+                        lambda etc=None: _orig_memberships(etc=etc_dir))
+    monkeypatch.setattr(cli, "_membership_paths",
+                        lambda key, etc=None, var=None:
+                            _orig_paths(key, etc=etc_dir, var=tmp_path))
+
+    # A DIFFERENT hub (fresh CA) for a mesh ALSO named 'prod'.
+    other_ca = CAKeys.generate()
+    token = encode_token(b"\x01" * 32, other_ca.ca_pub_bytes, "203.0.113.9",
+                         generate_seed(), 51901, mesh_domain="prod.internal")
+    ns = types.SimpleNamespace(token=token, config=None, data_dir=None,
+                               listen_port=None, interface=None, hostname="n1",
+                               inbound=None, endpoint="[fd00::1]:51900",
+                               hosts_sync=None)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_join(ns)
+    msg = str(e.value)
+    assert "cannot bridge two meshes with the same domain" in msg
+    assert "NOT consumed" in msg
+    # No state written for the refused join.
+    assert not (tmp_path / "greasewood_prod" / "id_priv.pem").exists()
