@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — nginx
+#
+#  original template based on :  Debian 13 (trixie)  ·  nginx 1.26
+#  adapted for this host      :  ..............................................
+#
+#  Writes a fullchain (leaf + mesh CA) + key under /etc/nginx/tls, plus the CA
+#  on its own for optional client-cert (mTLS) verification. If your layout
+#  differs, edit the [[file]] paths and fill the blank above. Wrong paths fail
+#  LOUDLY at `gw cert-request` time.
+#
+#  Then, in your server { } block:
+#    ssl_certificate     /etc/nginx/tls/fullchain.pem;
+#    ssl_certificate_key /etc/nginx/tls/nginx.key;
+#    # ssl_client_certificate /etc/nginx/tls/ca.pem;   # only for mTLS
+#    # ssl_verify_client on;
+#
+#  SANs default to this node's <hostname>.<mesh_domain>; pass --san to override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reload = "systemctl reload nginx"
+
+[[file]]
+role  = "key"
+path  = "/etc/nginx/tls/nginx.key"
+owner = "root:root"
+mode  = "0600"
+
+[[file]]
+role  = "fullchain"
+path  = "/etc/nginx/tls/fullchain.pem"
+owner = "root:root"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/etc/nginx/tls/ca.pem"
+owner = "root:root"
+mode  = "0644"

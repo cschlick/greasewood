@@ -1863,6 +1863,66 @@ def _resolve_anchor_url(cfg) -> str:
     return cfg.root_url
 
 
+def _shipped_profiles_dir() -> "Path":
+    return Path(__file__).resolve().parent / "profiles"
+
+
+def _shipped_profile_names() -> list:
+    d = _shipped_profiles_dir()
+    return sorted(p.stem for p in d.glob("*.toml")) if d.is_dir() else []
+
+
+def _load_cert_profile(ref: str) -> dict:
+    """Resolve a --profile argument to {reload, files, path, text}. `ref` is a
+    file path, or the bare name of a shipped template (postgres, nginx, …)."""
+    import tomllib
+    p = Path(ref)
+    if not p.exists():
+        cand = _shipped_profiles_dir() / f"{ref}.toml"
+        if not cand.exists():
+            names = ", ".join(_shipped_profile_names()) or "(none)"
+            sys.exit(f"no cert profile {ref!r} — pass a file path, or a shipped "
+                     f"name: {names}")
+        p = cand
+    text = p.read_text()
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"profile {p}: invalid TOML — {e}")
+    files = data.get("file", [])
+    if not files:
+        sys.exit(f"profile {p}: no [[file]] entries (need role + path each)")
+    for f in files:
+        if "role" not in f or "path" not in f:
+            sys.exit(f"profile {p}: every [[file]] needs a role and a path")
+        if f["role"] not in ("key", "cert", "ca", "fullchain", "bundle"):
+            sys.exit(f"profile {p}: unknown role {f['role']!r} "
+                     f"(key|cert|ca|fullchain|bundle)")
+    return {"reload": data.get("reload"), "dns": data.get("dns", []),
+            "files": files, "path": str(p), "text": text}
+
+
+def cmd_cert_profiles(args) -> int:
+    """List the bundled cert profile templates (starting points to copy + edit
+    for common TLS services). They record the OS/software version they were
+    written against; adapt paths to yours."""
+    names = _shipped_profile_names()
+    if not names:
+        print("no bundled profiles found")
+        return 0
+    print("bundled cert profiles (templates — copy + adapt to your paths):")
+    for n in names:
+        based = ""
+        for ln in (_shipped_profiles_dir() / f"{n}.toml").read_text().splitlines():
+            if "based on" in ln:
+                based = ln.split(":", 1)[1].strip() if ":" in ln else ""
+                break
+        print(f"  {n:<10} {('· ' + based) if based else ''}")
+    print("\nView/copy one:   gw cert-request --profile <name> --show")
+    print("Use one:         sudo gw cert-request --profile <name|path.toml>")
+    return 0
+
+
 def cmd_cert_request(args) -> int:
     """Request an x509 TLS cert from the anchor for a local service (e.g. Postgres).
     Generates the leaf key locally; only its public key is sent to the anchor. Unless
@@ -1872,6 +1932,18 @@ def cmd_cert_request(args) -> int:
     from .config import load_config
     from .keys import NodeKeys
     from . import certs as certmod
+
+    # A cert PROFILE bundles the file placements (paths + owner + mode) and the
+    # reload command for a service, so one command issues, places, chowns, and
+    # registers renewal. --show just prints the template (to copy + adapt) and
+    # needs neither root nor config.
+    profile = None
+    if getattr(args, "profile", None):
+        profile = _load_cert_profile(args.profile)
+        if getattr(args, "show", False):
+            print(profile["text"], end="")
+            return 0
+
     _require_root("cert-request",
                   "it reads the node's identity key and writes the TLS key (0600)")
 
@@ -1893,15 +1965,65 @@ def cmd_cert_request(args) -> int:
     # whose local mount had to fall back (domain collision): peers still
     # resolve this node under the canonical suffix, so that's the cert name.
     if not dns and not ips:
-        from .hosts import mesh_name
-        dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
-        ips = [keys.addr]
+        if profile and profile["dns"]:
+            dns = list(profile["dns"])
+        else:
+            from .hosts import mesh_name
+            dns = [mesh_name(cfg.hostname, cfg.mesh_domain)]
+            ips = [keys.addr]
 
     # CN is not operator-settable: it's cosmetic under verify-full (the SAN is
     # what's checked) and the anchor constrains it to an owned name anyway, so we
     # just derive it from the first SAN.
     cn = dns[0] if dns else (ips[0] if ips else keys.addr)
-    name = args.name or (dns[0] if dns else "service")
+    name = args.name or (Path(profile["path"]).stem if profile
+                         else (dns[0] if dns else "service"))
+
+    anchor_url = args.anchor or _resolve_anchor_url(cfg)
+    if not anchor_url:
+        sys.exit("no anchor URL — set root_url in config or pass --anchor")
+
+    if profile:
+        # Pre-validate every owner before we bother the anchor, so a typo'd
+        # user fails instantly rather than after burning a cert.
+        for f in profile["files"]:
+            if f.get("owner"):
+                try:
+                    certmod._resolve_owner(f["owner"])
+                except RuntimeError as e:
+                    sys.exit(str(e))
+        try:
+            key_pem, cert_pem, ca_pem = certmod.fetch_cert(
+                anchor_url, keys, dns=dns, ips=ips, cn=cn)
+            certmod.place_cert_files(profile["files"], key_pem, cert_pem, ca_pem)
+        except certmod.CertRejected as e:
+            sys.exit(f"cert request rejected: {e}")
+        except (RuntimeError, OSError) as e:
+            sys.exit(f"cert request/placement failed: {e}")
+
+        reload_cmd = args.reload_cmd or profile["reload"]
+        auto = not args.no_auto_renew
+        certmod.record_managed(cfg.data_dir, {
+            "name": name, "cn": cn, "dns": dns, "ips": ips,
+            "files": profile["files"], "reload_cmd": reload_cmd,
+            "auto_renew": auto,
+        })
+        print(f"TLS certificate issued + placed via profile "
+              f"'{Path(profile['path']).name}'.")
+        print(f"  cn / SAN : {cn}" + (f"  (+{len(dns) - 1} more)" if len(dns) > 1 else ""))
+        for f in profile["files"]:
+            own = f.get("owner", "root:root")
+            mode = int(f["mode"], 8) if f.get("mode") else \
+                certmod._ROLE_MODE.get(f["role"], 0o644)
+            print(f"  {f['role']:<9}→ {f['path']}  [{own} {mode:04o}]")
+        if reload_cmd:
+            print(f"  reload   : {reload_cmd}")
+        if auto:
+            print("The daemon re-issues, re-places (with owner/mode), and runs "
+                  "reload at ~half TTL — the whole lifecycle is hands-off.")
+        else:
+            print("Auto-renewal disabled (--no-auto-renew) — re-run before expiry.")
+        return 0
 
     # Resolve the three destinations. Default is <out-dir>/<name>.{key,crt} +
     # <out-dir>/ca.crt; each can be overridden independently so the key, cert,
@@ -1915,10 +2037,6 @@ def cmd_cert_request(args) -> int:
     # Capture the prior destinations so we can flag any that are now orphaned.
     prior = [c for c in certmod.load_manifest(cfg.data_dir) if c.get("name") == name]
     old_paths = set(certmod.entry_paths(prior[0])) if prior else set()
-
-    anchor_url = args.anchor or _resolve_anchor_url(cfg)
-    if not anchor_url:
-        sys.exit("no anchor URL — set root_url in config or pass --anchor")
 
     try:
         key_path, crt_path, ca_path = certmod.issue_cert(
@@ -4047,7 +4165,22 @@ def main(argv=None) -> int:
     sp.add_argument("--no-auto-renew", dest="no_auto_renew", action="store_true",
                     help="do not auto-renew this cert in the daemon (one-shot; "
                          "re-run manually before expiry)")
+    sp.add_argument("--profile", default=None, metavar="NAME|PATH",
+                    help="a cert profile (a shipped template name like 'postgres', "
+                         "or a path to your own .toml): issues + places the "
+                         "key/cert/ca where the service wants them, with the "
+                         "right owner/mode, and registers its reload. The daemon "
+                         "re-places them on every renewal too. See 'gw cert-profiles'.")
+    sp.add_argument("--show", action="store_true",
+                    help="with --profile, print that profile template (to copy "
+                         "and adapt) and exit — no root/config needed")
     sp.set_defaults(fn=cmd_cert_request)
+
+    # cert-profiles
+    sp = sub.add_parser("cert-profiles",
+                        help="list the bundled cert profile templates for common "
+                             "TLS services (postgres, nginx, haproxy, redis)")
+    sp.set_defaults(fn=cmd_cert_profiles)
 
     # cert-status
     sp = sub.add_parser("cert-status", help="show local TLS certs and expiry")
@@ -4136,10 +4269,11 @@ def main(argv=None) -> int:
     _setup_logging(args.verbose)
     # -c discovery: with one membership on the host, every command finds it
     # unaided; with several, demand -c (loudly, listing them). create/join
-    # derive their own config from the mesh name; the service commands manage
-    # units, not meshes.
-    if args.config is None and args.cmd not in (
-            "create", "join"):
+    # derive their own config from the mesh name; cert-profiles (and
+    # cert-request --show) just read bundled templates — no mesh needed.
+    _no_config = args.cmd in ("create", "join", "cert-profiles") or (
+        args.cmd == "cert-request" and getattr(args, "show", False))
+    if args.config is None and not _no_config:
         args.config = str(_discover_config())
     try:
         return args.fn(args)

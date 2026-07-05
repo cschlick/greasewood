@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — Redis
+#
+#  original template based on :  Debian 13 (trixie)  ·  Redis 7.4
+#  adapted for this host      :  ..............................................
+#
+#  Writes the leaf key/cert and the mesh CA under /etc/redis/tls. If your layout
+#  differs, edit the [[file]] paths and fill the blank above. Wrong paths or a
+#  missing 'redis' user fail LOUDLY at `gw cert-request` time.
+#
+#  Then, in redis.conf:
+#    tls-port 6379
+#    port 0                                 # TLS-only
+#    tls-cert-file    /etc/redis/tls/redis.crt
+#    tls-key-file     /etc/redis/tls/redis.key
+#    tls-ca-cert-file /etc/redis/tls/ca.crt
+#
+#  NOTE: Redis does not re-read TLS files on SIGHUP; the reload below RESTARTS
+#  it (a brief blip). If you can't take that, swap in a CONFIG SET-based reload.
+#
+#  SANs default to this node's <hostname>.<mesh_domain>; pass --san to override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+reload = "systemctl restart redis-server"
+
+[[file]]
+role  = "key"
+path  = "/etc/redis/tls/redis.key"
+owner = "redis:redis"
+mode  = "0600"
+
+[[file]]
+role  = "cert"
+path  = "/etc/redis/tls/redis.crt"
+owner = "redis:redis"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/etc/redis/tls/ca.crt"
+owner = "redis:redis"
+mode  = "0644"

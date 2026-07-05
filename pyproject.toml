@@ -48,6 +48,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["greasewood"]
 
+[tool.setuptools.package-data]
+greasewood = ["profiles/*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--ignore=tests/integration -m 'not deep'"
