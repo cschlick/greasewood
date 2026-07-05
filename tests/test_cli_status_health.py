@@ -174,3 +174,84 @@ def test_syncloop_lifecycle_methods_exist(tmp_path):
     finally:
         loop.stop()
         t.join(timeout=2)
+
+
+def test_roster_live_mode_columns(tmp_path):
+    """Live roster: right side is link · per-second rate · latency; the latency
+    cell shows the async value (or '…' until a peer's ping returns)."""
+    import base64
+    import time
+    import types
+    from greasewood import cli, wg
+    keys = NodeKeys.generate()
+    ca = CAKeys.generate()
+    linked, pending = NodeKeys.generate(), NodeKeys.generate()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+
+    def rec(k, name):
+        cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
+                          hostname=name, caps=["segment:mesh"], iat=now,
+                          exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
+        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+                          cred=cred).sign(k.id_priv)
+    records = [rec(linked, "db01"), rec(pending, "web1")]
+    cfg = types.SimpleNamespace(caps=["segment:mesh"], mesh_domain="gw.internal")
+    nowe = int(time.time())
+    live = {
+        base64.b64encode(linked.wg_pub_bytes).decode():
+            wg.LivePeer(wg_pub_b64="x", endpoint="", allowed_ips="",
+                        latest_handshake=nowe - 5, rx_bytes=0, tx_bytes=0),
+        base64.b64encode(pending.wg_pub_bytes).decode():
+            wg.LivePeer(wg_pub_b64="y", endpoint="", allowed_ips="",
+                        latest_handshake=nowe - 4, rx_bytes=0, tx_bytes=0),
+    }
+    latency = {linked.addr: "12ms"}                       # web1's ping not back yet
+    rates = {linked.addr: "↓1.2M/s ↑300K/s"}
+    lines = cli._roster_lines(records, cfg, dt.datetime.now(_UTC),
+                              keys.id_pub_hex, live, True,
+                              latency=latency, rates=rates)
+    joined = "\n".join(lines)
+    assert "link" in joined and "rate" in joined and "latency" in joined
+    assert "12ms" in joined and "↓1.2M/s ↑300K/s" in joined
+    assert "…" in joined                                  # pending ping placeholder
+
+
+def test_ping_rtt_parses_and_times_out(monkeypatch):
+    import subprocess
+    from greasewood import cli
+
+    def ok(*a, **k):
+        return subprocess.CompletedProcess(a[0], 0, "64 bytes ... time=13.4 ms\n", "")
+    monkeypatch.setattr(subprocess, "run", ok)
+    assert cli._ping_rtt("fd8d::1") == "13ms"
+
+    def down(*a, **k):
+        return subprocess.CompletedProcess(a[0], 1, "", "")
+    monkeypatch.setattr(subprocess, "run", down)
+    assert cli._ping_rtt("fd8d::2") == "—"
+
+
+def test_latency_prober_updates_results(monkeypatch):
+    import time
+    from greasewood import cli
+    monkeypatch.setattr(cli, "_ping_rtt", lambda a: "7ms")
+    p = cli._LatencyProber()
+    p.set_targets(["fd8d::1", "fd8d::2"])
+    p.start()
+    for _ in range(20):
+        if p.results.get("fd8d::1") and p.results.get("fd8d::2"):
+            break
+        time.sleep(0.05)
+    p.stop()
+    assert p.results["fd8d::1"] == "7ms" and p.results["fd8d::2"] == "7ms"
+
+
+def test_status_live_requires_root_and_tty(monkeypatch):
+    import pytest
+    import types
+    from greasewood import cli
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    with pytest.raises(SystemExit) as e:
+        cli._status_live(types.SimpleNamespace(), "abc")
+    assert "needs root" in str(e.value)
