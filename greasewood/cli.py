@@ -2229,15 +2229,66 @@ def cmd_rename_node(args) -> int:
 # run
 # ---------------------------------------------------------------------------
 
+def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs):
+    """Bring up the anchor-only services and return (get_revoked, door_watcher):
+    load the CA, start the HTTP control plane, and start the enrollment door
+    watcher. get_revoked is the live revoke-list reader the reconcile loop uses;
+    door_watcher is returned so cmd_run can stop it at shutdown (the HTTP server
+    is a daemon thread that dies with the process, so it isn't returned)."""
+    from .ca import CA
+    from .keys import CAKeys
+    from .server import ControlServer
+    from .enroll import DoorWatcher, EnrollContext
+    from . import wg as wgmod
+
+    if not cfg.ca_key_file:
+        sys.exit("anchor role requires ca_key_file in [anchor]")
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
+    get_revoked = ca.load_revoked_set
+    log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
+    # Re-apply door routing in case the machine rebooted since create.
+    wgmod.setup_door_routing()
+
+    # Bind the control plane to the overlay address (reachable only through the
+    # mesh) and loopback (for the anchor talking to itself) — NOT "::". This
+    # keeps it off the underlay structurally, no firewall rule needed.
+    port = _control_port(cfg)
+    listen_addrs = [f"[{keys.addr}]:{port}", f"[::1]:{port}"]
+
+    # Fleet-wide renew hint (gw renew-all): served in /directory, re-read per
+    # request so a bump takes effect without restarting the anchor.
+    def read_renew_after():
+        try:
+            return (cfg.data_dir / "renew_after").read_text().strip() or None
+        except FileNotFoundError:
+            return None
+
+    server = ControlServer(
+        listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
+        ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
+        mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after)
+    server.start()
+
+    door_watcher = DoorWatcher(
+        EnrollContext(
+            ca=ca, directory=directory, node_keys=keys, wg_iface=cfg.wg_interface,
+            get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
+            cache_path=cfg.dir_cache_path, control_port=port,
+            mesh_domain=cfg.mesh_domain, data_dir=cfg.data_dir),
+        door_port=cfg.door_port)
+    door_watcher.start()
+    log.info("door watcher started")
+    return get_revoked, door_watcher
+
+
 def cmd_run(args) -> int:
     _require_root("run")
     from .config import load_config
-    from .keys import NodeKeys, CAKeys
-    from .ca import CA
+    from .keys import NodeKeys
     from .directory import Directory
     from .reconcile import ReconcileLoop
     from .sync import SyncLoop, push_record
-    from .server import ControlServer
     from .renewal import RenewalLoop
     from . import wg as wgmod
 
@@ -2291,7 +2342,6 @@ def cmd_run(args) -> int:
             # the systemd unit's Restart=on-failure.
             sys.exit(str(e))
 
-    ca: CA | None = None
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
     door_watcher = None
@@ -2300,57 +2350,9 @@ def cmd_run(args) -> int:
     # without a daemon restart — both for control-plane refusal and local
     # eviction. Plain nodes have no revoke list (expiry-based revocation).
     get_revoked: "callable" = set
-    is_anchor = cfg.role == "anchor"
-
-    if is_anchor:
-        if not cfg.ca_key_file:
-            sys.exit("anchor role requires ca_key_file in [anchor]")
-        ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-        ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
-        get_revoked = ca.load_revoked_set
-        log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
-        # Re-apply door routing in case the machine rebooted since create
-        wgmod.setup_door_routing()
-
-        # Bind the control plane to the overlay address (reachable only through
-        # the mesh) and loopback (for the anchor talking to itself) — NOT "::".
-        # This keeps it off the underlay structurally, no firewall rule needed.
-        port = _control_port(cfg)
-        listen_addrs = [f"[{keys.addr}]:{port}", f"[::1]:{port}"]
-
-        # Fleet-wide renew hint (gw renew-all): served in /directory, re-read
-        # per request so a bump takes effect without restarting the anchor.
-        def _read_renew_after():
-            try:
-                return (cfg.data_dir / "renew_after").read_text().strip() or None
-            except FileNotFoundError:
-                return None
-
-        srv = ControlServer(
-            listen_addrs,
-            directory,
-            get_ca_pubs=get_ca_pubs,
-            get_revoked=get_revoked,
-            ca=ca,
-            cache_path=cfg.dir_cache_path,
-            tls_cert_ttl=cfg.tls_cert_ttl,
-            mesh_domain=cfg.mesh_domain,
-            get_renew_after=_read_renew_after,
-        )
-        srv.start()
-
-        from .enroll import DoorWatcher, EnrollContext
-        door_watcher = DoorWatcher(
-            EnrollContext(
-                ca=ca, directory=directory, node_keys=keys,
-                wg_iface=cfg.wg_interface, get_ca_pubs=get_ca_pubs,
-                get_revoked=get_revoked, cache_path=cfg.dir_cache_path,
-                control_port=_control_port(cfg), mesh_domain=cfg.mesh_domain,
-                data_dir=cfg.data_dir),
-            door_port=cfg.door_port,
-        )
-        door_watcher.start()
-        log.info("door watcher started")
+    if cfg.role == "anchor":
+        get_revoked, door_watcher = _start_anchor_control_plane(
+            cfg, keys, directory, get_ca_pubs)
 
     # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval
