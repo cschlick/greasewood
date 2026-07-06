@@ -142,10 +142,9 @@ class RenewalLoop:
 
     def _renew_and_publish(self) -> Credential:
         """Renew the credential, update the local directory, and re-publish the
-        fresh record to the anchor. The push is not optional: peers pull records
-        from the anchor, so a credential that only lived locally would never reach
-        them and they would evict this node at its old expiry. Raises on any
-        failure so the caller's retry/backoff loop re-attempts the whole step."""
+        fresh record to the anchor (the push is not optional — see the module
+        docstring). Raises on any failure so the caller's retry/backoff loop
+        re-attempts the whole step."""
         from .sync import push_record
         new_cred = _do_renew(self._get_anchor_url(), self._keys)
         self._cred = new_cred

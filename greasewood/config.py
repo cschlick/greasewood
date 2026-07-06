@@ -16,14 +16,14 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    # Node identity
+    # Node identity  [node]
     data_dir: Path
     hostname: str
     role: str              # "anchor" | "node"
     caps: list[str]
     endpoints: list[str]   # explicit endpoints e.g. ["[2001:db8::1]:51900"]
 
-    # Network
+    # Network  [network]
     wg_interface: str
     listen_port: int
     overlay_prefix: str    # the fleet's overlay /64, e.g. "fd8d:e5c1:db1a:7::"
@@ -95,8 +95,15 @@ def load_config(path: Path) -> Config:
     if not node.get("hostname"):
         sys.exit("config: [node] hostname is required")
 
+    data_dir = Path(node.get("data_dir", "/var/lib/greasewood")).expanduser()
+    # Default to <data_dir>/audit.log; "" (explicitly empty) disables it.
+    raw_audit = net.get("audit_log")
+    audit_log = (None if raw_audit == ""
+                 else Path(raw_audit).expanduser() if raw_audit
+                 else data_dir / "audit.log")
+
     cfg = Config(
-        data_dir=Path(node.get("data_dir", "/var/lib/greasewood")).expanduser(),
+        data_dir=data_dir,
         hostname=node["hostname"],
         role=node.get("role", "node"),
         # Default must be a segment: tag — peering is decided by shared
@@ -114,12 +121,7 @@ def load_config(path: Path) -> Config:
         hosts_sync=bool(net.get("hosts_sync", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
         aliases=list(net.get("aliases", [])),
-        # Default to <data_dir>/audit.log; "" (explicitly empty) disables it.
-        audit_log=(
-            None if net.get("audit_log") == ""
-            else Path(net["audit_log"]).expanduser() if "audit_log" in net
-            else Path(node.get("data_dir", "/var/lib/greasewood")).expanduser() / "audit.log"
-        ),
+        audit_log=audit_log,
 
         ca_pubs=ca_sec.get("trusted_pubs", []),
 

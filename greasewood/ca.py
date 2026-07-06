@@ -114,7 +114,7 @@ class CA:
             if self.is_revoked(id_pub):
                 raise ValueError("id_pub is on the revoke list")
 
-            owner = self._hostname_owner(hostname)
+            owner = self.hostname_owner(hostname)
             if owner is not None and owner != id_pub.hex():
                 raise ValueError(
                     f"hostname {hostname!r} is already in use by another node "
@@ -158,7 +158,7 @@ class CA:
             if self.is_revoked(req.id_pub):
                 raise ValueError("id_pub is on the revoke list")
 
-            node_info = self._load_node_info(req.id_pub)
+            node_info = self.node_info(req.id_pub)
             if node_info is None:
                 raise UnknownNodeError("unknown node — issue a credential first")
 
@@ -219,14 +219,18 @@ class CA:
 
     def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
         """(hostname, caps) for an enrolled node, or None if unknown."""
-        return self._load_node_info(id_pub)
+        p = self._node_path(id_pub)
+        if not p.exists():
+            return None
+        d = json.loads(p.read_text())
+        return d.get("hostname", ""), d.get("caps", [])
 
     def set_caps(self, id_pub: bytes, caps: list[str]) -> None:
         """Rewrite a known node's caps in the registry. Takes effect at the
         node's NEXT renewal — `renew` re-issues from the registry, so the node
         picks up the change with no re-join. Raises ValueError if unknown."""
         with self._lock:
-            info = self._load_node_info(id_pub)
+            info = self.node_info(id_pub)
             if info is None:
                 raise UnknownNodeError("unknown node — enroll it first")
             hostname, _ = info
@@ -235,13 +239,13 @@ class CA:
     # --- revoke list ---
 
     def is_revoked(self, id_pub: bytes) -> bool:
-        return id_pub.hex() in self._load_revoked()
+        return id_pub.hex() in self.load_revoked_set()
 
     def add_revoke(self, id_pub: bytes) -> bool:
         """Revoke an identity and release its hostname. Returns True if the
         node's caps record existed and was removed (i.e. a hostname was freed)."""
         with self._lock:
-            revoked = self._load_revoked()
+            revoked = self.load_revoked_set()
             revoked.add(id_pub.hex())
             self._save_revoked(revoked)
             freed = self.forget_node(id_pub)
@@ -263,9 +267,6 @@ class CA:
             return False
 
     def load_revoked_set(self) -> set[str]:
-        return self._load_revoked()
-
-    def _load_revoked(self) -> set[str]:
         if not self._revoke_path.exists():
             return set()
         return set(json.loads(self._revoke_path.read_text()).get("revoked", []))
@@ -285,24 +286,12 @@ class CA:
         p.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(p, json.dumps({"hostname": hostname, "caps": caps}, indent=2))
 
-    def _load_node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
-        p = self._node_path(id_pub)
-        if not p.exists():
-            return None
-        d = json.loads(p.read_text())
-        return d.get("hostname", ""), d.get("caps", [])
-
     def hostname_owner(self, hostname: str) -> str | None:
-        """Public: id_pub hex already using this (sanitized) hostname, or None.
-        Used by `gw invite --hostname` to verify a pinned name is free before
-        issuing the token, so a pinned name can't collide at enrollment."""
-        return self._hostname_owner(hostname)
-
-    def _hostname_owner(self, hostname: str) -> str | None:
         """id_pub hex of the node already using this (sanitized) hostname among
-        the credentials this CA has issued, or None. Note: this tracks the
-        names the CA *issued*; a decommissioned node keeps its name until its
-        nodes/<id>.json is removed."""
+        the credentials this CA has issued, or None. `gw invite --hostname`
+        uses it to verify a pinned name is free before issuing the token. Note:
+        this tracks the names the CA *issued*; a decommissioned node keeps its
+        name until its nodes/<id>.json is removed."""
         from .hosts import sanitize
         want = sanitize(hostname)
         nodes_dir = self._data_dir / "nodes"
