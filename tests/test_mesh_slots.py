@@ -415,3 +415,18 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     joined = "\n".join(lines)
     assert "the anchor renamed this mesh" in joined
     assert "sudo gw rename-mesh prod-fleet" in joined
+
+
+def test_cmd_join_second_leg_framing_is_in_scope():
+    """Regression: extracting _enroll_over_door moved the framing imports out of
+    cmd_join, so the second-leg record publish raised NameError — silently
+    swallowed by its try/except, leaving the node absent from the anchor's
+    directory until the next sync. Guard: the helper names cmd_join uses for the
+    second leg must resolve at module scope."""
+    import inspect
+    from greasewood import cli
+    src = inspect.getsource(cli.cmd_join)
+    # the second leg calls send_msg/recv_msg — they must be imported inside cmd_join
+    assert "send_msg" in src and "recv_msg" in src
+    assert "from .door import recv_msg, send_msg" in src or \
+           "from .door import send_msg, recv_msg" in src
