@@ -52,7 +52,7 @@ def test_health_block_shows_self_facts(tmp_path, capsys):
     assert "cred     : expires" in out and "in 17h" in out     # 18h ttl, ~17h left
     assert "reach    : advertises an endpoint" in out
     assert "trust    : 1 trusted CA · anchor http://[fd8d" in out
-    assert "sync     : directory synced 0s ago" in out
+    assert "synced   : directory synced 0s ago" in out
 
 
 def test_expired_credential_is_flagged(tmp_path, capsys):
@@ -64,13 +64,13 @@ def test_expired_credential_is_flagged(tmp_path, capsys):
 def test_never_synced_and_stale(tmp_path, capsys):
     args = _node(tmp_path)                                      # no sync stamp
     cli.cmd_watch(args)
-    assert "sync     : never" in capsys.readouterr().out
+    assert "synced   : never" in capsys.readouterr().out
 
     old = dt.datetime.now(_UTC) - dt.timedelta(minutes=6)
     sync.stamp_sync_path(tmp_path).write_text(old.replace(microsecond=0).isoformat())
     cli.cmd_watch(args)
     out = capsys.readouterr().out
-    assert "sync     : ⚠" in out and "anchor unreachable?" in out
+    assert "synced   : ⚠" in out and "anchor unreachable?" in out
 
 
 def test_outbound_only_posture(tmp_path, capsys):

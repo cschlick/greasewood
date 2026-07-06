@@ -132,6 +132,9 @@ class RenewalLoop:
             endpoints=self._endpoints,
             cred=cred,
             aliases=self._aliases,
+            # Preserve the live-link set the reconcile loop maintains, so a
+            # renewal doesn't wipe it (it composes via the directory seq).
+            reachable=list(existing.reachable) if existing else [],
         ).sign(self._keys.id_priv)
         self._directory.put(record)
         self._directory.save(self._cache_path)

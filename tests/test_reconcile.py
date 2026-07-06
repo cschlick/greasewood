@@ -228,7 +228,7 @@ class TestReconcileTrustGate:
         fake = _FakeWg()
         monkeypatch.setattr(reconcile, "wgmod", fake)
 
-        trusted = reconcile_once(
+        trusted, _ = reconcile_once(
             "gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
             [ca.ca_pub_bytes], revoked,
         )
@@ -431,3 +431,54 @@ class TestEndpointBackoff:
         assert fake.set_calls == 1                          # re-set for keepalive
         assert fake.peers[pub].keepalive == 0               # futile poke stopped
         assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"  # still pinned
+
+
+class TestReachablePublish:
+    """reconcile_once reports the live-link set; ReconcileLoop publishes it
+    (rate-limited) so it rides the directory to the fleet."""
+
+    def test_reconcile_reports_live_links(self, monkeypatch):
+        import base64
+        import time as _time
+        from greasewood import reconcile as rmod
+        from greasewood.reconcile import reconcile_once
+        from greasewood.wg import LivePeer
+        ca = CAKeys.generate()
+        local, up, down = NodeKeys.generate(), NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        rup = _make_record(up, _make_cred(up, ca, "up"), endpoints=["1.1.1.1:51900"])
+        rdn = _make_record(down, _make_cred(down, ca, "down"), endpoints=["2.2.2.2:51900"])
+        directory.put(rup)
+        directory.put(rdn)
+        fake = _FakeWg()
+        pu = base64.b64encode(up.wg_pub_bytes).decode()
+        pd = base64.b64encode(down.wg_pub_bytes).decode()
+        fake.peers[pu] = LivePeer(wg_pub_b64=pu, endpoint="1.1.1.1:51900",
+                                  allowed_ips=f"{rup.cred.addr}/128",
+                                  latest_handshake=int(_time.time()) - 5)  # live
+        fake.peers[pd] = LivePeer(wg_pub_b64=pd, endpoint="2.2.2.2:51900",
+                                  allowed_ips=f"{rdn.cred.addr}/128",
+                                  latest_handshake=0)                       # never
+        monkeypatch.setattr(rmod, "wgmod", fake)
+        _trusted, reachable = reconcile_once(
+            "gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+            [ca.ca_pub_bytes], set())
+        assert reachable == [rup.cred.addr]           # only the handshaking peer
+
+    def test_loop_publishes_on_change_rate_limited(self):
+        from greasewood.reconcile import ReconcileLoop
+        published = []
+        loop = ReconcileLoop(
+            iface="gw-x", directory=Directory(), local_id_pub=b"x" * 32,
+            local_caps=[], get_ca_pubs=lambda: [], get_revoked=lambda: set(),
+            on_reachable=published.append, reachable_min_interval=30.0)
+        loop._maybe_publish_reachable(["a"])
+        assert published == [["a"]]                    # first change fires
+        loop._maybe_publish_reachable(["a"])
+        assert len(published) == 1                     # unchanged → no fire
+        loop._maybe_publish_reachable(["a", "b"])
+        assert len(published) == 1                     # changed but < min interval
+        loop._last_reachable_pub -= 31                 # pretend interval elapsed
+        loop._maybe_publish_reachable(["a", "b"])
+        assert published[-1] == ["a", "b"]             # now it fires
