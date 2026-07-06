@@ -250,7 +250,7 @@ One greppable [logfmt](https://brandur.org/logfmt) line per command:
 ```
 ts=2026-07-02T10:15:03Z INFO greasewood.audit: cmd rc=0 t=12ms \
   ctx="reconcile: +peer db01 [fd8d:e5c1:db1a:7::a1] seg=prod" \
-  argv="wg set gw_myfleet peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
+  argv="wg set gw-myfleet peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
 ```
 
 So months later you can answer "when did db01 get added, why, and did it
@@ -275,7 +275,7 @@ $ gw narrate --since 2h
       overlay address fd8d:e5c1:db1a:7::a1 (a /128 host route — one address per
       peer, derived from its identity key); dial it at 203.0.113.7:51900; send a
       keepalive every 25s to hold the path open.                          (14ms)
-    ✓ Route traffic for fd8d:e5c1:db1a:7::a1 over gw_myfleet — wg configures the
+    ✓ Route traffic for fd8d:e5c1:db1a:7::a1 over gw-myfleet — wg configures the
       peer but not the kernel route, so greasewood adds it explicitly.     (3ms)
 ```
 
@@ -321,7 +321,7 @@ sudo gw run
 
 `create` generates the CA, the persistent door key, the policy routing for
 the enrollment door, and the anchor's own credential, then writes
-`/etc/greasewood_myfleet.toml`. `gw run` starts the daemon: it brings up the `gw_myfleet`
+`/etc/greasewood_myfleet.toml`. `gw run` starts the daemon: it brings up the `gw-myfleet`
 WireGuard interface, serves the control plane, and watches for door windows.
 
 The anchor takes this machine's hostname like any other node — it isn't named
@@ -385,7 +385,7 @@ exactly what the door exists to prevent.
 ```bash
 gw watch --snapshot        # local node + directory view (fleet-wide link state)
 sudo gw diagnose db01 web1 # pairwise: can db01 and web1 form a tunnel?
-sudo wg show gw_myfleet    # live WireGuard peers
+sudo wg show gw-myfleet    # live WireGuard peers
 ```
 
 `gw diagnose` is the tool to reach for when a peer won't connect. It's
@@ -560,13 +560,13 @@ On a default-drop host, allow (nftables):
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
 | underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
 | `lo`       | `iifname "lo" accept`         | the anchor talks to itself (`::1:51902`)|
-| `gw_<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the anchor** |
+| `gw-<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the anchor** |
 | `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when anchor** |
 
 ```
 udp dport { 51900, 51901 } accept
 iifname "lo" accept
-iifname "gw_myfleet" tcp dport 51902 accept
+iifname "gw-myfleet" tcp dport 51902 accept
 iifname "gw-door" tcp dport 51903 accept
 ```
 
@@ -605,7 +605,7 @@ table inet gw_anchor {
         # --- tunnel-internal services (TCP), scoped to their interface.
         # 51902 is reachable only as a verified mesh peer; 51903 only
         # through a token's door tunnel.
-        iifname "gw_myfleet" tcp dport 51902 accept comment "control plane"
+        iifname "gw-myfleet" tcp dport 51902 accept comment "control plane"
         iifname "gw-door" tcp dport 51903 accept comment "enroll server"
 
         # --- your own management access — adjust to taste ------------------
@@ -780,7 +780,7 @@ Two properties worth knowing:
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
 | `watch`            | sudo  | **Live** mesh dashboard (redraws in place, so it needs sudo for live WireGuard state): the split roster + link state, per-second throughput, and a latency column that fills in as pings return. Ctrl-C to exit. **`--snapshot`** prints one static view and exits (no root; auto-used when piped) — for logging/scripts. `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). |
-| `config [key]`     | no    | Print resolved config facts machine-readably for scripting — `gw config interface` gives the mesh interface name (`gw_<mesh>`), no arg lists all as `key<TAB>value`. |
+| `config [key]`     | no    | Print resolved config facts machine-readably for scripting — `gw config interface` gives the mesh interface name (`gw-<mesh>`), no arg lists all as `key<TAB>value`. |
 | `firewall`         | no    | Print the recommended firewall ruleset (a **suggestion** — greasewood never changes your firewall; nothing is applied). The same posture on every node; with `sudo` also flags anything that looks blocked. |
 | `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
 | `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
@@ -818,7 +818,7 @@ role     = "node"          # "anchor" | "node"
 caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
 
 [network]
-interface  = "gw_myfleet"
+interface  = "gw-myfleet"
 listen_port = 51900
 overlay_prefix = "fd8d:e5c1:db1a:7::"        # the fleet's overlay /64 (ULA)
 seeds    = ["http://[<anchor-overlay>]:51902"]  # directory URLs to pull (the anchor)
@@ -900,7 +900,7 @@ sudo gw join "$TOKEN_B"        # that's it
 `join` routes by the token's **CA**: a token for a mesh you're already on
 refreshes that membership; an unknown CA **auto-provisions the next membership
 slot** — config `/etc/greasewood2.toml`, data `/var/lib/greasewood2`, interface
-`gw_<name>`, UDP `51910` (then +10 each). The mesh's **name domain rides
+`gw-<name>`, UDP `51910` (then +10 each). The mesh's **name domain rides
 in the token** (declared once at `gw create <name>` → `<name>.internal`), so
 every member of a mesh — including multi-mesh hosts — mounts it under the SAME
 suffix, and TLS names agree fleet-wide with no flags.

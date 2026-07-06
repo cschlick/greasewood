@@ -38,7 +38,7 @@ caps = ["segment:mesh"]
 
 
 [network]
-interface = "gw_myfleet"
+interface = "gw-myfleet"
 listen_port = 51900
 
 # The fleet's overlay /64 (a ULA). Must be identical on every node in a mesh —

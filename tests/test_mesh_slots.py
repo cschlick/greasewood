@@ -10,7 +10,7 @@ from greasewood import cli
 from greasewood.keys import CAKeys
 
 
-def _write_cfg(path: Path, data_dir: Path, ca_hex: str, iface="gw_x",
+def _write_cfg(path: Path, data_dir: Path, ca_hex: str, iface="gw-x",
                port=51900, domain="x.internal"):
     path.write_text(f"""[node]
 hostname = "n1"
@@ -32,11 +32,11 @@ def test_membership_key_and_paths():
     mp = cli._membership_paths("prod-fleet")
     assert mp["config"] == Path("/etc/greasewood_prod-fleet.toml")
     assert mp["data_dir"] == Path("/var/lib/greasewood_prod-fleet")
-    assert mp["interface"] == "gw_prod-fleet"           # 13 chars, fits
+    assert mp["interface"] == "gw-prod-fleet"           # 13 chars, fits
     assert mp["unit"] == "greasewood@prod-fleet"
-    # 15-char kernel limit: gw_ + first 12 chars only.
+    # 15-char kernel limit: gw- + first 12 chars only.
     long = cli._membership_paths("engineering-platform")
-    assert long["interface"] == "gw_engineering"
+    assert long["interface"] == "gw-engineering"
     assert len(long["interface"]) <= 15
 
 
@@ -84,15 +84,15 @@ def test_iface_truncation_collision_detected(tmp_path):
     detected so join/create can refuse loudly instead of silently renaming."""
     ca = CAKeys.generate()
     _write_cfg(tmp_path / "greasewood_engineering-platform.toml", tmp_path / "da",
-               ca.ca_pub_hex, iface="gw_engineering")
+               ca.ca_pub_hex, iface="gw-engineering")
     iface = cli._membership_paths("engineering-payroll")["interface"]
-    assert iface == "gw_engineering"                     # same truncation
+    assert iface == "gw-engineering"                     # same truncation
     clash = cli._iface_collision(
         iface, tmp_path / "greasewood_engineering-payroll.toml", etc=tmp_path)
     assert clash == tmp_path / "greasewood_engineering-platform.toml"
     # Its own config never counts as a clash.
     assert cli._iface_collision(
-        "gw_engineering", tmp_path / "greasewood_engineering-platform.toml",
+        "gw-engineering", tmp_path / "greasewood_engineering-platform.toml",
         etc=tmp_path) is None
 
 
@@ -123,7 +123,7 @@ def test_shared_prefix_warns_distinct_does_not(tmp_path, caplog):
         (tmp_path / "greasewood_alpha.toml").read_text().replace(
             "[network]", '[network]\noverlay_prefix = "fd8d:e5c1:db1a:7::"'))
     cfg2 = tmp_path / "greasewood_beta.toml"
-    _write_cfg(cfg2, tmp_path / "db", ca_b.ca_pub_hex, iface="gw_beta",
+    _write_cfg(cfg2, tmp_path / "db", ca_b.ca_pub_hex, iface="gw-beta",
                port=51910, domain="beta.internal")
     cfg2.write_text(cfg2.read_text().replace(
         "[network]", '[network]\noverlay_prefix = "fdde:cafc:ffe:e::"'))
@@ -168,7 +168,7 @@ def test_join_derives_paths_with_no_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     mp = {"config": tmp_path / "greasewood_zzz.toml",
           "data_dir": tmp_path / "greasewood_zzz",
-          "interface": "gw_zzz", "unit": "greasewood@zzz"}
+          "interface": "gw-zzz", "unit": "greasewood@zzz"}
     monkeypatch.setattr(cli, "_membership_paths", lambda key, **kw: mp)
     monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])
     monkeypatch.setattr(cli, "_membership_for_ca", lambda ca, etc=None: None)
@@ -202,7 +202,7 @@ def test_migrate_membership_moves_everything(tmp_path, monkeypatch):
     (old_data / "id_pub.hex").write_text("aa")
     ca = CAKeys.generate()
     cfg = etc / "greasewood_alpha.toml"
-    _write_cfg(cfg, old_data, ca.ca_pub_hex, iface="gw_alpha",
+    _write_cfg(cfg, old_data, ca.ca_pub_hex, iface="gw-alpha",
                domain="alpha.internal")
     monkeypatch.setattr("greasewood.wg.interface_exists", lambda i: False)
     monkeypatch.setattr("shutil.which", lambda n: None)       # no systemctl
@@ -212,7 +212,7 @@ def test_migrate_membership_moves_everything(tmp_path, monkeypatch):
     assert not cfg.exists()
     text = new_cfg.read_text()
     assert 'mesh_domain = "beta.internal"' in text
-    assert 'interface = "gw_beta"' in text
+    assert 'interface = "gw-beta"' in text
     assert f'data_dir = "{var / "greasewood_beta"}"' in text
     assert (var / "greasewood_beta" / "id_pub.hex").read_text() == "aa"
     assert not old_data.exists()
@@ -228,9 +228,9 @@ def test_migrate_membership_refuses_collisions(tmp_path, monkeypatch):
     (var / "greasewood_alpha").mkdir()
     cfg = etc / "greasewood_alpha.toml"
     _write_cfg(cfg, var / "greasewood_alpha", ca.ca_pub_hex,
-               iface="gw_alpha", domain="alpha.internal")
+               iface="gw-alpha", domain="alpha.internal")
     _write_cfg(etc / "greasewood_beta.toml", var / "gb", ca.ca_pub_hex,
-               iface="gw_beta", domain="beta.internal")
+               iface="gw-beta", domain="beta.internal")
     import pytest
     with pytest.raises(SystemExit) as e:
         cli._migrate_membership(cfg, "beta", etc=etc, var=var)
@@ -271,7 +271,7 @@ def test_reconcile_rename_grace_dual_then_retire(tmp_path, monkeypatch):
         @staticmethod
         def remove_block(domain, path=None):
             calls.append(("remove", domain))
-    loop = ReconcileLoop(iface="gw_x", directory=Directory(),
+    loop = ReconcileLoop(iface="gw-x", directory=Directory(),
                          local_id_pub=b"\x01" * 32, local_caps=[],
                          get_ca_pubs=lambda: [], get_revoked=set,
                          hosts_domain="beta.internal", data_dir=tmp_path)
@@ -303,7 +303,7 @@ def test_join_refuses_same_name_different_mesh(tmp_path, monkeypatch):
     ca_existing = CAKeys.generate()
     # Existing membership 'prod' with domain prod.internal, CA = ca_existing.
     _write_cfg(etc_dir / "greasewood_prod.toml", tmp_path / "dp", ca_existing.ca_pub_hex,
-               iface="gw_prod", domain="prod.internal")
+               iface="gw-prod", domain="prod.internal")
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     # Redirect the two leaf helpers to the tmp /etc and data root, matching
     # their real signatures; _membership_for_ca / _iface_collision / _free_
@@ -362,7 +362,7 @@ def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
 
     import pytest
     with pytest.raises(wgmod.PortInUse) as e:
-        wgmod.ensure_interface("gw_pm", "fd8d::1", 51900, __import__("pathlib").Path("/x"))
+        wgmod.ensure_interface("gw-pm", "fd8d::1", 51900, __import__("pathlib").Path("/x"))
     msg = str(e.value)
     assert "UDP port 51900 is already used by WireGuard interface 'gw-old'" in msg
     assert "ip link del gw-old" in msg and "--listen-port" in msg

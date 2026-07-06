@@ -81,14 +81,14 @@ def ping_once(container: str, addr: str, timeout: int = 2) -> bool:
 
 
 def mesh_iface(container: str) -> str:
-    """The container's mesh interface (gw_<name> — one membership per test
-    container; the door is 'gw-door', hyphen, so it never matches)."""
+    """The container's mesh interface (gw-<name> — one membership per test
+    container; the door 'gw-door' is excluded explicitly)."""
     out = pexec(container, "sh", "-c",
                 "wg show interfaces 2>/dev/null || true").stdout.split()
     for tok in out:
-        if tok.startswith("gw_"):
+        if tok.startswith("gw-") and tok != "gw-door":
             return tok
-    return "gw_none"
+    return "gw-none"
 
 
 def wg_peer_count(container: str, iface: "str | None" = None) -> int:

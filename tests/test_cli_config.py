@@ -17,7 +17,7 @@ hostname = "db01"
 data_dir = "{tmp_path}"
 role = "{role}"
 [network]
-interface = "gw_pm"
+interface = "gw-pm"
 listen_port = 51900
 seeds = []
 root_url = "http://[fd8d::1]:51902"
@@ -32,7 +32,7 @@ def test_config_single_key_is_bare_value(tmp_path, capsys):
     cfg = _cfg(tmp_path)
     assert cli.cmd_config(types.SimpleNamespace(config=str(cfg),
                                                 key="interface")) == 0
-    assert capsys.readouterr().out == "gw_pm\n"     # bare, scriptable
+    assert capsys.readouterr().out == "gw-pm\n"     # bare, scriptable
 
 
 def test_config_all_is_key_tab_value(tmp_path, capsys):
@@ -40,7 +40,7 @@ def test_config_all_is_key_tab_value(tmp_path, capsys):
     cli.cmd_config(types.SimpleNamespace(config=str(cfg), key=None))
     out = capsys.readouterr().out
     facts = dict(line.split("\t", 1) for line in out.strip().splitlines())
-    assert facts["interface"] == "gw_pm"
+    assert facts["interface"] == "gw-pm"
     assert facts["mesh_domain"] == "pm.internal"
     assert facts["listen_port"] == "51900"
     assert "control_port" not in facts              # node → no anchor-only facts
@@ -69,5 +69,5 @@ def test_firewall_prints_suggestion_and_the_four_ports(tmp_path, capsys, monkeyp
     assert "NEVER modifies your firewall" in out and "nothing has been changed" in out.lower()
     # all four ports, with the two TCP scoped to their interfaces
     assert "51900, 51901" in out                       # the two UDP (unscoped)
-    assert 'iifname "gw_pm" tcp dport 51902' in out    # control plane (mesh iface)
+    assert 'iifname "gw-pm" tcp dport 51902' in out    # control plane (mesh iface)
     assert 'iifname "gw-door" tcp dport 51903' in out  # enrollment (door iface)

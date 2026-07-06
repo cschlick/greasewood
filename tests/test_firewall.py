@@ -105,8 +105,8 @@ def test_iifname_match_satisfies():
 
 
 def test_anchor_rules_use_the_real_mesh_interface():
-    # The control-plane rule must be scoped to the actual gw_<name> interface,
+    # The control-plane rule must be scoped to the actual gw-<name> interface,
     # not the stale hardcoded "gw-mesh".
-    rules = fw.anchor_rules(51900, 51902, mesh_iface="gw_pm")
+    rules = fw.anchor_rules(51900, 51902, mesh_iface="gw-pm")
     control = [r for r in rules if r.proto == "tcp" and r.port == 51902]
-    assert control and control[0].iif == "gw_pm"
+    assert control and control[0].iif == "gw-pm"
