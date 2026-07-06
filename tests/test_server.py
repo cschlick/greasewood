@@ -663,3 +663,16 @@ class TestRequestHardening:
         dropped = directory.merge([forged])  # not signed by node → invalid
         assert dropped == 0
         assert directory.get(node.id_pub_hex).seq == 1
+
+
+def test_negative_content_length_rejected():
+    """A negative Content-Length would make rfile.read(-1) read to EOF, bypassing
+    the _MAX_BODY cap. It must be a clean 400, not an unbounded read."""
+    import io
+    from greasewood import server
+    h = server._Handler.__new__(server._Handler)
+    h.headers = {"Content-Length": "-1"}
+    h.rfile = io.BytesIO(b"{}")
+    import pytest
+    with pytest.raises(ValueError, match="invalid request body length"):
+        h._read_json()

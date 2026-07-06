@@ -58,6 +58,25 @@ def _ts(t: dt.datetime) -> str:
     return t.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _str(value: Any, field: str) -> str:
+    """A field that must be a string. Same discipline as _parse_ts: reject a
+    hostile/wrong JSON type HERE with a clean ValueError, so it becomes a 400
+    at the network boundary instead of a str-method AttributeError or a
+    sorted() TypeError deep in verification (an unhandled 500)."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _str_list(value: Any, field: str) -> list[str]:
+    """A field that must be a list of strings (caps, SANs, endpoints, aliases).
+    Guards the sorted()/endswith() paths that would otherwise raise TypeError/
+    AttributeError on `[1, 2]` or a bare scalar — see _str."""
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ValueError(f"{field} must be a list of strings")
+    return list(value)
+
+
 def _parse_ts(s: str) -> dt.datetime:
     if not isinstance(s, str):
         # A non-string (e.g. JSON null/number) would raise AttributeError on
@@ -134,9 +153,9 @@ class Credential:
         return cls(
             id_pub=_b64d(d["id_pub"]),
             wg_pub=_b64d(d["wg_pub"]),
-            addr=d["addr"],
-            hostname=d["hostname"],
-            caps=d["caps"],
+            addr=_str(d["addr"], "addr"),
+            hostname=_str(d["hostname"], "hostname"),
+            caps=_str_list(d["caps"], "caps"),
             iat=_parse_ts(d["iat"]),
             exp=_parse_ts(d["exp"]),
             ca_sig=_b64d(d["ca_sig"]),
@@ -256,11 +275,11 @@ class NodeRecord:
         return cls(
             id_pub=_b64d(d["id_pub"]),
             seq=d["seq"],
-            endpoints=d["endpoints"],
+            endpoints=_str_list(d["endpoints"], "endpoints"),
             inbound=d.get("inbound", "yes"),  # vestigial
             cred=Credential.from_dict(d["cred"]),
-            aliases=list(d.get("aliases", [])),
-            reachable=list(d.get("reachable", [])),
+            aliases=_str_list(d.get("aliases", []), "aliases"),
+            reachable=_str_list(d.get("reachable", []), "reachable"),
             sig=_b64d(d["sig"]),
         )
 
@@ -380,12 +399,12 @@ class CertRequest:
         return cls(
             id_pub=_b64d(d["id_pub"]),
             leaf_pub=_b64d(d["leaf_pub"]),
-            cn=d["cn"],
+            cn=_str(d["cn"], "cn"),
             # dns/ips are ALWAYS in the signed body (unlike aliases/reachable,
             # which .get() signals as omitted-when-empty) — so index, don't .get.
-            dns=list(d["dns"]),
-            ips=list(d["ips"]),
-            nonce=d["nonce"],
+            dns=_str_list(d["dns"], "dns"),
+            ips=_str_list(d["ips"], "ips"),
+            nonce=_str(d["nonce"], "nonce"),
             ts=_parse_ts(d["ts"]),
             sig=_b64d(d["sig"]),
         )
