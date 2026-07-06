@@ -3053,7 +3053,7 @@ def main(argv=None) -> int:
                          "e.g. 'tls'. Omitted → the anchor's [anchor] default_caps "
                          "(ships as 'tls'). Segmentation is set with --segments.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
-                    help="underlay IPv6 address to embed in token (auto-detected if omitted)")
+                    help="underlay address, v6 or v4, to embed in the token (auto-detected if omitted)")
     sp.add_argument("--standing", action="store_true",
                     help="open a STANDING door: the token enrolls any number of "
                          "nodes (one at a time) and never expires — for baked "
@@ -3311,7 +3311,7 @@ def main(argv=None) -> int:
 
     # anchor-backup
     sp = sub.add_parser("anchor-backup",
-                        help="[sudo, anchor] [anchor] write an encrypted backup of the CA key + "
+                        help="[sudo, anchor] write an encrypted backup of the CA key + "
                              "node registry + revoke list (passphrase via prompt "
                              "or $GW_BACKUP_PASSPHRASE)")
     sp.add_argument("--out", default=None, metavar="PATH",
