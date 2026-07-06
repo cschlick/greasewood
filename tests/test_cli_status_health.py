@@ -6,7 +6,7 @@ freshness for a node). All local: no root, no network.
 import datetime as dt
 import types
 
-from greasewood import cli, sync
+from greasewood import cli, sync, status
 from greasewood.directory import Directory
 from greasewood.keys import CAKeys, NodeKeys
 from greasewood.wire import Credential, NodeRecord
@@ -208,7 +208,7 @@ def test_roster_live_mode_columns(tmp_path):
     }
     latency = {linked.addr: "12ms", keys.addr: "0ms"}     # web1's ping not back yet
     rates = {linked.addr: "↓1.2M/s ↑300K/s"}
-    lines = cli._roster_lines(records, cfg, dt.datetime.now(_UTC),
+    lines = status._roster_lines(records, cfg, dt.datetime.now(_UTC),
                               keys.id_pub_hex, live, True,
                               latency=latency, rates=rates)
     joined = "\n".join(lines)
@@ -228,19 +228,19 @@ def test_ping_rtt_parses_and_times_out(monkeypatch):
     def ok(*a, **k):
         return subprocess.CompletedProcess(a[0], 0, "64 bytes ... time=13.4 ms\n", "")
     monkeypatch.setattr(subprocess, "run", ok)
-    assert cli._ping_rtt("fd8d::1") == "13ms"
+    assert status._ping_rtt("fd8d::1") == "13ms"
 
     def down(*a, **k):
         return subprocess.CompletedProcess(a[0], 1, "", "")
     monkeypatch.setattr(subprocess, "run", down)
-    assert cli._ping_rtt("fd8d::2") == "—"
+    assert status._ping_rtt("fd8d::2") == "—"
 
 
 def test_latency_prober_updates_results(monkeypatch):
     import time
     from greasewood import cli
-    monkeypatch.setattr(cli, "_ping_rtt", lambda a: "7ms")
-    p = cli._LatencyProber()
+    monkeypatch.setattr(status, "_ping_rtt", lambda a: "7ms")
+    p = status._LatencyProber()
     p.set_targets(["fd8d::1", "fd8d::2"])
     p.start()
     for _ in range(20):
@@ -258,5 +258,5 @@ def test_watch_live_requires_root_and_tty(monkeypatch):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
     with pytest.raises(SystemExit) as e:
-        cli._watch_live(types.SimpleNamespace(), "abc")
+        status._watch_live(types.SimpleNamespace(), "abc")
     assert "needs root" in str(e.value)

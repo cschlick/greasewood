@@ -6,7 +6,7 @@ nothing is numbered.
 """
 from pathlib import Path
 
-from greasewood import cli
+from greasewood import cli, status
 from greasewood.keys import CAKeys
 
 
@@ -411,7 +411,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
         {"new_domain": "prod-fleet.internal", "old_domain": "old.internal"}))
     from greasewood.config import load_config
     cfg = load_config(tmp_path / "gw.toml")
-    lines = cli._self_health_lines(cfg, Directory(), keys.id_pub_hex)
+    lines = status._self_health_lines(cfg, Directory(), keys.id_pub_hex)
     joined = "\n".join(lines)
     assert "the anchor renamed this mesh" in joined
     assert "sudo gw rename-mesh prod-fleet" in joined

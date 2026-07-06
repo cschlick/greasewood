@@ -17,7 +17,7 @@ import os
 import time
 import types
 
-from greasewood import cli, wg
+from greasewood import cli, status, wg
 from greasewood.directory import Directory
 from greasewood.keys import CAKeys, NodeKeys, derive_addr
 from greasewood.wire import Credential, NodeRecord
@@ -73,7 +73,7 @@ trusted_pubs = ["{CA.ca_pub_hex}"]
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live_peers)
-    monkeypatch.setattr(cli, "_self_firewall_port", lambda port: self_fw)
+    monkeypatch.setattr(status, "_self_firewall_port", lambda port: self_fw)
 
     print("\n" + "━" * 78)
     print(f"┃ {title}\n┃ $ sudo gw diagnose {' '.join(nodes)}")

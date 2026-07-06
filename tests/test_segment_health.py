@@ -6,7 +6,7 @@ root). This is the "find the firewall partition" view.
 import datetime as dt
 import types
 
-from greasewood import cli
+from greasewood import cli, status
 from greasewood.keys import CAKeys, NodeKeys, derive_addr
 from greasewood.wire import Credential, NodeRecord
 
@@ -36,7 +36,7 @@ def _mesh(*recs):
 def test_fully_connected(capsys):
     a, b, c = _mesh(_rec("db01", ["1:51900"]), _rec("db02", ["2:51900"]),
                     _rec("db03", ["3:51900"]))
-    cli._print_segment_health([a, b, c], types.SimpleNamespace(mesh_domain="m.internal"))
+    status._print_segment_health([a, b, c], types.SimpleNamespace(mesh_domain="m.internal"))
     assert "✓ fully connected" in capsys.readouterr().out
 
 
@@ -44,7 +44,7 @@ def test_partition_and_isolated(capsys):
     a, b, c = _mesh(_rec("db01", ["1:51900"]), _rec("db02", ["2:51900"]),
                     _rec("db03", ["3:51900"]))
     d = _rec("web1", ["4:51900"])                      # nobody reaches d, d reaches nobody
-    cli._print_segment_health([a, b, c, d], types.SimpleNamespace(mesh_domain="m.internal"))
+    status._print_segment_health([a, b, c, d], types.SimpleNamespace(mesh_domain="m.internal"))
     out = capsys.readouterr().out
     assert "PARTITIONED — 2 islands" in out
     assert "web1.m.internal }   ← isolated" in out
@@ -57,14 +57,14 @@ def test_one_sided_report_counts_as_up(capsys):
     b = _rec("db02", ["2:51900"])
     a.reachable[:] = [b.cred.addr]                     # only a reports the edge
     b.reachable[:] = []                                # b hasn't (stale)
-    cli._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
+    status._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
     assert "✓ fully connected" in capsys.readouterr().out
 
 
 def test_directional_hint_when_one_advertises(capsys):
     a = _rec("db01", ["203.0.113.1:51900"])           # dialable
     b = _rec("db02", [])                               # outbound-only → must dial a
-    cli._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
+    status._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
     out = capsys.readouterr().out
     assert "db02.m.internal can't reach db01.m.internal at 203.0.113.1:51900" in out
 
@@ -74,6 +74,6 @@ def test_two_outbound_only_not_flagged(capsys):
     fault, so it's not reported as a down edge."""
     a = _rec("db01", [])
     b = _rec("db02", [])
-    cli._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
+    status._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
     out = capsys.readouterr().out
     assert "down" not in out                           # no expected edge → not degraded

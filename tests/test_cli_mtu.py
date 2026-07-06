@@ -12,7 +12,7 @@ import subprocess
 import time
 import types
 
-from greasewood import cli, wg
+from greasewood import cli, wg, status
 from greasewood.directory import Directory
 from greasewood.keys import CAKeys, NodeKeys, derive_addr
 from greasewood.wire import Credential, NodeRecord
@@ -37,19 +37,19 @@ def test_iface_mtu_parses(monkeypatch):
     out = "42: gw-mesh: <POINTOPOINT,NOARP,UP> mtu 1420 qdisc noqueue state UNKNOWN\n"
     monkeypatch.setattr(cli.subprocess, "run",
                         _fake_run({"link show": (0, out)}))
-    assert cli._iface_mtu("gw-mesh") == 1420
+    assert status._iface_mtu("gw-mesh") == 1420
 
 
 def test_iface_mtu_missing_is_none(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", _fake_run({"link show": (1, "")}))
-    assert cli._iface_mtu("gw-mesh") is None
+    assert status._iface_mtu("gw-mesh") is None
 
 
 def test_probe_clean_path_no_warning(monkeypatch):
     # ping available; both small and full-size succeed → no blackhole.
     monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/ping")
     monkeypatch.setattr(cli.subprocess, "run", _fake_run({"ping": 0}))
-    assert cli._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
+    assert status._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
 
 
 def test_probe_detects_blackhole(monkeypatch):
@@ -62,7 +62,7 @@ def test_probe_detects_blackhole(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0)
     monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/ping")
     monkeypatch.setattr(cli.subprocess, "run", run)
-    warn = cli._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420)
+    warn = status._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420)
     assert warn is not None
     assert "MTU" in warn and "1420" in warn      # names the interface MTU
     assert "1372" in warn                         # and the payload it dropped (1420-48)
@@ -73,17 +73,17 @@ def test_probe_small_ping_fails_is_inconclusive(monkeypatch):
     # problem; stay quiet rather than cry wolf.
     monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/ping")
     monkeypatch.setattr(cli.subprocess, "run", _fake_run({"ping": 1}))
-    assert cli._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
+    assert status._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
 
 
 def test_probe_no_ping_binary_is_none(monkeypatch):
     monkeypatch.setattr(cli.shutil, "which", lambda n: None)
-    assert cli._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
+    assert status._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=1420) is None
 
 
 def test_probe_unknown_mtu_is_none(monkeypatch):
     monkeypatch.setattr(cli.shutil, "which", lambda n: "/bin/ping")
-    assert cli._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=None) is None
+    assert status._mtu_probe("gw-mesh", "fd8d::2", iface_mtu=None) is None
 
 
 # --- end-to-end: the blackhole warning reaches diagnose output --------------
@@ -129,7 +129,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live)
-    monkeypatch.setattr(cli, "_iface_mtu", lambda iface: 1420)
+    monkeypatch.setattr(status, "_iface_mtu", lambda iface: 1420)
     return cfg, derive_addr(peer.id_pub_bytes)
 
 
@@ -137,7 +137,7 @@ def test_diagnose_reports_blackhole_on_linked_peer(tmp_path, monkeypatch, capsys
     """A LINKED pair involving this host runs the PMTU probe; a blackhole
     (small DF ping passes, full-MTU one dropped) is reported on the verdict."""
     cfg, addr = _linked_peer_diagnose(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli, "_ping6_df",
+    monkeypatch.setattr(status, "_ping6_df",
                         lambda a, payload, timeout=1: payload <= 100)
     cli.cmd_diagnose(types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                            nodes=["db"]))
@@ -149,7 +149,7 @@ def test_diagnose_reports_blackhole_on_linked_peer(tmp_path, monkeypatch, capsys
 def test_diagnose_no_blackhole_when_path_clean(tmp_path, monkeypatch, capsys):
     """Clean path (both DF pings pass) → LINKED, no blackhole warning."""
     cfg, addr = _linked_peer_diagnose(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli, "_ping6_df", lambda a, payload, timeout=1: True)
+    monkeypatch.setattr(status, "_ping6_df", lambda a, payload, timeout=1: True)
     cli.cmd_diagnose(types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                            nodes=["db"]))
     out = capsys.readouterr().out
