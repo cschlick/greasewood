@@ -20,7 +20,7 @@ import logging
 import threading
 from pathlib import Path
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from .directory import Directory
 from .loop import Loop
@@ -41,6 +41,18 @@ _LIVE_LINK_SECS = 180
 
 # Step 6 authorization policy: (local_caps, peer_caps) → bool
 Policy = Callable[[list[str], list[str]], bool]
+
+
+class _Desired(NamedTuple):
+    """What one WireGuard peer should look like after this cycle."""
+    addr: str                   # the peer's overlay /128
+    endpoint: "str | None"      # underlay endpoint to pin (None: peer initiates)
+    keepalive: int              # 25, or 0 when backed off (dead endpoint)
+
+
+class ReconcileResult(NamedTuple):
+    trusted: list               # fully-verified records — the ONLY derivable set
+    reachable: list             # overlay addrs with a live handshake (published)
 
 
 def _segments(caps: list[str]) -> set[str]:
@@ -177,7 +189,7 @@ def reconcile_once(
     policy: Policy = default_policy,
     local_families: "set[int] | None" = None,
     endpoint_tracker: "_EndpointTracker | None" = None,
-) -> "tuple[list, list[str]]":
+) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
 
@@ -206,7 +218,7 @@ def reconcile_once(
     now_epoch = time.time() if endpoint_tracker is not None else 0.0
 
     # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)
-    desired: dict[str, tuple[str, str | None]] = {}
+    desired: dict[str, _Desired] = {}
     meta: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
@@ -237,7 +249,7 @@ def reconcile_once(
                 keepalive = 0          # dead endpoint: stop the futile 25s poke
         else:
             endpoint = candidates[0] if candidates else None
-        desired[wg_pub_b64] = (record.cred.addr, endpoint, keepalive)
+        desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
         # Context for the audit trail: name + segments, so every peer command
         # says WHO and WHY, not just a bare pubkey.
         segs = ",".join(sorted(_segments(record.cred.caps))) or "-"
@@ -251,28 +263,29 @@ def reconcile_once(
         return meta.get(pub, f"...{pub[-8:]}")
 
     for pub in desired_set - live_set:
-        addr, ep, ka = desired[pub]
+        d = desired[pub]
         try:
             with audit.context(f"reconcile: +peer {_who(pub)}"):
-                wgmod.set_peer(iface, pub, addr, ep, keepalive=ka)
+                wgmod.set_peer(iface, pub, d.addr, d.endpoint, keepalive=d.keepalive)
         except Exception as e:
             log.warning("add peer ...%s failed: %s", pub[-8:], e)
 
     for pub in desired_set & live_set:
-        addr, ep, ka = desired[pub]
-        # ep=None (the peer stopped advertising, e.g. went outbound-only)
+        d = desired[pub]
+        # endpoint=None (the peer stopped advertising, e.g. went outbound-only)
         # deliberately does NOT clear a live endpoint: WireGuard roams the
         # endpoint on any authenticated packet anyway, and clearing one would
         # require remove+re-add — tearing down a working session for no gain.
-        endpoint_changed = ep and live[pub].endpoint != ep
-        route_missing = not live[pub].allowed_ips or addr not in live[pub].allowed_ips
-        ka_changed = live[pub].keepalive != ka   # dead↔alive flips keepalive 25↔0
+        endpoint_changed = d.endpoint and live[pub].endpoint != d.endpoint
+        route_missing = not live[pub].allowed_ips or d.addr not in live[pub].allowed_ips
+        ka_changed = live[pub].keepalive != d.keepalive  # dead↔alive flips 25↔0
         if endpoint_changed or route_missing or ka_changed:
             try:
                 why = ("endpoint" if endpoint_changed else
                        "keepalive" if ka_changed else "route")
                 with audit.context(f"reconcile: ~peer {_who(pub)} ({why})"):
-                    wgmod.set_peer(iface, pub, addr, ep, keepalive=ka)
+                    wgmod.set_peer(iface, pub, d.addr, d.endpoint,
+                                   keepalive=d.keepalive)
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", pub[-8:], e)
 
@@ -292,11 +305,11 @@ def reconcile_once(
     # bidirectional regardless of who dialed).
     hs_now = time.time()
     reachable = sorted(
-        addr for pub, (addr, _ep, _ka) in desired.items()
+        d.addr for pub, d in desired.items()
         if (lp := live.get(pub)) and lp.latest_handshake
         and (hs_now - lp.latest_handshake) <= _LIVE_LINK_SECS
     )
-    return trusted, reachable
+    return ReconcileResult(trusted, reachable)
 
 
 class ReconcileLoop(Loop):

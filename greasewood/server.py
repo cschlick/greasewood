@@ -261,33 +261,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "node lacks the 'tls' capability"}, 403)
             return
 
-        # SAN authorization: a node may only obtain a cert for names it OWNS —
-        # its CA-registered name <hostname>.<mesh_domain> (from node_info, NOT
-        # from the request), subdomains of it, and its own overlay address. This
-        # is what makes a client's SAN validation meaningful: without it, any
-        # tls-capable node could mint a cert for another node's name and
-        # impersonate it to verify-full clients.
-        from .hosts import mesh_name
-        own_name = mesh_name(hostname, self.mesh_domain)
-        own_addr = derive_addr(req.id_pub)
-
-        def _owned_dns(name: str) -> bool:
-            return name == own_name or name.endswith("." + own_name)
-
-        bad = [d for d in req.dns if not _owned_dns(d)]
-        bad += [ip for ip in req.ips if ip != own_addr]
-        if bad:
-            self._send_json({
-                "error": f"not authorized for SAN(s) {bad}; a node may only get a "
-                         f"cert for {own_name!r}, its subdomains, and its own "
-                         f"address {own_addr!r}"
-            }, 403)
+        authz = self._authorize_sans(req, hostname)
+        if isinstance(authz, str):
+            self._send_json({"error": authz}, 403)
             return
-
-        # Default to the node's own name + address when none were requested.
-        dns = list(req.dns) or [own_name]
-        ips = list(req.ips) or [own_addr]
-        cn = req.cn if (req.cn and _owned_dns(req.cn)) else own_name
+        cn, dns, ips = authz
 
         ttl = self.tls_cert_ttl or _dt.timedelta(days=7)
         try:
@@ -298,6 +276,35 @@ class _Handler(BaseHTTPRequestHandler):
             return
         log.info("issued TLS cert for %s cn=%s dns=%s ips=%s", hostname, cn, dns, ips)
         self._send_json({"cert": leaf_pem, "ca_cert": ca_pem})
+
+    def _authorize_sans(self, req, hostname: str):
+        """SAN authorization: a node may only obtain a cert for names it OWNS —
+        its CA-registered name <hostname>.<mesh_domain> (from node_info, NOT
+        from the request), subdomains of it, and its own overlay address. This
+        is what makes a client's SAN validation meaningful: without it, any
+        tls-capable node could mint a cert for another node's name and
+        impersonate it to verify-full clients.
+
+        Returns (cn, dns, ips) — defaulted to the node's own name + address
+        when none were requested — or an error string on a refusal."""
+        from .hosts import mesh_name
+        from .keys import derive_addr
+        own_name = mesh_name(hostname, self.mesh_domain)
+        own_addr = derive_addr(req.id_pub)
+
+        def _owned_dns(name: str) -> bool:
+            return name == own_name or name.endswith("." + own_name)
+
+        bad = [d for d in req.dns if not _owned_dns(d)]
+        bad += [ip for ip in req.ips if ip != own_addr]
+        if bad:
+            return (f"not authorized for SAN(s) {bad}; a node may only get a "
+                    f"cert for {own_name!r}, its subdomains, and its own "
+                    f"address {own_addr!r}")
+        dns = list(req.dns) or [own_name]
+        ips = list(req.ips) or [own_addr]
+        cn = req.cn if (req.cn and _owned_dns(req.cn)) else own_name
+        return cn, dns, ips
 
 
 class _IPv6Server(HTTPServer):
