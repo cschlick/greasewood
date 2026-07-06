@@ -2323,19 +2323,15 @@ def cmd_run(args) -> int:
         )
         srv.start()
 
-        from .enroll import DoorWatcher
+        from .enroll import DoorWatcher, EnrollContext
         door_watcher = DoorWatcher(
-            data_dir=cfg.data_dir,
-            ca=ca,
-            directory=directory,
-            node_keys=keys,
-            wg_iface=cfg.wg_interface,
-            get_ca_pubs=get_ca_pubs,
-            get_revoked=get_revoked,
-            cache_path=cfg.dir_cache_path,
-            control_port=_control_port(cfg),
+            EnrollContext(
+                ca=ca, directory=directory, node_keys=keys,
+                wg_iface=cfg.wg_interface, get_ca_pubs=get_ca_pubs,
+                get_revoked=get_revoked, cache_path=cfg.dir_cache_path,
+                control_port=_control_port(cfg), mesh_domain=cfg.mesh_domain,
+                data_dir=cfg.data_dir),
             door_port=cfg.door_port,
-            mesh_domain=cfg.mesh_domain,
         )
         door_watcher.start()
         log.info("door watcher started")

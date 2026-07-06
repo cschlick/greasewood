@@ -48,10 +48,10 @@ def test_mark_opened_standing_and_enroll_count(tmp_path):
 
 
 def _watcher(tmp_path, **kw):
-    return enroll.DoorWatcher(
-        data_dir=tmp_path, ca=None, directory=Directory(),
-        node_keys=NodeKeys.generate(), wg_iface="gw-mesh",
-        door_port=51901, **kw)
+    ctx = enroll.EnrollContext(
+        ca=None, directory=Directory(), node_keys=NodeKeys.generate(),
+        wg_iface="gw-mesh", data_dir=tmp_path)
+    return enroll.DoorWatcher(ctx, door_port=51901, **kw)
 
 
 def test_watcher_standing_starts_server_and_reerects_door(tmp_path, monkeypatch):
@@ -67,8 +67,9 @@ def test_watcher_standing_starts_server_and_reerects_door(tmp_path, monkeypatch)
     started = {}
 
     class FakeSrv:
-        def __init__(self, **kwargs):
+        def __init__(self, ctx, on_done, **kwargs):
             started.update(kwargs)
+            started["on_done"] = on_done
         def start(self):
             started["started"] = True
     monkeypatch.setattr(enroll, "EnrollServer", FakeSrv)
@@ -91,8 +92,9 @@ def test_watcher_standing_on_done_keeps_window(tmp_path, monkeypatch):
     captured = {}
 
     class FakeSrv:
-        def __init__(self, **kwargs):
+        def __init__(self, ctx, on_done, **kwargs):
             captured.update(kwargs)
+            captured["on_done"] = on_done
         def start(self):
             pass
     monkeypatch.setattr(enroll, "EnrollServer", FakeSrv)
@@ -112,10 +114,10 @@ def test_enroll_server_standing_stays_open_after_success(tmp_path, monkeypatch):
 
     handled = []
 
-    srv = enroll.EnrollServer(
+    ctx = enroll.EnrollContext(
         ca=None, directory=Directory(), node_keys=NodeKeys.generate(),
-        wg_iface="gw-mesh", on_done=lambda: handled.append("done"),
-        standing=True, data_dir=tmp_path)
+        wg_iface="gw-mesh", data_dir=tmp_path)
+    srv = enroll.EnrollServer(ctx, lambda: handled.append("done"), standing=True)
 
     # Bind on loopback instead of ANCHOR_DOOR_IP so the test needs no interface.
     real_socket = socket.socket

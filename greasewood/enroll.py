@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import errno
+from dataclasses import dataclass
 import json
 import logging
 import socket
@@ -45,6 +46,29 @@ from .door import recv_msg as _recv_msg, send_msg as _send_msg
 
 
 # ---------------------------------------------------------------------------
+# EnrollContext — the mesh-scoped enrollment state (same for every window). The
+# DoorWatcher holds one and passes it through to each EnrollServer verbatim, so
+# a new field is added here and read where needed — not threaded through two
+# constructors and a forwarding call. The per-WINDOW knobs (timeout, caps,
+# pinned hostname, standing) stay explicit EnrollServer args: the split is the
+# standing-door design in the type system (mesh-scoped vs window-scoped).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EnrollContext:
+    ca: "CA"
+    directory: "Directory"
+    node_keys: "NodeKeys"
+    wg_iface: str
+    get_ca_pubs: "Callable[[], list[bytes]]" = None
+    get_revoked: "Callable[[], set[str]]" = None
+    cache_path: "Path | None" = None
+    control_port: int = 51902
+    mesh_domain: "str | None" = None
+    data_dir: "Path | None" = None
+
+
+# ---------------------------------------------------------------------------
 # EnrollServer
 # ---------------------------------------------------------------------------
 
@@ -61,45 +85,36 @@ class EnrollServer:
 
     def __init__(
         self,
-        ca: "CA",
-        directory: "Directory",
-        node_keys: "NodeKeys",
-        wg_iface: str,
+        ctx: "EnrollContext",
         on_done: Callable[[], None],
+        *,
         timeout_secs: float = 900.0,
-        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
-        get_revoked: "Callable[[], set[str]] | None" = None,
-        cache_path: "Path | None" = None,
-        control_port: int = 51902,
         max_attempts: int = 3,
         caps: "list[str] | None" = None,
         pinned_hostname: "str | None" = None,
-        data_dir: "Path | None" = None,
         standing: bool = False,
-        mesh_domain: "str | None" = None,
     ) -> None:
-        # The mesh's canonical name domain, advertised to joiners in the enroll
-        # response so every member mounts the mesh under the SAME suffix (and
-        # TLS names agree fleet-wide). None → field omitted (older anchors).
-        self._mesh_domain = mesh_domain
+        # Mesh-scoped state (see EnrollContext). mesh_domain is advertised to
+        # joiners so every member mounts the mesh under the SAME suffix; data_dir
+        # is where door status/history is persisted for `gw watch` (best-effort,
+        # observability only — None disables it).
+        self._ca = ctx.ca
+        self._directory = ctx.directory
+        self._node_keys = ctx.node_keys
+        self._wg_iface = ctx.wg_iface
+        self._get_ca_pubs = ctx.get_ca_pubs or (lambda: [])
+        self._get_revoked = ctx.get_revoked or set
+        self._cache_path = ctx.cache_path
+        self._control_port = ctx.control_port
+        self._mesh_domain = ctx.mesh_domain
+        self._data_dir = ctx.data_dir
         # A STANDING door serves any number of enrollments and never closes on
         # its own — no deadline, no attempts-exhausted, success loops back to
         # accept. It ends only via stop() (daemon shutdown, `gw close-door`, or
         # a superseding invite clearing the window).
         self._standing = standing
-        self._ca = ca
-        self._directory = directory
-        self._node_keys = node_keys
-        self._wg_iface = wg_iface
         self._on_done = on_done
         self._timeout = timeout_secs
-        # Where to persist door status/history for `gw watch` (best-effort;
-        # None disables it). Observability only — never blocks enrollment.
-        self._data_dir = data_dir
-        self._get_ca_pubs = get_ca_pubs or (lambda: [])
-        self._get_revoked = get_revoked or set
-        self._cache_path = cache_path
-        self._control_port = control_port
         self._max_attempts = max_attempts
         # Caps the anchor authorized for this window (from `gw invite`).
         # The joiner does NOT choose these — the window is authoritative.
@@ -397,33 +412,18 @@ class DoorWatcher(Loop):
 
     def __init__(
         self,
-        data_dir: Path,
-        ca: "CA",
-        directory: "Directory",
-        node_keys: "NodeKeys",
-        wg_iface: str,
+        ctx: "EnrollContext",
         poll_interval: float = 5.0,
-        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
-        get_revoked: "Callable[[], set[str]] | None" = None,
-        cache_path: "Path | None" = None,
-        control_port: int = 51902,
         door_port: "int | None" = None,
-        mesh_domain: "str | None" = None,
     ) -> None:
-        # Needed to re-erect the door interface for a STANDING window after a
-        # anchor reboot (the window persists; the kernel interface doesn't).
+        # The DoorWatcher holds the mesh-scoped context and forwards it to each
+        # EnrollServer it starts; it only reads ctx.data_dir itself (the window
+        # file lives there). door_port is DoorWatcher-only: needed to re-erect
+        # the door interface for a STANDING window after a reboot (the window
+        # persists; the kernel interface doesn't).
+        self._ctx = ctx
+        self._data_dir = ctx.data_dir
         self._door_port = door_port
-        # Advertised to joiners so the whole mesh shares one name domain.
-        self._mesh_domain = mesh_domain
-        self._data_dir = data_dir
-        self._ca = ca
-        self._directory = directory
-        self._node_keys = node_keys
-        self._wg_iface = wg_iface
-        self._get_ca_pubs = get_ca_pubs or (lambda: [])
-        self._get_revoked = get_revoked or set
-        self._cache_path = cache_path
-        self._control_port = control_port
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
         super().__init__(poll_interval, "door-watcher")
@@ -522,21 +522,11 @@ class DoorWatcher(Loop):
                          else "door enrollment complete, window closed")
 
             srv = EnrollServer(
-                ca=self._ca,
-                directory=self._directory,
-                node_keys=self._node_keys,
-                wg_iface=self._wg_iface,
-                on_done=on_done,
+                self._ctx, on_done,
                 timeout_secs=remaining,
-                get_ca_pubs=self._get_ca_pubs,
-                get_revoked=self._get_revoked,
-                cache_path=self._cache_path,
-                control_port=self._control_port,
                 caps=window_caps,
                 pinned_hostname=window_hostname,
-                data_dir=self._data_dir,
                 standing=standing,
-                mesh_domain=self._mesh_domain,
             )
             try:
                 door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,

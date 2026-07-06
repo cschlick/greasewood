@@ -11,7 +11,7 @@ import struct
 import subprocess
 import types
 
-from greasewood.enroll import EnrollServer, _send_msg, _recv_msg
+from greasewood.enroll import EnrollServer, EnrollContext, _send_msg, _recv_msg
 from greasewood.keys import NodeKeys
 
 
@@ -48,9 +48,10 @@ def _attempt(monkeypatch, ca, joiner):
             1, ["wg", "set", iface, "peer", pub, "allowed-ips", f"{addr}/128"])
     monkeypatch.setattr("greasewood.wg.set_peer", broken_set_peer)
 
-    srv = EnrollServer(
+    ctx = EnrollContext(
         ca=ca, directory=types.SimpleNamespace(get=lambda *a: None),
-        node_keys=NodeKeys.generate(), wg_iface="gw-mesh", on_done=lambda: None)
+        node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
+    srv = EnrollServer(ctx, lambda: None)
     ours, theirs = socket.socketpair()
     try:
         ours.sendall(_framed({
