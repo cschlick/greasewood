@@ -211,14 +211,6 @@ def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> N
                     pass
 
 
-def _profile_cert_path(files: list) -> "Path | None":
-    """The file in a profile that carries the leaf cert (for the expiry check)."""
-    for f in files:
-        if f.get("role") in ("cert", "fullchain", "bundle"):
-            return Path(f["path"])
-    return None
-
-
 # --- manifest of daemon-managed certs -------------------------------------
 
 def manifest_path(data_dir) -> Path:
@@ -320,18 +312,32 @@ class ManagedCert:
                    files=d.get("files") or None, raw=d)
 
     @property
+    def _placements(self) -> list:
+        """The entry's files as a uniform [{role, path}, ...] — the profile's
+        [[file]] specs, or a legacy entry's three paths cast to key/cert/ca
+        roles. The single place the two on-disk shapes are reconciled, so the
+        read methods below don't each re-discriminate them."""
+        if self.files:
+            return self.files
+        key_p, crt_p, ca_p = entry_paths(self.raw)
+        return [{"role": "key", "path": str(key_p)},
+                {"role": "cert", "path": str(crt_p)},
+                {"role": "ca", "path": str(ca_p)}]
+
+    @property
     def cert_path(self) -> "Path | None":
         """The file carrying the leaf cert (drives the expiry check)."""
-        return (_profile_cert_path(self.files) if self.files
-                else entry_paths(self.raw)[1])
+        return next((Path(f["path"]) for f in self._placements
+                     if f["role"] in ("cert", "fullchain", "bundle")), None)
 
     def placed_paths(self) -> list:
         """Every file this cert placed (what cert-remove reports/deletes)."""
-        if self.files:
-            return [f["path"] for f in self.files]
-        return [str(p) for p in entry_paths(self.raw)]
+        return [f["path"] for f in self._placements]
 
     def renew(self, anchor_url: str, keys, *, dns: "list | None" = None) -> None:
+        # The two shapes renew differently on purpose: a profile RE-PLACES every
+        # file with its owner/mode (place_cert_files), a legacy entry re-issues
+        # into its three paths (issue_cert). Only the write mechanism branches.
         dns = self.dns if dns is None else dns
         if self.files:
             key_pem, cert_pem, ca_pem = fetch_cert(
