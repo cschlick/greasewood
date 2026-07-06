@@ -97,3 +97,26 @@ trusted_pubs = []
     with pytest.raises(SystemExit) as e:
         load_config(p)
     assert "bad overlay_prefix" in str(e.value) and "not-a-prefix" in str(e.value)
+
+
+def test_zero_or_negative_credential_ttl_rejected():
+    """A non-positive credential_ttl would have the anchor issue already-expired
+    credentials — reject it (and give a clean config: message, not a traceback)."""
+    import pytest
+    from greasewood.config import _parse_duration
+    for bad in ("0h", "-5h", "0d"):
+        with pytest.raises(ValueError, match="must be positive"):
+            _parse_duration(bad)
+
+
+def test_bad_duration_exits_cleanly(tmp_path):
+    """A typo'd duration exits with a `config:` message, like overlay_prefix —
+    not a raw ValueError traceback at startup."""
+    import pytest
+    from greasewood.config import load_config
+    p = tmp_path / "gw.toml"
+    p.write_text('[node]\nhostname="n1"\nrole="anchor"\n[network]\nseeds=[]\n'
+                 '[ca]\ntrusted_pubs=[]\n[anchor]\ncredential_ttl="2x"\n')
+    with pytest.raises(SystemExit) as e:
+        load_config(p)
+    assert "credential_ttl" in str(e.value) and "2x" in str(e.value)

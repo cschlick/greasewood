@@ -84,15 +84,32 @@ def membership_key(domain: str) -> str:
     return stem if valid_label(stem) else sanitize(stem)
 
 
+def _duration(section: dict, key: str, default: str) -> dt.timedelta:
+    """Parse a duration config value, exiting with a clean `config:` message on a
+    bad one — the same posture as overlay_prefix, not a raw ValueError traceback
+    at startup."""
+    raw = section.get(key, default)
+    try:
+        return _parse_duration(raw)
+    except ValueError as e:
+        sys.exit(f"config: bad {key} {raw!r}: {e}")
+
+
 def _parse_duration(s: str) -> dt.timedelta:
-    """Parse simple duration strings: '24h', '12h', '7d', '30m'."""
-    if s.endswith("h"):
-        return dt.timedelta(hours=int(s[:-1]))
-    if s.endswith("d"):
-        return dt.timedelta(days=int(s[:-1]))
-    if s.endswith("m"):
-        return dt.timedelta(minutes=int(s[:-1]))
-    raise ValueError(f"unrecognized duration {s!r} — use '24h', '7d', or '30m'")
+    """Parse simple duration strings: '24h', '12h', '7d', '30m'. Rejects
+    non-positive values — a zero/negative credential_ttl would have an anchor
+    issue already-expired credentials, and no duration greasewood uses is ever
+    meant to be <= 0."""
+    unit = {"h": "hours", "d": "days", "m": "minutes"}.get(s[-1:] if s else "")
+    if unit is None:
+        raise ValueError(f"unrecognized duration {s!r} — use '24h', '7d', or '30m'")
+    try:
+        n = int(s[:-1])
+    except ValueError:
+        raise ValueError(f"unrecognized duration {s!r} — use '24h', '7d', or '30m'")
+    if n <= 0:
+        raise ValueError(f"duration {s!r} must be positive")
+    return dt.timedelta(**{unit: n})
 
 
 def render_config(*, hostname: str, data_dir, role: str, caps: list,
@@ -186,10 +203,10 @@ def load_config(path: Path) -> Config:
         ca_key_file=Path(anchor["ca_key_file"]).expanduser() if "ca_key_file" in anchor else None,
         ca_key_passphrase_env=anchor.get("ca_key_passphrase_env"),
         control_listen=anchor.get("control_listen", ":51902"),
-        credential_ttl=_parse_duration(anchor.get("credential_ttl", "24h")),
-        renew_before=_parse_duration(anchor.get("renew_before", "12h")),
-        door_window=_parse_duration(anchor.get("door_window", "15m")),
-        tls_cert_ttl=_parse_duration(anchor.get("tls_cert_ttl", "7d")),
+        credential_ttl=_duration(anchor, "credential_ttl", "24h"),
+        renew_before=_duration(anchor, "renew_before", "12h"),
+        door_window=_duration(anchor, "door_window", "15m"),
+        tls_cert_ttl=_duration(anchor, "tls_cert_ttl", "7d"),
         door_port=int(anchor.get("door_port", 51901)),
         default_segments=list(anchor.get("default_segments", ["mesh"])),
         default_caps=list(anchor.get("default_caps", ["tls"])),

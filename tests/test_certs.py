@@ -313,3 +313,28 @@ def test_migrate_rewrites_cert_manifest(tmp_path):
     assert entries[0]["dns"] == ["db.new.internal"]
     assert entries[0]["cn"] == "db.new.internal"
     assert entries[1]["dns"] == ["pg.db.new.internal", "keep.corp.example"]  # non-mesh kept
+
+
+def test_manifest_writes_are_atomic(tmp_path, monkeypatch):
+    """A torn manifest write must not be possible: record/remove go through
+    keys.atomic_write (temp + rename), so load_manifest never sees a truncated
+    file that it would swallow as [] — silently disabling all renewal."""
+    import inspect
+    from greasewood import certs
+    for fn in (certs.record_managed, certs.remove_managed, certs.snapshot_profile):
+        src = inspect.getsource(fn)
+        assert "atomic_write" in src and "write_text" not in src, fn.__name__
+
+
+def test_place_cert_files_no_privkey_tmp_left_on_owner_failure(tmp_path):
+    """If chown fails (unknown owner), the 0600 temp holding the leaf private key
+    must be cleaned up, not left as <dest>.gwtmp in the service dir."""
+    import pytest
+    from greasewood import certs
+    dest = tmp_path / "server.key"
+    files = [{"role": "key", "path": str(dest), "owner": "no_such_user_zzz9"}]
+    with pytest.raises(RuntimeError):
+        certs.place_cert_files(files, "KEYPEM\n", "C\n", "A\n")
+    assert not dest.exists()
+    assert not (tmp_path / "server.key.gwtmp").exists()      # no leaked key temp
+    assert list(tmp_path.iterdir()) == []                    # nothing left behind

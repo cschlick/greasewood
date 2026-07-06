@@ -189,15 +189,26 @@ def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> N
         # Deliberately NOT keys.atomic_write: the owner must change on the TEMP,
         # before the atomic swap, so the file appears fully-owned or not at all.
         tmp = dest.with_name(dest.name + ".gwtmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        placed = False
         try:
-            os.write(fd, content)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            try:
+                os.write(fd, content)
+            finally:
+                os.close(fd)
+            os.chmod(tmp, mode)                  # O_CREAT mode is umask-masked
+            if f.get("owner"):
+                os.chown(tmp, *_resolve_owner(f["owner"]))
+            os.replace(tmp, dest)                # atomic swap
+            placed = True
         finally:
-            os.close(fd)
-        os.chmod(tmp, mode)                      # O_CREAT mode is umask-masked
-        if f.get("owner"):
-            os.chown(tmp, *_resolve_owner(f["owner"]))
-        os.replace(tmp, dest)                    # atomic swap
+            # A failed chown (unknown owner) etc. must NOT leave the 0600 temp —
+            # for key/bundle roles it holds the leaf PRIVATE KEY.
+            if not placed:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
 
 
 def _profile_cert_path(files: list) -> "Path | None":
@@ -227,9 +238,10 @@ def record_managed(data_dir, entry: dict) -> None:
     of adding a duplicate that would keep renewing into the old location."""
     certs = [c for c in load_manifest(data_dir) if c.get("name") != entry["name"]]
     certs.append(entry)
-    p = manifest_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(certs, indent=2))
+    # Atomic: a torn manifest is worse than a lost update — load_manifest
+    # swallows a JSONDecodeError as [], so a truncated write would silently
+    # switch off auto-renewal for EVERY managed cert until the next request.
+    atomic_write(manifest_path(data_dir), json.dumps(certs, indent=2), mode=0o644)
 
 
 def remove_managed(data_dir, name: str) -> bool:
@@ -240,7 +252,7 @@ def remove_managed(data_dir, name: str) -> bool:
     kept = [c for c in entries if c.get("name") != name]
     if len(kept) == len(entries):
         return False
-    manifest_path(data_dir).write_text(json.dumps(kept, indent=2))
+    atomic_write(manifest_path(data_dir), json.dumps(kept, indent=2), mode=0o644)
     return True
 
 
@@ -254,8 +266,7 @@ def snapshot_profile(data_dir, name: str, text: str) -> Path:
     applied (with its provenance comments), separate from the manifest's
     effective config. Returns the snapshot path."""
     p = profile_snapshot_path(data_dir, name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text)
+    atomic_write(p, text, mode=0o644)
     return p
 
 
