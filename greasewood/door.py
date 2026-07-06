@@ -240,10 +240,49 @@ def window_path(data_dir: Path) -> Path:
     return data_dir / "door_window.json"
 
 
+@dataclass
+class Window:
+    """A parsed door window — and the ONE definition of window liveness:
+    STANDING never expires (closed only by `gw close-door` or a superseding
+    invite); otherwise live while its expiry is in the future. Both
+    read_window (invite/watch) and the DoorWatcher build on this, so the rule
+    can't drift between them."""
+    standing: bool
+    expires: "dt.datetime | None"    # None for a standing window
+    expires_str: "str | None"        # raw string — a window's session identity
+    caps: list
+    hostname: "str | None"           # pinned at invite, or None
+    guest_pub: "str | None"          # standing only: door re-erection material
+    psk: "str | None"
+
+    def live(self, now: "dt.datetime | None" = None) -> bool:
+        if self.standing:
+            return True
+        if self.expires is None:
+            return False
+        return (now or dt.datetime.now(dt.timezone.utc)) < self.expires
+
+
+def parse_window(data: dict) -> "Window | None":
+    """dict → Window, or None if malformed."""
+    standing = bool(data.get("standing"))
+    expires = None
+    if not standing:
+        try:
+            expires = dt.datetime.fromisoformat(
+                data["expires"].replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return Window(standing=standing, expires=expires,
+                  expires_str=data.get("expires"),
+                  caps=list(data.get("caps") or ["segment:mesh"]),
+                  hostname=data.get("hostname"),
+                  guest_pub=data.get("guest_pub"), psk=data.get("psk"))
+
+
 def read_window(data_dir: Path) -> "dict | None":
-    """The current door window if it is live, else None. A window is live if it
-    is STANDING (never expires; closed only by `gw close-door` or a superseding
-    invite) or if its expiry is still in the future."""
+    """The current door window's raw dict if it is live, else None (liveness
+    per Window.live)."""
     p = window_path(data_dir)
     if not p.exists():
         return None
@@ -251,15 +290,8 @@ def read_window(data_dir: Path) -> "dict | None":
         data = json.loads(p.read_text())
     except (OSError, ValueError):
         return None
-    if data.get("standing"):
-        return data
-    try:
-        exp = dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if dt.datetime.now(dt.timezone.utc) >= exp:
-        return None
-    return data
+    w = parse_window(data)
+    return data if w is not None and w.live() else None
 
 
 # ---------------------------------------------------------------------------

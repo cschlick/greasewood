@@ -228,31 +228,57 @@ class EnrollServer:
             self._on_done()
 
     def _handle(self, conn: socket.socket, peer_ip: str, attempts_left: int) -> bool:
-        """Process one enrollment attempt. Returns True if it succeeded (the
-        window should close), False if it was refused (the joiner may retry
-        while attempts remain)."""
-        import base64
-        from . import wg as wgmod
-        from .keys import derive_addr
+        """One enrollment attempt, as a narrative: validate the request →
+        issue + install (with rollback; a refusal is replied cleanly) → send
+        the credential → best-effort second leg (the joiner's first record).
+        Returns True if enrollment succeeded (the window should close), False
+        on a refusal (the joiner may retry while attempts remain)."""
+        id_pub_bytes, wg_pub_bytes, hostname = self._validate_request(_recv_msg(conn))
 
-        req = _recv_msg(conn)
+        cred = self._issue_and_install(conn, peer_ip, attempts_left,
+                                       id_pub_bytes, wg_pub_bytes, hostname)
+        if cred is None:
+            return False        # refused — a clean reply was already sent
+
+        self._send_credential(conn, cred)
+        self._receive_first_record(conn)
+        # The credential was issued and the peer installed, so the enrollment
+        # itself succeeded — the second-leg record publish is best-effort.
+        return True
+
+    def _validate_request(self, req: dict) -> "tuple[bytes, bytes, str]":
+        """Decode + validate the enroll request. Raises ValueError on a
+        malformed one (the accept loop counts it as a failed attempt)."""
+        import base64
+
         if req.get("v") != 1:
             raise ValueError(f"unsupported version: {req.get('v')}")
-
         id_pub_bytes = bytes.fromhex(req["id_pub"])
         wg_pub_bytes = base64.b64decode(req["wg_pub"])
-        # Hostname: if the anchor pinned one at invite, it wins and the joiner's
-        # requested name is ignored; otherwise the joiner names itself.
-        hostname = self._pinned_hostname or str(req["hostname"])
-        # Caps are decided by the anchor at `gw invite` and carried in the
-        # door window — NOT self-asserted by the joiner. Any caps in the request
-        # are ignored; the window's caps are authoritative.
-        caps = list(self._caps)
-
         if len(id_pub_bytes) != 32:
             raise ValueError("id_pub must be 32 bytes")
         if len(wg_pub_bytes) != 32:
             raise ValueError("wg_pub must be 32 bytes")
+        # Hostname: if the anchor pinned one at invite, it wins and the joiner's
+        # requested name is ignored; otherwise the joiner names itself.
+        hostname = self._pinned_hostname or str(req["hostname"])
+        return id_pub_bytes, wg_pub_bytes, hostname
+
+    def _issue_and_install(self, conn, peer_ip: str, attempts_left: int,
+                           id_pub_bytes: bytes, wg_pub_bytes: bytes,
+                           hostname: str):
+        """Issue the CA credential and install the WireGuard peer — the two
+        steps that can refuse. On either refusal, reply cleanly (never a raw
+        traceback), roll back what this attempt created, and return None.
+        Returns the Credential on success."""
+        from . import wg as wgmod
+        from .keys import derive_addr
+        import base64
+
+        # Caps are decided by the anchor at `gw invite` and carried in the
+        # door window — NOT self-asserted by the joiner. Any caps in the request
+        # are ignored; the window's caps are authoritative.
+        caps = list(self._caps)
 
         # Issue CA-signed credential. A ValueError here is a refusal (revoked
         # id, or hostname already taken) — report it cleanly to the joiner
@@ -272,7 +298,7 @@ class EnrollServer:
             _send_msg(conn, {"v": 1, "ok": False, "error": "enrollment refused",
                              "reason": str(e),
                              "attempts_remaining": attempts_left - 1})
-            return False
+            return None
 
         # Add new node as a peer on the main WG interface so it can establish
         # its tunnel and push its NodeRecord to the anchor on first startup.
@@ -309,12 +335,15 @@ class EnrollServer:
             _send_msg(conn, {"v": 1, "ok": False, "error": "anchor data-plane failure",
                              "reason": reason,
                              "attempts_remaining": attempts_left - 1})
-            return False
+            return None
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
         self._status(door.mark_door_enrolled, peer_ip, hostname)
+        return cred
 
-        # Send back the credential + anchor's own NodeRecord so the new node can
-        # pre-seed its directory and configure seeds using the overlay address.
+    def _send_credential(self, conn, cred) -> None:
+        """The success reply: the credential + the anchor's own NodeRecord, so
+        the new node can pre-seed its directory and configure seeds using the
+        overlay address."""
         anchor_record = self._directory.get(self._node_keys.id_pub_hex)
         reply = {
             "v": 1,
@@ -327,24 +356,19 @@ class EnrollServer:
             reply["mesh_domain"] = self._mesh_domain
         _send_msg(conn, reply)
 
-        # Second leg: the node now builds + signs its NodeRecord (it embeds the
-        # credential we just issued) and sends it here. We merge it into the
-        # directory so the reconcile loop keeps the peer we installed above —
-        # this is the bootstrap that used to be a separate POST /publish over
-        # the door. Doing it on the door tunnel means the control plane never
-        # has to listen on the door interface. Best-effort: a node on older
-        # code simply won't send it and falls back to publishing once its
-        # overlay tunnel is up.
+    def _receive_first_record(self, conn) -> None:
+        """Second leg, BEST-EFFORT by design: the node builds + signs its
+        NodeRecord (embedding the credential we just issued) and sends it here;
+        we merge it so the reconcile loop keeps the peer we installed. Doing it
+        on the door tunnel means the control plane never listens on the door
+        interface. Nothing here can fail the enrollment — the credential is
+        already issued and the reply sent; an older node simply doesn't send a
+        record and publishes once its overlay tunnel is up."""
         from .wire import NodeRecord
         try:
             rec_msg = _recv_msg(conn)
         except Exception:
-            # The credential was already issued, the peer installed, and the
-            # response sent — enrollment SUCCEEDED. The second leg is best-effort
-            # (older nodes skip it; under load the recv may lag), so this is a
-            # successful attempt: return True so the window closes, not False
-            # (which would wrongly keep the door open for a "retry").
-            return True
+            return              # older node / laggy recv — enrollment already succeeded
         try:
             record = NodeRecord.from_dict(rec_msg["record"])
             record.verify(self._get_ca_pubs(), self._get_revoked())
@@ -359,10 +383,6 @@ class EnrollServer:
                 _send_msg(conn, {"v": 1, "ok": False, "error": str(e)})
             except Exception:
                 pass
-
-        # The credential was issued and the peer installed, so the enrollment
-        # itself succeeded — the second-leg record publish above is best-effort.
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +436,8 @@ class DoorWatcher(Loop):
                 self._enroll.stop()
 
     def _tick(self) -> None:
+        """Absent window → clean up; expired → close; live and not yet served →
+        start an EnrollServer for it (_start_server)."""
         window_path = self._data_dir / "door_window.json"
 
         if not window_path.exists():
@@ -424,15 +446,15 @@ class DoorWatcher(Loop):
 
         try:
             data = json.loads(window_path.read_text())
-            standing = bool(data.get("standing"))
-            expires = None if standing else \
-                dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
         except Exception as e:
             log.debug("door_window.json unreadable: %s", e)
             return
+        win = door.parse_window(data)
+        if win is None:
+            log.debug("door_window.json malformed; ignoring")
+            return
 
-        now = dt.datetime.now(_UTC)
-        if expires is not None and now >= expires:
+        if not win.live():
             log.info("door window expired, cleaning up")
             self._clear_enroll()
             window_path.unlink(missing_ok=True)
@@ -442,14 +464,18 @@ class DoorWatcher(Loop):
                 log.debug("door status update failed: %s", e)
             return
 
+        self._start_server(win, window_path)
+
+    def _start_server(self, win: "door.Window", window_path: Path) -> None:
+        """Start the EnrollServer for a live window (no-op if one is running).
+        For a STANDING window, first re-erect the door interface if a reboot
+        took it (the window persists; kernel state doesn't)."""
+        standing = win.standing
         with self._lock:
             if self._enroll is not None:
                 return  # already running
 
-            # A standing window persists across anchor reboots, but the door
-            # interface is kernel state and doesn't — re-erect it from the
-            # keys the window carries before serving.
-            if standing and data.get("guest_pub") and data.get("psk"):
+            if standing and win.guest_pub and win.psk:
                 from . import wg as wgmod
                 if not wgmod.interface_exists(DOOR_IFACE):
                     log.info("standing door: re-erecting %s", DOOR_IFACE)
@@ -457,20 +483,18 @@ class DoorWatcher(Loop):
                         from . import audit
                         with audit.context("standing door: re-erect after reboot"):
                             wgmod.ensure_anchor_door_interface(
-                                self._data_dir / "door.key", data["guest_pub"],
-                                data["psk"], self._door_port)
+                                self._data_dir / "door.key", win.guest_pub,
+                                win.psk, self._door_port)
                     except Exception as e:
                         log.error("standing door: could not re-erect %s: %s — "
                                   "will retry next tick", DOOR_IFACE, e)
                         return
 
-            remaining = None if standing else (expires - now).total_seconds()
-            # Capture expiry string for the on_done guard below.
-            expires_str = data.get("expires")
-            # Caps the anchor authorized at `gw invite` for this window.
-            window_caps = data.get("caps") or ["segment:mesh"]
-            # Pinned hostname, if the anchor set one (`gw invite --hostname`).
-            window_hostname = data.get("hostname")
+            remaining = (None if standing else
+                         (win.expires - dt.datetime.now(_UTC)).total_seconds())
+            expires_str = win.expires_str   # a window's session identity (on_done)
+            window_caps = win.caps          # authorized at `gw invite`
+            window_hostname = win.hostname  # pinned at invite, or None
 
             def on_done():
                 # Only delete the window if it still belongs to this session.
