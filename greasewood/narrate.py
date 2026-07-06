@@ -131,6 +131,8 @@ def _describe_wg(a) -> str:
 
 def _describe_ip(a) -> str:
     toks = [t for t in a[1:] if t not in ("-6", "-4", "-o")]
+    if len(toks) < 3:               # a bare/truncated line — nothing to translate
+        return "ip " + " ".join(a[1:])
     two = toks[:2]
     dev = toks[-1]
     if two == ["link", "add"]:

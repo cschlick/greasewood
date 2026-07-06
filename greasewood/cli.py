@@ -3110,7 +3110,7 @@ def cmd_narrate(args) -> int:
     what greasewood did to the kernel's network state, when, why, and whether it
     worked. Reads <data_dir>/audit.log by default; a path, or '-' for stdin."""
     import sys as _sys
-    from .config import load_config
+    from .config import load_config, _parse_duration
     from . import narrate as N
 
     # Where to read from.

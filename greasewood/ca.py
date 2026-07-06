@@ -31,6 +31,14 @@ from .keys import CAKeys, derive_addr
 from .wire import Credential, RenewRequest
 
 log = logging.getLogger(__name__)
+
+
+class UnknownNodeError(ValueError):
+    """The id_pub has no registry entry (nodes/<id>.json). A distinct type
+    because the control plane's re-root fallback fires ONLY on this condition
+    (server._reroot_reissue) — gating a security-relevant path on an exception
+    *type* instead of its message text."""
+
 _UTC = dt.timezone.utc
 
 CapPolicy = Callable[[list[str]], list[str]]
@@ -152,7 +160,7 @@ class CA:
 
             node_info = self._load_node_info(req.id_pub)
             if node_info is None:
-                raise ValueError("unknown node — issue a credential first")
+                raise UnknownNodeError("unknown node — issue a credential first")
 
             hostname, caps = node_info
             if req.hostname and req.hostname != hostname:
@@ -220,7 +228,7 @@ class CA:
         with self._lock:
             info = self._load_node_info(id_pub)
             if info is None:
-                raise ValueError("unknown node — enroll it first")
+                raise UnknownNodeError("unknown node — enroll it first")
             hostname, _ = info
             self._save_node_caps(id_pub, hostname, caps)
 

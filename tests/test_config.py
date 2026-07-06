@@ -79,10 +79,21 @@ def test_new_node_defaults_explicit(tmp_path):
     assert cfg.default_caps == []
 
 
-def test_malformed_overlay_prefix_is_swallowed(tmp_path):
-    # A hand-edited bad prefix must not crash load_config; the parse failure is
-    # swallowed (the process keeps the default /64) and the raw value is stored.
-    p = _write(tmp_path,
-               '[node]\nhostname = "n1"\n[network]\noverlay_prefix = "not-an-ip"\n')
-    cfg = load_config(p)  # must not raise
-    assert cfg.overlay_prefix == "not-an-ip"
+def test_bad_overlay_prefix_fails_loudly(tmp_path):
+    """Regression: a malformed overlay_prefix was silently swallowed, quietly
+    addressing the node under the DEFAULT /64 instead of the fleet's."""
+    import pytest
+    from greasewood.config import load_config
+    p = tmp_path / "gw.toml"
+    p.write_text('''[node]
+hostname = "n1"
+data_dir = "/tmp/x"
+[network]
+overlay_prefix = "not-a-prefix"
+seeds = []
+[ca]
+trusted_pubs = []
+''')
+    with pytest.raises(SystemExit) as e:
+        load_config(p)
+    assert "bad overlay_prefix" in str(e.value) and "not-a-prefix" in str(e.value)

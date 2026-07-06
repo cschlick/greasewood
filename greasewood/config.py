@@ -144,6 +144,9 @@ def load_config(path: Path) -> Config:
     from .keys import set_overlay_prefix, parse_overlay_prefix
     try:
         set_overlay_prefix(parse_overlay_prefix(cfg.overlay_prefix))
-    except Exception:
-        pass  # keep the default on a malformed prefix
+    except ValueError as e:
+        # Fail loudly: silently keeping the DEFAULT /64 on a typo'd prefix
+        # would address this node (or issue credentials, on an anchor) under
+        # the wrong prefix with zero signal.
+        sys.exit(f"config: bad overlay_prefix {cfg.overlay_prefix!r}: {e}")
     return cfg

@@ -117,3 +117,16 @@ def test_hostname_owner_and_collision(tmp_path):
     with pytest.raises(ValueError, match="already in use"):
         ca.issue(b.id_pub_bytes, b.wg_pub_bytes, "web1", ["mesh"])
     ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "web1", ["mesh"])
+
+
+def test_unknown_node_is_typed_not_prose():
+    """Regression: the control plane's re-root fallback fired on the exception
+    MESSAGE text ('unknown node' in str(e)); it now keys on UnknownNodeError,
+    so rewording a message can't silently disable a security-relevant path."""
+    from greasewood.ca import CA, UnknownNodeError
+    import inspect
+    from greasewood import server
+    assert issubclass(UnknownNodeError, ValueError)   # old catches still work
+    src = inspect.getsource(server._Handler._reroot_reissue)
+    assert "isinstance(orig_err, UnknownNodeError)" in src
+    assert '"unknown node" not in' not in src         # the prose gate is gone

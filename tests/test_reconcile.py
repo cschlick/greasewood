@@ -332,7 +332,7 @@ class TestInterfaceSelfHeal:
         calls = {"ensure": 0}
         monkeypatch.setattr(reconcile.wgmod, "interface_exists",
                             lambda iface: True, raising=False)
-        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: [])
+        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: ([], []))
         loop = self._loop(lambda: calls.__setitem__("ensure", 1))
         loop._cycle()
         assert calls["ensure"] == 0
@@ -342,7 +342,7 @@ class TestInterfaceSelfHeal:
         monkeypatch.setattr(reconcile.wgmod, "interface_exists",
                             lambda iface: False, raising=False)
         monkeypatch.setattr(reconcile, "reconcile_once",
-                            lambda *a, **k: ran.__setitem__("reconcile", 1) or [])
+                            lambda *a, **k: ran.__setitem__("reconcile", 1) or ([], []))
         def boom():
             raise RuntimeError("ip link add failed")
         loop = self._loop(boom)
@@ -354,7 +354,7 @@ class TestInterfaceSelfHeal:
         def explode(iface):
             raise AssertionError("should not be called")
         monkeypatch.setattr(reconcile.wgmod, "interface_exists", explode, raising=False)
-        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: [])
+        monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: ([], []))
         loop = self._loop(None)
         loop._cycle()
 
@@ -482,3 +482,50 @@ class TestReachablePublish:
         loop._last_reachable_pub -= 31                 # pretend interval elapsed
         loop._maybe_publish_reachable(["a", "b"])
         assert published[-1] == ["a", "b"]             # now it fires
+
+
+class TestLoopResilience:
+    """The reconcile thread must survive an exception escaping _cycle — a dead
+    reconcile loop is a frozen data plane under a healthy-looking daemon. (The
+    old bare run() died on the first such exception; the sibling loops already
+    guarded theirs.)"""
+
+    def test_run_survives_cycle_exception(self):
+        import threading
+        from greasewood.reconcile import ReconcileLoop
+        loop = ReconcileLoop(iface="gw-x", directory=Directory(),
+                             local_id_pub=b"x" * 32, local_caps=[],
+                             get_ca_pubs=lambda: [], get_revoked=lambda: set(),
+                             interval=0.01)
+        calls = {"n": 0}
+        fired = threading.Event()
+
+        def boom():
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                fired.set()
+            raise RuntimeError("cycle exploded")
+        loop._cycle = boom
+        t = loop.start()
+        assert fired.wait(timeout=5), "loop died after the first exception"
+        loop.stop()
+        t.join(timeout=2)
+        assert calls["n"] >= 3                # kept cycling THROUGH the raises
+
+    def test_cycle_mock_shape_matches_contract(self, monkeypatch):
+        """Guard against the mock rot this class fixes: a full _cycle with the
+        REAL reconcile_once return shape must reach the post-reconcile steps
+        (reachable publish) — proving the tests above exercise the success
+        path, not a swallowed unpack error."""
+        from greasewood.reconcile import ReconcileLoop
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists",
+                            lambda iface: True, raising=False)
+        monkeypatch.setattr(reconcile, "reconcile_once",
+                            lambda *a, **k: ([], ["fd8d::1"]))
+        published = []
+        loop = ReconcileLoop(iface="gw-x", directory=Directory(),
+                             local_id_pub=b"x" * 32, local_caps=[],
+                             get_ca_pubs=lambda: [], get_revoked=lambda: set(),
+                             on_reachable=published.append)
+        loop._cycle()
+        assert published == [["fd8d::1"]]     # the success path actually ran
