@@ -25,6 +25,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+
+def _raw_pub(priv) -> bytes:
+    """The 32 raw public-key bytes of an Ed25519/X25519 private key."""
+    return priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
 # Default overlay /64 (8 bytes). Configurable per fleet via [network]
 # overlay_prefix; this is just the default a fresh create uses.
 OVERLAY_PREFIX_BYTES = bytes([0xfd, 0x8d, 0xe5, 0xc1, 0xdb, 0x1a, 0x00, 0x07])
@@ -106,13 +114,9 @@ class NodeKeys:
     @classmethod
     def generate(cls) -> "NodeKeys":
         id_priv = Ed25519PrivateKey.generate()
-        id_pub_bytes = id_priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        id_pub_bytes = _raw_pub(id_priv)
         wg_priv = X25519PrivateKey.generate()
-        wg_pub_bytes = wg_priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        wg_pub_bytes = _raw_pub(wg_priv)
         return cls(
             id_priv=id_priv,
             id_pub_bytes=id_pub_bytes,
@@ -166,14 +170,10 @@ class NodeKeys:
         id_priv = serialization.load_pem_private_key(
             (data_dir / "id_priv.pem").read_bytes(), password=passphrase
         )
-        id_pub_bytes = id_priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        id_pub_bytes = _raw_pub(id_priv)
         wg_raw = base64.b64decode((data_dir / "wg.key").read_text().strip())
         wg_priv = X25519PrivateKey.from_private_bytes(wg_raw)
-        wg_pub_bytes = wg_priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        wg_pub_bytes = _raw_pub(wg_priv)
         return cls(
             id_priv=id_priv,
             id_pub_bytes=id_pub_bytes,
@@ -204,9 +204,7 @@ class CAKeys:
     @classmethod
     def generate(cls) -> "CAKeys":
         priv = Ed25519PrivateKey.generate()
-        pub_bytes = priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        pub_bytes = _raw_pub(priv)
         return cls(ca_priv=priv, ca_pub_bytes=pub_bytes)
 
     def save(self, key_path: Path, passphrase: bytes | None = None) -> None:
@@ -231,9 +229,7 @@ class CAKeys:
         priv = serialization.load_pem_private_key(
             key_path.read_bytes(), password=passphrase
         )
-        pub_bytes = priv.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
-        )
+        pub_bytes = _raw_pub(priv)
         return cls(ca_priv=priv, ca_pub_bytes=pub_bytes)
 
 

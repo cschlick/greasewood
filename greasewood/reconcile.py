@@ -13,6 +13,7 @@ locally with no agreement or coordination required.
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import datetime as dt
 import json
 import logging
@@ -95,6 +96,15 @@ def _select_endpoint(endpoints: list[str],
     return candidates[0] if candidates else None
 
 
+@dataclass
+class _PeerEndpoint:
+    """One peer's endpoint-fallback state, carried across reconcile cycles."""
+    current: str                            # the endpoint currently pinned
+    since: float                            # when we pinned/rotated to it
+    unhealthy_since: "float | None" = None  # first cycle with no live handshake
+    dead: bool = False                      # past a full probe cycle → backoff
+
+
 class _EndpointTracker:
     """Per-peer endpoint fallback state, carried across reconcile cycles.
 
@@ -107,13 +117,12 @@ class _EndpointTracker:
     the dwell clock, so a healthy link is never disturbed.
     """
 
-    def __init__(self, dwell: float = 20.0, healthy: float = 180.0) -> None:
+    def __init__(self, dwell: float = 20.0, healthy: float = _LIVE_LINK_SECS) -> None:
         self._dwell = dwell
-        # A handshake within `healthy` seconds means the current endpoint works.
-        # ~180s covers WireGuard's ~2-min handshake refresh on an idle-but-live
-        # tunnel (matches the 'LINKED' window gw diagnose uses).
+        # A handshake within `healthy` seconds means the current endpoint works
+        # (defaults to the shared _LIVE_LINK_SECS window).
         self._healthy = healthy
-        self._state: dict[str, dict] = {}  # wg_pub_b64 → {current, since}
+        self._state: dict[str, _PeerEndpoint] = {}  # keyed by wg_pub_b64
 
     def _is_healthy(self, hs: int, now: float) -> bool:
         return bool(hs) and (now - hs) <= self._healthy
@@ -124,37 +133,37 @@ class _EndpointTracker:
             self._state.pop(wg_pub_b64, None)
             return None
         st = self._state.get(wg_pub_b64)
-        if st is None or st["current"] not in candidates:
+        if st is None or st.current not in candidates:
             # New peer, or it re-advertised a set without our current endpoint.
             # Start the unhealthy clock now if it isn't already handshaking, so
             # the backoff countdown runs from when we first pinned the endpoint.
             healthy = self._is_healthy(hs, now)
-            st = {"current": candidates[0], "since": now,
-                  "unhealthy_since": None if healthy else now, "dead": False}
+            st = _PeerEndpoint(current=candidates[0], since=now,
+                               unhealthy_since=None if healthy else now)
             self._state[wg_pub_b64] = st
-            return st["current"]
+            return st.current
         if self._is_healthy(hs, now):
             # Working link → reset the dwell clock, clear any backoff.
-            st.update(since=now, unhealthy_since=None, dead=False)
-            return st["current"]
-        if st.get("unhealthy_since") is None:
-            st["unhealthy_since"] = now
-        if len(candidates) > 1 and (now - st["since"]) >= self._dwell:
-            i = candidates.index(st["current"])
-            st["current"] = candidates[(i + 1) % len(candidates)]
-            st["since"] = now
+            st.since, st.unhealthy_since, st.dead = now, None, False
+            return st.current
+        if st.unhealthy_since is None:
+            st.unhealthy_since = now
+        if len(candidates) > 1 and (now - st.since) >= self._dwell:
+            i = candidates.index(st.current)
+            st.current = candidates[(i + 1) % len(candidates)]
+            st.since = now
         # Backoff: once we've been unhealthy for a full probe cycle (dwell per
         # advertised endpoint) with no handshake, the endpoint(s) are dead. We
         # keep it pinned for automatic recovery, but the caller drops keepalive
         # to 0 so we stop firing a futile packet every 25s into the void.
-        st["dead"] = (now - st["unhealthy_since"]) >= self._dwell * len(candidates)
-        return st["current"]
+        st.dead = (now - st.unhealthy_since) >= self._dwell * len(candidates)
+        return st.current
 
     def is_backoff(self, wg_pub_b64: str) -> bool:
         """True if this peer's endpoint has been dead past a full probe cycle —
         pinned but not worth keepalive traffic (see choose())."""
         st = self._state.get(wg_pub_b64)
-        return bool(st and st.get("dead"))
+        return bool(st and st.dead)
 
 
 def reconcile_once(
@@ -167,7 +176,7 @@ def reconcile_once(
     policy: Policy = default_policy,
     local_families: "set[int] | None" = None,
     endpoint_tracker: "_EndpointTracker | None" = None,
-) -> list:
+) -> "tuple[list, list[str]]":
     """
     Single reconcile pass against the full directory.
 
@@ -181,10 +190,12 @@ def reconcile_once(
 
     Result: kernel WireGuard peer set matches exactly the authorized directory.
 
-    Returns the records that passed full verification (steps 1–5, including the
-    local node's own record). This is the ONLY set other outputs may be derived
-    from — the /etc/hosts block is built from it, so a revoked or expired node
-    stops resolving on the same cycle its tunnel comes down. The directory cache
+    Returns (trusted, reachable). `trusted` is the records that passed full
+    verification (steps 1–5, including the local node's own record) — the ONLY
+    set other outputs may be derived from; the /etc/hosts block is built from
+    it, so a revoked or expired node stops resolving on the same cycle its
+    tunnel comes down. `reachable` is the overlay addrs of peers with a live
+    handshake — what this node publishes for the fleet's segment-health view. The directory cache
     itself is deliberately looser (structural checks only) so it survives
     re-roots and clock skew; anything user-visible must go through this gate.
     """

@@ -360,7 +360,8 @@ class CertRequest:
         }
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "CertRequest":
-        return replace(self, sig=id_priv.sign(_canonical(self._body_dict())))
+        sig = id_priv.sign(_canonical(self._body_dict()))
+        return replace(self, sig=sig)
 
     def verify_self_sig(self) -> None:
         pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
@@ -380,8 +381,10 @@ class CertRequest:
             id_pub=_b64d(d["id_pub"]),
             leaf_pub=_b64d(d["leaf_pub"]),
             cn=d["cn"],
-            dns=list(d.get("dns", [])),
-            ips=list(d.get("ips", [])),
+            # dns/ips are ALWAYS in the signed body (unlike aliases/reachable,
+            # which .get() signals as omitted-when-empty) — so index, don't .get.
+            dns=list(d["dns"]),
+            ips=list(d["ips"]),
             nonce=d["nonce"],
             ts=_parse_ts(d["ts"]),
             sig=_b64d(d["sig"]),

@@ -421,8 +421,8 @@ class TestEndpointBackoff:
         monkeypatch.setattr(rmod, "wgmod", fake)
         # Tracker already past dwell for this peer (unhealthy since t=0).
         tracker = _EndpointTracker(dwell=20.0)
-        tracker._state[pub] = {"current": "[2001:db8::9]:51900", "since": 0.0,
-                               "unhealthy_since": 0.0, "dead": False}
+        tracker._state[pub] = rmod._PeerEndpoint(
+            current="[2001:db8::9]:51900", since=0.0, unhealthy_since=0.0)
         monkeypatch.setattr(_time, "time", lambda: 1000.0)
 
         reconcile_once("gw-test", directory, local.id_pub_bytes, ["segment:mesh"],

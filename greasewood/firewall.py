@@ -145,6 +145,9 @@ def _load_ruleset():
 
 def check(rules: list[Rule], log) -> bool:
     """Inspect the local firewall and warn about anything that looks blocked.
+    Takes the caller's logger (the only module-level function here that logs):
+    create/join/firewall route the advice through the CLI's logger so it lands
+    in the command's own output stream, not a separate module channel.
     Returns True if everything looks fine (or unknowable), False if a needed
     port appears blocked by a default-drop policy."""
     ruleset = _load_ruleset()

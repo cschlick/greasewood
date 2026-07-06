@@ -9,6 +9,11 @@ all-or-nothing interface bounces that tear down every live tunnel.
 
 Interface and address setup use `ip`; that happens once at startup, not in
 the hot reconcile loop.
+
+Audit-context rule: contexts are CALLER-supplied (audit.context at the call
+site — reconcile/invite/join/startup know who and why); this module only
+records. The exceptions set their own because no caller adds meaning:
+rename_interface and the door isolation routing.
 """
 from __future__ import annotations
 

@@ -482,9 +482,11 @@ class DoorWatcher:
                 if not wgmod.interface_exists(DOOR_IFACE):
                     log.info("standing door: re-erecting %s", DOOR_IFACE)
                     try:
-                        wgmod.ensure_anchor_door_interface(
-                            self._data_dir / "door.key", data["guest_pub"],
-                            data["psk"], self._door_port)
+                        from . import audit
+                        with audit.context("standing door: re-erect after reboot"):
+                            wgmod.ensure_anchor_door_interface(
+                                self._data_dir / "door.key", data["guest_pub"],
+                                data["psk"], self._door_port)
                     except Exception as e:
                         log.error("standing door: could not re-erect %s: %s — "
                                   "will retry next tick", DOOR_IFACE, e)
