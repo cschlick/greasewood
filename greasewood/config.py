@@ -46,8 +46,10 @@ class Config:
     seeds: list[str]       # http://[addr]:port — seeds to pull directory from
     root_url: str          # where to send enroll/renew requests
 
-    # CA trust set — list of hex-encoded raw Ed25519 public keys
-    ca_pubs: list[str]
+    # CA trust set — hex-encoded raw Ed25519 public keys. The _hex suffix is
+    # load-bearing: everywhere ELSE in the codebase `ca_pubs` is raw bytes (what
+    # verify() wants), and cli/status decode this with bytes.fromhex at use.
+    ca_pubs_hex: list[str]
 
     # Anchor-only (written under the [anchor] section)
     ca_key_file: Path | None
@@ -198,7 +200,7 @@ def load_config(path: Path) -> Config:
         aliases=list(net.get("aliases", [])),
         audit_log=audit_log,
 
-        ca_pubs=ca_sec.get("trusted_pubs", []),
+        ca_pubs_hex=ca_sec.get("trusted_pubs", []),
 
         ca_key_file=Path(anchor["ca_key_file"]).expanduser() if "ca_key_file" in anchor else None,
         ca_key_passphrase_env=anchor.get("ca_key_passphrase_env"),

@@ -73,7 +73,7 @@ trusted_pubs = ["{CA.ca_pub_hex}"]
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live_peers)
-    monkeypatch.setattr(status, "_self_firewall_port", lambda port: self_fw)
+    monkeypatch.setattr(status, "_self_firewall_verdict", lambda port: self_fw)
 
     print("\n" + "━" * 78)
     print(f"┃ {title}\n┃ $ sudo gw diagnose {' '.join(nodes)}")
