@@ -2705,7 +2705,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     def _right(r, is_self, peers, lp):
         if is_live:                             # link · rate · latency
             if is_self:
-                return ("(self)", "", "")
+                return ("(self)", "", latency.get(r.cred.addr, "…"))
             if not peers:
                 return ("— not a peer", "", "")
             if lp is None:
@@ -2939,6 +2939,12 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
 
             rates, targets = {}, []
             for r in records:
+                if r.id_pub.hex() == own_id:
+                    # Ping our own overlay address (~0ms) so the self row shows a
+                    # latency too — makes a peer with NO latency (broken) visually
+                    # distinct from the healthy rows.
+                    targets.append(r.cred.addr)
+                    continue
                 pub = base64.b64encode(r.cred.wg_pub).decode()
                 lp = live.get(pub)
                 if not lp:
