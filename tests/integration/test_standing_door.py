@@ -59,7 +59,7 @@ def test_standing_door_lifecycle(gw_image, gw_network, gw_anchor):
             # The door is STILL open after successful enrollments.
             r = pexec(anchor, "ip", "link", "show", "gw-door", check=False)
             assert r.returncode == 0, "standing door interface went down after enrollments"
-            status = pexec(anchor, "gw", "status").stdout
+            status = pexec(anchor, "gw", "watch", "--snapshot").stdout
             assert "OPEN (standing)" in status
             assert "2 enrolled" in status
 

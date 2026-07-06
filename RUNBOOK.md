@@ -9,7 +9,7 @@ Disaster SOPs for a greasewood fleet. Commands assume the default
 Before any recovery, find out what's actually wrong. `gw diagnose` is a
 **pairwise** tool: it lays up to two named nodes plus the anchor side by side and
 explains, per pair, whether a tunnel can form — and if not, which factor blocks
-it. (Fleet-wide link state is `gw status`; diagnose is the focused deep-dive.)
+it. (Fleet-wide link state is `gw watch`; diagnose is the focused deep-dive.)
 
 ```
 sudo gw diagnose            # this host ↔ the anchor
@@ -117,7 +117,7 @@ Do it in this order:
 5. **Restart to apply**, once per mesh (live tunnels survive):
    ```
    sudo systemctl restart greasewood@<mesh>     # or: 'greasewood@*' for all
-   gw status                                    # links still up?
+   gw watch --snapshot                          # links still up?
    sudo journalctl -u greasewood@<mesh> -n 30   # clean start, no crash loop?
    ```
 6. **Roll out gradually.** Upgrade and verify **one node first**, then the rest.
@@ -161,7 +161,7 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 > to `renew-all` would make it only as strong as the least-cooperative node. To
 > tighten the window, shorten `credential_ttl`.
 
-`gw status` on the anchor shows identities; `gw diagnose` confirms the peer drops.
+`gw watch` on the anchor shows identities; `gw diagnose` confirms the peer drops.
 
 ## SOP: node lost / decommissioned (not compromised)
 
@@ -249,7 +249,7 @@ deliberate fleet change, not something the daemon does to itself.
    both old and new names.
 
 2. **Each member, on its next directory poll**, notices the anchor's domain no
-   longer matches its own and records it — `gw status` then shows, loudly:
+   longer matches its own and records it — `gw watch` then shows, loudly:
    `rename: ⚠ the anchor renamed this mesh <old> → <new>. Migrate: sudo gw
    rename-mesh <new>`. (An un-migrated member keeps working — peering is by
    identity, not name — it's just naming-inconsistent with the fleet until you
@@ -375,7 +375,7 @@ Troubleshooting:
   be running and the anchor reachable over the overlay, and the node must still hold
   the `tls` cap. Check `journalctl -u greasewood` for `TLS cert auto-renewal
   for … failed`; run `gw diagnose` to confirm the link to the anchor; confirm the cap
-  with `gw status` on the anchor. A renewal failure is retried on the next cycle.
+  with `gw watch` on the anchor. A renewal failure is retried on the next cycle.
 - **Cert renewed but the service still serves the old one:** the reload hook
   didn't take. The new files *are* on disk — check `journalctl` for `cert
   reload_cmd … exited`, and test the command by hand (e.g. `systemctl reload

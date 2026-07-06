@@ -136,7 +136,7 @@ class SyncLoop:
             return
         from .cli import _membership_key
         # Persist the pending rename so it survives daemon restarts and surfaces
-        # in `gw status` — a scrolled-past log line is easy to miss for a change
+        # in `gw watch` — a scrolled-past log line is easy to miss for a change
         # that needs an operator action.
         self._write_pending_rename(anchor_domain)
         if anchor_domain != self._warned_domain:
@@ -179,7 +179,7 @@ class SyncLoop:
                 if n:
                     self._directory.save(self._cache_path)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
-                self._stamp_sync()   # record a successful pull for `gw status`
+                self._stamp_sync()   # record a successful pull for `gw watch`
                 self._note_anchor_clock(anchor_now)
                 self._note_mesh_domain(anchor_domain)
                 if self._on_renew_after and renew_after is not None:
@@ -189,7 +189,7 @@ class SyncLoop:
                 log.warning("sync from %s failed: %s", seed, e)
 
     def _stamp_sync(self) -> None:
-        """Record the time of a successful directory pull, so `gw status` can
+        """Record the time of a successful directory pull, so `gw watch` can
         show sync freshness (it reads a *cache*; a stale roster is worth
         flagging). Stamped on every successful pull, even a no-op one."""
         try:

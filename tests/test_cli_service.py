@@ -122,9 +122,9 @@ def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
 
     def boom(args):
         raise PermissionError(13, "Permission denied", "/var/lib/greasewood/ca.key")
-    monkeypatch.setattr(cli, "cmd_status", boom)
+    monkeypatch.setattr(cli, "cmd_watch", boom)
     with pytest.raises(SystemExit) as e:
-        cli.main(["-c", "/tmp/x.toml", "status"])
+        cli.main(["-c", "/tmp/x.toml", "watch"])
     msg = str(e.value)
     assert "AS ROOT" in msg and "CAP_DAC_OVERRIDE" in msg
     assert "chown root:root /var/lib/greasewood/ca.key" in msg

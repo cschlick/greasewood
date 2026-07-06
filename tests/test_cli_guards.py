@@ -135,7 +135,7 @@ root_url = ""
     (data_dir / "directory.json").write_text("[]")
 
     import types
-    rc = cli.cmd_status(types.SimpleNamespace(config=str(cfg)))
+    rc = cli.cmd_watch(types.SimpleNamespace(config=str(cfg)))
     (data_dir / "id_priv.pem").chmod(0o600)
     out = capsys.readouterr().out
     assert rc == 0
@@ -185,10 +185,10 @@ trusted_pubs = []
     data.chmod(0o000)                                        # untraversable
     try:
         with _pytest.raises(SystemExit) as e:
-            cli.cmd_status(types.SimpleNamespace(config=str(cfg), by_segment=False))
+            cli.cmd_watch(types.SimpleNamespace(config=str(cfg), by_segment=False))
         msg = str(e.value)
         assert "can't read the public state" in msg
-        assert "sudo gw status" in msg and "chmod 755" in msg
+        assert "sudo gw watch" in msg and "chmod 755" in msg
     finally:
         data.chmod(0o755)
 

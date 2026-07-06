@@ -236,7 +236,7 @@ def read_window(data_dir: Path) -> "dict | None":
 # ---------------------------------------------------------------------------
 # Door status/history — a small record of the door's lifecycle the anchor daemon
 # maintains (open/close times + reason, failed attempts + source IPs, the last
-# enrollment). `gw status` reads it to show what the door is doing. Written 0600
+# enrollment). `gw watch` reads it to show what the door is doing. Written 0600
 # because it contains source IP addresses.
 # ---------------------------------------------------------------------------
 

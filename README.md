@@ -302,7 +302,7 @@ pip install .              # add '.[test]' to also get pytest
 ```
 
 Either installs the `gw` command. Most subcommands need sudo/root (they create
-WireGuard interfaces and edit routing); `gw status` does not.
+WireGuard interfaces and edit routing); `gw watch` does not.
 
 The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
 as a managed systemd service instead — see [Running as a
@@ -326,7 +326,7 @@ WireGuard interface, serves the control plane, and watches for door windows.
 
 The anchor takes this machine's hostname like any other node — it isn't named
 anything special. You tell which node is the anchor from `role: anchor` in
-`gw status`, not from its name. (Pass `--hostname <name>` to override the default.)
+`gw watch`, not from its name. (Pass `--hostname <name>` to override the default.)
 
 ### 2. Enroll a node
 
@@ -383,7 +383,7 @@ exactly what the door exists to prevent.
 ### 3. Check it
 
 ```bash
-gw status                  # local node + directory view (fleet-wide link state)
+gw watch --snapshot        # local node + directory view (fleet-wide link state)
 sudo gw diagnose db01 web1 # pairwise: can db01 and web1 form a tunnel?
 sudo wg show gw_myfleet    # live WireGuard peers
 ```
@@ -391,7 +391,7 @@ sudo wg show gw_myfleet    # live WireGuard peers
 `gw diagnose` is the tool to reach for when a peer won't connect. It's
 **pairwise**: it lays up to two named nodes plus the anchor side by side and
 explains, per pair, whether a tunnel can form — segments, reachability, and the
-firewall/routing directionality that's usually the real question. (`gw status`
+firewall/routing directionality that's usually the real question. (`gw watch`
 is the fleet-wide link overview; diagnose is the focused deep-dive.)
 
 ```bash
@@ -462,7 +462,7 @@ it:
   that legacy state, and the fix is `chown root:root` on the flagged keys.)
   Read-only commands don't need ownership: the data dir is `0755` and the public
   files (`id_pub.hex`, `directory.json`, `*.pub`) are world-readable, so
-  `gw status` works for **any** user; each secret is its own `0600` root-owned
+  `gw watch --snapshot` works for **any** user; each secret is its own `0600` root-owned
   file. Every command that needs root **says so up front** — a clean
   `'gw <cmd>' needs root (<why>). Try: sudo gw <cmd>` — instead of failing
   partway on whichever file access breaks first. Root-needing commands: the
@@ -508,7 +508,7 @@ generate another. (If you do overwrite an unused token, `gw invite` warns you �
 on stderr, so the new token still prints cleanly to stdout and `TOKEN=$(gw
 invite)` keeps working.)
 
-On the anchor, **`gw status` shows what the door is doing** — open (with the
+On the anchor, **`gw watch` shows what the door is doing** — open (with the
 minutes until it closes, the caps it grants, any failed attempts and their
 source IPs, and attempts remaining) or closed (how long ago and why: enrolled,
 expired, or too many failed attempts). Handy for watching an enrollment or
@@ -720,7 +720,7 @@ TOKEN=$(sudo gw invite --segments prod,web)   # a token for a node in prod + web
 sudo gw join "$TOKEN" --hostname web1
 ```
 
-A node's segments show up in `gw status` (a `segments` column). To change them
+A node's segments show up in `gw watch` (a `segments` column). To change them
 later **without re-joining**, run `gw set-segments <node> prod,web` on the anchor —
 it takes effect at the node's next renewal (or re-invite + re-join for an
 immediate change).
@@ -779,7 +779,7 @@ Two properties worth knowing:
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `status`           | no    | This node's health (version, credential expiry, reachability, trust anchors, sync freshness) + a **split roster**: LEFT is the mesh (fleet-wide — name, addr, reachable, segments, expiry); RIGHT is *this node's* view (do I peer with them; with `sudo`, the live data link + traffic). `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). **`--live`/`-w`** (sudo) turns it into a redraw-in-place dashboard: link state, per-second throughput, and a latency column that fills in as pings return (only pings while you watch). |
+| `watch`            | sudo  | **Live** mesh dashboard (redraws in place, so it needs sudo for live WireGuard state): the split roster + link state, per-second throughput, and a latency column that fills in as pings return. Ctrl-C to exit. **`--snapshot`** prints one static view and exits (no root; auto-used when piped) — for logging/scripts. `--by-segment` groups by segment; on the anchor it also shows the [door's state](#membership). |
 | `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
 | `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
 | `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
@@ -791,7 +791,7 @@ Two properties worth knowing:
 | `cert-status`      | no    | Show every daemon-managed TLS cert (expiry, renewal state, SANs, placed files, profile) from the manifest — wherever the files live. |
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `rename-node <name>` | yes | Change this node's mesh hostname (anchor-validated, no re-join; refused if the anchor pinned the name). |
-| `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the anchor, then on each member (surfaced in its `gw status`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
+| `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the anchor, then on each member (surfaced in its `gw watch`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
 | `renew`            | yes   | Force an immediate credential renewal for this node (applies an anchor-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
 | `renew-all`        | no    | On the anchor: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the anchor's rate stays ~constant with mesh size). |
 | `anchor-backup`       | no    | On the anchor: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and anchor identity. Store it offline. |
@@ -853,7 +853,7 @@ and *nothing else*) — the door just doesn't close afterward. Joins serialize
 every couple of seconds; have the first-boot script retry on failure.
 
 Threat model, honestly: a leaked standing token lets its holder **enroll a
-rogue node** into the pinned segment — a bounded, visible (`gw status` shows
+rogue node** into the pinned segment — a bounded, visible (`gw watch` shows
 `door: OPEN (standing) — N enrolled`; every join is in the audit trail), and
 reversible (`gw revoke`) failure. That is the deliberate trade against the
 alternatives (e.g. giving instances SSH to the anchor, whose failure mode is anchor
@@ -865,7 +865,7 @@ sudo gw invite --standing ... -q   # fresh seed → fresh token → update user-
 ```
 
 Lost the token? A standing token is stored (0600 root) so you can re-retrieve
-it without re-issuing — **`sudo gw status`** on the anchor prints it in the door
+it without re-issuing — **`sudo gw watch`** on the anchor prints it in the door
 block while the standing door is open (root only; it's the enrollment
 credential). Re-issuing would invalidate copies already baked into images, so
 retrieve rather than re-invite.
@@ -950,7 +950,7 @@ verification would reject.
 
 ## Names
 
-Every node has a stable overlay address, and `gw status` shows each node's
+Every node has a stable overlay address, and `gw watch` shows each node's
 resolvable name↔address map. Name resolution is **on by default**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
 `<hostname>.<mesh>.internal` (e.g. `db.myfleet.internal`), built from the records that pass the reconcile loop's

@@ -115,7 +115,7 @@ class EnrollServer:
         self._wg_iface = wg_iface
         self._on_done = on_done
         self._timeout = timeout_secs
-        # Where to persist door status/history for `gw status` (best-effort;
+        # Where to persist door status/history for `gw watch` (best-effort;
         # None disables it). Observability only — never blocks enrollment.
         self._data_dir = data_dir
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
