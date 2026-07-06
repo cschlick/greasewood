@@ -1064,185 +1064,18 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
     return record
 
 
-def cmd_join(args) -> int:
-    _require_root("join")
-    from .keys import NodeKeys
-    from .wire import Credential, NodeRecord
-    from .directory import Directory
-    from .door import decode_token, derive_door_params
-    from .config import load_config
+def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
+                      anchor_door_pub_b64: str, params, door_port,
+                      ca_pub_bytes: bytes, already_enrolled: bool):
+    """The door dance: bring up the transient gw-door interface, connect to the
+    anchor's enroll daemon through it, exchange request → credential, and
+    verify the credential against the token's CA. Every failure exits with an
+    actionable message (tearing the door down first). On success the door is
+    left UP and the socket OPEN: the caller pushes its signed record back on
+    the same connection as the second leg, then tears down. Returns
+    (conn, resp, cred)."""
     from . import wg as wgmod
-    # way we tolerantly extract the gw1.… line, so `gw invite | ssh B gw join -`
-    # works even without `invite -q`.
-    token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
-
-    # Decode token → anchor_door_pub, ca_pub, anchor_host(s), seed, door_port.
-    # Decoded FIRST because the CA pub routes the join (see below).
-    try:
-        (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
-         token_domain) = decode_token(token)
-    except ValueError as e:
-        sys.exit(f"invalid token: {e}")
-    ca_pub_hex = ca_pub_bytes.hex()
-
-    # -c/--data-dir default to None (derived below from the token's mesh name);
-    # the auto/explicit block after this always leaves both set.
-    cfg_path = Path(args.config) if args.config else None
-    data_dir = Path(args.data_dir) if args.data_dir else None
-    listen_port = args.listen_port
-
-    # Auto-slotting: when every location knob is at its default, route the join
-    # by the token's CA. A token for a mesh this host is already on refreshes
-    # that membership; a token for a NEW mesh (unknown CA, default slot already
-    # by the token's CA: known CA → refresh that membership; unknown CA → a new
-    # membership named by the mesh itself (the token's domain). Explicit flags
-    # override any derived value.
-    joined_key = None
-    auto = args.config is None and args.data_dir is None
-    if auto:
-        known = _membership_for_ca(ca_pub_hex)
-        if known is not None:
-            # Re-join: use the existing membership's config as-is (its real,
-            # possibly-customized values win; `prior` below supplies the rest).
-            cfg_path = _membership_paths(known)["config"]
-            existing = load_config(cfg_path)
-            data_dir, listen_port = existing.data_dir, existing.listen_port
-            joined_key = known
-            log.info("token's CA matches membership %r — refreshing it "
-                     "(config %s)", known, cfg_path)
-        else:
-            if not token_domain:
-                sys.exit("token carries no mesh domain (older anchor?) — re-issue "
-                         "the invite on a current anchor, or pass -c/--data-dir/"
-                         "--interface/--listen-port explicitly")
-            key = membership_key(token_domain)
-            mp = _membership_paths(key)
-            cfg_path, data_dir = mp["config"], mp["data_dir"]
-            listen_port = (args.listen_port
-                           if args.listen_port is not None else _free_listen_port())
-            if args.interface is None:
-                args.interface = mp["interface"]
-                clash = _iface_collision(args.interface, cfg_path)
-                if clash:
-                    sys.exit(
-                        f"derived interface name {args.interface!r} (gw- + first "
-                        f"12 chars of {key!r}) is already used by the membership "
-                        f"at {clash} — the kernel caps interface names at 15 "
-                        f"chars, so long mesh names can collide after "
-                        f"truncation. Re-run with an explicit --interface. "
-                        f"The token was NOT consumed.")
-            joined_key = key
-            log.info(
-                "token is for a mesh this host isn't on — provisioning "
-                "membership %r: config %s, data %s, interface %s, UDP %d "
-                "(every value overridable with join flags)",
-                key, cfg_path, data_dir, args.interface, listen_port)
-    else:
-        if args.config is None or args.data_dir is None:
-            sys.exit("explicit joins need BOTH -c and --data-dir (any other "
-                     "flags optional); omit both for the derived defaults")
-        if args.listen_port is None:
-            listen_port = _free_listen_port()
-
-    # HARD domain-collision refusal, BEFORE the door dance (so a refusal never
-    # burns the invite): a mesh has ONE domain everywhere, and a node cannot
-    # bridge two meshes that share one — no alias, no flag, no exception. The
-    # only membership that may legitimately carry this domain is the one being
-    # REFRESHED — identified by CA, not by config path: a *different* mesh with
-    # the same name derives the same config path, so excluding by path would
-    # mask exactly the collision we must catch.
-    if token_domain:
-        _rk = _membership_for_ca(ca_pub_hex)
-        _refresh_cfg = _membership_paths(_rk)["config"].resolve() if _rk else None
-        for _n, _p in _memberships():
-            if _refresh_cfg is not None and _p.resolve() == _refresh_cfg:
-                continue
-            try:
-                if load_config(_p).mesh_domain == token_domain:
-                    sys.exit(
-                        f"this mesh's domain {token_domain!r} is already used by "
-                        f"membership {_n!r} ({_p}) — a node cannot bridge two "
-                        f"meshes with the same domain. Rename one of them on its "
-                        f"anchor (gw rename-mesh <new-name>) and re-run this join. "
-                        f"The token was NOT consumed.")
-            except SystemExit:
-                raise
-            except Exception:
-                continue
-
-    # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
-    # address), so this just refreshes the credential. Detect it so we can (a)
-    # tell the operator and (b) preserve the existing config instead of silently
-    # resetting hostname/caps to defaults.
-    already_enrolled = (data_dir / "id_priv.pem").exists()
-    prior = None
-    if cfg_path.exists():
-        try:
-            prior = load_config(cfg_path)
-        except Exception:
-            prior = None
-
-    # hostname / caps: explicit flag wins, else keep the prior value, else default.
-    if args.hostname:
-        hostname = args.hostname
-    elif prior and prior.hostname:
-        hostname = prior.hostname
-    else:
-        # Default to the machine's short hostname (first label, no domain).
-        hostname = socket.gethostname().split(".")[0] or "node"
-
-    # Caps/segments are NOT chosen here. The anchor decides them at `gw invite` and
-    # binds them into the credential issued over the door; we read them back
-    # from that credential below and write them to config. (No self-assertion:
-    # whatever a joiner might request is ignored by the anchor.)
-    caps: list[str] = []
-
-    # Endpoint(s) = where other nodes dial this one for a direct tunnel. If not
-    # given, best-effort detect a public v6 and/or v4. A node with no endpoint
-    # can still reach the anchor (it initiates outbound), but peers can't dial it,
-    # so node<->node links won't form unless the other side is reachable.
-    node_endpoints = _advertised_endpoints(
-        args.endpoint, listen_port,
-        prior.endpoints if prior else None,
-    )
-    if node_endpoints:
-        log.info("advertising underlay endpoint(s): %s", ", ".join(node_endpoints))
-    else:
-        log.warning(
-            "no public endpoint detected — this node will be reachable only by "
-            "initiating outbound (e.g. to the anchor); other nodes cannot dial it, "
-            "so direct node-to-node links may not form. Pass --endpoint <addr> "
-            "if this node is publicly reachable.")
-
-    # (token was decoded up top — its CA pub routed the join to a slot)
-    # The token may carry several anchor underlay hosts (v4 and/or v6, comma-sep);
-    # dial one this node can actually reach.
-    anchor_host = _pick_reachable_host(anchor_host.split(","))
-
-    anchor_door_pub_b64 = base64.b64encode(anchor_door_pub_bytes).decode()
-
-    # Derive door params from seed (same derivation the anchor ran at invite time)
-    params = derive_door_params(seed)
-    log.info("guest_pub: ...%s", params.guest_pub_b64[-8:])
-
-    # Generate this node's permanent keypairs
-    data_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
-        # directory.json, *.pub) that root-free commands like `gw watch --snapshot` read;
-        # every secret inside is its own 0600 root-owned file. Root owns all of
-        # it — state is never chowned to the invoking user (the CA key on a
-        # login account would let that account mint credentials).
-        os.chmod(data_dir, 0o755)
-    except PermissionError:
-        pass
-    node_keys = NodeKeys.load_or_generate(data_dir)
-    if already_enrolled:
-        log.info(
-            "re-enrolling existing node %s (keys reused; refreshing credential, "
-            "hostname=%s; caps assigned by the anchor)", node_keys.addr, hostname,
-        )
-    log.info("overlay addr: %s", node_keys.addr)
+    from .wire import Credential
 
     # Bring up the local door interface (door port comes from the token)
     from . import audit
@@ -1319,6 +1152,203 @@ def cmd_join(args) -> int:
     except Exception as e:
         wgmod.destroy_interface("gw-door")
         sys.exit(f"credential verification failed: {e}")
+
+    return conn, resp, cred
+
+
+def _route_join(args, ca_pub_hex: str, token_domain: "str | None"):
+    """Where does this join land? Routes by the token's CA when every location
+    knob is at its default: a known CA refreshes that membership; an unknown CA
+    provisions a new one named by the token's mesh domain. Explicit -c/
+    --data-dir win. Also the HARD domain-collision refusal — all of this runs
+    BEFORE the door dance, so a refusal never burns the invite. Returns
+    (cfg_path, data_dir, listen_port, joined_key); may set args.interface for
+    a newly provisioned membership."""
+    from .config import load_config
+
+    cfg_path = Path(args.config) if args.config else None
+    data_dir = Path(args.data_dir) if args.data_dir else None
+    listen_port = args.listen_port
+
+    joined_key = None
+    auto = args.config is None and args.data_dir is None
+    if auto:
+        known = _membership_for_ca(ca_pub_hex)
+        if known is not None:
+            # Re-join: use the existing membership's config as-is (its real,
+            # possibly-customized values win; `prior` below supplies the rest).
+            cfg_path = _membership_paths(known)["config"]
+            existing = load_config(cfg_path)
+            data_dir, listen_port = existing.data_dir, existing.listen_port
+            joined_key = known
+            log.info("token's CA matches membership %r — refreshing it "
+                     "(config %s)", known, cfg_path)
+        else:
+            if not token_domain:
+                sys.exit("token carries no mesh domain (older anchor?) — re-issue "
+                         "the invite on a current anchor, or pass -c/--data-dir/"
+                         "--interface/--listen-port explicitly")
+            key = membership_key(token_domain)
+            mp = _membership_paths(key)
+            cfg_path, data_dir = mp["config"], mp["data_dir"]
+            listen_port = (args.listen_port
+                           if args.listen_port is not None else _free_listen_port())
+            if args.interface is None:
+                args.interface = mp["interface"]
+                clash = _iface_collision(args.interface, cfg_path)
+                if clash:
+                    sys.exit(
+                        f"derived interface name {args.interface!r} (gw- + first "
+                        f"12 chars of {key!r}) is already used by the membership "
+                        f"at {clash} — the kernel caps interface names at 15 "
+                        f"chars, so long mesh names can collide after "
+                        f"truncation. Re-run with an explicit --interface. "
+                        f"The token was NOT consumed.")
+            joined_key = key
+            log.info(
+                "token is for a mesh this host isn't on — provisioning "
+                "membership %r: config %s, data %s, interface %s, UDP %d "
+                "(every value overridable with join flags)",
+                key, cfg_path, data_dir, args.interface, listen_port)
+    else:
+        if args.config is None or args.data_dir is None:
+            sys.exit("explicit joins need BOTH -c and --data-dir (any other "
+                     "flags optional); omit both for the derived defaults")
+        if args.listen_port is None:
+            listen_port = _free_listen_port()
+
+    # HARD domain-collision refusal, BEFORE the door dance (so a refusal never
+    # burns the invite): a mesh has ONE domain everywhere, and a node cannot
+    # bridge two meshes that share one — no alias, no flag, no exception. The
+    # only membership that may legitimately carry this domain is the one being
+    # REFRESHED — identified by CA, not by config path: a *different* mesh with
+    # the same name derives the same config path, so excluding by path would
+    # mask exactly the collision we must catch.
+    if token_domain:
+        _rk = _membership_for_ca(ca_pub_hex)
+        _refresh_cfg = _membership_paths(_rk)["config"].resolve() if _rk else None
+        for _n, _p in _memberships():
+            if _refresh_cfg is not None and _p.resolve() == _refresh_cfg:
+                continue
+            try:
+                if load_config(_p).mesh_domain == token_domain:
+                    sys.exit(
+                        f"this mesh's domain {token_domain!r} is already used by "
+                        f"membership {_n!r} ({_p}) — a node cannot bridge two "
+                        f"meshes with the same domain. Rename one of them on its "
+                        f"anchor (gw rename-mesh <new-name>) and re-run this join. "
+                        f"The token was NOT consumed.")
+            except SystemExit:
+                raise
+            except Exception:
+                continue
+
+    return cfg_path, data_dir, listen_port, joined_key
+
+
+def cmd_join(args) -> int:
+    _require_root("join")
+    from .keys import NodeKeys
+    from .wire import Credential, NodeRecord
+    from .directory import Directory
+    from .door import decode_token, derive_door_params
+    from .config import load_config
+    from . import wg as wgmod
+    # way we tolerantly extract the gw1.… line, so `gw invite | ssh B gw join -`
+    # works even without `invite -q`.
+    token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
+
+    # Decode token → anchor_door_pub, ca_pub, anchor_host(s), seed, door_port.
+    # Decoded FIRST because the CA pub routes the join (see below).
+    try:
+        (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
+         token_domain) = decode_token(token)
+    except ValueError as e:
+        sys.exit(f"invalid token: {e}")
+    ca_pub_hex = ca_pub_bytes.hex()
+
+    # -c/--data-dir default to None (derived below from the token's mesh name);
+    # the auto/explicit block after this always leaves both set.
+    cfg_path, data_dir, listen_port, joined_key = _route_join(
+        args, ca_pub_hex, token_domain)
+
+    # Re-join is a re-enrollment: keys are reused (same id_pub → same overlay
+    # address), so this just refreshes the credential. Detect it so we can (a)
+    # tell the operator and (b) preserve the existing config instead of silently
+    # resetting hostname/caps to defaults.
+    already_enrolled = (data_dir / "id_priv.pem").exists()
+    prior = None
+    if cfg_path.exists():
+        try:
+            prior = load_config(cfg_path)
+        except Exception:
+            prior = None
+
+    # hostname / caps: explicit flag wins, else keep the prior value, else default.
+    if args.hostname:
+        hostname = args.hostname
+    elif prior and prior.hostname:
+        hostname = prior.hostname
+    else:
+        # Default to the machine's short hostname (first label, no domain).
+        hostname = socket.gethostname().split(".")[0] or "node"
+
+    # Caps/segments are NOT chosen here. The anchor decides them at `gw invite` and
+    # binds them into the credential issued over the door; we read them back
+    # from that credential below and write them to config. (No self-assertion:
+    # whatever a joiner might request is ignored by the anchor.)
+    caps: list[str] = []
+
+    # Endpoint(s) = where other nodes dial this one for a direct tunnel. If not
+    # given, best-effort detect a public v6 and/or v4. A node with no endpoint
+    # can still reach the anchor (it initiates outbound), but peers can't dial it,
+    # so node<->node links won't form unless the other side is reachable.
+    node_endpoints = _advertised_endpoints(
+        args.endpoint, listen_port,
+        prior.endpoints if prior else None,
+    )
+    if node_endpoints:
+        log.info("advertising underlay endpoint(s): %s", ", ".join(node_endpoints))
+    else:
+        log.warning(
+            "no public endpoint detected — this node will be reachable only by "
+            "initiating outbound (e.g. to the anchor); other nodes cannot dial it, "
+            "so direct node-to-node links may not form. Pass --endpoint <addr> "
+            "if this node is publicly reachable.")
+
+    # (token was decoded up top — its CA pub routed the join to a slot)
+    # The token may carry several anchor underlay hosts (v4 and/or v6, comma-sep);
+    # dial one this node can actually reach.
+    anchor_host = _pick_reachable_host(anchor_host.split(","))
+
+    anchor_door_pub_b64 = base64.b64encode(anchor_door_pub_bytes).decode()
+
+    # Derive door params from seed (same derivation the anchor ran at invite time)
+    params = derive_door_params(seed)
+    log.info("guest_pub: ...%s", params.guest_pub_b64[-8:])
+
+    # Generate this node's permanent keypairs
+    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
+        # directory.json, *.pub) that root-free commands like `gw watch --snapshot` read;
+        # every secret inside is its own 0600 root-owned file. Root owns all of
+        # it — state is never chowned to the invoking user (the CA key on a
+        # login account would let that account mint credentials).
+        os.chmod(data_dir, 0o755)
+    except PermissionError:
+        pass
+    node_keys = NodeKeys.load_or_generate(data_dir)
+    if already_enrolled:
+        log.info(
+            "re-enrolling existing node %s (keys reused; refreshing credential, "
+            "hostname=%s; caps assigned by the anchor)", node_keys.addr, hostname,
+        )
+    log.info("overlay addr: %s", node_keys.addr)
+
+    conn, resp, cred = _enroll_over_door(
+        data_dir, node_keys, hostname, anchor_host, anchor_door_pub_b64,
+        params, door_port, ca_pub_bytes, already_enrolled)
 
     # The anchor decided our name + caps; adopt them from the issued credential
     # (the authoritative record of what we were granted) so config matches. For
