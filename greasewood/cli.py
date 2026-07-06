@@ -772,7 +772,7 @@ def _membership_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "str | No
     from .config import load_config
     for key, p in _memberships(etc):
         try:
-            if ca_pub_hex in load_config(p).ca_pubs:
+            if ca_pub_hex in load_config(p).ca_pubs_hex:
                 return key
         except Exception:
             continue
@@ -1703,7 +1703,7 @@ def cmd_anchor_promote(args) -> int:
 
     # Trust our own CA as a root, in addition to whatever we already trust, so
     # this anchor accepts the credentials it issues.
-    trusted = list(dict.fromkeys([*cfg.ca_pubs, ca_pub_hex]))
+    trusted = list(dict.fromkeys([*cfg.ca_pubs_hex, ca_pub_hex]))
 
     # An anchor must reach every segment — ensure the wildcard segment. (Its own
     # credential picks this up on the next renewal under the new CA.)
@@ -2272,7 +2272,7 @@ def cmd_run(args) -> int:
     # Trust is static, straight from config: the trusted CA set, the seeds to
     # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
-    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
     def get_ca_pubs():
         return ca_pubs
 

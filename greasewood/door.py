@@ -35,6 +35,7 @@ import datetime as dt
 import json
 import os
 import struct
+from typing import NamedTuple
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -177,12 +178,21 @@ def encode_token(
     return TOKEN_PREFIX + base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
 
 
-def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
-    """
-    Decode a join token.
-    Returns (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
-    mesh_domain). Raises ValueError on malformed input.
-    """
+class DecodedToken(NamedTuple):
+    """A join token's contents, named. It stays a tuple, so existing positional
+    unpacks (`a, b, c, d, e, f = decode_token(...)`) keep working while the
+    fields self-document — field 3 is the SECRET seed, not just 'the 4th thing'."""
+    anchor_door_pub: bytes   # anchor's X25519 door public key (32 bytes)
+    ca_pub: bytes            # mesh CA Ed25519 public key (32 bytes) — routes the join
+    anchor_host: str         # underlay host(s) to dial the door, comma-separated
+    seed: bytes              # 32-byte shared secret → door PSK + guest key (HKDF)
+    door_port: int           # UDP port the anchor's door listens on
+    mesh_domain: str         # the mesh's name domain (adopted by the joiner)
+
+
+def decode_token(token: str) -> "DecodedToken":
+    """Decode a join token into a DecodedToken. Raises ValueError on malformed
+    input."""
     if not token.startswith(TOKEN_PREFIX):
         raise ValueError(f"token must start with {TOKEN_PREFIX!r}")
     b64 = token[len(TOKEN_PREFIX):]
@@ -206,7 +216,8 @@ def decode_token(token: str) -> tuple[bytes, bytes, str, bytes, int, str]:
         raise ValueError("token payload truncated (domain)")
     mesh_domain = payload[dlen_at + 1:dlen_at + 1 + domain_len].decode()
 
-    return anchor_door_pub, ca_pub, anchor_host, seed, door_port, mesh_domain
+    return DecodedToken(anchor_door_pub, ca_pub, anchor_host, seed,
+                        door_port, mesh_domain)
 
 
 # ---------------------------------------------------------------------------

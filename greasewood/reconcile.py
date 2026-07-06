@@ -214,18 +214,19 @@ def reconcile_once(
     """
     # Live kernel state up front: the endpoint tracker needs each peer's last
     # handshake time to decide whether its current endpoint is working.
-    live = wgmod.get_peers(iface)
-    if live is None:
+    live_peers = wgmod.get_peers(iface)
+    if live_peers is None:
         # Couldn't read live WireGuard state (a transient `wg show` failure).
         # Acting on this as "no peers" would skip every removal and re-add
         # everything — so skip the diff this cycle and retry next tick.
         log.warning("could not read live peers on %s; skipping reconcile this cycle", iface)
         return ReconcileResult([], [])
-    now_epoch = time.time() if endpoint_tracker is not None else 0.0
+    now = time.time()
 
-    # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)
+    # The peers that SHOULD exist after this cycle: wg_pub_b64 → _Desired
+    # (addr, endpoint, keepalive). Built from the verified+authorized records.
     desired: dict[str, _Desired] = {}
-    meta: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
+    context: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
     for record in directory.all():
@@ -248,9 +249,10 @@ def reconcile_once(
         candidates = _endpoint_candidates(record.endpoints, local_families)
         keepalive = _KEEPALIVE
         if endpoint_tracker is not None:
-            lp = live.get(wg_pub_b64)
-            hs = lp.latest_handshake if lp else 0
-            endpoint = endpoint_tracker.choose(wg_pub_b64, candidates, hs, now_epoch)
+            live_peer = live_peers.get(wg_pub_b64)
+            last_handshake = live_peer.latest_handshake if live_peer else 0
+            endpoint = endpoint_tracker.choose(wg_pub_b64, candidates,
+                                               last_handshake, now)
             if endpoint_tracker.is_backoff(wg_pub_b64):
                 keepalive = 0          # dead endpoint: stop the futile 25s poke
         else:
@@ -259,61 +261,66 @@ def reconcile_once(
         # Context for the audit trail: name + segments, so every peer command
         # says WHO and WHY, not just a bare pubkey.
         segs = ",".join(sorted(_segments(record.cred.caps))) or "-"
-        meta[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] seg={segs}"
+        context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] seg={segs}"
 
-    # Diff against live kernel state and apply
-    live_set = set(live)
-    desired_set = set(desired)
+    # The three-way diff, named by intent: authorized-but-absent get installed,
+    # present get their endpoint/route/keepalive re-checked, no-longer-authorized
+    # get removed. This is the whole membership decision, per peer, no coordination.
+    live_pubs, desired_pubs = set(live_peers), set(desired)
+    to_install = desired_pubs - live_pubs
+    to_verify = desired_pubs & live_pubs
+    to_remove = live_pubs - desired_pubs
 
-    def _who(pub: str) -> str:
-        return meta.get(pub, f"...{pub[-8:]}")
+    def _who(wg_pub: str) -> str:
+        return context.get(wg_pub, f"...{wg_pub[-8:]}")
 
-    for pub in desired_set - live_set:
-        d = desired[pub]
+    for wg_pub in to_install:
+        want = desired[wg_pub]
         try:
-            with audit.context(f"reconcile: +peer {_who(pub)}"):
-                wgmod.set_peer(iface, pub, d.addr, d.endpoint, keepalive=d.keepalive)
+            with audit.context(f"reconcile: +peer {_who(wg_pub)}"):
+                wgmod.set_peer(iface, wg_pub, want.addr, want.endpoint,
+                               keepalive=want.keepalive)
         except Exception as e:
-            log.warning("add peer ...%s failed: %s", pub[-8:], e)
+            log.warning("add peer ...%s failed: %s", wg_pub[-8:], e)
 
-    for pub in desired_set & live_set:
-        d = desired[pub]
+    for wg_pub in to_verify:
+        want, have = desired[wg_pub], live_peers[wg_pub]
         # endpoint=None (the peer stopped advertising, e.g. went outbound-only)
         # deliberately does NOT clear a live endpoint: WireGuard roams the
         # endpoint on any authenticated packet anyway, and clearing one would
         # require remove+re-add — tearing down a working session for no gain.
-        endpoint_changed = d.endpoint and live[pub].endpoint != d.endpoint
-        route_missing = not live[pub].allowed_ips or d.addr not in live[pub].allowed_ips
-        ka_changed = live[pub].keepalive != d.keepalive  # dead↔alive flips 25↔0
-        if endpoint_changed or route_missing or ka_changed:
+        endpoint_changed = want.endpoint and have.endpoint != want.endpoint
+        route_missing = not have.allowed_ips or want.addr not in have.allowed_ips
+        keepalive_changed = have.keepalive != want.keepalive  # dead↔alive flips 25↔0
+        if endpoint_changed or route_missing or keepalive_changed:
             try:
                 why = ("endpoint" if endpoint_changed else
-                       "keepalive" if ka_changed else "route")
-                with audit.context(f"reconcile: ~peer {_who(pub)} ({why})"):
-                    wgmod.set_peer(iface, pub, d.addr, d.endpoint,
-                                   keepalive=d.keepalive)
+                       "keepalive" if keepalive_changed else "route")
+                with audit.context(f"reconcile: ~peer {_who(wg_pub)} ({why})"):
+                    wgmod.set_peer(iface, wg_pub, want.addr, want.endpoint,
+                                   keepalive=want.keepalive)
             except Exception as e:
-                log.warning("update peer ...%s failed: %s", pub[-8:], e)
+                log.warning("update peer ...%s failed: %s", wg_pub[-8:], e)
 
-    for pub in live_set - desired_set:
+    for wg_pub in to_remove:
         try:
             # Pass allowed_ip so the kernel route is also removed
-            peer_ip = live[pub].allowed_ips.split("/")[0] if live[pub].allowed_ips else None
-            with audit.context(f"reconcile: -peer {_who(pub)}"):
-                wgmod.remove_peer(iface, pub, peer_ip)
+            have = live_peers[wg_pub]
+            peer_ip = have.allowed_ips.split("/")[0] if have.allowed_ips else None
+            with audit.context(f"reconcile: -peer {_who(wg_pub)}"):
+                wgmod.remove_peer(iface, wg_pub, peer_ip)
         except Exception as e:
-            log.warning("remove peer ...%s failed: %s", pub[-8:], e)
+            log.warning("remove peer ...%s failed: %s", wg_pub[-8:], e)
 
     # The overlay addrs we currently have a LIVE link to (recent handshake). This
     # is what a node publishes as its `reachable` set so the fleet can see which
     # edges are up — an unreachable segment-mate (firewalled) shows as a missing
     # edge from both ends. Session-existence, not direction (a working tunnel is
     # bidirectional regardless of who dialed).
-    hs_now = time.time()
     reachable = sorted(
-        d.addr for pub, d in desired.items()
-        if (lp := live.get(pub)) and lp.latest_handshake
-        and (hs_now - lp.latest_handshake) <= _LIVE_LINK_SECS
+        want.addr for wg_pub, want in desired.items()
+        if (live_peer := live_peers.get(wg_pub)) and live_peer.latest_handshake
+        and (now - live_peer.latest_handshake) <= _LIVE_LINK_SECS
     )
     return ReconcileResult(trusted, reachable)
 

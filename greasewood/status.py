@@ -67,7 +67,7 @@ def _fmt_bytes(n) -> str:
     return f"{x:.1f}T"
 
 
-def _fmt_hs_age(age_s: float) -> str:
+def _fmt_handshake_age(age_s: float) -> str:
     """Compact age for a handshake: 12→'12s', 90→'1m', 7200→'2h', bigger→'Nd'."""
     if age_s < 60:
         return f"{int(age_s)}s"
@@ -111,7 +111,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
             if lp is None:
                 return ("not installed", "", "")
             if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
-                return (f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)}",
+                return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)}",
                         (rates or {}).get(r.cred.addr, ""),
                         latency.get(r.cred.addr, "…"))   # … = ping in flight
             return ("○ no handshake", "", "—")
@@ -124,7 +124,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         if lp is None:
             return ("not installed", "")
         if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
-            return (f"● up, {_fmt_hs_age(now_epoch - lp.latest_handshake)} ago",
+            return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)} ago",
                     f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
         return ("○ no handshake", "")
 
@@ -537,7 +537,7 @@ def _self_health_lines(cfg, directory, own_id) -> list:
              else "no endpoint (outbound-only — you dial peers)")
     lines.append(f"{'reach':<9}: {reach}")
 
-    n = len(cfg.ca_pubs)
+    n = len(cfg.ca_pubs_hex)
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
                  f"anchor {cfg.root_url or '(none configured)'}")
 
@@ -735,7 +735,7 @@ def _mtu_probe(iface: str, addr: str, iface_mtu: "int | None") -> "str | None":
             f"(ip link set {iface} mtu 1280) or fix the underlay path MTU.")
 
 
-def _self_firewall_port(port: int) -> str:
+def _self_firewall_verdict(port: int) -> str:
     """This host's own nftables verdict for a UDP port: 'OPEN', 'CLOSED' (a
     default-drop policy with no accept rule), 'open (no default-drop)', or
     '??? (nft unreadable)'. Only the local host is knowable — every other node's
@@ -818,7 +818,7 @@ def cmd_diagnose(args) -> int:
     for w in _key_file_warnings(_secret_key_paths(cfg)):
         print(f"  ⚠ {w}")
 
-    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs]
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
     revoked: set = set()
     rev_path = cfg.data_dir / "revoked.json"
     if rev_path.exists():
@@ -922,7 +922,7 @@ def cmd_diagnose(args) -> int:
         c.ep_str = c.u6 if c.u6 != "-" else (c.u4 if c.u4 != "-" else "—")
         c.hs = _hs_age(rec)
         if is_self:
-            c.fw = _self_firewall_port(port)
+            c.fw = _self_firewall_verdict(port)
         elif not c.has_ep:
             c.fw = "n/a (outbound-only)"
         elif c.hs is not None:
