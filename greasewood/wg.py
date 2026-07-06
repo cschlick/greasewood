@@ -17,6 +17,9 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
+
+from . import audit
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,8 +29,6 @@ log = logging.getLogger(__name__)
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     # Every ip/wg mutation greasewood makes passes through here, so this is the
     # one place that records the data-plane command trail (greasewood.audit).
-    import time
-    from . import audit
     t0 = time.monotonic()
     try:
         r = subprocess.run(list(args), capture_output=True, text=True, check=check)

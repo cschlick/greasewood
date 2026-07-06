@@ -34,7 +34,7 @@ def _cred(node, ca, *, iat=None):
 def _loop(tmp_path, *, n_nodes, cred):
     node = NodeKeys.generate()
     loop = RenewalLoop(
-        node_keys=node, directory=Directory(), get_root_url=lambda: "",
+        node_keys=node, directory=Directory(), get_anchor_url=lambda: "",
         current_cred=cred, hostname="n1", endpoints=[],
         cache_path=tmp_path / "d.json",
     )

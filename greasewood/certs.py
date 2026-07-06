@@ -25,6 +25,7 @@ import secrets
 import shlex
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -44,7 +45,6 @@ def fetch_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str
     ca_pem) as PEM strings. The leaf private key is generated locally and never
     sent. Raises CertRejected on an anchor 4xx (no retry) or RuntimeError after
     exhausting retries. Callers place the PEMs (see issue_cert / place_cert_files)."""
-    import time as _t
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from .wire import CertRequest
@@ -78,11 +78,11 @@ def fetch_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str
                 raise CertRejected(msg) from e
             last_err = msg
             if attempt < attempts - 1:
-                _t.sleep(3)
+                time.sleep(3)
         except urllib.error.URLError as e:
             last_err = e
             if attempt < attempts - 1:
-                _t.sleep(3)
+                time.sleep(3)
     if data is None:
         raise RuntimeError(str(last_err))
     if "error" in data:
@@ -292,8 +292,6 @@ def _rename_grace_old_domain(data_dir) -> "str | None":
     <data_dir>/rename_grace.json), or None. Shared shape with the reconcile
     loop's hosts grace, so old TLS names and old /etc/hosts names retire
     together."""
-    import datetime as dt
-    from pathlib import Path
     p = Path(data_dir) / "rename_grace.json"
     if not p.exists():
         return None

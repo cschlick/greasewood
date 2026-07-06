@@ -22,13 +22,16 @@ lifecycle (anchor-promote, anchor-backup, anchor-restore).
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
+import ipaddress
 import json
 import logging
 import os
 import shutil
 import signal
 import socket
+import re
 import subprocess
 import sys
 import threading
@@ -40,12 +43,12 @@ log = logging.getLogger("greasewood")
 
 
 def _setup_logging(verbose: bool) -> None:
-    from .audit import _UTCFormatter
+    from .audit import UTCFormatter
     level = logging.DEBUG if verbose else logging.INFO
     handler = logging.StreamHandler()
     # Full ISO-8601 UTC timestamps: a command trail spanning days must be
     # unambiguous (the old format was time-only).
-    handler.setFormatter(_UTCFormatter(
+    handler.setFormatter(UTCFormatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
     root.handlers.clear()
@@ -139,19 +142,17 @@ def _san_to_owned_label(san: str, cfg) -> "str | None":
 def _add_config_aliases(cfg_path: Path, cfg, labels: list) -> list:
     """Merge `labels` into [network] aliases in the TOML, in place. Returns the
     labels actually added (empty if all were already present / couldn't edit)."""
-    import json as _json
-    import re as _re
     have = set(cfg.aliases)
     new = [l for l in labels if l not in have]
     if not new:
         return []
-    merged = _json.dumps(sorted(have | set(new)))
+    merged = json.dumps(sorted(have | set(new)))
     text = cfg_path.read_text()
     line = f"aliases = {merged}"
-    if _re.search(r"(?m)^\s*aliases\s*=", text):
-        text = _re.sub(r"(?m)^\s*aliases\s*=.*$", line, text, count=1)
-    elif _re.search(r"(?m)^\[network\]\s*$", text):
-        text = _re.sub(r"(?m)^(\[network\]\s*)$", r"\1\n" + line, text, count=1)
+    if re.search(r"(?m)^\s*aliases\s*=", text):
+        text = re.sub(r"(?m)^\s*aliases\s*=.*$", line, text, count=1)
+    elif re.search(r"(?m)^\[network\]\s*$", text):
+        text = re.sub(r"(?m)^(\[network\]\s*)$", r"\1\n" + line, text, count=1)
     else:
         return []                            # no place to put it — caller warns
     cfg_path.write_text(text)
@@ -212,9 +213,6 @@ def _detect_public_ipv6() -> str | None:
     GUA = 2000::/3 (first 3 bits are 001).  ULA (fc/fd) and link-local
     (fe80) are excluded because they are not routable across the internet.
     """
-    import ipaddress
-    import subprocess
-
     try:
         r = subprocess.run(
             ["ip", "-6", "-o", "addr", "show", "scope", "global"],
@@ -259,8 +257,6 @@ def _detect_public_ipv4() -> str | None:
     holds only a private v4) this returns None, so inbound v4 nodes should pass
     `--endpoint <public-v4>` explicitly. Only the underlay may be v4; the overlay
     stays IPv6."""
-    import ipaddress
-    import subprocess
     try:
         r = subprocess.run(
             ["ip", "-4", "-o", "addr", "show", "scope", "global"],
@@ -285,7 +281,6 @@ def _local_families() -> set[int]:
     """Which underlay families this node can originate connections on, by
     default-route presence. Used to pick a reachable peer endpoint. Falls back to
     assuming both if detection fails."""
-    import subprocess
     fams: set[int] = set()
     for fam, flag in ((6, "-6"), (4, "-4")):
         try:
@@ -351,7 +346,6 @@ def cmd_create(args) -> int:
     if not _vl(args.name):
         sys.exit(f"mesh name {args.name!r} must be a DNS label "
                  "(lowercase letters/digits/hyphens, e.g. 'prod-fleet')")
-    import json as json_mod
     from .keys import CAKeys, NodeKeys
     from .ca import CA
     from .wire import NodeRecord
@@ -368,7 +362,6 @@ def cmd_create(args) -> int:
     ca_key_path = data_dir / "ca.key"
     # The role is "anchor"; the hostname is just this machine's name by default
     # (short form, no domain), overridable with --hostname.
-    import socket
     from .keys import set_overlay_prefix, parse_overlay_prefix
     hostname = args.hostname or socket.gethostname().split(".")[0] or "anchor"
     listen_port = args.listen_port if args.listen_port is not None else _free_listen_port()
@@ -432,14 +425,14 @@ def cmd_create(args) -> int:
     node_keys = NodeKeys.load_or_generate(data_dir)
     log.info("overlay addr: %s", node_keys.addr)
 
-    endpoint_line = f'\nendpoints = {json_mod.dumps(endpoints)}' if endpoints else ""
+    endpoint_line = f'\nendpoints = {json.dumps(endpoints)}' if endpoints else ""
     hosts_sync = "true" if getattr(args, "hosts_sync", True) else "false"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f"""[node]
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "anchor"
-caps = {json_mod.dumps(caps)}{endpoint_line}
+caps = {json.dumps(caps)}{endpoint_line}
 
 [network]
 interface = "{interface}"
@@ -531,8 +524,6 @@ def cmd_invite(args) -> int:
         # -q: emit only the token on stdout — silence the informational stderr
         # chatter (superseding-window warning, door/wg setup logs) for scripting.
         logging.getLogger().setLevel(logging.ERROR)
-    import datetime as dt_mod
-    import json as json_mod
     from .config import load_config
     from .door import (
         generate_seed, derive_door_params, encode_token,
@@ -602,7 +593,6 @@ def cmd_invite(args) -> int:
 
     door_key_raw = load_or_generate_door_key(data_dir)
     anchor_door_pub = door_pub_bytes_from_key(door_key_raw)
-    import base64
     door_key_b64 = base64.b64encode(door_key_raw).decode()
 
     from .keys import CAKeys
@@ -700,7 +690,7 @@ def cmd_invite(args) -> int:
         # bakeable, so the operator can re-retrieve it later (via anchor `gw
         # status`) without re-issuing — re-issuing would invalidate the copies
         # already baked into images. Same 0600-root posture as the guest key.
-        window_path.write_text(json_mod.dumps({
+        window_path.write_text(json.dumps({
             "v": 1,
             "standing": True,
             "caps": caps,
@@ -713,8 +703,8 @@ def cmd_invite(args) -> int:
         log.info("STANDING door opened — this token enrolls any number of "
                  "nodes until: sudo gw close-door")
     else:
-        expires = dt_mod.datetime.now(dt_mod.timezone.utc) + window
-        window_path.write_text(json_mod.dumps({
+        expires = dt.datetime.now(dt.timezone.utc) + window
+        window_path.write_text(json.dumps({
             "v": 1,
             "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "caps": caps,
@@ -800,10 +790,9 @@ def _membership_paths(key: str, etc: "Path" = Path("/etc"),
 
 def _memberships(etc: "Path" = Path("/etc")) -> "list[tuple[str, Path]]":
     """Existing membership configs on this host as (key, config_path)."""
-    import re as _re
     out = []
     for p in etc.glob("greasewood_*.toml"):
-        m = _re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", p.name)
+        m = re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", p.name)
         if m:
             out.append((m.group(1), p))
     return sorted(out)
@@ -889,7 +878,6 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
     or script scoped to the /64 now silently matches BOTH meshes, and an
     address no longer tells a human which mesh it belongs to. Returns True if
     it warned (for tests)."""
-    import ipaddress
     from .config import load_config
     try:
         mine = ipaddress.ip_network(f"{my_prefix}/64")
@@ -927,8 +915,6 @@ def _membership_service(key: str) -> str:
     the process execs, so `enable --now` "succeeds" even for a daemon that
     crashes a second later (and then crash-loops under Restart=on-failure). We
     verify it reaches AND holds 'active' before telling the operator it's up."""
-    import shutil
-    import subprocess
     unit = f"greasewood@{key}.service"
     systemctl = shutil.which("systemctl")
     if not systemctl or not (_UNIT_DIR / "greasewood@.service").exists():
@@ -953,9 +939,6 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     rename). Leaves the OLD domain's /etc/hosts block in place and drops a
     grace marker in the new data dir: the daemon keeps old names resolving
     until the grace deadline, then retires them. Returns the new config path."""
-    import json as _json
-    import shutil
-    import subprocess
     from .config import load_config
     from . import wg as wgmod
 
@@ -986,13 +969,12 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
         wgmod.rename_interface(cfg.wg_interface, mp["interface"])
 
     # Rewrite the three name-keyed fields; everything else carries over.
-    import re as _re
     text = cfg_path.read_text()
-    text = _re.sub(r'(?m)^mesh_domain\s*=.*$',
+    text = re.sub(r'(?m)^mesh_domain\s*=.*$',
                    f'mesh_domain = "{new_domain}"', text)
-    text = _re.sub(r'(?m)^interface\s*=.*$',
+    text = re.sub(r'(?m)^interface\s*=.*$',
                    f'interface = "{mp["interface"]}"', text)
-    text = _re.sub(r'(?m)^data_dir\s*=.*$',
+    text = re.sub(r'(?m)^data_dir\s*=.*$',
                    f'data_dir = "{new_data}"', text)
     mp["config"].write_text(text)
     cfg_path.unlink()
@@ -1009,7 +991,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
 
     # Grace: old names keep resolving for one credential TTL, then retire.
     until = (dt.datetime.now(_UTC) + cfg.credential_ttl).replace(microsecond=0)
-    (new_data / "rename_grace.json").write_text(_json.dumps(
+    (new_data / "rename_grace.json").write_text(json.dumps(
         {"old_domain": cfg.mesh_domain, "until": until.isoformat()}))
 
     if systemctl and (_UNIT_DIR / "greasewood@.service").exists():
@@ -1023,13 +1005,12 @@ def _rewrite_cert_manifest_domain(data_dir: "Path", old_domain: str,
     """Swap old_domain → new_domain in every managed cert's SANs/CN, so cert
     auto-renewal targets the mesh's new names once the rename grace ends. A
     no-op if there's no manifest. Explicit non-mesh SANs are left untouched."""
-    import json as _json
     from . import certs as certmod
     mpath = certmod.manifest_path(data_dir)
     if not mpath.exists():
         return
     try:
-        entries = _json.loads(mpath.read_text())
+        entries = json.loads(mpath.read_text())
     except (OSError, ValueError):
         return
 
@@ -1042,7 +1023,7 @@ def _rewrite_cert_manifest_domain(data_dir: "Path", old_domain: str,
         if e.get("cn"):
             e["cn"] = _swap(e["cn"])
     try:
-        mpath.write_text(_json.dumps(entries, indent=2))
+        mpath.write_text(json.dumps(entries, indent=2))
     except OSError:
         pass
 
@@ -1081,19 +1062,13 @@ def cmd_rename_mesh(args) -> int:
 
 def cmd_join(args) -> int:
     _require_root("join")
-    import json as json_mod
-    import socket
     import struct
-    import time
     from .keys import NodeKeys
     from .wire import Credential, NodeRecord
     from .directory import Directory
     from .door import decode_token, derive_door_params
     from .config import load_config
     from . import wg as wgmod
-    import base64
-
-    # Token comes from the positional arg, or from stdin when it's "-". Either
     # way we tolerantly extract the gw1.… line, so `gw invite | ssh B gw join -`
     # works even without `invite -q`.
     token = _extract_token(sys.stdin.read() if args.token == "-" else args.token)
@@ -1307,7 +1282,7 @@ def cmd_join(args) -> int:
         "wg_pub": node_keys.wg_pub_b64,
         "hostname": hostname,
     }
-    req_body = json_mod.dumps(req, separators=(",", ":")).encode()
+    req_body = json.dumps(req, separators=(",", ":")).encode()
 
     def _recv_framed(sock):
         hdr = b""
@@ -1323,10 +1298,10 @@ def cmd_join(args) -> int:
             if not chunk:
                 raise ConnectionError("connection closed")
             raw += chunk
-        return json_mod.loads(raw)
+        return json.loads(raw)
 
     def _send_framed(sock, obj):
-        b = json_mod.dumps(obj, separators=(",", ":")).encode()
+        b = json.dumps(obj, separators=(",", ":")).encode()
         sock.sendall(struct.pack(">I", len(b)) + b)
 
     # Leave the connection OPEN after the response — we send our signed record
@@ -1440,9 +1415,9 @@ def cmd_join(args) -> int:
     # Tear down the door interface
     wgmod.destroy_interface("gw-door")
 
-    endpoint_line = f'\nendpoints = {json_mod.dumps(node_endpoints)}' if node_endpoints else ""
-    seeds_list = json_mod.dumps([anchor_overlay_url]) if anchor_overlay_url else "[]"
-    root_url_val = json_mod.dumps(anchor_overlay_url) if anchor_overlay_url else '""'
+    endpoint_line = f'\nendpoints = {json.dumps(node_endpoints)}' if node_endpoints else ""
+    seeds_list = json.dumps([anchor_overlay_url]) if anchor_overlay_url else "[]"
+    root_url_val = json.dumps(anchor_overlay_url) if anchor_overlay_url else '""'
     # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
     # previously-disabled setting.
     if getattr(args, "hosts_sync", None) is False:      # --no-hosts-sync given
@@ -1466,7 +1441,7 @@ def cmd_join(args) -> int:
 hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "node"
-caps = {json_mod.dumps(caps)}{endpoint_line}
+caps = {json.dumps(caps)}{endpoint_line}
 
 [network]
 interface = "{interface}"
@@ -1688,8 +1663,7 @@ def _unit_for_config(cfg_path) -> str:
     """The systemd unit serving this membership: greasewood@<key> when the
     config follows the /etc/greasewood_<key>.toml scheme, else a generic
     'greasewood@<name>' placeholder for messages."""
-    import re as _re
-    m = _re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", Path(cfg_path).name)
+    m = re.fullmatch(r"greasewood_([a-z0-9-]+)\.toml", Path(cfg_path).name)
     return f"greasewood@{m.group(1)}" if m else "greasewood@<name>"
 
 
@@ -1733,7 +1707,6 @@ def cmd_anchor_promote(args) -> int:
     Prints the CA public key + control endpoint to add to the fleet's
     trusted_pubs (a manual re-root — see the printed steps)."""
     _require_root("anchor-promote")
-    import json as json_mod
     from .config import load_config
     from .keys import CAKeys, NodeKeys
 
@@ -1778,26 +1751,26 @@ def cmd_anchor_promote(args) -> int:
         anchor_caps.append("segment:*")
 
     endpoint_line = (
-        f'\nendpoints = {json_mod.dumps(cfg.endpoints)}' if cfg.endpoints else ""
+        f'\nendpoints = {json.dumps(cfg.endpoints)}' if cfg.endpoints else ""
     )
     hosts_sync = "true" if cfg.hosts_sync else "false"
     cfg_path.write_text(f"""[node]
 hostname = "{cfg.hostname}"
 data_dir = "{cfg.data_dir}"
 role = "anchor"
-caps = {json_mod.dumps(anchor_caps)}{endpoint_line}
+caps = {json.dumps(anchor_caps)}{endpoint_line}
 
 [network]
 interface = "{cfg.wg_interface}"
 listen_port = {cfg.listen_port}
 overlay_prefix = "{cfg.overlay_prefix}"
-seeds = {json_mod.dumps(cfg.seeds)}
+seeds = {json.dumps(cfg.seeds)}
 root_url = "{cfg.root_url}"
 hosts_sync = {hosts_sync}
 mesh_domain = "{cfg.mesh_domain}"
 
 [ca]
-trusted_pubs = {json_mod.dumps(trusted)}
+trusted_pubs = {json.dumps(trusted)}
 
 [anchor]
 ca_key_file = "{ca_key_path}"
@@ -1974,7 +1947,6 @@ def cmd_cert_request(args) -> int:
     Generates the leaf key locally; only its public key is sent to the anchor. Unless
     --no-auto-renew is given, the cert is recorded so the daemon renews it at
     ~half its TTL (and runs --reload-cmd afterward)."""
-    import ipaddress
     from .config import load_config
     from .keys import NodeKeys
     from . import certs as certmod
@@ -2225,14 +2197,13 @@ def cmd_cert_status(args) -> int:
 # rename-node — change this node's mesh hostname (anchor-validated, no re-join)
 # ---------------------------------------------------------------------------
 
-def cmd_rename(args) -> int:
+def cmd_rename_node(args) -> int:
     """Rename this node in the mesh without re-joining. Asks the anchor to re-issue
     the credential under the new name over the existing control plane; the anchor
     enforces uniqueness (refused if taken) and frees the old name. Keys and the
     overlay address are unchanged. Requires the mesh to be up (the daemon
     running) so the anchor is reachable."""
     _require_root("rename-node")
-    import re
     import secrets
     import urllib.error
     import urllib.request
@@ -2571,7 +2542,7 @@ def cmd_run(args) -> int:
         renewal = RenewalLoop(
             node_keys=keys,
             directory=directory,
-            get_root_url=lambda: cfg.root_url,
+            get_anchor_url=lambda: cfg.root_url,
             current_cred=own_record.cred,
             hostname=cfg.hostname,
             endpoints=eff_endpoints,
@@ -2669,7 +2640,6 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     answer. With root it's the live link + cumulative traffic. In LIVE mode
     (latency dict supplied) the right side is link + per-second RATE + a latency
     column that fills in asynchronously (blank until each peer's ping returns)."""
-    import base64
     from .hosts import mesh_name
     from .reconcile import default_policy
 
@@ -2835,8 +2805,6 @@ def _fmt_rate(bytes_per_s: float) -> str:
 def _ping_rtt(addr: str) -> str:
     """Round-trip time to an overlay address via one ICMPv6 echo, as 'Nms', or
     '—' on timeout/unreachable. Numeric only (-n), 1s deadline (-W1)."""
-    import re
-    import subprocess
     try:
         r = subprocess.run(["ping", "-6", "-n", "-c", "1", "-W", "1", addr],
                            capture_output=True, text=True, timeout=3)
@@ -2856,7 +2824,6 @@ class _LatencyProber:
     someone is watching the live view (the caller stops it on exit)."""
 
     def __init__(self) -> None:
-        import threading
         self.results: dict = {}
         self._targets: list = []
         self._lock = threading.Lock()
@@ -2886,12 +2853,10 @@ class _LatencyProber:
         self._stop.set()
 
 
-def _status_live(cfg, own_id, interval: float = 2.0) -> int:
+def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
     """Live, redraw-in-place `gw watch`: link state + per-second throughput
     (from the sample delta between frames) + an async latency column. Root +
     a terminal required; Ctrl-C exits."""
-    import base64
-    import time
     from .directory import Directory
     from . import wg as wgmod
 
@@ -3093,14 +3058,13 @@ def cmd_narrate(args) -> int:
     """Read the data-plane command trail and translate it into plain English —
     what greasewood did to the kernel's network state, when, why, and whether it
     worked. Reads <data_dir>/audit.log by default; a path, or '-' for stdin."""
-    import sys as _sys
     from .config import load_config, _parse_duration
     from . import narrate as N
 
     # Where to read from.
     src = getattr(args, "source", None)
     if src == "-":
-        lines = _sys.stdin.read().splitlines()
+        lines = sys.stdin.read().splitlines()
     else:
         if src:
             path = Path(src)
@@ -3141,7 +3105,7 @@ def cmd_narrate(args) -> int:
         print("no matching data-plane commands.")
         return 0
 
-    color = _sys.stdout.isatty() and not getattr(args, "no_color", False)
+    color = sys.stdout.isatty() and not getattr(args, "no_color", False)
     if getattr(args, "stats", False):
         print(N.summarize(entries))
         print()
@@ -3196,11 +3160,10 @@ def _self_health_lines(cfg, directory, own_id) -> list:
 
     # A pending mesh rename the daemon detected from the anchor — persisted so it
     # doesn't scroll past in the log. Needs an operator action, so it's loud.
-    import json as _json
     pend = cfg.data_dir / "pending_rename.json"
     if pend.exists():
         try:
-            d = _json.loads(pend.read_text())
+            d = json.loads(pend.read_text())
             newk = _membership_key(d["new_domain"])
             lines.append(f"{'rename':<9}: ⚠ the anchor renamed this mesh "
                          f"{d.get('old_domain','?')} → {d['new_domain']}. "
@@ -3298,7 +3261,7 @@ def cmd_watch(args) -> int:
         # Redraw-in-place live view: link state + per-second throughput + an
         # async latency column (pings run only while you're watching). Needs
         # root for live WireGuard state — that's why the default wants sudo.
-        return _status_live(cfg, own_id,
+        return _watch_live(cfg, own_id,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
 
     directory = Directory.load(cfg.dir_cache_path)
@@ -3466,7 +3429,6 @@ def _diag_anchor_record(directory, cfg, own_rec):
     None if unresolvable / not yet in cache."""
     if cfg.role == "anchor":
         return own_rec
-    import re
     m = re.search(r"\[([0-9a-fA-F:]+)\]", cfg.root_url or "")
     if not m:
         return None
@@ -3501,8 +3463,6 @@ def cmd_diagnose(args) -> int:
     firewall allows the port, so a peer that still can't reach us points at an
     upstream router/NAT not forwarding it."
     """
-    import base64
-    import time as _time
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from .config import load_config
@@ -3543,7 +3503,7 @@ def cmd_diagnose(args) -> int:
         live_peers = {}
     directory = Directory.load(cfg.dir_cache_path)
     now = dt.datetime.now(_UTC)
-    now_epoch = int(_time.time())
+    now_epoch = int(time.time())
     own_rec = directory.get(own_id)
 
     # ---- resolve the requested nodes → up to three columns (pair + anchor) ------
@@ -3762,9 +3722,6 @@ def cmd_renew(args) -> int:
     from .wire import NodeRecord
     from .renewal import _do_renew
     from .sync import push_record
-    import json as json_mod
-    import re
-
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         sys.exit(f"not configured (no config file at {cfg_path})")
@@ -3809,7 +3766,7 @@ def cmd_renew(args) -> int:
     if list(cred.caps) != list(cfg.caps):
         text = cfg_path.read_text()
         new, n = re.subn(r'(?m)^\s*caps\s*=\s*\[.*\]\s*$',
-                         f'caps = {json_mod.dumps(list(cred.caps))}', text, count=1)
+                         f'caps = {json.dumps(list(cred.caps))}', text, count=1)
         if n:
             cfg_path.write_text(new)
             print(f"caps updated by the anchor: {list(cfg.caps)} -> {list(cred.caps)}")
@@ -3951,9 +3908,6 @@ def cmd_anchor_restore(args) -> int:
 
 def cmd_purge(args) -> int:
     _require_root("purge")
-    import shutil
-    import subprocess
-
     cfg_path = Path(args.config)
 
     # Nothing is unsuffixed anymore, so there are no guessable defaults: the
@@ -4081,7 +4035,6 @@ def _systemd_available() -> bool:
     container with systemctl installed but `sleep` as PID 1 returns False, so
     create/join fall back to the manual `gw run` line instead of crashing on a
     systemctl that can't reach a manager."""
-    import shutil
     return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
 
 
@@ -4089,8 +4042,6 @@ def _write_service_template(exec_path: "str | None" = None) -> "str | None":
     """Write the greasewood@ template unit (idempotent) and daemon-reload.
     Returns the systemctl path (None if this host has no systemd). Shared by
     create/join (auto by default) and re-used across memberships."""
-    import shutil
-    import subprocess
     gw_exec = exec_path or shutil.which("gw") or os.path.realpath(sys.argv[0])
     _UNIT_DIR.mkdir(parents=True, exist_ok=True)
     (_UNIT_DIR / "greasewood@.service").write_text(_SERVICE_UNIT.format(exec=gw_exec))
@@ -4105,9 +4056,6 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
     final is-active state ('active', 'activating', 'failed', ...). A unit that
     execs and crashes within a couple of seconds flaps active→activating
     (auto-restart) — the settle re-check catches exactly that."""
-    import subprocess
-    import time
-
     def _state() -> str:
         r = subprocess.run([systemctl, "is-active", unit],
                            capture_output=True, text=True)
@@ -4452,7 +4400,7 @@ def main(argv=None) -> int:
     sp = sub.add_parser("rename-node",
                         help="[sudo] change this node's mesh hostname (anchor-validated, no re-join)")
     sp.add_argument("hostname", help="the new hostname")
-    sp.set_defaults(fn=cmd_rename)
+    sp.set_defaults(fn=cmd_rename_node)
 
     # renew
     sp = sub.add_parser("renew",

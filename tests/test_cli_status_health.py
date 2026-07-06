@@ -251,12 +251,12 @@ def test_latency_prober_updates_results(monkeypatch):
     assert p.results["fd8d::1"] == "7ms" and p.results["fd8d::2"] == "7ms"
 
 
-def test_status_live_requires_root_and_tty(monkeypatch):
+def test_watch_live_requires_root_and_tty(monkeypatch):
     import pytest
     import types
     from greasewood import cli
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
     with pytest.raises(SystemExit) as e:
-        cli._status_live(types.SimpleNamespace(), "abc")
+        cli._watch_live(types.SimpleNamespace(), "abc")
     assert "needs root" in str(e.value)

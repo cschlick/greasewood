@@ -31,6 +31,8 @@ gives door access; nothing else does.
 from __future__ import annotations
 
 import base64
+import datetime as dt
+import json
 import os
 import struct
 from dataclasses import dataclass
@@ -212,9 +214,6 @@ def read_window(data_dir: Path) -> "dict | None":
     """The current door window if it is live, else None. A window is live if it
     is STANDING (never expires; closed only by `gw close-door` or a superseding
     invite) or if its expiry is still in the future."""
-    import datetime as dt
-    import json
-
     p = window_path(data_dir)
     if not p.exists():
         return None
@@ -246,7 +245,6 @@ def door_status_path(data_dir: Path) -> Path:
 
 def read_door_status(data_dir: Path) -> "dict | None":
     """The door's current/last-known status, or None if it has never opened."""
-    import json
     try:
         return json.loads(door_status_path(data_dir).read_text())
     except (FileNotFoundError, ValueError):
@@ -254,12 +252,10 @@ def read_door_status(data_dir: Path) -> "dict | None":
 
 
 def _status_now_iso() -> str:
-    import datetime as dt
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _write_door_status(data_dir: Path, data: dict) -> None:
-    import json
     p = door_status_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")

@@ -13,6 +13,8 @@ locally with no agreement or coordination required.
 from __future__ import annotations
 
 import base64
+import datetime as dt
+import json
 import logging
 import threading
 from pathlib import Path
@@ -20,6 +22,7 @@ import time
 from typing import Callable
 
 from .directory import Directory
+from . import hosts
 from . import audit
 from . import wg as wgmod
 
@@ -402,7 +405,6 @@ class ReconcileLoop:
         self._maybe_publish_reachable(reachable)
         if self._hosts_domain:
             try:
-                from . import hosts
                 # Only fully-verified records (never directory.all()): a revoked
                 # or expired node must drop out of name resolution on the same
                 # cycle its WireGuard peer is removed.
@@ -417,8 +419,6 @@ class ReconcileLoop:
         at the deadline, retire the old block and the marker."""
         if self._data_dir is None:
             return
-        import datetime as dt
-        import json
         marker = Path(self._data_dir) / "rename_grace.json"
         if not marker.exists():
             return
