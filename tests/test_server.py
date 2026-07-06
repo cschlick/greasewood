@@ -523,7 +523,7 @@ class TestRenewalPropagation:
             loop = RenewalLoop(
                 node_keys=node,
                 directory=own_dir,
-                get_root_url=lambda: f"http://[::1]:{port}",
+                get_anchor_url=lambda: f"http://[::1]:{port}",
                 current_cred=cred,
                 hostname="test-node",
                 endpoints=["[2001:db8::1]:51900"],

@@ -63,7 +63,7 @@ class RenewalLoop:
         self,
         node_keys: NodeKeys,
         directory: Directory,
-        get_root_url: "Callable[[], str]",
+        get_anchor_url: "Callable[[], str]",
         current_cred: Credential,
         hostname: str,
         endpoints: list[str],
@@ -74,7 +74,7 @@ class RenewalLoop:
         self._keys = node_keys
         self._directory = directory
         # A callable returning the anchor URL to renew against (the configured anchor).
-        self._get_root_url = get_root_url
+        self._get_anchor_url = get_anchor_url
         self._cred = current_cred
         self._hostname = hostname
         self._endpoints = endpoints
@@ -147,10 +147,10 @@ class RenewalLoop:
         them and they would evict this node at its old expiry. Raises on any
         failure so the caller's retry/backoff loop re-attempts the whole step."""
         from .sync import push_record
-        new_cred = _do_renew(self._get_root_url(), self._keys)
+        new_cred = _do_renew(self._get_anchor_url(), self._keys)
         self._cred = new_cred
         record = self._publish(new_cred)
-        push_record(self._get_root_url(), record)
+        push_record(self._get_anchor_url(), record)
         return new_cred
 
     def run(self) -> None:

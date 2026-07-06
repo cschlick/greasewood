@@ -63,7 +63,7 @@ _LOG2N_MAX = 20
 # working (a re-generated identity would give the anchor a new address). They're
 # anchor secrets living in the same encrypted blob, so no extra exposure.
 _ANCHOR_STATE = ["ca.key.pub", "ca.cert.pem", "door.key", "revoked.json",
-              "id_priv.pem", "wg.key"]
+                 "id_priv.pem", "wg.key"]
 _ANCHOR_STATE_GLOBS = ["nodes/*.json"]
 
 

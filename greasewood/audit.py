@@ -102,7 +102,7 @@ def record_command(argv, rc: int, elapsed_ms: int,
 # Sinks
 # ---------------------------------------------------------------------------
 
-class _UTCFormatter(logging.Formatter):
+class UTCFormatter(logging.Formatter):
     """ISO-8601 UTC timestamps — a command trail spanning days must be
     unambiguous (the default console format is time-only)."""
     def formatTime(self, record, datefmt=None):
@@ -110,7 +110,7 @@ class _UTCFormatter(logging.Formatter):
         return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_FILE_FMT = _UTCFormatter("ts=%(asctime)s %(message)s")
+_FILE_FMT = UTCFormatter("ts=%(asctime)s %(message)s")
 
 
 def attach_file(path, max_mb: float = 8.0, keep: int = 12) -> "RotatingFileHandler | None":

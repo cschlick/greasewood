@@ -28,7 +28,7 @@ def test_renewal_retries_with_exponential_backoff_then_stops(tmp_path, monkeypat
     loop = RenewalLoop(
         node_keys=node,
         directory=Directory(),
-        get_root_url=lambda: "http://[::1]:0",
+        get_anchor_url=lambda: "http://[::1]:0",
         current_cred=_cred(node, ca),
         hostname="n1",
         endpoints=[],
