@@ -397,7 +397,6 @@ class DoorWatcher(Loop):
         self._directory = directory
         self._node_keys = node_keys
         self._wg_iface = wg_iface
-        self._poll_interval = poll_interval
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
         self._get_revoked = get_revoked or set
         self._cache_path = cache_path
