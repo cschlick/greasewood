@@ -195,7 +195,7 @@ def test_roster_live_mode_columns(tmp_path):
                           exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
         return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
                           cred=cred).sign(k.id_priv)
-    records = [rec(linked, "db01"), rec(pending, "web1")]
+    records = [rec(keys, "me"), rec(linked, "db01"), rec(pending, "web1")]
     cfg = types.SimpleNamespace(caps=["segment:mesh"], mesh_domain="gw.internal")
     nowe = int(time.time())
     live = {
@@ -206,13 +206,17 @@ def test_roster_live_mode_columns(tmp_path):
             wg.LivePeer(wg_pub_b64="y", endpoint="", allowed_ips="",
                         latest_handshake=nowe - 4, rx_bytes=0, tx_bytes=0),
     }
-    latency = {linked.addr: "12ms"}                       # web1's ping not back yet
+    latency = {linked.addr: "12ms", keys.addr: "0ms"}     # web1's ping not back yet
     rates = {linked.addr: "↓1.2M/s ↑300K/s"}
     lines = cli._roster_lines(records, cfg, dt.datetime.now(_UTC),
                               keys.id_pub_hex, live, True,
                               latency=latency, rates=rates)
     joined = "\n".join(lines)
     assert "link" in joined and "rate" in joined and "latency" in joined
+    # the self row carries a latency too (ping to own addr) so broken/no-latency
+    # rows stand out
+    self_row = next(ln for ln in lines if "(self)" in ln)
+    assert "0ms" in self_row
     assert "12ms" in joined and "↓1.2M/s ↑300K/s" in joined
     assert "…" in joined                                  # pending ping placeholder
 
