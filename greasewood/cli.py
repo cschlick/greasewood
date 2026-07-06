@@ -167,7 +167,7 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 
 
 def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
-                         mesh_iface: str = "gw-mesh") -> None:
+                         mesh_iface: str = "gw-mesh", header: bool = True) -> None:
     """
     Print (never apply) the recommended firewall posture. greasewood binds its
     control/enroll planes only to the overlay + loopback, so nothing it runs is
@@ -181,9 +181,14 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
     connection until that node actually becomes an anchor and binds it.
     """
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
-    print("Firewall (greasewood never edits it). Recommended posture — the SAME")
-    print("rules on every node, so any node can become the anchor with no firewall")
-    print("change. On a default-drop host, allow (nftables):")
+    if header:
+        print("Firewall (greasewood never edits it). Recommended posture — the SAME")
+        print("rules on every node, so any node can become the anchor with no firewall")
+        print("change. On a default-drop host, allow (nftables):")
+    else:
+        print("Recommended posture — the SAME rules on every node (anchor or not), so")
+        print("promoting a node to anchor needs no firewall change. On a default-drop")
+        print("input chain (nftables):")
     print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept            # WireGuard (underlay)")
     print(f"  iifname \"lo\" accept                          # anchor talks to itself")
     print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept        # control plane (when anchor)")
@@ -3144,6 +3149,34 @@ def cmd_config(args) -> int:
     return 0
 
 
+def cmd_firewall(args) -> int:
+    """Print the recommended firewall ruleset for this mesh — a SUGGESTION only.
+    greasewood NEVER touches your firewall; this command changes nothing. The
+    same ruleset is recommended on every node (anchor or not), so promoting a
+    node to anchor needs no firewall change. With root it also checks the live
+    nftables ruleset and flags anything that looks blocked."""
+    from .config import load_config
+    from . import firewall as _fw
+    cfg = load_config(Path(args.config))
+    control_port = _control_port(cfg)
+
+    bar = "─" * 72
+    print(bar)
+    print("  greasewood NEVER modifies your firewall.")
+    print("  This is a SUGGESTION — nothing has been changed. Apply it yourself.")
+    print(bar)
+    print()
+    _print_firewall_help(cfg.listen_port, control_port, cfg.wg_interface, header=False)
+    print()
+    print("The two UDP ports ride the underlay (WireGuard listens there). The two")
+    print("TCP ports bind only to their interface, so they're scoped to it — and")
+    print("harmless on a non-anchor node (nothing is bound, so the kernel refuses).")
+    print()
+    # Advisory check of the LIVE ruleset (read-only; needs root to see it).
+    _fw.check(_fw.anchor_rules(cfg.listen_port, control_port, cfg.wg_interface), log)
+    return 0
+
+
 def cmd_watch(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -4172,6 +4205,13 @@ def main(argv=None) -> int:
                          "listen_port, data_dir, role, hostname, root_url, …); "
                          "omit to list all as key<TAB>value")
     sp.set_defaults(fn=cmd_config)
+
+    # firewall — print the recommended posture (a suggestion; nothing changes)
+    sp = sub.add_parser("firewall",
+                        help="print the recommended firewall ruleset (a SUGGESTION "
+                             "— greasewood never changes your firewall). With sudo "
+                             "also flags anything that looks blocked.")
+    sp.set_defaults(fn=cmd_firewall)
 
     # diagnose
     sp = sub.add_parser(
