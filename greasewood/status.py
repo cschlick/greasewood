@@ -174,22 +174,24 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         right_rows.append(_right(r, r.id_pub.hex() == own_id,
                                  default_policy(cfg.caps, r.cred.caps), lp))
 
-    def _w(hdr, i, rows):
-        return max(len(hdr), *(len(row[i]) for row in rows)) if rows else len(hdr)
-    lw = [_w(left_hdr[i], i, left_rows) for i in range(len(left_hdr))]
-    rw = [_w(right_hdr[i], i, right_rows) for i in range(len(right_hdr))]
+    def _col_width(header, i, rows):
+        return max(len(header), *(len(row[i]) for row in rows)) if rows else len(header)
+    left_widths = [_col_width(left_hdr[i], i, left_rows) for i in range(len(left_hdr))]
+    right_widths = [_col_width(right_hdr[i], i, right_rows) for i in range(len(right_hdr))]
 
-    def _fl(cells):     # left: name right-justified, rest left
-        return " ".join([f"{cells[0]:>{lw[0]}}"]
-                        + [f"{cells[i]:<{lw[i]}}" for i in range(1, len(cells))])
-    def _fr(cells):
-        return " ".join(f"{cells[i]:<{rw[i]}}" for i in range(len(cells)))
+    def _fmt_left(cells):   # name right-justified, the rest left-justified
+        return " ".join([f"{cells[0]:>{left_widths[0]}}"]
+                        + [f"{cells[i]:<{left_widths[i]}}" for i in range(1, len(cells))])
 
-    lwidth = len(_fl(left_hdr))
-    out = [f"{'mesh — the fleet (same on every node)':<{lwidth}} │ this node",
-           _fl(left_hdr) + " │ " + _fr(right_hdr),
-           "-" * lwidth + "-+-" + "-" * max(len(_fr(right_hdr)), 9)]
-    out += [_fl(lr) + " │ " + _fr(rr) for lr, rr in zip(left_rows, right_rows)]
+    def _fmt_right(cells):
+        return " ".join(f"{cells[i]:<{right_widths[i]}}" for i in range(len(cells)))
+
+    left_width = len(_fmt_left(left_hdr))
+    out = [f"{'mesh — the fleet (same on every node)':<{left_width}} │ this node",
+           _fmt_left(left_hdr) + " │ " + _fmt_right(right_hdr),
+           "-" * left_width + "-+-" + "-" * max(len(_fmt_right(right_hdr)), 9)]
+    out += [_fmt_left(lrow) + " │ " + _fmt_right(rrow)
+            for lrow, rrow in zip(left_rows, right_rows)]
     if not have_live and not is_live:
         note = ("run 'sudo gw watch' for live data links + traffic" if not is_root
                 else "no live WireGuard state — is the daemon running?")
