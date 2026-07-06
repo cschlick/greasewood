@@ -45,10 +45,37 @@ def test_place_cert_files_content_mode_owner(tmp_path):
     assert oct(os.stat(tmp_path / "b.pem").st_mode & 0o777) == "0o640"
 
 
-def test_place_creates_parent_dirs(tmp_path):
-    dest = tmp_path / "deep" / "nested" / "s.crt"
+def test_place_creates_one_subdir_under_existing_root(tmp_path):
+    # A cert subdir is created under an EXISTING directory (the common
+    # /etc/<svc>/tls case where the service root exists but tls/ doesn't).
+    dest = tmp_path / "tls" / "s.crt"
     certs.place_cert_files([{"role": "cert", "path": str(dest)}], "K", "C\n", "A")
     assert dest.read_text() == "C\n"
+
+
+def test_place_refuses_to_fabricate_a_deep_tree(tmp_path):
+    # A missing PARENT of the target dir means the service isn't installed or the
+    # path is wrong (e.g. postgres profile's /var/lib/postgresql/17/main on a
+    # PG-16 host). It must fail loudly, not invent the tree and mis-place a key.
+    dest = tmp_path / "deep" / "nested" / "s.crt"
+    with pytest.raises(RuntimeError) as e:
+        certs.place_cert_files([{"role": "cert", "path": str(dest)}], "K", "C\n", "A")
+    assert "doesn't exist" in str(e.value)
+    assert not dest.parent.exists()             # nothing fabricated
+
+
+def test_place_multi_level_subdirs_when_earlier_file_makes_intermediate(tmp_path):
+    # minio's shape: certs/public.crt then certs/CAs/ca.crt — the first file
+    # creates certs/, so the second can create CAs/ under it (order matters, and
+    # the shipped profiles are ordered for it).
+    (tmp_path / "svc").mkdir()                   # the service root exists
+    files = [
+        {"role": "cert", "path": str(tmp_path / "svc" / "certs" / "public.crt")},
+        {"role": "ca", "path": str(tmp_path / "svc" / "certs" / "CAs" / "ca.crt")},
+    ]
+    certs.place_cert_files(files, "K", "C\n", "A")
+    assert (tmp_path / "svc" / "certs" / "public.crt").read_text() == "C\n"
+    assert (tmp_path / "svc" / "certs" / "CAs" / "ca.crt").read_text() == "A\n"
 
 
 def test_resolve_owner_unknown_fails_loudly():
