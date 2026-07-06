@@ -91,8 +91,17 @@ class Directory:
             return d
         try:
             raw = json.loads(path.read_text())
-            records = [NodeRecord.from_dict(r) for r in raw]
-            d.merge(records)
         except Exception as e:
-            log.warning("directory cache load failed, starting empty: %s", e)
+            log.warning("directory cache unreadable, starting empty: %s", e)
+            return d
+        # Per-record: a single corrupt/truncated entry costs one peer, not the
+        # whole cache — the point of the cache is to keep running from
+        # last-known-good while the anchor is offline.
+        records = []
+        for raw_record in raw if isinstance(raw, list) else []:
+            try:
+                records.append(NodeRecord.from_dict(raw_record))
+            except Exception as e:
+                log.warning("skipping one corrupt directory-cache record: %s", e)
+        d.merge(records)
         return d
