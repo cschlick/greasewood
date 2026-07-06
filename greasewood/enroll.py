@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Callable
 from . import door
 from .door import ENROLL_PORT, ANCHOR_DOOR_IP, DOOR_IFACE
 
+from .loop import Loop
+
 if TYPE_CHECKING:
     from .ca import CA
     from .directory import Directory
@@ -37,33 +39,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
-_MAX_MSG = 64 * 1024
-
-
-# ---------------------------------------------------------------------------
-# Wire helpers
-# ---------------------------------------------------------------------------
-
-def _recvall(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError(f"short read: {len(buf)}/{n} bytes")
-        buf += chunk
-    return buf
-
-
-def _recv_msg(sock: socket.socket) -> dict:
-    length = struct.unpack(">I", _recvall(sock, 4))[0]
-    if length > _MAX_MSG:
-        raise ValueError(f"message too large: {length}")
-    return json.loads(_recvall(sock, length))
-
-
-def _send_msg(sock: socket.socket, data: dict) -> None:
-    body = json.dumps(data, separators=(",", ":")).encode()
-    sock.sendall(struct.pack(">I", len(body)) + body)
+# Wire framing lives in door.py (one definition for server + `gw join` client).
+from .door import recv_msg as _recv_msg, send_msg as _send_msg
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +366,7 @@ class EnrollServer:
 # DoorWatcher
 # ---------------------------------------------------------------------------
 
-class DoorWatcher:
+class DoorWatcher(Loop):
     """
     Polls data_dir/door_window.json every poll_interval seconds.
     Starts an EnrollServer when a valid window is found; cleans up when it expires.
@@ -427,21 +404,14 @@ class DoorWatcher:
         self._control_port = control_port
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, name="door-watcher", daemon=True)
+        super().__init__(poll_interval, "door-watcher")
 
-    def start(self) -> None:
-        self._thread.start()
-
+    # run()/start() come from Loop; stop() also downs the live enroll server.
     def stop(self) -> None:
-        self._stop.set()
+        super().stop()
         with self._lock:
             if self._enroll:
                 self._enroll.stop()
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self._poll_interval):
-            self._tick()
 
     def _tick(self) -> None:
         window_path = self._data_dir / "door_window.json"

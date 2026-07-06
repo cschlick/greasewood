@@ -267,7 +267,7 @@ class TestReconcileTrustGate:
             get_revoked=lambda: revoked,
             hosts_domain="internal",
         )
-        loop._cycle()
+        loop._tick()
 
         assert captured["names"] == {"local", "good"}
 
@@ -325,7 +325,7 @@ class TestInterfaceSelfHeal:
         monkeypatch.setattr(reconcile, "reconcile_once",
                             lambda *a, **k: calls.__setitem__("reconcile", calls["reconcile"] + 1) or [])
         loop = self._loop(lambda: calls.__setitem__("ensure", calls["ensure"] + 1))
-        loop._cycle()
+        loop._tick()
         assert calls == {"ensure": 1, "reconcile": 1}   # healed, then reconciled
 
     def test_present_interface_is_not_touched(self, monkeypatch):
@@ -334,7 +334,7 @@ class TestInterfaceSelfHeal:
                             lambda iface: True, raising=False)
         monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: ([], []))
         loop = self._loop(lambda: calls.__setitem__("ensure", 1))
-        loop._cycle()
+        loop._tick()
         assert calls["ensure"] == 0
 
     def test_failed_heal_skips_cycle_and_retries_next(self, monkeypatch):
@@ -346,7 +346,7 @@ class TestInterfaceSelfHeal:
         def boom():
             raise RuntimeError("ip link add failed")
         loop = self._loop(boom)
-        loop._cycle()                       # must not raise
+        loop._tick()                       # must not raise
         assert ran["reconcile"] == 0        # no reconcile against a dead iface
 
     def test_no_hook_means_no_check(self, monkeypatch):
@@ -356,7 +356,7 @@ class TestInterfaceSelfHeal:
         monkeypatch.setattr(reconcile.wgmod, "interface_exists", explode, raising=False)
         monkeypatch.setattr(reconcile, "reconcile_once", lambda *a, **k: ([], []))
         loop = self._loop(None)
-        loop._cycle()
+        loop._tick()
 
 
 class TestEndpointBackoff:
@@ -485,7 +485,7 @@ class TestReachablePublish:
 
 
 class TestLoopResilience:
-    """The reconcile thread must survive an exception escaping _cycle — a dead
+    """The reconcile thread must survive an exception escaping the tick — a dead
     reconcile loop is a frozen data plane under a healthy-looking daemon. (The
     old bare run() died on the first such exception; the sibling loops already
     guarded theirs.)"""
@@ -505,7 +505,7 @@ class TestLoopResilience:
             if calls["n"] >= 3:
                 fired.set()
             raise RuntimeError("cycle exploded")
-        loop._cycle = boom
+        loop._tick = boom
         t = loop.start()
         assert fired.wait(timeout=5), "loop died after the first exception"
         loop.stop()
@@ -513,7 +513,7 @@ class TestLoopResilience:
         assert calls["n"] >= 3                # kept cycling THROUGH the raises
 
     def test_cycle_mock_shape_matches_contract(self, monkeypatch):
-        """Guard against the mock rot this class fixes: a full _cycle with the
+        """Guard against the mock rot this class fixes: a full tick with the
         REAL reconcile_once return shape must reach the post-reconcile steps
         (reachable publish) — proving the tests above exercise the success
         path, not a swallowed unpack error."""
@@ -527,5 +527,5 @@ class TestLoopResilience:
                              local_id_pub=b"x" * 32, local_caps=[],
                              get_ca_pubs=lambda: [], get_revoked=lambda: set(),
                              on_reachable=published.append)
-        loop._cycle()
+        loop._tick()
         assert published == [["fd8d::1"]]     # the success path actually ran

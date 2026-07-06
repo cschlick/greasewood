@@ -40,6 +40,34 @@ from pathlib import Path
 
 from .keys import atomic_write
 
+# The enrollment exchange's framing: 4-byte big-endian length + JSON. The ONE
+# definition — both sides (enroll.EnrollServer and `gw join`) import these, so
+# the framing can never drift between server and client.
+_MAX_MSG = 64 * 1024
+
+
+def _recvall(sock, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError(f"short read: {len(buf)}/{n} bytes")
+        buf += chunk
+    return buf
+
+
+def recv_msg(sock) -> dict:
+    length = struct.unpack(">I", _recvall(sock, 4))[0]
+    if length > _MAX_MSG:
+        raise ValueError(f"message too large: {length}")
+    return json.loads(_recvall(sock, length))
+
+
+def send_msg(sock, data: dict) -> None:
+    body = json.dumps(data, separators=(",", ":")).encode()
+    sock.sendall(struct.pack(">I", len(body)) + body)
+
+
 _SALT = b"greasewood-door-v1"
 _INFO_GUEST = b"gw/door/guest-x25519/v1"
 _INFO_PSK = b"gw/door/psk/v1"
