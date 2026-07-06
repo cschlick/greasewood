@@ -31,6 +31,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from .keys import atomic_write
+
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
 
@@ -104,15 +106,9 @@ def issue_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str
     key_pem, cert_pem, ca_pem = fetch_cert(
         anchor_url, keys, dns=dns, ips=ips, cn=cn, timeout=timeout, attempts=attempts)
     key_path, crt_path, ca_path = Path(key_path), Path(crt_path), Path(ca_path)
-    for p in (key_path, crt_path, ca_path):
-        p.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, key_pem.encode())
-    finally:
-        os.close(fd)
-    crt_path.write_text(cert_pem)
-    ca_path.write_text(ca_pem)
+    atomic_write(key_path, key_pem)                 # 0600: private key
+    atomic_write(crt_path, cert_pem, mode=0o644)
+    atomic_write(ca_path, ca_pem, mode=0o644)
     return key_path, crt_path, ca_path
 
 
@@ -171,6 +167,8 @@ def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> N
         content = compose_role(role, key_pem, cert_pem, ca_pem).encode()
         mode = int(f["mode"], 8) if f.get("mode") else _ROLE_MODE.get(role, 0o644)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # Deliberately NOT keys.atomic_write: the owner must change on the TEMP,
+        # before the atomic swap, so the file appears fully-owned or not at all.
         tmp = dest.with_name(dest.name + ".gwtmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:

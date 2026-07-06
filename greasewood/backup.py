@@ -38,6 +38,8 @@ import os
 import tarfile
 from pathlib import Path
 
+from .keys import atomic_write
+
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -170,12 +172,7 @@ def restore_files(data_dir, files: dict[str, bytes]) -> list[str]:
         dest = (data_dir / name).resolve()
         if dest != data_dir and data_dir not in dest.parents:
             raise BackupError(f"unsafe path in backup: {name!r}")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # 0600 write: this is key material.
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        # 0600, atomic: this is key material.
+        atomic_write(dest, data)
         written.append(name)
     return written

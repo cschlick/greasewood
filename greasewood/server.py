@@ -124,35 +124,35 @@ class _Handler(BaseHTTPRequestHandler):
             })
         elif self.path == "/ca-cert":
             if self.ca is None:
-                self.send_error(404)
+                self._send_json({"error": "not an anchor"}, 404)
             else:
                 self._send_json({"ca_cert": self.ca.ca_cert_pem()})
         elif self.path == "/health":
             self._send_json({"status": "ok", "now": self._now_iso()})
         else:
-            self.send_error(404)
+            self._send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
         try:
             body = self._read_json()
         except Exception:
-            self.send_error(400, "bad JSON")
+            self._send_json({"error": "bad JSON"}, 400)
             return
 
         if self.path == "/publish":
             self._handle_publish(body)
         elif self.path == "/renew":
             if self.ca is None:
-                self.send_error(403, "not an anchor")
+                self._send_json({"error": "not an anchor"}, 403)
             else:
                 self._handle_renew(body)
         elif self.path == "/cert":
             if self.ca is None:
-                self.send_error(403, "not an anchor")
+                self._send_json({"error": "not an anchor"}, 403)
             else:
                 self._handle_cert(body)
         else:
-            self.send_error(404)
+            self._send_json({"error": "not found"}, 404)
 
     def _handle_publish(self, body: dict) -> None:
         from .wire import NodeRecord

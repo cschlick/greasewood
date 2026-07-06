@@ -27,7 +27,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from .keys import CAKeys, derive_addr
+from .keys import CAKeys, atomic_write, derive_addr
 from .wire import Credential, RenewRequest
 
 log = logging.getLogger(__name__)
@@ -42,31 +42,6 @@ class UnknownNodeError(ValueError):
 _UTC = dt.timezone.utc
 
 CapPolicy = Callable[[list[str]], list[str]]
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write via a UNIQUE temp file + rename so a crash mid-write can't corrupt
-    the revoke list or a node-caps file, and concurrent writers (multiple
-    threads now that the control plane is threaded, or a `gw revoke`/`set-caps`
-    process racing the daemon) can't collide on a shared temp path — the rename
-    is atomic and last-writer-wins, never a truncated/mixed file or a
-    FileNotFoundError from one writer moving another's temp."""
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # mkstemp in the SAME dir → same filesystem, so os.replace is a real atomic
-    # rename (not a cross-device copy).
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        # Clean up our own temp on any failure; never leave litter behind.
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 class CA:
@@ -272,7 +247,7 @@ class CA:
         return set(json.loads(self._revoke_path.read_text()).get("revoked", []))
 
     def _save_revoked(self, revoked: set[str]) -> None:
-        _atomic_write_text(
+        atomic_write(
             self._revoke_path, json.dumps({"revoked": sorted(revoked)}, indent=2)
         )
 
@@ -284,7 +259,7 @@ class CA:
     def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str]) -> None:
         p = self._node_path(id_pub)
         p.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(p, json.dumps({"hostname": hostname, "caps": caps}, indent=2))
+        atomic_write(p, json.dumps({"hostname": hostname, "caps": caps}, indent=2))
 
     def hostname_owner(self, hostname: str) -> str | None:
         """id_pub hex of the node already using this (sanitized) hostname among
