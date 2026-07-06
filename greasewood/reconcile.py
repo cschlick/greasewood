@@ -215,6 +215,12 @@ def reconcile_once(
     # Live kernel state up front: the endpoint tracker needs each peer's last
     # handshake time to decide whether its current endpoint is working.
     live = wgmod.get_peers(iface)
+    if live is None:
+        # Couldn't read live WireGuard state (a transient `wg show` failure).
+        # Acting on this as "no peers" would skip every removal and re-add
+        # everything — so skip the diff this cycle and retry next tick.
+        log.warning("could not read live peers on %s; skipping reconcile this cycle", iface)
+        return ReconcileResult([], [])
     now_epoch = time.time() if endpoint_tracker is not None else 0.0
 
     # Build the desired peer set: wg_pub_b64 → (overlay_addr, endpoint | None)

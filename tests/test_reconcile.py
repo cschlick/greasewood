@@ -529,3 +529,22 @@ class TestLoopResilience:
                              on_reachable=published.append)
         loop._tick()
         assert published == [["fd8d::1"]]     # the success path actually ran
+
+
+class TestUnreadableLiveState:
+    """A transient `wg show dump` failure (get_peers → None) must NOT be acted on
+    as 'no peers' — that would skip every removal and re-add everything. The
+    cycle is skipped and retried next tick."""
+
+    def test_get_peers_none_skips_the_diff(self, monkeypatch):
+        from greasewood.reconcile import reconcile_once
+        monkeypatch.setattr(reconcile.wgmod, "get_peers", lambda iface: None)
+        set_peer_calls = []
+        monkeypatch.setattr(reconcile.wgmod, "set_peer",
+                            lambda *a, **k: set_peer_calls.append(a))
+        monkeypatch.setattr(reconcile.wgmod, "remove_peer",
+                            lambda *a, **k: set_peer_calls.append(("rm",) + a))
+        result = reconcile_once("gw-x", Directory(), b"x" * 32, ["segment:mesh"],
+                                [], set())
+        assert result == ([], [])                # nothing derived
+        assert set_peer_calls == []              # no kernel mutation on a misread

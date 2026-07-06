@@ -325,7 +325,7 @@ def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
             records = sorted(Directory.load(cfg.dir_cache_path).all(),
                              key=lambda r: r.hostname)
             try:
-                live = wgmod.get_peers(cfg.wg_interface)
+                live = wgmod.get_peers(cfg.wg_interface) or {}
             except Exception:
                 live = {}
             now = dt.datetime.now(_UTC)
@@ -623,7 +623,7 @@ def cmd_watch(args) -> int:
     if is_root:
         try:
             from . import wg as wgmod
-            live_peers = wgmod.get_peers(cfg.wg_interface)
+            live_peers = wgmod.get_peers(cfg.wg_interface) or {}
         except Exception:
             live_peers = None
 
@@ -756,13 +756,16 @@ def _diag_anchor_record(directory, cfg, own_rec):
     None if unresolvable / not yet in cache."""
     if cfg.role == "anchor":
         return own_rec
-    m = re.search(r"\[([0-9a-fA-F:]+)\]", cfg.root_url or "")
-    if not m:
+    # root_url is an overlay (IPv6) control-plane URL in practice, but parse it
+    # with the stdlib rather than a hand-rolled bracket regex: urlparse unbrackets
+    # v6, strips the port, and stays correct if a bare host ever appears.
+    from urllib.parse import urlparse
+    host = urlparse(cfg.root_url or "").hostname
+    if not host:
         return None
-    addr = m.group(1)
-    for r in directory.all():
-        if r.cred.addr == addr:
-            return r
+    for record in directory.all():
+        if record.cred.addr == host:
+            return record
     return None
 
 
@@ -825,7 +828,7 @@ def cmd_diagnose(args) -> int:
             pass
 
     try:
-        live_peers = wgmod.get_peers(cfg.wg_interface)
+        live_peers = wgmod.get_peers(cfg.wg_interface) or {}
     except Exception:
         live_peers = {}
     directory = Directory.load(cfg.dir_cache_path)

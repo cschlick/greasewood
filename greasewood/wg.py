@@ -333,16 +333,18 @@ def _temp_key_file(b64_key: str):
             pass
 
 
-def get_peers(iface: str) -> dict[str, LivePeer]:
+def get_peers(iface: str) -> "dict[str, LivePeer] | None":
     """
-    Return currently installed peers from `wg show <iface> dump`.
-    First line is the interface; subsequent lines are peers. Tab-separated:
-    pubkey, preshared-key, endpoint, allowed-ips, latest-handshake,
-    rx-bytes, tx-bytes, persistent-keepalive.
+    Currently installed peers from `wg show <iface> dump`, or None if the dump
+    FAILED (vs an empty dict, which means the interface has no peers). The
+    distinction matters to the reconcile loop: acting on a misread of "no peers"
+    would skip every removal. First line is the interface; subsequent lines are
+    peers, tab-separated: pubkey, preshared-key, endpoint, allowed-ips,
+    latest-handshake, rx-bytes, tx-bytes, persistent-keepalive.
     """
     r = _run("wg", "show", iface, "dump", check=False)
     if r.returncode != 0:
-        return {}
+        return None
     peers: dict[str, LivePeer] = {}
     lines = r.stdout.strip().splitlines()
     for line in lines[1:]:  # skip interface line
