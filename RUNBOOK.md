@@ -238,7 +238,7 @@ set so you always have an overlap path.
 
 A mesh's name is one thing everywhere: its domain (`<name>.internal`), and — on
 each host — its config (`/etc/greasewood_<name>.toml`), data dir
-(`/var/lib/greasewood_<name>`), interface (`gw_<name>`), and service
+(`/var/lib/greasewood_<name>`), interface (`gw-<name>`), and service
 (`greasewood@<name>`). `gw rename-mesh <new>` moves all of them together, so
 they never drift apart. It is **operator-driven on every host** — a rare,
 deliberate fleet change, not something the daemon does to itself.

@@ -382,7 +382,7 @@ def cmd_create(args) -> int:
     if args.interface is None:
         clash = _iface_collision(interface, cfg_path)
         if clash:
-            sys.exit(f"derived interface name {interface!r} (gw_ + first 12 "
+            sys.exit(f"derived interface name {interface!r} (gw- + first 12 "
                      f"chars of {args.name!r}) is already used by the membership "
                      f"at {clash} — pass an explicit --interface.")
     overlay_prefix = args.overlay_prefix
@@ -774,7 +774,7 @@ def cmd_close_door(args) -> int:
 # carried in every join token as <name>.internal). Nothing is unsuffixed and
 # nothing is numbered: the very first mesh on a host gets the same name-derived
 # artifacts as the fifth — /etc/greasewood_<name>.toml, /var/lib/
-# greasewood_<name>, interface gw_<name[:12]>, service greasewood@<name>.
+# greasewood_<name>, interface gw-<name[:12]>, service greasewood@<name>.
 # Explicit flags override any derived value.
 
 def _membership_key(domain: str) -> str:
@@ -789,12 +789,12 @@ def _membership_key(domain: str) -> str:
 def _membership_paths(key: str, etc: "Path" = Path("/etc"),
                       var: "Path" = Path("/var/lib")) -> dict:
     """The derived artifacts for membership `key`. The interface truncates to
-    the kernel's 15-char limit (gw_ + 12); a truncation collision between two
+    the kernel's 15-char limit (gw- + 12); a truncation collision between two
     memberships is a loud join/create-time refusal, never a silent rename."""
     return {
         "config": etc / f"greasewood_{key}.toml",
         "data_dir": var / f"greasewood_{key}",
-        "interface": f"gw_{key[:12].rstrip(chr(45))}",
+        "interface": f"gw-{key[:12].rstrip(chr(45))}",
         "unit": f"greasewood@{key}",
     }
 
@@ -1069,7 +1069,7 @@ def cmd_rename_mesh(args) -> int:
     print(f"mesh renamed: {old_domain} → {args.new_name}.internal")
     print(f"  config    : {new_cfg}")
     print(f"  data dir  : /var/lib/greasewood_{args.new_name}")
-    print(f"  interface : gw_{args.new_name[:12].rstrip('-')}")
+    print(f"  interface : gw-{args.new_name[:12].rstrip('-')}")
     print(f"  service   : greasewood@{args.new_name} (old instance disabled)")
     print(f"Old *.{old_domain} names keep resolving for one credential TTL, "
           f"then retire.")
@@ -1148,7 +1148,7 @@ def cmd_join(args) -> int:
                 clash = _iface_collision(args.interface, cfg_path)
                 if clash:
                     sys.exit(
-                        f"derived interface name {args.interface!r} (gw_ + first "
+                        f"derived interface name {args.interface!r} (gw- + first "
                         f"12 chars of {key!r}) is already used by the membership "
                         f"at {clash} — the kernel caps interface names at 15 "
                         f"chars, so long mesh names can collide after "
@@ -4079,7 +4079,7 @@ def main(argv=None) -> int:
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay IPv6 address (auto-detected if omitted)")
     sp.add_argument("--interface", default=None,
-                    help="WireGuard interface name (default: gw_<name[:12]>)")
+                    help="WireGuard interface name (default: gw-<name[:12]>)")
     sp.add_argument("--overlay-prefix", dest="overlay_prefix",
                     default="fd8d:e5c1:db1a:7::",
                     help="the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)")

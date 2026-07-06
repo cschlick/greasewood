@@ -18,7 +18,7 @@ from .helpers import directory_records, pexec, podman, wg_peer_count, wait_for_p
 pytestmark = pytest.mark.integration
 
 
-def _wait_peer_gone(cid, at_most, iface="gw_testmesh", timeout=60):
+def _wait_peer_gone(cid, at_most, iface="gw-testmesh", timeout=60):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if wg_peer_count(cid, iface) <= at_most:
