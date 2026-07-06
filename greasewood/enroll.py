@@ -266,8 +266,12 @@ class EnrollServer:
         malformed one (the accept loop counts it as a failed attempt)."""
         import base64
 
+        if not isinstance(req, dict):
+            raise ValueError("enroll request must be a JSON object")
         if req.get("v") != 1:
             raise ValueError(f"unsupported version: {req.get('v')}")
+        if "id_pub" not in req or "wg_pub" not in req:
+            raise ValueError("enroll request missing id_pub/wg_pub")
         id_pub_bytes = bytes.fromhex(req["id_pub"])
         wg_pub_bytes = base64.b64decode(req["wg_pub"])
         if len(id_pub_bytes) != 32:

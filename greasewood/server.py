@@ -96,8 +96,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
-        if length > _MAX_BODY:
-            raise ValueError(f"request body too large ({length} bytes)")
+        if length < 0 or length > _MAX_BODY:
+            # A negative Content-Length would make rfile.read(-1) read to EOF,
+            # bypassing the size cap — reject it as a bad request.
+            raise ValueError(f"invalid request body length ({length})")
         body = json.loads(self.rfile.read(length))
         # Every endpoint expects a JSON object. Enforce it here so a bare null,
         # list, or scalar is a clean 400 in do_POST — not a TypeError deep in a

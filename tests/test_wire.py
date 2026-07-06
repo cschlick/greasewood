@@ -410,3 +410,51 @@ class TestNodeRecordAliases:
         d["aliases"] = ["pg", "injected"]               # add a name post-signing
         with pytest.raises(ValueError, match="invalid self-signature"):
             NodeRecord.from_dict(d).verify_structural()
+
+
+class TestHostileInputRejectedCleanly:
+    """Malformed JSON types on the network-reachable objects must raise
+    ValueError at from_dict (→ a clean 4xx), never a str-method AttributeError
+    or a sorted() TypeError deep in verification (an unhandled 500). An enrolled
+    node signs a valid request but can put garbage in the fields."""
+
+    def _base_cred_dict(self):
+        from greasewood.keys import CAKeys, NodeKeys, derive_addr
+        import datetime as dt
+        ca, k = CAKeys.generate(), NodeKeys.generate()
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        return Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                          addr=derive_addr(k.id_pub_bytes), hostname="h",
+                          caps=["segment:mesh"], iat=now,
+                          exp=now + dt.timedelta(hours=1)).sign(ca.ca_priv).to_dict()
+
+    def test_credential_non_string_caps_rejected(self):
+        import pytest
+        d = self._base_cred_dict()
+        d["caps"] = [1, 2]                       # sorted() would TypeError
+        with pytest.raises(ValueError, match="caps must be a list of strings"):
+            Credential.from_dict(d)
+
+    def test_credential_non_string_hostname_rejected(self):
+        import pytest
+        d = self._base_cred_dict()
+        d["hostname"] = 123
+        with pytest.raises(ValueError, match="hostname must be a string"):
+            Credential.from_dict(d)
+
+    def test_certrequest_non_string_cn_and_dns_rejected(self):
+        import pytest
+        from greasewood.wire import CertRequest
+        from greasewood.keys import NodeKeys
+        k = NodeKeys.generate()
+        req = CertRequest(id_pub=k.id_pub_bytes, leaf_pub=k.wg_pub_bytes,
+                          cn="db01", dns=["db01"], ips=[], nonce="n",
+                          ts=__import__("datetime").datetime.now(
+                              __import__("datetime").timezone.utc).replace(microsecond=0),
+                          ).sign(k.id_priv).to_dict()
+        for bad_field, bad_value, msg in [("cn", 123, "cn must be a string"),
+                                          ("dns", [123], "dns must be a list of strings"),
+                                          ("ips", [1], "ips must be a list of strings")]:
+            d = dict(req, **{bad_field: bad_value})
+            with pytest.raises(ValueError, match=msg):
+                CertRequest.from_dict(d)
