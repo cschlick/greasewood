@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from greasewood import cli, door, enroll
+from greasewood import cli, door, enroll, status
 from greasewood.directory import Directory
 from greasewood.keys import CAKeys, NodeKeys
 
@@ -234,7 +234,7 @@ def test_standing_window_stores_and_status_shows_token(tmp_path):
     }))
     door.mark_door_opened(tmp_path, None, caps=["segment:autoscale"], standing=True)
     cfg = types.SimpleNamespace(data_dir=tmp_path, role="anchor")
-    lines = cli._door_status_lines(cfg)
+    lines = status._door_status_lines(cfg)
     joined = "\n".join(lines)
     assert "OPEN (standing)" in joined
     assert "token: gw1.THE-STANDING-TOKEN" in joined
@@ -249,5 +249,5 @@ def test_single_use_window_has_no_stored_token(tmp_path):
         "v": 1, "expires": "2099-01-01T00:00:00Z", "caps": [], "hostname": None,
     }))
     door.mark_door_opened(tmp_path, "2099-01-01T00:00:00Z")
-    lines = cli._door_status_lines(types.SimpleNamespace(data_dir=tmp_path, role="anchor"))
+    lines = status._door_status_lines(types.SimpleNamespace(data_dir=tmp_path, role="anchor"))
     assert not any("token:" in ln for ln in lines)

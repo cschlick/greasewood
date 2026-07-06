@@ -261,3 +261,50 @@ def atomic_write(path: Path, data: "bytes | str", mode: int = 0o600) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _key_file_warnings(paths, expect_uid: int = 0) -> list:
+    """Sanity-check secret key files: each should be owned by `expect_uid`
+    (root) and readable by owner only. A key owned by another user means that
+    account can read it — for the CA key, mint mesh credentials — usually a
+    leftover from a pre-1.0 create that chowned the data dir to the operator.
+    Returns human-readable warnings; missing files are fine (not all roles have
+    all keys)."""
+    import stat as statmod
+    warns = []
+    for p in paths:
+        if p is None:
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if st.st_uid != expect_uid:
+            warns.append(
+                f"SECURITY: {p} is owned by uid {st.st_uid}, not root — that "
+                f"account can read this key"
+                + (" and mint mesh credentials" if "ca" in Path(p).name else "")
+                + f". Fix: chown root:root {p}")
+        if statmod.S_IMODE(st.st_mode) & 0o077:
+            warns.append(f"SECURITY: {p} is group/world-accessible "
+                         f"(mode {statmod.S_IMODE(st.st_mode):o}). "
+                         f"Fix: chmod 600 {p}")
+    return warns
+
+
+def _secret_key_paths(cfg) -> list:
+    """The secret key files this install may have (missing ones are skipped)."""
+    return [cfg.data_dir / "id_priv.pem", cfg.data_dir / "wg.key",
+            cfg.data_dir / "door.key", getattr(cfg, "ca_key_file", None)]
+
+
+def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
+    """(id_pub_hex, overlay_addr) from the world-readable id_pub.hex — never the
+    private key. Read-only commands (nodes, diagnose) use this so they work
+    without sudo: the public id is enough to mark 'self' and derive the addr."""
+    from .keys import derive_addr
+    try:
+        h = (data_dir / "id_pub.hex").read_text().strip()
+        return h, derive_addr(bytes.fromhex(h))
+    except (FileNotFoundError, ValueError):
+        return None, None

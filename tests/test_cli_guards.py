@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from greasewood import keys as keys_mod
 from greasewood import cli
 from greasewood.keys import NodeKeys, derive_addr
 
@@ -98,7 +99,7 @@ def test_own_identity_reads_public_key_only(tmp_path):
     # Make the private key unreadable to prove we never open it.
     (tmp_path / "id_priv.pem").chmod(0o000)
     try:
-        h, addr = cli._own_identity(tmp_path)
+        h, addr = keys_mod._own_identity(tmp_path)
         assert h == keys.id_pub_hex
         assert addr == derive_addr(keys.id_pub_bytes)
     finally:
@@ -106,7 +107,7 @@ def test_own_identity_reads_public_key_only(tmp_path):
 
 
 def test_own_identity_missing_returns_none(tmp_path):
-    assert cli._own_identity(tmp_path) == (None, None)
+    assert keys_mod._own_identity(tmp_path) == (None, None)
 
 
 def test_status_works_without_private_key(tmp_path, capsys, monkeypatch):
@@ -150,18 +151,18 @@ def test_key_file_warnings_flags_foreign_owner_and_loose_mode(tmp_path):
     key = tmp_path / "ca.key"
     key.write_text("k")
     key.chmod(0o600)
-    warns = cli._key_file_warnings([key], expect_uid=0)      # test uid ≠ 0 → foreign
+    warns = keys_mod._key_file_warnings([key], expect_uid=0)      # test uid ≠ 0 → foreign
     assert len(warns) == 1
     assert "owned by uid" in warns[0] and "mint mesh credentials" in warns[0]
     assert f"chown root:root {key}" in warns[0]
 
     key.chmod(0o644)                                          # loose mode too
-    warns = cli._key_file_warnings([key], expect_uid=0)
+    warns = keys_mod._key_file_warnings([key], expect_uid=0)
     assert len(warns) == 2 and any("group/world-accessible" in w for w in warns)
 
     key.chmod(0o600)                                          # owned right + tight = quiet
-    assert cli._key_file_warnings([key], expect_uid=os.geteuid()) == []
-    assert cli._key_file_warnings([tmp_path / "missing.key", None]) == []
+    assert keys_mod._key_file_warnings([key], expect_uid=os.geteuid()) == []
+    assert keys_mod._key_file_warnings([tmp_path / "missing.key", None]) == []
 
 
 def test_status_says_truth_when_data_dir_unreadable(tmp_path, capsys):
