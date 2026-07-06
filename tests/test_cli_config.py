@@ -58,3 +58,16 @@ def test_config_unknown_key_errors(tmp_path):
     with pytest.raises(SystemExit) as e:
         cli.cmd_config(types.SimpleNamespace(config=str(cfg), key="nope"))
     assert "unknown config key 'nope'" in str(e.value)
+
+
+def test_firewall_prints_suggestion_and_the_four_ports(tmp_path, capsys, monkeypatch):
+    from greasewood import firewall
+    monkeypatch.setattr(firewall, "_load_ruleset", lambda: None)   # no live nft
+    cfg = _cfg(tmp_path)
+    assert cli.cmd_firewall(types.SimpleNamespace(config=str(cfg))) == 0
+    out = capsys.readouterr().out
+    assert "NEVER modifies your firewall" in out and "nothing has been changed" in out.lower()
+    # all four ports, with the two TCP scoped to their interfaces
+    assert "51900, 51901" in out                       # the two UDP (unscoped)
+    assert 'iifname "gw_pm" tcp dport 51902' in out    # control plane (mesh iface)
+    assert 'iifname "gw-door" tcp dport 51903' in out  # enrollment (door iface)
