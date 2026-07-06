@@ -91,3 +91,31 @@ def test_summarize_counts_operations_not_commands():
     s = N.summarize(entries)
     assert "1 removed" in s                # one operation, not two commands
     assert "1 command(s) failed" in s      # but failures counted per command
+
+
+def test_cmd_narrate_since_filter_works(tmp_path, capsys):
+    """Regression: `gw narrate --since 30m` crashed with NameError —
+    _parse_duration was only imported inside cmd_create."""
+    import types
+    from greasewood import cli
+    log = tmp_path / "audit.log"
+    log.write_text(
+        'ts=2020-01-01T00:00:00Z cmd rc=0 t=1ms ctx="old: +peer x" '
+        'argv="wg set gw-mesh peer OLD= allowed-ips fd8d::1/128"\n'
+        'ts=2099-01-01T00:00:00Z cmd rc=0 t=1ms ctx="new: +peer y" '
+        'argv="wg set gw-mesh peer NEW= allowed-ips fd8d::2/128"\n')
+    args = types.SimpleNamespace(config="/nonexistent", source=str(log),
+                                 since="30m", peer=None, grep=None,
+                                 failures=False, raw=False, stats=False,
+                                 no_color=True)
+    assert cli.cmd_narrate(args) == 0
+    out = capsys.readouterr().out
+    assert "NEW" in out or "fd8d::2" in out    # recent entry survives the filter
+    assert "OLD" not in out                    # 2020 entry filtered out
+
+
+def test_describe_ip_bare_line_does_not_crash():
+    """Regression: a bare/truncated `ip` argv IndexError'd on toks[-1]."""
+    assert N._describe_ip(["ip"]) == "ip "
+    assert N._describe_ip(["ip", "-6"]).startswith("ip")
+    assert N._describe_ip(["ip", "link"]).startswith("ip")

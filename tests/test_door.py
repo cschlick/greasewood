@@ -204,3 +204,19 @@ class TestDoorStatus:
         door.mark_door_opened(tmp_path, "2026-07-02T10:00:00+00:00")
         mode = stat.S_IMODE((tmp_path / "door_status.json").stat().st_mode)
         assert mode == 0o600, oct(mode)   # contains source IPs
+
+
+def test_node_door_log_reports_configured_port(monkeypatch, caplog):
+    """Regression: the 'node door interface up' log printed the DOOR_PORT
+    constant, not the actually-configured door_port — lying exactly when a
+    custom port was in play (i.e. when someone was debugging one)."""
+    import logging
+    import subprocess
+    from greasewood import wg
+    monkeypatch.setattr(wg, "_run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    with caplog.at_level(logging.INFO, logger="greasewood.wg"):
+        wg.ensure_node_door_interface(b"k" * 32, "QUJD", "UFNL",
+                                      "203.0.113.9", door_port=51999)
+    assert any(":51999" in r.getMessage() for r in caplog.records)
+    assert not any(":51901" in r.getMessage() for r in caplog.records)

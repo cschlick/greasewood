@@ -210,7 +210,8 @@ class _Handler(BaseHTTPRequestHandler):
         verified against the trusted CA set (an attacker can't forge caps/name
         without a trusted CA key), and the requester proved id_priv possession.
         """
-        if "unknown node" not in str(orig_err):
+        from .ca import UnknownNodeError
+        if not isinstance(orig_err, UnknownNodeError):
             return None
         rec = self.directory.get(req.id_pub.hex())
         if rec is None or rec.cred.id_pub != req.id_pub:

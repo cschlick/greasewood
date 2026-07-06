@@ -308,7 +308,7 @@ def ensure_node_door_interface(
     _run("ip", "-6", "addr", "add", f"{GUEST_DOOR_IP}/128", "dev", DOOR_IFACE)
     _run("ip", "link", "set", DOOR_IFACE, "up")
     _run("ip", "-6", "route", "replace", f"{ANCHOR_DOOR_IP}/128", "dev", DOOR_IFACE)
-    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, anchor_host, DOOR_PORT)
+    log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, anchor_host, door_port)
 
 
 @contextlib.contextmanager

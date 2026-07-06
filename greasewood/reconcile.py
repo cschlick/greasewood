@@ -362,8 +362,15 @@ class ReconcileLoop:
             log.warning("publishing reachable set failed: %s", e)
 
     def run(self) -> None:
+        # Catch-all like the other loops: an exception escaping _cycle (e.g. a
+        # subprocess failure in the interface self-heal, before _cycle's inner
+        # try) must not kill the reconcile thread — a dead reconcile loop is a
+        # frozen data plane under a healthy-looking daemon.
         while not self._stop.wait(self._interval):
-            self._cycle()
+            try:
+                self._cycle()
+            except Exception as e:
+                log.error("reconcile loop error: %s", e)
 
     def _cycle(self) -> None:
         if self._ensure_iface is not None and not wgmod.interface_exists(self._iface):
