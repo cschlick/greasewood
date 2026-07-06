@@ -8,6 +8,7 @@ and serves the control plane + enrollment door.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -92,6 +93,52 @@ def _parse_duration(s: str) -> dt.timedelta:
     if s.endswith("m"):
         return dt.timedelta(minutes=int(s[:-1]))
     raise ValueError(f"unrecognized duration {s!r} — use '24h', '7d', or '30m'")
+
+
+def render_config(*, hostname: str, data_dir, role: str, caps: list,
+                  endpoints: "list | None" = None, interface: str,
+                  listen_port: int, overlay_prefix: str, seeds: list,
+                  root_url: str, hosts_sync: bool, mesh_domain: str,
+                  trusted_pubs: list, anchor: "dict | None" = None) -> str:
+    """The ONE writer of /etc/greasewood_<name>.toml — create, join, and
+    anchor-promote all render through it, so a config field is added in exactly
+    two places: the Config dataclass above (the reader) and this template (the
+    writer). `anchor` (the anchor-only section) is a dict with ca_key_file,
+    control_port, credential_ttl, door_port; None on a plain node."""
+    endpoint_line = f"\nendpoints = {json.dumps(list(endpoints))}" if endpoints else ""
+    text = f"""[node]
+hostname = "{hostname}"
+data_dir = "{data_dir}"
+role = "{role}"
+caps = {json.dumps(list(caps))}{endpoint_line}
+
+[network]
+interface = "{interface}"
+listen_port = {listen_port}
+overlay_prefix = "{overlay_prefix}"
+seeds = {json.dumps(list(seeds))}
+root_url = {json.dumps(root_url or "")}
+hosts_sync = {"true" if hosts_sync else "false"}
+mesh_domain = "{mesh_domain}"
+
+[ca]
+trusted_pubs = {json.dumps(list(trusted_pubs))}
+"""
+    if anchor:
+        text += f"""
+[anchor]
+ca_key_file = "{anchor["ca_key_file"]}"
+control_listen = ":{anchor["control_port"]}"
+credential_ttl = "{anchor["credential_ttl"]}"
+renew_before = "12h"
+door_window = "15m"
+door_port = {anchor["door_port"]}
+# Defaults granted to new nodes at `gw invite` (when --segments/--caps are
+# omitted). Edit anytime — the next invite reads them fresh, no restart.
+default_segments = ["mesh"]
+default_caps = ["tls"]
+"""
+    return text
 
 
 def load_config(path: Path) -> Config:

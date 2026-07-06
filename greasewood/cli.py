@@ -38,7 +38,7 @@ import threading
 import time
 from pathlib import Path
 
-from .config import membership_key
+from .config import membership_key, render_config
 from .keys import _key_file_warnings, _own_identity, _secret_key_paths
 from .status import _dur_short, _version, cmd_diagnose, cmd_watch
 
@@ -421,39 +421,17 @@ def cmd_create(args) -> int:
     node_keys = NodeKeys.load_or_generate(data_dir)
     log.info("overlay addr: %s", node_keys.addr)
 
-    endpoint_line = f'\nendpoints = {json.dumps(endpoints)}' if endpoints else ""
-    hosts_sync = "true" if getattr(args, "hosts_sync", True) else "false"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(f"""[node]
-hostname = "{hostname}"
-data_dir = "{data_dir}"
-role = "anchor"
-caps = {json.dumps(caps)}{endpoint_line}
-
-[network]
-interface = "{interface}"
-listen_port = {listen_port}
-overlay_prefix = "{overlay_prefix}"
-seeds = []
-root_url = "http://[::1]:{control_port}"
-hosts_sync = {hosts_sync}
-mesh_domain = "{mesh_domain}"
-
-[ca]
-trusted_pubs = ["{ca_pub_hex}"]
-
-[anchor]
-ca_key_file = "{ca_key_path}"
-control_listen = ":{control_port}"
-credential_ttl = "{args.credential_ttl}"
-renew_before = "12h"
-door_window = "15m"
-door_port = {args.door_port}
-# Defaults granted to new nodes at `gw invite` (when --segments/--caps are
-# omitted). Edit anytime — the next invite reads them fresh, no restart.
-default_segments = ["mesh"]
-default_caps = ["tls"]
-""")
+    cfg_path.write_text(render_config(
+        hostname=hostname, data_dir=data_dir, role="anchor", caps=caps,
+        endpoints=endpoints, interface=interface, listen_port=listen_port,
+        overlay_prefix=overlay_prefix, seeds=[],
+        root_url=f"http://[::1]:{control_port}",
+        hosts_sync=getattr(args, "hosts_sync", True), mesh_domain=mesh_domain,
+        trusted_pubs=[ca_pub_hex],
+        anchor={"ca_key_file": ca_key_path, "control_port": control_port,
+                "credential_ttl": args.credential_ttl,
+                "door_port": args.door_port}))
     log.info("wrote config → %s", cfg_path)
 
     ca = CA(ca_keys, data_dir, ttl)
@@ -1420,17 +1398,10 @@ def cmd_join(args) -> int:
     # Tear down the door interface
     wgmod.destroy_interface("gw-door")
 
-    endpoint_line = f'\nendpoints = {json.dumps(node_endpoints)}' if node_endpoints else ""
-    seeds_list = json.dumps([anchor_overlay_url]) if anchor_overlay_url else "[]"
-    root_url_val = json.dumps(anchor_overlay_url) if anchor_overlay_url else '""'
     # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
     # previously-disabled setting.
-    if getattr(args, "hosts_sync", None) is False:      # --no-hosts-sync given
-        hosts_sync = "false"
-    elif prior is not None and not prior.hosts_sync:    # re-join kept disabled
-        hosts_sync = "false"
-    else:
-        hosts_sync = "true"
+    hosts_sync = not (getattr(args, "hosts_sync", None) is False
+                      or (prior is not None and not prior.hosts_sync))
     # Name domain: the mesh has exactly ONE, carried in the token (declared at
     # its anchor's create / rename-mesh). The joiner adopts it, period — a collision
     # with another membership already hard-refused before the door dance. A
@@ -1442,24 +1413,13 @@ def cmd_join(args) -> int:
                  else "gw-mesh"))
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(f"""[node]
-hostname = "{hostname}"
-data_dir = "{data_dir}"
-role = "node"
-caps = {json.dumps(caps)}{endpoint_line}
-
-[network]
-interface = "{interface}"
-listen_port = {listen_port}
-overlay_prefix = "{overlay_prefix}"
-seeds = {seeds_list}
-root_url = {root_url_val}
-hosts_sync = {hosts_sync}
-mesh_domain = "{mesh_domain}"
-
-[ca]
-trusted_pubs = ["{ca_pub_hex}"]
-""")
+    cfg_path.write_text(render_config(
+        hostname=hostname, data_dir=data_dir, role="node", caps=caps,
+        endpoints=node_endpoints, interface=interface, listen_port=listen_port,
+        overlay_prefix=overlay_prefix,
+        seeds=[anchor_overlay_url] if anchor_overlay_url else [],
+        root_url=anchor_overlay_url or "", hosts_sync=hosts_sync,
+        mesh_domain=mesh_domain, trusted_pubs=[ca_pub_hex]))
     log.info("wrote config → %s", cfg_path)
 
     print(f"\nNode enrolled successfully.")
@@ -1708,39 +1668,15 @@ def cmd_anchor_promote(args) -> int:
     if "segment:*" not in anchor_caps:
         anchor_caps.append("segment:*")
 
-    endpoint_line = (
-        f'\nendpoints = {json.dumps(cfg.endpoints)}' if cfg.endpoints else ""
-    )
-    hosts_sync = "true" if cfg.hosts_sync else "false"
-    cfg_path.write_text(f"""[node]
-hostname = "{cfg.hostname}"
-data_dir = "{cfg.data_dir}"
-role = "anchor"
-caps = {json.dumps(anchor_caps)}{endpoint_line}
-
-[network]
-interface = "{cfg.wg_interface}"
-listen_port = {cfg.listen_port}
-overlay_prefix = "{cfg.overlay_prefix}"
-seeds = {json.dumps(cfg.seeds)}
-root_url = "{cfg.root_url}"
-hosts_sync = {hosts_sync}
-mesh_domain = "{cfg.mesh_domain}"
-
-[ca]
-trusted_pubs = {json.dumps(trusted)}
-
-[anchor]
-ca_key_file = "{ca_key_path}"
-control_listen = ":{control_port}"
-credential_ttl = "{args.credential_ttl}"
-renew_before = "12h"
-door_window = "15m"
-door_port = {cfg.door_port}
-# Defaults granted to new nodes at `gw invite` (edit anytime; read fresh).
-default_segments = ["mesh"]
-default_caps = ["tls"]
-""")
+    cfg_path.write_text(render_config(
+        hostname=cfg.hostname, data_dir=cfg.data_dir, role="anchor",
+        caps=anchor_caps, endpoints=cfg.endpoints, interface=cfg.wg_interface,
+        listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
+        seeds=cfg.seeds, root_url=cfg.root_url, hosts_sync=cfg.hosts_sync,
+        mesh_domain=cfg.mesh_domain, trusted_pubs=trusted,
+        anchor={"ca_key_file": ca_key_path, "control_port": control_port,
+                "credential_ttl": args.credential_ttl,
+                "door_port": cfg.door_port}))
     log.info("promoted to anchor role in %s", cfg_path)
 
     print("\nReady to become an anchor. CA key generated; config set to role=anchor.")
