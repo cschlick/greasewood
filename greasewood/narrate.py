@@ -48,10 +48,8 @@ def _field(line: str, key: str) -> "str | None":
 
 def parse_line(line: str) -> "Entry | None":
     """Parse one audit line into an Entry, or None if it isn't a command line."""
-    if " cmd " not in f" {line} " and not line.strip().startswith("cmd "):
-        # tolerate the console format 'ts LVL name: cmd ...' too
-        if "greasewood.audit" not in line and "cmd rc=" not in line:
-            return None
+    # One test suffices: every command line carries argv="..."; anything
+    # without it (banners, tracebacks, other loggers) isn't a command line.
     argv_s = _field(line, "argv")
     if argv_s is None:
         return None

@@ -18,6 +18,7 @@ Wire framing: 4-byte big-endian length prefix + JSON body (max 64 KiB).
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import logging
 import socket
@@ -211,7 +212,9 @@ class EnrollServer:
                         close_reason = "attempts_exhausted"
 
         except OSError as e:
-            if "Errno 9" in str(e) or "closed" in str(e).lower():
+            # stop() closes our listening socket out from under accept();
+            # match the errno, not the message text.
+            if e.errno == errno.EBADF or "closed" in str(e).lower():
                 pass  # stopped via stop()
             else:
                 log.error("enroll server OSError: %s", e)
