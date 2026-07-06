@@ -40,12 +40,13 @@ class Rule:
         return " ".join(parts)
 
 
-def anchor_rules(listen_port: int = 51900, control_port: int = 51902) -> list[Rule]:
+def anchor_rules(listen_port: int = 51900, control_port: int = 51902,
+                 mesh_iface: str = "gw-mesh") -> list[Rule]:
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     return [
         Rule("udp", listen_port, None, "mesh WireGuard"),
         Rule("udp", DOOR_PORT, None, "enrollment door (WireGuard)"),
-        Rule("tcp", control_port, "gw-mesh", "control plane (when anchor)"),
+        Rule("tcp", control_port, mesh_iface, "control plane (when anchor)"),
         Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when anchor)"),
     ]
 
