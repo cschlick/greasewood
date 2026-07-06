@@ -7,7 +7,7 @@ service (Postgres, an HTTP API, …) that any peer validates against one trust
 root. This is a separate artifact type from the mesh Credential — a real x509
 cert with SANs — but it shares the CA key, so there is exactly one trust anchor.
 
-Mirrors internalca.py: Ed25519 throughout, self-signed root with
+Ed25519 throughout, self-signed root with
 BasicConstraints CA:TRUE pathlen:0, leaves CA:FALSE with
 keyUsage=digitalSignature and EKU serverAuth+clientAuth (every leaf may be
 either end of a connection). No CRL/OCSP — revocation is passive (short leaf

@@ -42,7 +42,7 @@ def fetch_cert(anchor_url: str, keys, *, dns: list[str], ips: list[str], cn: str
                timeout: float = 10.0, attempts: int = 5) -> "tuple[str, str, str]":
     """Request a leaf TLS cert from the anchor and return (key_pem, cert_pem,
     ca_pem) as PEM strings. The leaf private key is generated locally and never
-    sent. Raises CertRejected on a anchor 4xx (no retry) or RuntimeError after
+    sent. Raises CertRejected on an anchor 4xx (no retry) or RuntimeError after
     exhausting retries. Callers place the PEMs (see issue_cert / place_cert_files)."""
     import time as _t
     from cryptography.hazmat.primitives import serialization

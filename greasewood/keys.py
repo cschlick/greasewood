@@ -238,7 +238,7 @@ class CAKeys:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """Atomic write at 0600 — borrowed from internalca.py."""
+    """Atomic write at 0600 (temp file + rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
