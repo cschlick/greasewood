@@ -1418,8 +1418,20 @@ def cmd_join(args) -> int:
             log.info("published record to anchor via door tunnel")
         else:
             log.warning("anchor rejected door publish: %s", ack.get("error"))
-    except Exception as e:
+    except (OSError, ValueError) as e:
+        # The EXPECTED, recoverable failure: the door tunnel dropped or timed
+        # out (OSError), or the anchor returned a short/oversized/undecodable
+        # frame (ValueError). Enrollment already SUCCEEDED and our record is
+        # saved locally, so this costs only immediacy — the daemon republishes
+        # over the overlay on its next sync.
         log.warning("door publish failed (anchor learns this node on next sync): %s", e)
+    except Exception:
+        # Anything else is a BUG, not a network condition — surface it loudly
+        # (full traceback) instead of hiding it behind the soft "next sync"
+        # message, which is what let a NameError here masquerade as a benign
+        # I/O hiccup. Still don't fail the already-successful enrollment.
+        log.error("door publish hit an unexpected error — this is a bug; the "
+                  "node is enrolled and will sync", exc_info=True)
     finally:
         try:
             conn.close()
