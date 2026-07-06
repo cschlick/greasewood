@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 # endpoint has gone dead past a full probe cycle drops to 0 — see _EndpointTracker.
 _KEEPALIVE = 25
 
+# A peer counts as a live link (for the published `reachable` set) if it
+# handshaked within this window. ~180s covers WireGuard's ~2-min refresh on an
+# idle-but-live tunnel (keepalive=25 keeps it well inside).
+_LIVE_LINK_SECS = 180
+
 # Step 6 authorization policy: (local_caps, peer_caps) → bool
 Policy = Callable[[list[str], list[str]], bool]
 
@@ -265,7 +270,18 @@ def reconcile_once(
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", pub[-8:], e)
 
-    return trusted
+    # The overlay addrs we currently have a LIVE link to (recent handshake). This
+    # is what a node publishes as its `reachable` set so the fleet can see which
+    # edges are up — an unreachable segment-mate (firewalled) shows as a missing
+    # edge from both ends. Session-existence, not direction (a working tunnel is
+    # bidirectional regardless of who dialed).
+    hs_now = time.time()
+    reachable = sorted(
+        addr for pub, (addr, _ep, _ka) in desired.items()
+        if (lp := live.get(pub)) and lp.latest_handshake
+        and (hs_now - lp.latest_handshake) <= _LIVE_LINK_SECS
+    )
+    return trusted, reachable
 
 
 class ReconcileLoop:
@@ -283,6 +299,8 @@ class ReconcileLoop:
         local_families: "set[int] | None" = None,
         ensure_iface: "Callable[[], None] | None" = None,
         data_dir: "Path | None" = None,
+        on_reachable: "Callable[[list[str]], None] | None" = None,
+        reachable_min_interval: float = 30.0,
     ) -> None:
         # For the rename-mesh grace marker (rename_grace.json): while it's
         # live, the OLD domain's names keep resolving alongside the new; at
@@ -316,7 +334,32 @@ class ReconcileLoop:
         # single-endpoint peers). Dwell scales with the reconcile interval so a
         # dead endpoint gets a few handshake attempts before we rotate.
         self._endpoint_tracker = _EndpointTracker(dwell=max(15.0, interval * 3))
+        # Called when this node's live-link set (reachable) changes — the daemon
+        # re-signs + republishes its record so the fleet sees the edge change.
+        # Rate-limited so a flapping link can't spam the directory.
+        self._on_reachable = on_reachable
+        self._reachable_min_interval = reachable_min_interval
+        self._last_reachable: "list[str] | None" = None
+        self._last_reachable_pub = 0.0
         self._stop = threading.Event()
+
+    def _maybe_publish_reachable(self, reachable: "list[str]") -> None:
+        """Fire on_reachable when the live-link set changes AND at least
+        reachable_min_interval has passed since the last publish — so a flapping
+        edge can't spam the directory (the change is caught on the next cycle
+        past the window)."""
+        if self._on_reachable is None or reachable == self._last_reachable:
+            return
+        now = time.monotonic()
+        if self._last_reachable is not None \
+                and now - self._last_reachable_pub < self._reachable_min_interval:
+            return  # changed, but too soon — re-detected and sent next cycle
+        try:
+            self._on_reachable(reachable)
+            self._last_reachable = reachable
+            self._last_reachable_pub = now
+        except Exception as e:
+            log.warning("publishing reachable set failed: %s", e)
 
     def run(self) -> None:
         while not self._stop.wait(self._interval):
@@ -335,7 +378,7 @@ class ReconcileLoop:
                           self._iface, e)
                 return
         try:
-            trusted = reconcile_once(
+            trusted, reachable = reconcile_once(
                 self._iface,
                 self._directory,
                 self._local_id_pub,
@@ -349,6 +392,7 @@ class ReconcileLoop:
         except Exception as e:
             log.error("reconcile error: %s", e)
             return  # no verified set this cycle; hosts stays as-is, heals next pass
+        self._maybe_publish_reachable(reachable)
         if self._hosts_domain:
             try:
                 from . import hosts

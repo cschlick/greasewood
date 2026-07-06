@@ -2508,6 +2508,29 @@ def cmd_run(args) -> int:
                 cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
             )
 
+    def _publish_reachable(reachable: list) -> None:
+        # Re-sign our record with the new live-link set and push it, so the
+        # fleet sees the edge change. Reads the current record from the directory
+        # and bumps seq (composing cleanly with renewal, which preserves
+        # reachable the same way) — the directory is the single seq source.
+        from .wire import NodeRecord
+        cur = directory.get(keys.id_pub_hex)
+        if cur is None:
+            return
+        new = NodeRecord(
+            id_pub=keys.id_pub_bytes, seq=cur.seq + 1,
+            endpoints=list(cur.endpoints), cred=cur.cred,
+            aliases=list(cur.aliases), reachable=list(reachable),
+        ).sign(keys.id_priv)
+        directory.put(new)
+        directory.save(cfg.dir_cache_path)
+        for seed in cfg.seeds:
+            try:
+                push_record(seed, new)
+            except Exception as e:
+                log.debug("reachable push to %s failed: %s", seed, e)
+        log.debug("published reachable set (%d live links)", len(reachable))
+
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
         directory=directory,
@@ -2519,6 +2542,7 @@ def cmd_run(args) -> int:
         local_families=_local_families(),
         ensure_iface=_ensure_mesh_iface,
         data_dir=cfg.data_dir,
+        on_reachable=_publish_reachable,
     )
     recon.start()
 
@@ -2751,6 +2775,75 @@ def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
         print(line)
 
 
+def _segment_analysis(members):
+    """Fleet-wide connectivity within a segment, from each node's self-reported
+    `reachable` set (synced in the directory — no root or live wg needed).
+    Returns (components, missing_edges). An edge is UP if EITHER end reports the
+    other (a session is bidirectional, so one end suffices — robust to one-sided
+    staleness). An edge is EXPECTED (so its absence is a fault) when at least one
+    end advertises an endpoint, i.e. a dialable direction exists."""
+    def linked(a, b):
+        return b.cred.addr in a.reachable or a.cred.addr in b.reachable
+    parent = {r.cred.addr: r.cred.addr for r in members}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:               # path-compress
+            parent[x], x = root, parent[x]
+        return root
+
+    missing = []
+    for i, a in enumerate(members):
+        for b in members[i + 1:]:
+            if linked(a, b):
+                parent[find(a.cred.addr)] = find(b.cred.addr)
+            elif a.endpoints or b.endpoints:   # a link was possible but is absent
+                missing.append((a, b))
+    comps = {}
+    for r in members:
+        comps.setdefault(find(r.cred.addr), []).append(r)
+    return list(comps.values()), missing
+
+
+def _edge_down_hint(a, b, cfg) -> str:
+    """A directional hint for a down edge, derived from who advertises an
+    endpoint (the dialable direction) — the discovery-vs-firewall first question."""
+    from .hosts import mesh_name
+    na = mesh_name(a.hostname, cfg.mesh_domain)
+    nb = mesh_name(b.hostname, cfg.mesh_domain)
+    ea, eb = bool(a.endpoints), bool(b.endpoints)
+    if ea and eb:
+        return f"{na} ✗ {nb}  (both advertise endpoints — check firewalls at both ends)"
+    if ea:                                      # only a is dialable → b must reach it
+        return f"{na} ✗ {nb}  ({nb} can't reach {na} at {a.endpoints[0]} — {na}'s firewall/NAT?)"
+    return f"{na} ✗ {nb}  ({na} can't reach {nb} at {b.endpoints[0]} — {nb}'s firewall/NAT?)"
+
+
+def _print_segment_health(members, cfg) -> None:
+    """Under a segment's roster: fully-connected, or the partition/down-edge
+    breakdown. Uses only the synced `reachable` sets, so it works non-root."""
+    from .hosts import mesh_name
+    if len(members) < 2:
+        return
+    comps, missing = _segment_analysis(members)
+    if len(comps) <= 1 and not missing:
+        print("  ✓ fully connected")
+        return
+    if len(comps) > 1:
+        print(f"  ⚠ PARTITIONED — {len(comps)} islands that can't reach each other:")
+        for c in sorted(comps, key=len, reverse=True):
+            names = ", ".join(sorted(mesh_name(r.hostname, cfg.mesh_domain) for r in c))
+            tail = "   ← isolated" if len(c) == 1 else ""
+            print(f"      {{ {names} }}{tail}")
+    if missing:
+        n = len(missing)
+        print(f"  ⚠ {n} expected link{'' if n == 1 else 's'} down:")
+        for a, b in missing:
+            print(f"      {_edge_down_hint(a, b, cfg)}")
+
+
 def _fmt_rate(bytes_per_s: float) -> str:
     return f"{_fmt_bytes(max(0.0, bytes_per_s))}/s"
 
@@ -2864,9 +2957,11 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
             body = _roster_lines(records, cfg, now, own_id, live, True,
                                  latency=prober.results, rates=rates)
             up = sum(1 for a in targets)
+            fresh = _sync_freshness(cfg)
             frame = ["\033[H\033[J",
                      f"gw watch · {cfg.hostname}.{cfg.mesh_domain} · "
-                     f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up", ""]
+                     f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up"
+                     + (f" · {fresh}" if fresh else ""), ""]
             frame += body
             frame += ["", "(latency pings fill in live · throughput is per-second "
                       "· Ctrl-C to exit)"]
@@ -2880,6 +2975,27 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
         sys.stdout.write("\033[?25h\n")   # restore cursor
         sys.stdout.flush()
     return 0
+
+
+def _sync_freshness(cfg) -> "str | None":
+    """How fresh the local directory is — shown at the TOP of `gw watch` so the
+    roster/segment view's staleness is obvious (it's only as current as the last
+    sync). None on the anchor (it's the source of truth)."""
+    if cfg.role == "anchor":
+        return None
+    from . import sync as syncmod
+    last = syncmod.read_last_sync(cfg.data_dir)
+    if last is None:
+        return "never synced (is the daemon running / reaching the anchor?)"
+    try:
+        age = (dt.datetime.now(_UTC) - dt.datetime.fromisoformat(
+            last.replace("Z", "+00:00"))).total_seconds()
+    except (ValueError, AttributeError):
+        age = 0.0
+    if age > 120:
+        return (f"⚠ directory synced {_fmt_ago(last)} — anchor unreachable? "
+                f"this view may be stale")
+    return f"directory synced {_fmt_ago(last)}"
 
 
 def _fmt_ago(iso: str) -> str:
@@ -3085,22 +3201,8 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
                  f"anchor {cfg.root_url or '(none configured)'}")
 
-    # Sync freshness — nodes read a *cache*, so a stale roster is worth flagging.
-    # The anchor is the source of truth, so it has nothing to be 'stale' against.
-    if cfg.role != "anchor":
-        last = syncmod.read_last_sync(cfg.data_dir)
-        if last is None:
-            lines.append(f"{'sync':<9}: never (is the daemon running / reaching the anchor?)")
-        else:
-            try:
-                age = (dt.datetime.now(_UTC)
-                       - dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
-                       ).total_seconds()
-            except (ValueError, AttributeError):
-                age = 0
-            flag = "⚠ " if age > 120 else ""
-            tail = " — anchor unreachable?" if age > 120 else ""
-            lines.append(f"{'sync':<9}: {flag}directory synced {_fmt_ago(last)}{tail}")
+    # (Sync freshness is shown prominently at the top of `gw watch` instead —
+    # see _sync_freshness — so the segment/roster view's staleness is obvious.)
 
     # A pending mesh rename the daemon detected from the anchor — persisted so it
     # doesn't scroll past in the log. Needs an operator action, so it's loud.
@@ -3214,6 +3316,9 @@ def cmd_watch(args) -> int:
     print(f"role     : {cfg.role}")
     print(f"hostname : {cfg.hostname}")
     print(f"addr     : {own_addr or '(keys not generated)'}")
+    fresh = _sync_freshness(cfg)
+    if fresh:
+        print(f"synced   : {fresh}")
     # Self/health — local facts about THIS node (fast, no root, no network).
     for line in _self_health_lines(cfg, directory, own_id):
         print(line)
@@ -3254,6 +3359,7 @@ def cmd_watch(args) -> int:
             shown.update(r.id_pub.hex() for r in members)
             print(f"segment: {s}  ({len(members)} node{'' if len(members) == 1 else 's'})")
             _print_node_table(members, cfg, now, own_id, live_peers, is_root)
+            _print_segment_health(members, cfg)
             print()
         # Anything not shown above — unsegmented nodes (can't peer), or reach-all
         # nodes with no named segment to fall under — so the grouped view drops

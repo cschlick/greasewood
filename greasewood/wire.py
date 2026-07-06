@@ -158,6 +158,12 @@ class NodeRecord:
                          # only so records stay verifiable across the upgrade that
                          # dropped the flag. Nothing reads it, nothing sets it.
     aliases: list[str] = field(default_factory=list)
+    # Overlay addresses this node currently has a LIVE link to (recent handshake,
+    # not backed off). Self-observed, rate-limited, optional (omitted from the
+    # signed body when empty — same shape as aliases, so old/new records
+    # interop). Rides the existing directory sync so `gw watch` can render
+    # fleet-wide per-segment connectivity without any new channel.
+    reachable: list[str] = field(default_factory=list)
     sig: bytes = field(default=b"", repr=False)
 
     @property
@@ -180,6 +186,8 @@ class NodeRecord:
         # ordinary record's wire form is unchanged.
         if self.aliases:
             d["aliases"] = sorted(self.aliases)
+        if self.reachable:                       # live link set (optional)
+            d["reachable"] = sorted(self.reachable)
         return d
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "NodeRecord":
@@ -252,6 +260,7 @@ class NodeRecord:
             inbound=d.get("inbound", "yes"),  # vestigial
             cred=Credential.from_dict(d["cred"]),
             aliases=list(d.get("aliases", [])),
+            reachable=list(d.get("reachable", [])),
             sig=_b64d(d["sig"]),
         )
 
