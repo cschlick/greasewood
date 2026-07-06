@@ -1784,7 +1784,7 @@ def _cert_already_current(data_dir, name: str, *, dns, ips, files=None,
         if (entry.get("key_path"), entry.get("crt_path"), entry.get("ca_path")) \
                 != tuple(str(p) for p in paths):
             return None
-    crt = certmod.entry_cert_path(entry)
+    crt = certmod.ManagedCert.from_dict(entry).cert_path
     if crt is None or certmod.cert_due_for_renewal(crt):   # missing/old → re-issue
         return None
     return certmod.cert_expiry(crt)
@@ -1817,10 +1817,7 @@ def cmd_cert_remove(args) -> int:
     certmod.profile_snapshot_path(cfg.data_dir, args.name).unlink(missing_ok=True)
     print(f"deregistered '{args.name}' — the daemon will no longer renew it.")
 
-    if entry.get("files"):
-        paths = [f["path"] for f in entry["files"]]
-    else:
-        paths = [str(p) for p in certmod.entry_paths(entry)]
+    paths = certmod.ManagedCert.from_dict(entry).placed_paths()
     if args.delete_files:
         for p in paths:
             try:
@@ -2062,7 +2059,7 @@ def cmd_cert_status(args) -> int:
             head += f"   (profile: {e['profile']})"
         print(head)
 
-        crt = certmod.entry_cert_path(e)
+        crt = certmod.ManagedCert.from_dict(e).cert_path
         exp = certmod.cert_expiry(crt) if crt else None
         auto = "auto-renew on" if e.get("auto_renew", True) else "auto-renew OFF"
         if exp is None:
