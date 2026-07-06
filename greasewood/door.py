@@ -317,32 +317,6 @@ def mark_door_closed(data_dir: Path, reason: str) -> None:
     _write_door_status(data_dir, cur)
 
 
-def active_window_expiry(data_dir: Path) -> str | None:
-    """
-    Return the 'expires' string of the current door window if one is open and
-    unexpired, else None.
-
-    The door admits one node at a time, so this doubles as a "slot occupied?"
-    check: `gw invite` uses it to warn before clobbering a live window, and an
-    orderly provisioner can poll it to know when the door is free again (the
-    window file is removed by the anchor when an enrollment completes).
-    """
-    import datetime as dt
-    import json
-
-    p = window_path(data_dir)
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text())
-        exp = dt.datetime.fromisoformat(data["expires"].replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if dt.datetime.now(dt.timezone.utc) >= exp:
-        return None
-    return data["expires"]
-
-
 def door_pub_bytes_from_key(raw_priv: bytes) -> bytes:
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     from cryptography.hazmat.primitives import serialization

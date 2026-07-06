@@ -1,22 +1,23 @@
 """
-gw — CLI entry point.
+gw — CLI entry point (every subcommand lives here; `gw --help` is the index).
 
-Enrollment is door-based: a transient WireGuard tunnel, no SSH, no HTTP on the
-underlay.
+The core ceremony — enrollment is door-based: a transient WireGuard tunnel,
+no SSH, no HTTP on the underlay:
 
   On the anchor:
-    gw create          # one-shot: CA, door key, routing, self-credential
+    gw create <name>      # one-shot: CA, door key, routing, self-credential
     gw run                # start the daemon (serves control plane + door)
-    gw invite             # open a 15-min window, print a single-use join token
+    gw invite             # open a window, print a single-use join token
 
   On the new node:
     gw join <token>       # enroll over the door, then:
     gw run                # join the mesh
 
-Other subcommands:
-  revoke <id_pub>     Add a node to the revoke list (on the anchor).
-  status              Show local node and directory state.
-  purge               Remove all local greasewood state.
+Everything else groups around that: observe (watch, diagnose, narrate, config,
+firewall), administer nodes on the anchor (invite/close-door, revoke, set-caps,
+set-segments, renew-all), maintain this node (renew, rename-node, rename-mesh,
+purge), TLS service certs (cert-request/-profiles/-status/-remove), and anchor
+lifecycle (anchor-promote, anchor-backup, anchor-restore).
 """
 from __future__ import annotations
 
@@ -356,7 +357,7 @@ def cmd_create(args) -> int:
     from .wire import NodeRecord
     from .directory import Directory
     from .config import _parse_duration
-    from .door import load_or_generate_door_key, door_pub_bytes_from_key
+    from .door import load_or_generate_door_key
     from . import wg as wgmod
 
     # Everything derives from the mesh name unless explicitly overridden —
@@ -387,7 +388,7 @@ def cmd_create(args) -> int:
                      f"at {clash} — pass an explicit --interface.")
     overlay_prefix = args.overlay_prefix
     # The mesh's ONE name domain, everywhere, forever (changed only by a
-    # deliberate fleet-wide set-domain). Rides in every join token.
+    # deliberate fleet-wide rename-mesh). Rides in every join token.
     mesh_domain = args.mesh_domain or f"{args.name}.internal"
     # Activate this fleet's overlay /64 before we derive the anchor's own address.
     try:
@@ -477,7 +478,6 @@ default_caps = ["tls"]
         id_pub=node_keys.id_pub_bytes,
         seq=seq,
         endpoints=endpoints,
-        inbound="yes",
         cred=cred,
     ).sign(node_keys.id_priv)
     directory.put(record)
@@ -537,7 +537,6 @@ def cmd_invite(args) -> int:
     from .door import (
         generate_seed, derive_door_params, encode_token,
         load_or_generate_door_key, door_pub_bytes_from_key,
-        active_window_expiry,
     )
     from . import wg as wgmod
 
@@ -794,7 +793,7 @@ def _membership_paths(key: str, etc: "Path" = Path("/etc"),
     return {
         "config": etc / f"greasewood_{key}.toml",
         "data_dir": var / f"greasewood_{key}",
-        "interface": f"gw-{key[:12].rstrip(chr(45))}",
+        "interface": f"gw-{key[:12].rstrip('-')}",
         "unit": f"greasewood@{key}",
     }
 
@@ -1453,7 +1452,7 @@ def cmd_join(args) -> int:
     else:
         hosts_sync = "true"
     # Name domain: the mesh has exactly ONE, carried in the token (declared at
-    # its anchor's create / set-domain). The joiner adopts it, period — a collision
+    # its anchor's create / rename-mesh). The joiner adopts it, period — a collision
     # with another membership already hard-refused before the door dance. A
     # re-join of an existing membership keeps its config; token wins if both.
     mesh_domain = (token_domain
@@ -1694,16 +1693,6 @@ def _unit_for_config(cfg_path) -> str:
     return f"greasewood@{m.group(1)}" if m else "greasewood@<name>"
 
 
-def _service_state() -> str:
-    """How the greasewood daemon is managed on this host: 'active' (systemd
-    unit installed and running), 'installed' (unit present, not yet running),
-    or 'manual' (no unit). Used so create / join don't tell the user to run
-    `gw run` when systemd already starts the daemon on its own."""
-    if not (_UNIT_DIR / "greasewood@.service").exists():
-        return "manual"
-    return "installed"
-
-
 def _print_daemon_guidance(key: str, cfg_path, then: str = "",
                            no_service: bool = False) -> None:
     """Bring up (and report) this membership's daemon. By default create/join
@@ -1844,11 +1833,6 @@ default_caps = ["tls"]
 # ---------------------------------------------------------------------------
 # TLS service certificates (§12) — cert-request / cert-status
 # ---------------------------------------------------------------------------
-
-def _resolve_anchor_url(cfg) -> str:
-    """The control-plane URL to talk to: the configured anchor."""
-    return cfg.root_url
-
 
 def _shipped_profiles_dir() -> "Path":
     return Path(__file__).resolve().parent / "profiles"
@@ -2041,7 +2025,7 @@ def cmd_cert_request(args) -> int:
     name = args.name or (Path(profile["path"]).stem if profile
                          else (dns[0] if dns else "service"))
 
-    anchor_url = args.anchor or _resolve_anchor_url(cfg)
+    anchor_url = args.anchor or cfg.root_url
     if not anchor_url:
         sys.exit("no anchor URL — set root_url in config or pass --anchor")
 
@@ -2238,7 +2222,7 @@ def cmd_cert_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# rename — change this node's mesh hostname (anchor-validated, no re-join)
+# rename-node — change this node's mesh hostname (anchor-validated, no re-join)
 # ---------------------------------------------------------------------------
 
 def cmd_rename(args) -> int:
@@ -2604,7 +2588,7 @@ def cmd_run(args) -> int:
     cert_renewal = None
     _managed = _load_cert_manifest(cfg.data_dir)
     if _managed:
-        cert_renewal = CertRenewalLoop(keys, lambda: _resolve_anchor_url(cfg),
+        cert_renewal = CertRenewalLoop(keys, lambda: cfg.root_url,
                                        cfg.data_dir, mesh_domain=cfg.mesh_domain)
         cert_renewal.start()
         log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
@@ -2635,7 +2619,7 @@ def cmd_run(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# nodes
+# watch — the mesh dashboard (live by default; --snapshot for one static frame)
 # ---------------------------------------------------------------------------
 
 def _underlay_addrs(endpoints: list[str]) -> tuple[str, str]:
@@ -2962,7 +2946,7 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
 
             body = _roster_lines(records, cfg, now, own_id, live, True,
                                  latency=prober.results, rates=rates)
-            up = sum(1 for a in targets)
+            up = len(targets)
             fresh = _sync_freshness(cfg)
             frame = ["\033[H\033[J",
                      f"gw watch · {cfg.hostname}.{cfg.mesh_domain} · "
@@ -3385,7 +3369,7 @@ def cmd_watch(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# diagnose — explain why a peer link is or isn't forming
+# diagnose — pairwise link diagnosis (up to two nodes + the anchor)
 # ---------------------------------------------------------------------------
 
 def _anchor_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":

@@ -2,13 +2,14 @@
 greasewood.wire — the two signed objects that constitute the entire protocol.
 
 Credential (CA-signed, §5.1):
-  id_pub, wg_pub, addr, caps, iat, exp → ca_sig covers all of these.
+  id_pub, wg_pub, addr, hostname, caps, iat, exp → ca_sig covers all of these.
   The only thing the CA ever signs. Short-lived (~24h). Slow path.
 
 NodeRecord (self-signed by id_priv, §5.2):
-  id_pub, seq, endpoints, inbound, hostname, cred → sig covers all of these.
+  id_pub, seq, endpoints, cred (+ optional aliases/reachable, + the vestigial
+  inbound) → sig covers all of these; hostname lives inside cred.
   Carries the full credential so any reader can verify without talking to the CA.
-  Fast path — a node re-signs when its endpoint changes, no CA involvement.
+  Fast path — a node re-signs when its endpoints/links change, no CA involvement.
 
 Both objects use json.dumps(sort_keys=True) as the canonical signing form.
 Binary fields (keys, signatures) are standard base64.
@@ -24,7 +25,6 @@ import base64
 import datetime as dt
 import ipaddress
 import json
-import secrets
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -34,7 +34,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .keys import derive_addr, host_bits
+from .keys import host_bits
 
 _UTC = dt.timezone.utc
 

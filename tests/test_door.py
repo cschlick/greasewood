@@ -132,27 +132,28 @@ def _write_window(data_dir, delta_minutes):
     return exp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def test_active_window_none_when_absent(tmp_path):
-    from greasewood.door import active_window_expiry
-    assert active_window_expiry(tmp_path) is None
+def test_read_window_none_when_absent(tmp_path):
+    from greasewood.door import read_window
+    assert read_window(tmp_path) is None
 
 
-def test_active_window_returns_expiry_when_open(tmp_path):
-    from greasewood.door import active_window_expiry
+def test_read_window_returns_live_window(tmp_path):
+    from greasewood.door import read_window
     exp = _write_window(tmp_path, 15)
-    assert active_window_expiry(tmp_path) == exp
+    w = read_window(tmp_path)
+    assert w is not None and w["expires"] == exp
 
 
-def test_active_window_none_when_expired(tmp_path):
-    from greasewood.door import active_window_expiry
+def test_read_window_none_when_expired(tmp_path):
+    from greasewood.door import read_window
     _write_window(tmp_path, -1)
-    assert active_window_expiry(tmp_path) is None
+    assert read_window(tmp_path) is None
 
 
-def test_active_window_none_when_malformed(tmp_path):
-    from greasewood.door import active_window_expiry
+def test_read_window_none_when_malformed(tmp_path):
+    from greasewood.door import read_window
     (tmp_path / "door_window.json").write_text("{not valid json")
-    assert active_window_expiry(tmp_path) is None
+    assert read_window(tmp_path) is None
 
 
 # ── Door status/history (surfaced by `gw status`) ────────────────────────────

@@ -99,8 +99,6 @@ def load_config(path: Path) -> Config:
         data_dir=Path(node.get("data_dir", "/var/lib/greasewood")).expanduser(),
         hostname=node["hostname"],
         role=node.get("role", "node"),
-        # Only "no" means outbound-only; anything else (incl. a legacy
-        # "unknown", missing, or garbage) normalizes to the reachable default.
         # Default must be a segment: tag — peering is decided by shared
         # segments, so a bare "mesh" cap would silently peer with nobody.
         caps=node.get("caps", ["segment:mesh"]),
