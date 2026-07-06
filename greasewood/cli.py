@@ -1410,9 +1410,10 @@ def cmd_join(args) -> int:
     # (the bootstrap chicken-and-egg). Doing this on the door tunnel — rather
     # than a separate POST /publish — means the control plane never has to listen
     # on the door interface.
+    from .door import recv_msg, send_msg
     try:
-        _send_framed(conn, {"v": 1, "record": record.to_dict()})
-        ack = _recv_framed(conn)
+        send_msg(conn, {"v": 1, "record": record.to_dict()})
+        ack = recv_msg(conn)
         if ack.get("ok"):
             log.info("published record to anchor via door tunnel")
         else:
