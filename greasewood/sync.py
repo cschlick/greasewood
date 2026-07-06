@@ -134,7 +134,7 @@ class SyncLoop:
             if anchor_domain and anchor_domain == self._expected_domain:
                 self._clear_pending_rename()
             return
-        from .cli import _membership_key
+        from .config import membership_key
         # Persist the pending rename so it survives daemon restarts and surfaces
         # in `gw watch` — a scrolled-past log line is easy to miss for a change
         # that needs an operator action.
@@ -146,7 +146,7 @@ class SyncLoop:
                 "old-name artifacts; migrate them (config, data dir, interface, "
                 "service) with:  sudo gw rename-mesh %s   (brief tunnel blip "
                 "while the interface renames)",
-                self._expected_domain, anchor_domain, _membership_key(anchor_domain))
+                self._expected_domain, anchor_domain, membership_key(anchor_domain))
 
     def _pending_rename_path(self):
         return self._cache_path.parent / "pending_rename.json"

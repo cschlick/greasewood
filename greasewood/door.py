@@ -38,6 +38,8 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+from .keys import atomic_write
+
 _SALT = b"greasewood-door-v1"
 _INFO_GUEST = b"gw/door/guest-x25519/v1"
 _INFO_PSK = b"gw/door/psk/v1"
@@ -256,15 +258,7 @@ def _status_now_iso() -> str:
 
 
 def _write_door_status(data_dir: Path, data: dict) -> None:
-    p = door_status_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(data, indent=2).encode())
-    finally:
-        os.close(fd)
-    os.replace(tmp, p)
+    atomic_write(door_status_path(data_dir), json.dumps(data, indent=2))
 
 
 def mark_door_opened(data_dir: Path, expires_iso: "str | None", *, caps=None,
@@ -325,12 +319,4 @@ def door_pub_bytes_from_key(raw_priv: bytes) -> bytes:
 
 def _write_key_b64(path: Path, raw: bytes) -> None:
     """Atomic write of base64-encoded key bytes at mode 0600."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, base64.b64encode(raw) + b"\n")
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+    atomic_write(path, base64.b64encode(raw) + b"\n")

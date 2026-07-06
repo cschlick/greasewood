@@ -38,6 +38,8 @@ import threading
 import time
 from pathlib import Path
 
+from .config import membership_key
+
 _UTC = dt.timezone.utc
 log = logging.getLogger("greasewood")
 
@@ -766,15 +768,6 @@ def cmd_close_door(args) -> int:
 # greasewood_<name>, interface gw-<name[:12]>, service greasewood@<name>.
 # Explicit flags override any derived value.
 
-def _membership_key(domain: str) -> str:
-    """The membership key for a mesh domain: '<name>.internal' → '<name>';
-    anything else (a --mesh-domain override like corp.example.internal) is
-    sanitized to a single DNS-safe label."""
-    from .hosts import sanitize, valid_label
-    stem = domain[:-len(".internal")] if domain.endswith(".internal") else domain
-    return stem if valid_label(stem) else sanitize(stem)
-
-
 def _membership_paths(key: str, etc: "Path" = Path("/etc"),
                       var: "Path" = Path("/var/lib")) -> dict:
     """The derived artifacts for membership `key`. The interface truncates to
@@ -943,7 +936,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     from . import wg as wgmod
 
     cfg = load_config(cfg_path)
-    old_key = _membership_key(cfg.mesh_domain)
+    old_key = membership_key(cfg.mesh_domain)
     new_domain = f"{new_key}.internal"
     mp = _membership_paths(new_key, etc=etc, var=var)
     if mp["config"].exists():
@@ -1094,7 +1087,7 @@ def cmd_join(args) -> int:
     # by the token's CA: known CA → refresh that membership; unknown CA → a new
     # membership named by the mesh itself (the token's domain). Explicit flags
     # override any derived value.
-    membership_key = None
+    joined_key = None
     auto = args.config is None and args.data_dir is None
     if auto:
         known = _membership_for_ca(ca_pub_hex)
@@ -1104,7 +1097,7 @@ def cmd_join(args) -> int:
             cfg_path = _membership_paths(known)["config"]
             existing = load_config(cfg_path)
             data_dir, listen_port = existing.data_dir, existing.listen_port
-            membership_key = known
+            joined_key = known
             log.info("token's CA matches membership %r — refreshing it "
                      "(config %s)", known, cfg_path)
         else:
@@ -1112,7 +1105,7 @@ def cmd_join(args) -> int:
                 sys.exit("token carries no mesh domain (older anchor?) — re-issue "
                          "the invite on a current anchor, or pass -c/--data-dir/"
                          "--interface/--listen-port explicitly")
-            key = _membership_key(token_domain)
+            key = membership_key(token_domain)
             mp = _membership_paths(key)
             cfg_path, data_dir = mp["config"], mp["data_dir"]
             listen_port = (args.listen_port
@@ -1128,7 +1121,7 @@ def cmd_join(args) -> int:
                         f"chars, so long mesh names can collide after "
                         f"truncation. Re-run with an explicit --interface. "
                         f"The token was NOT consumed.")
-            membership_key = key
+            joined_key = key
             log.info(
                 "token is for a mesh this host isn't on — provisioning "
                 "membership %r: config %s, data %s, interface %s, UDP %d "
@@ -1464,10 +1457,10 @@ trusted_pubs = ["{ca_pub_hex}"]
     if anchor_overlay_url:
         print(f"  anchor control  : {anchor_overlay_url}")
     print()
-    if membership_key:
+    if joined_key:
         # Name-keyed path → the greasewood@ template can serve it. Install +
         # enable (unless --no-service), settle-checked, same as create.
-        _print_daemon_guidance(membership_key, cfg_path,
+        _print_daemon_guidance(joined_key, cfg_path,
                                no_service=getattr(args, "no_service", False))
     else:
         # Explicit custom -c path: the template's ExecStart hardcodes
@@ -3164,7 +3157,7 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     if pend.exists():
         try:
             d = json.loads(pend.read_text())
-            newk = _membership_key(d["new_domain"])
+            newk = membership_key(d["new_domain"])
             lines.append(f"{'rename':<9}: ⚠ the anchor renamed this mesh "
                          f"{d.get('old_domain','?')} → {d['new_domain']}. "
                          f"Migrate: sudo gw rename-mesh {newk}")
@@ -3859,11 +3852,8 @@ def cmd_anchor_backup(args) -> int:
               "high-entropy passphrase (a diceware phrase is ideal).")
     blob = bak.pack(files, passphrase)
 
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, blob)
-    finally:
-        os.close(fd)
+    from .keys import atomic_write
+    atomic_write(Path(out), blob)          # 0600, atomic: the fleet's root key
     node_count = sum(1 for n in files if n.startswith("nodes/"))
     print(f"wrote encrypted anchor backup → {out}")
     print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")

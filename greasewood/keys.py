@@ -146,7 +146,7 @@ class NodeKeys:
             if passphrase
             else serialization.NoEncryption()
         )
-        _write_private(
+        atomic_write(
             data_dir / "id_priv.pem",
             self.id_priv.private_bytes(
                 serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, enc
@@ -157,7 +157,7 @@ class NodeKeys:
             serialization.PrivateFormat.Raw,
             serialization.NoEncryption(),
         )
-        _write_private(data_dir / "wg.key", base64.b64encode(wg_raw) + b"\n")
+        atomic_write(data_dir / "wg.key", base64.b64encode(wg_raw) + b"\n")
 
         # Public material — world-readable, for diagnostics
         (data_dir / "id_pub.hex").write_text(self.id_pub_hex + "\n")
@@ -213,7 +213,7 @@ class CAKeys:
             if passphrase
             else serialization.NoEncryption()
         )
-        _write_private(
+        atomic_write(
             key_path,
             self.ca_priv.private_bytes(
                 serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, enc
@@ -233,14 +233,31 @@ class CAKeys:
         return cls(ca_priv=priv, ca_pub_bytes=pub_bytes)
 
 
-def _write_private(path: Path, data: bytes) -> None:
-    """Atomic write at 0600 (temp file + rename)."""
+def atomic_write(path: Path, data: "bytes | str", mode: int = 0o600) -> None:
+    """The one atomic file write (temp + rename), used for every piece of state
+    greasewood persists — keys, registry, revoke list, directory cache, door
+    window, certs, backups. The temp is UNIQUE (mkstemp) and in the SAME dir:
+    unique because a CLI process can race the daemon on the same file (e.g.
+    `gw revoke` vs the control plane) and a shared '.tmp' name would interleave
+    or move each other's temp; same-dir so os.replace is a real atomic rename,
+    not a cross-device copy. mkstemp creates 0600, so key material is never
+    world-readable even mid-write; `mode` is applied before the rename."""
+    import tempfile
+    path = Path(path)
+    if isinstance(data, str):
+        data = data.encode()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise

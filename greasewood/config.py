@@ -72,6 +72,17 @@ class Config:
         return self.data_dir / "wg.key"
 
 
+def membership_key(domain: str) -> str:
+    """The membership key for a mesh domain: '<name>.internal' → '<name>';
+    anything else (a --mesh-domain override like corp.example.internal) is
+    sanitized to a single DNS-safe label. Every name-keyed artifact —
+    /etc/greasewood_<key>.toml, /var/lib/greasewood_<key>, gw-<key>, the
+    greasewood@<key> unit — derives from this."""
+    from .hosts import sanitize, valid_label
+    stem = domain[:-len(".internal")] if domain.endswith(".internal") else domain
+    return stem if valid_label(stem) else sanitize(stem)
+
+
 def _parse_duration(s: str) -> dt.timedelta:
     """Parse simple duration strings: '24h', '12h', '7d', '30m'."""
     if s.endswith("h"):

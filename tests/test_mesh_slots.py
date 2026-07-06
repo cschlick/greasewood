@@ -27,8 +27,8 @@ trusted_pubs = ["{ca_hex}"]
 
 
 def test_membership_key_and_paths():
-    assert cli._membership_key("prod-fleet.internal") == "prod-fleet"
-    assert cli._membership_key("corp.example.internal") == "corp-example"  # sanitized
+    assert cli.membership_key("prod-fleet.internal") == "prod-fleet"
+    assert cli.membership_key("corp.example.internal") == "corp-example"  # sanitized
     mp = cli._membership_paths("prod-fleet")
     assert mp["config"] == Path("/etc/greasewood_prod-fleet.toml")
     assert mp["data_dir"] == Path("/var/lib/greasewood_prod-fleet")

@@ -17,6 +17,7 @@ import logging
 import threading
 from pathlib import Path
 
+from .keys import atomic_write
 from .wire import NodeRecord
 
 log = logging.getLogger(__name__)
@@ -78,9 +79,10 @@ class Directory:
         # it would corrupt the cache that replaces directory.json.
         with self._lock:
             data = [r.to_dict() for r in self._records.values()]
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            tmp.replace(path)
+            # 0644: the cache is public state — no-root `gw watch --snapshot`
+            # reads it. atomic_write's unique temp also covers the OTHER race
+            # the lock can't: a CLI process writing while the daemon syncs.
+            atomic_write(path, json.dumps(data, indent=2), mode=0o644)
 
     @classmethod
     def load(cls, path: Path) -> "Directory":

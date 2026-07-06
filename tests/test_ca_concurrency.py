@@ -5,7 +5,7 @@ Two of its operations are unsynchronized:
 
   * issue() enforces hostname uniqueness by check-then-act (_hostname_owner then
     _save_node_caps) — a TOCTOU that lets two identities claim one name; and
-  * _atomic_write_text uses a FIXED temp path, so two writers to the same file
+  * keys.atomic_write uses a UNIQUE temp path, so two writers to the same file
     race on that temp and one can hit FileNotFoundError at the rename.
 
 These tests drive the races with a barrier (all threads fire together) and must
@@ -15,7 +15,8 @@ unique temp name.
 import json
 import threading
 
-from greasewood.ca import CA, _atomic_write_text
+from greasewood.ca import CA
+from greasewood.keys import atomic_write
 from greasewood.keys import CAKeys, NodeKeys
 
 
@@ -71,7 +72,7 @@ def test_atomic_write_survives_concurrent_writers(tmp_path):
     payloads = [json.dumps({"n": i, "pad": "x" * 500}) for i in range(24)]
 
     def write(i):
-        _atomic_write_text(target, payloads[i])
+        atomic_write(target, payloads[i])
 
     # A few rounds to make the race reliable.
     for _ in range(5):
