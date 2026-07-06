@@ -74,7 +74,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     directory.save(cfg.dir_cache_path)
 
     print("\n$ gw status")
-    cli.cmd_status(types.SimpleNamespace(config=str(tmp_path / "gw.toml")))
+    cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml")))
     out = capsys.readouterr().out
     print(out)   # visible under `pytest -s`
 
@@ -82,7 +82,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert "│ self" in out                                            # self marked in the 'this node' column
     assert "name" in out and "segments" in out                       # left (mesh) columns
     assert "this node" in out and "peer?" in out                     # the split; non-root right side
-    assert "run 'sudo gw status'" in out                             # hint to see live links
+    assert "run 'sudo gw watch'" in out                             # hint to see live links
     assert "12 record(s) in local directory cache" in out            # self + 11
     assert "prod,web" in out                                          # multi-segment bridge
     assert "*" in out                                                 # reach-all segment
@@ -116,7 +116,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     directory.save(cfg.dir_cache_path)
 
     import types as _types
-    cli.cmd_status(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
+    cli.cmd_watch(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
                                          by_segment=True))
     out = capsys.readouterr().out
     print(out)   # visible under `pytest -s`

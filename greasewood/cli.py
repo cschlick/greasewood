@@ -396,7 +396,7 @@ def cmd_create(args) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
         # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
-        # directory.json, *.pub) that root-free commands like `gw status` read;
+        # directory.json, *.pub) that root-free commands like `gw watch --snapshot` read;
         # every secret inside is its own 0600 root-owned file. Root owns all of
         # it — state is never chowned to the invoking user (the CA key on a
         # login account would let that account mint credentials).
@@ -999,7 +999,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     _rewrite_cert_manifest_domain(new_data, cfg.mesh_domain, new_domain)
 
     # This membership just migrated — drop the pending-rename flag the sync
-    # loop raised (a member adopting the anchor's rename), so `gw status` clears.
+    # loop raised (a member adopting the anchor's rename), so `gw watch` clears.
     (new_data / "pending_rename.json").unlink(missing_ok=True)
 
     # Grace: old names keep resolving for one credential TTL, then retire.
@@ -1246,7 +1246,7 @@ def cmd_join(args) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     try:
         # 0755, not 0700: the dir holds world-readable public files (id_pub.hex,
-        # directory.json, *.pub) that root-free commands like `gw status` read;
+        # directory.json, *.pub) that root-free commands like `gw watch --snapshot` read;
         # every secret inside is its own 0600 root-owned file. Root owns all of
         # it — state is never chowned to the invoking user (the CA key on a
         # login account would let that account mint credentials).
@@ -1572,7 +1572,7 @@ def _resolve_node(ca, cfg, handle: str, *, require_enrolled: bool = True):
     if owner is None:
         sys.exit(f"no node named {handle!r} on this anchor — pass its hostname, "
                  f"its <host>.{cfg.mesh_domain} name, or its 64-char id_pub hex "
-                 f"(see `gw status`)")
+                 f"(see `gw watch`)")
     return bytes.fromhex(owner), s
 
 
@@ -2734,7 +2734,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
            "-" * lwidth + "-+-" + "-" * max(len(_fr(right_hdr)), 9)]
     out += [_fl(lr) + " │ " + _fr(rr) for lr, rr in zip(left_rows, right_rows)]
     if not have_live and not is_live:
-        note = ("run 'sudo gw status' to see live data links + traffic" if not is_root
+        note = ("run 'sudo gw watch' for live data links + traffic" if not is_root
                 else "no live WireGuard state — is the daemon running?")
         out.append(f"({note})")
     return out
@@ -2766,7 +2766,7 @@ def _ping_rtt(addr: str) -> str:
 
 
 class _LatencyProber:
-    """Background prober for `status --live`: round-robins ICMP pings over the
+    """Background prober for `gw watch`: round-robins ICMP pings over the
     current linked peers and publishes results in `self.results` ({addr: 'Nms'|
     '—'}). The display reads it non-blocking, so latency fills in over the first
     few seconds instead of stalling the first frame — and pings run ONLY while
@@ -2804,7 +2804,7 @@ class _LatencyProber:
 
 
 def _status_live(cfg, own_id, interval: float = 2.0) -> int:
-    """Live, redraw-in-place `gw status`: link state + per-second throughput
+    """Live, redraw-in-place `gw watch`: link state + per-second throughput
     (from the sample delta between frames) + an async latency column. Root +
     a terminal required; Ctrl-C exits."""
     import base64
@@ -2813,13 +2813,14 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
     from . import wg as wgmod
 
     if not sys.stdout.isatty():
-        sys.exit("gw status --live needs a terminal (it redraws in place); "
-                 "plain 'gw status' for piped/one-shot output")
+        sys.exit("gw watch needs a terminal to redraw into; "
+                 "use 'gw watch --snapshot' for piped/one-shot output")
     if os.geteuid() != 0:
         # Root is for `wg show` (live link state) — the same gate the static
         # right-side columns have. Pinging itself is unprivileged on Linux.
-        sys.exit("gw status --live needs root — it reads live WireGuard state "
-                 "(wg show). Try: sudo gw status --live")
+        sys.exit("gw watch needs root — it reads live WireGuard state "
+                 "(wg show). Try: sudo gw watch  (or gw watch --snapshot "
+                 "for a no-root static view)")
 
     prober = _LatencyProber()
     prober.start()
@@ -2858,7 +2859,7 @@ def _status_live(cfg, own_id, interval: float = 2.0) -> int:
                                  latency=prober.results, rates=rates)
             up = sum(1 for a in targets)
             frame = ["\033[H\033[J",
-                     f"gw status --live · {cfg.hostname}.{cfg.mesh_domain} · "
+                     f"gw watch · {cfg.hostname}.{cfg.mesh_domain} · "
                      f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up", ""]
             frame += body
             frame += ["", "(latency pings fill in live · throughput is per-second "
@@ -2906,7 +2907,7 @@ def _fmt_until(iso: str) -> str:
 
 
 def _door_status_lines(cfg) -> list:
-    """The `door:` block for `gw status` — anchor only. Shows whether the
+    """The `door:` block for `gw watch` — anchor only. Shows whether the
     enrollment door is open (and time-to-close) or closed (and how long ago),
     plus failed attempts + source IPs and the last enrollment."""
     from . import door
@@ -2915,7 +2916,7 @@ def _door_status_lines(cfg) -> list:
     except PermissionError:
         # door_status.json is 0600 root (it holds attempt source IPs). Degrade
         # honestly rather than dying — status is a no-root command.
-        return ["door     : (state readable only with root — sudo gw status)"]
+        return ["door     : (state readable only with root — sudo gw watch)"]
     if st is None:
         return ["door     : closed (never opened)"]
 
@@ -2942,7 +2943,7 @@ def _door_status_lines(cfg) -> list:
         lines.append(f"           grants: {grants} · closes only via: gw close-door")
         # The standing token, re-retrievable for baking into new images without
         # re-issuing. From the 0600-root window file — and this whole door block
-        # only renders for a root `gw status` (door_status.json is 0600 too), so
+        # only renders for a root `gw watch` (door_status.json is 0600 too), so
         # the token (which IS the enrollment credential) never shows non-root.
         w = door.read_window(cfg.data_dir)
         if w and w.get("token"):
@@ -3049,7 +3050,7 @@ def _dur_short(seconds: float) -> str:
 
 
 def _self_health_lines(cfg, directory, own_id) -> list:
-    """The self/health block for `gw status` — local facts about THIS node
+    """The self/health block for `gw watch` — local facts about THIS node
     (version, own credential, reachability posture, trust anchors, and — for a
     plain node — how fresh the directory cache is). All local: no root, no
     network, so `status` stays instant. Live/reach-out checks (clock skew, live
@@ -3111,7 +3112,7 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     return lines
 
 
-def cmd_status(args) -> int:
+def cmd_watch(args) -> int:
     from .config import load_config
     from .directory import Directory
 
@@ -3122,20 +3123,24 @@ def cmd_status(args) -> int:
 
     cfg = load_config(cfg_path)
 
-    # status is a no-root command: it reads only the public files (id_pub.hex,
-    # directory.json). But on a legacy install with a 0700 data dir, those reads
-    # fail invisibly (exists() → False, Directory.load → empty) and status would
-    # lie ("keys not generated", "directory is empty"). Say the truth instead.
+    # The snapshot (static) view is a no-root command: it reads only the public
+    # files (id_pub.hex, directory.json). But on a legacy install with a 0700
+    # data dir, those reads fail invisibly (exists() → False, Directory.load →
+    # empty) and it would lie ("keys not generated", "directory is empty"). Say
+    # the truth instead.
     if (cfg.data_dir.exists() and not os.access(cfg.data_dir, os.X_OK)) or (
             cfg.dir_cache_path.exists() and not os.access(cfg.dir_cache_path, os.R_OK)):
         sys.exit(f"can't read the public state under {cfg.data_dir} (a legacy "
-                 f"install with a 0700 data dir?). Either run: sudo gw status, "
+                 f"install with a 0700 data dir?). Either run: sudo gw watch, "
                  f"or open the public files up: sudo chmod 755 {cfg.data_dir}")
     own_id, own_addr = _own_identity(cfg.data_dir)
 
-    if getattr(args, "live", False):
+    # Live is the default; a static one-shot is --snapshot (for piping/logging),
+    # and we auto-fall-back to it when there's no terminal to redraw into.
+    if not getattr(args, "snapshot", False) and sys.stdout.isatty():
         # Redraw-in-place live view: link state + per-second throughput + an
-        # async latency column (pings run only while you're watching).
+        # async latency column (pings run only while you're watching). Needs
+        # root for live WireGuard state — that's why the default wants sudo.
         return _status_live(cfg, own_id,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
 
@@ -3394,7 +3399,7 @@ def cmd_diagnose(args) -> int:
     for name in requested:
         r = _find(name)
         if r is None:
-            sys.exit(f"no node named {name!r} in the directory cache (see gw status)")
+            sys.exit(f"no node named {name!r} in the directory cache (see gw watch)")
         picks.append((r.hostname, r, r.id_pub == own_id_bytes))
 
     if not requested:                           # 0 args: self ↔ anchor
@@ -3975,7 +3980,7 @@ def main(argv=None) -> int:
             "  sudo gw purge                -- remove all local state\n"
             "\n"
             "no sudo needed (read-only):\n"
-            "  gw status\n"
+            "  gw watch\n"
             "  gw diagnose   (add sudo to also see live WireGuard handshake state)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4110,20 +4115,21 @@ def main(argv=None) -> int:
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
     sp.set_defaults(fn=cmd_run)
 
-    # nodes
-    sp = sub.add_parser("status",
-                        help="list the mesh nodes in this node's directory (name, "
-                             "addr, expiry, state, segments) + who you are")
+    # watch — live mesh view by default; --snapshot for a static one-shot
+    sp = sub.add_parser("watch",
+                        help="[sudo] live mesh dashboard (redraws in place): the "
+                             "roster + link state, per-second throughput, and a "
+                             "latency column that fills in as pings return. "
+                             "Ctrl-C to exit. Use --snapshot for a static view.")
+    sp.add_argument("--snapshot", action="store_true",
+                    help="print a single static view and exit (no root needed) — "
+                         "for piping/logging. Auto-used when there's no terminal.")
     sp.add_argument("--by-segment", action="store_true",
                     help="group into one table per segment (a node appears under "
                          "each of its segments; segment:* nodes appear under all)")
-    sp.add_argument("--live", "-w", action="store_true",
-                    help="[sudo] redraw-in-place live view: link state, "
-                         "per-second throughput, and a latency column that fills "
-                         "in as pings return. Ctrl-C to exit.")
     sp.add_argument("--interval", type=float, default=2.0, metavar="SECS",
                     help="live refresh interval (default 2s; min 1s)")
-    sp.set_defaults(fn=cmd_status)
+    sp.set_defaults(fn=cmd_watch)
 
     # diagnose
     sp = sub.add_parser(

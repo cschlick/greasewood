@@ -46,7 +46,7 @@ def test_health_block_shows_self_facts(tmp_path, capsys):
     args = _node(tmp_path, endpoints=["[2001:db8::1]:51900"])
     sync.stamp_sync_path(tmp_path).write_text(
         dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     out = capsys.readouterr().out
     assert "version  :" in out
     assert "cred     : expires" in out and "in 17h" in out     # 18h ttl, ~17h left
@@ -57,18 +57,18 @@ def test_health_block_shows_self_facts(tmp_path, capsys):
 
 def test_expired_credential_is_flagged(tmp_path, capsys):
     args = _node(tmp_path, cred_ttl_h=-1)                       # already expired
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     assert "cred     : ⚠ EXPIRED" in capsys.readouterr().out
 
 
 def test_never_synced_and_stale(tmp_path, capsys):
     args = _node(tmp_path)                                      # no sync stamp
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     assert "sync     : never" in capsys.readouterr().out
 
     old = dt.datetime.now(_UTC) - dt.timedelta(minutes=6)
     sync.stamp_sync_path(tmp_path).write_text(old.replace(microsecond=0).isoformat())
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     out = capsys.readouterr().out
     assert "sync     : ⚠" in out and "anchor unreachable?" in out
 
@@ -76,14 +76,14 @@ def test_never_synced_and_stale(tmp_path, capsys):
 def test_outbound_only_posture(tmp_path, capsys):
     # A node that advertises no endpoint is naturally outbound-only.
     args = _node(tmp_path, endpoints=None)
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     assert "reach    : no endpoint (outbound-only" in capsys.readouterr().out
 
 
 def test_anchor_has_no_sync_line(tmp_path, capsys):
     # The anchor is the source of truth — nothing to be 'stale' against.
     args = _node(tmp_path, role="anchor")
-    cli.cmd_status(args)
+    cli.cmd_watch(args)
     out = capsys.readouterr().out
     assert "version  :" in out                                 # block still shows
     assert "sync     :" not in out
@@ -151,7 +151,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: live)
 
-    cli.cmd_status(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
+    cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
     out = capsys.readouterr().out
     assert "link" in out and "traffic" in out             # live headers, not 'peer?'
     assert "● up, 12s ago" in out and "↓4.0M ↑1.0M" in out  # linked peer + traffic
