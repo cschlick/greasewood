@@ -4079,18 +4079,19 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="gw",
-        description="Minimal WireGuard mesh overlay — direct-or-fail, IPv6-only",
+        description="Minimal WireGuard mesh overlay — direct-or-fail; IPv6-only overlay, v4-or-v6 underlay",
         epilog=(
-            "sudo requirements:\n"
-            "  sudo gw create            -- one-shot anchor bootstrap\n"
-            "  sudo gw invite                 -- open a door window, print join token\n"
-            "  sudo gw join <token> ...     -- enroll this machine (creates WG interfaces)\n"
-            "  sudo gw run                  -- start the daemon\n"
-            "  sudo gw purge                -- remove all local state\n"
+            "sudo requirements ([sudo] in a command's help = root-gated):\n"
+            "  sudo gw create <name>   -- one-shot anchor bootstrap\n"
+            "  sudo gw invite          -- open a door window, print a join token\n"
+            "  sudo gw join <token>    -- enroll this machine (creates WG interfaces)\n"
+            "  sudo gw run             -- start the daemon\n"
+            "  sudo gw watch           -- live dashboard (reads live WireGuard state)\n"
+            "  sudo gw purge           -- remove this mesh's local state\n"
             "\n"
             "no sudo needed (read-only):\n"
-            "  gw watch\n"
-            "  gw diagnose   (add sudo to also see live WireGuard handshake state)\n"
+            "  gw watch --snapshot · config · firewall · cert-status · cert-profiles\n"
+            "  gw diagnose   (add sudo for live link state + firewall inference)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -4121,7 +4122,7 @@ def main(argv=None) -> int:
     sp.add_argument("--door-port", dest="door_port", type=int, default=51901,
                     help="UDP port for the enrollment door (carried in tokens)")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
-                    help="underlay IPv6 address (auto-detected if omitted)")
+                    help="underlay address, v6 or v4 (auto-detected if omitted)")
     sp.add_argument("--interface", default=None,
                     help="WireGuard interface name (default: gw-<name[:12]>)")
     sp.add_argument("--overlay-prefix", dest="overlay_prefix",
@@ -4144,7 +4145,7 @@ def main(argv=None) -> int:
 
     # invite
     sp = sub.add_parser("invite",
-                        help="[sudo] open a 15-min door window and print a single-use join token")
+                        help="[sudo, anchor] open a 15-min door window and print a single-use join token")
     sp.add_argument("--hostname", default=None,
                     help="pin the invited node's mesh hostname (the anchor fixes it; "
                          "the joiner can't choose or later `gw rename-node` it). Omit "
@@ -4201,7 +4202,7 @@ def main(argv=None) -> int:
                     help="WireGuard interface name (default: keep existing, else "
                          "gw-mesh; use a distinct name per mesh on one host)")
     sp.add_argument("--endpoint", default=None, metavar="[ADDR]:PORT",
-                    help="this node's underlay endpoint (auto-detected if omitted)")
+                    help="this node's underlay endpoint, v6 or v4 (auto-detected if omitted)")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_const",
                     const=False, default=None,
                     help="don't maintain the managed /etc/hosts block "
@@ -4270,14 +4271,15 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_diagnose)
 
     # revoke
-    sp = sub.add_parser("revoke", help="add a node to the revoke list (run on the anchor)")
+    sp = sub.add_parser("revoke", help="[sudo, anchor] revoke a node — deny its "
+                        "renew/publish, evict it, free its hostname")
     sp.add_argument("node", help="the node: its hostname, its <host>.<mesh_domain> "
                     "mesh name, or its 64-char id_pub hex")
     sp.set_defaults(fn=cmd_revoke)
 
     # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",
-                        help="[anchor] change an enrolled node's caps (effective next renewal)")
+                        help="[sudo, anchor] change an enrolled node's caps (effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("caps", help="comma-separated full tag set, e.g. "
                                  "'segment:prod,tls' (replaces the node's current caps)")
@@ -4285,7 +4287,7 @@ def main(argv=None) -> int:
 
     # set-segments (anchor) — change only a node's segments
     sp = sub.add_parser("set-segments",
-                        help="[anchor] change an enrolled node's segments "
+                        help="[sudo, anchor] change an enrolled node's segments "
                              "(effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("segments", help="comma-separated segments, e.g. 'prod,web' "
@@ -4301,7 +4303,7 @@ def main(argv=None) -> int:
 
     # cert-request (on a node with the 'tls' capability)
     sp = sub.add_parser("cert-request",
-                        help="request an x509 TLS cert from the anchor for a local service")
+                        help="[sudo] request an x509 TLS cert from the anchor for a local service")
     sp.add_argument("--san", action="append", default=[], metavar="NAME|IP",
                     help="subject alternative name (repeatable; DNS or IP). "
                          "Must be a name the node owns (its <hostname>.<mesh_domain>, "
@@ -4351,7 +4353,7 @@ def main(argv=None) -> int:
 
     # cert-remove
     sp = sub.add_parser("cert-remove",
-                        help="stop managing a cert (drop it from auto-renewal); "
+                        help="[sudo] stop managing a cert (drop it from auto-renewal); "
                              "--delete-files also removes the placed key/cert/ca")
     sp.add_argument("name", help="the managed cert's name (see gw cert-status)")
     sp.add_argument("--delete-files", dest="delete_files", action="store_true",
@@ -4411,14 +4413,14 @@ def main(argv=None) -> int:
 
     # renew-all
     sp = sub.add_parser("renew-all",
-                        help="[anchor] request a fleet-wide renewal — advertise "
+                        help="[sudo, anchor] request a fleet-wide renewal — advertise "
                              "renew_after=now so cooperating nodes renew (jittered, "
                              "rate ~constant with mesh size)")
     sp.set_defaults(fn=cmd_renew_all)
 
     # anchor-backup
     sp = sub.add_parser("anchor-backup",
-                        help="[anchor] write an encrypted backup of the CA key + "
+                        help="[sudo, anchor] [anchor] write an encrypted backup of the CA key + "
                              "node registry + revoke list (passphrase via prompt "
                              "or $GW_BACKUP_PASSPHRASE)")
     sp.add_argument("--out", default=None, metavar="PATH",
