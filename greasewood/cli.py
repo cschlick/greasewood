@@ -166,7 +166,8 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
     return val.encode()
 
 
-def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) -> None:
+def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
+                         mesh_iface: str = "gw-mesh") -> None:
     """
     Print (never apply) the recommended firewall posture. greasewood binds its
     control/enroll planes only to the overlay + loopback, so nothing it runs is
@@ -185,7 +186,7 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902) ->
     print("change. On a default-drop host, allow (nftables):")
     print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept            # WireGuard (underlay)")
     print(f"  iifname \"lo\" accept                          # anchor talks to itself")
-    print(f"  iifname \"gw-mesh\" tcp dport {control_port} accept        # control plane (when anchor)")
+    print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept        # control plane (when anchor)")
     print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept    # enrollment (when anchor)")
 
 
@@ -493,10 +494,10 @@ default_caps = ["tls"]
     print(f"  TOKEN=$(sudo gw invite)          # on this machine")
     print(f"  sudo gw join \"$TOKEN\" --hostname <name>   # on the new machine")
     print()
-    _print_firewall_help(listen_port, control_port)
+    _print_firewall_help(listen_port, control_port, interface)
     print()
     from . import firewall as _fw
-    _fw.check(_fw.anchor_rules(listen_port, control_port), log)
+    _fw.check(_fw.anchor_rules(listen_port, control_port, interface), log)
     return 0
 
 
@@ -1498,7 +1499,7 @@ trusted_pubs = ["{ca_pub_hex}"]
               "it yourself or write your own unit)")
     print()
     from . import firewall as _fw
-    _print_firewall_help(listen_port)
+    _print_firewall_help(listen_port, mesh_iface=interface)
     print()
     _fw.check(_fw.node_rules(listen_port), log)
     return 0
@@ -1831,7 +1832,7 @@ default_caps = ["tls"]
     print("Start the daemon here:  sudo gw run")
     print()
     from . import firewall as _fw
-    _fw.check(_fw.anchor_rules(cfg.listen_port, control_port), log)
+    _fw.check(_fw.anchor_rules(cfg.listen_port, control_port, cfg.wg_interface), log)
     return 0
 
 
@@ -3112,6 +3113,37 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     return lines
 
 
+def cmd_config(args) -> int:
+    """Print resolved config facts, machine-readable — for scripting. With no
+    argument, one `key<TAB>value` line per fact; with a key, just that value
+    (e.g. `IFACE=$(gw config interface)` to scope a firewall rule to the mesh
+    interface). Reads config only — no root, no network."""
+    from .config import load_config
+    cfg = load_config(Path(args.config))
+    facts = {
+        "role": cfg.role,
+        "hostname": cfg.hostname,
+        "interface": cfg.wg_interface,
+        "mesh_domain": cfg.mesh_domain,
+        "listen_port": str(cfg.listen_port),
+        "overlay_prefix": cfg.overlay_prefix,
+        "data_dir": str(cfg.data_dir),
+        "config": str(args.config),
+        "root_url": cfg.root_url or "",
+    }
+    if cfg.role == "anchor":
+        facts["control_port"] = str(_control_port(cfg))
+        facts["door_port"] = str(cfg.door_port)
+    if args.key:
+        if args.key not in facts:
+            sys.exit(f"unknown config key {args.key!r} — have: {', '.join(facts)}")
+        print(facts[args.key])
+        return 0
+    for k, v in facts.items():
+        print(f"{k}\t{v}")
+    return 0
+
+
 def cmd_watch(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -4130,6 +4162,16 @@ def main(argv=None) -> int:
     sp.add_argument("--interval", type=float, default=2.0, metavar="SECS",
                     help="live refresh interval (default 2s; min 1s)")
     sp.set_defaults(fn=cmd_watch)
+
+    # config — machine-readable resolved facts, for scripting
+    sp = sub.add_parser("config",
+                        help="print resolved config facts (machine-readable) for "
+                             "scripting, e.g. `gw config interface`")
+    sp.add_argument("key", nargs="?",
+                    help="print just this value (interface, mesh_domain, "
+                         "listen_port, data_dir, role, hostname, root_url, …); "
+                         "omit to list all as key<TAB>value")
+    sp.set_defaults(fn=cmd_config)
 
     # diagnose
     sp = sub.add_parser(
