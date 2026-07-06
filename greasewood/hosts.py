@@ -181,8 +181,10 @@ def render_block(records, domain: str) -> str:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    # surrogateescape mirrors the reads: a user's non-UTF-8 hosts line comes back
+    # as surrogates and must be written back byte-for-byte, not re-encoded.
     tmp = path.with_suffix(path.suffix + ".gw.tmp")
-    tmp.write_text(text)
+    tmp.write_text(text, errors="surrogateescape")
     os.chmod(tmp, 0o644)
     try:
         os.replace(tmp, path)
@@ -191,7 +193,7 @@ def _atomic_write(path: Path, text: str) -> None:
         # rename-over fails (EBUSY/EXDEV). Fall back to an in-place write — not
         # atomic, but fine for this small, infrequently-written file.
         try:
-            with open(path, "w") as f:
+            with open(path, "w", errors="surrogateescape") as f:
                 f.write(text)
         finally:
             tmp.unlink(missing_ok=True)
@@ -202,7 +204,7 @@ def sync(records, domain: str, path: Path = DEFAULT_HOSTS) -> bool:
     block is tagged by `domain`, so a host on two meshes keeps two blocks).
     Returns True if the file changed."""
     with _lock(path):
-        current = path.read_text() if path.exists() else ""
+        current = path.read_text(errors="surrogateescape") if path.exists() else ""
         # Silent-misconfig guard: if the block under our tag holds addresses this
         # mesh doesn't have, another mesh on this host shares our mesh_domain.
         # Our own (stable) address is always in `records`, so normal churn keeps
@@ -231,7 +233,7 @@ def remove_block(domain: str, path: Path = DEFAULT_HOSTS) -> bool:
     with _lock(path):
         if not path.exists():
             return False
-        current = path.read_text()
+        current = path.read_text(errors="surrogateescape")
         base = _strip_managed(current, domain)
         new = base.rstrip("\n") + "\n" if base.strip() else base
         if new != current:

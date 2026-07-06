@@ -221,3 +221,18 @@ def test_distinct_domains_do_not_warn(tmp_path, caplog):
         hosts.sync([_rec("db", "fd8d::2")], "alpha", path=p)
         hosts.sync([_rec("web", "fdcc::5")], "beta", path=p)
     assert not any("mesh_domain" in r.message for r in caplog.records)
+
+
+def test_non_utf8_hosts_file_does_not_wedge(tmp_path):
+    """A stray non-UTF-8 byte in a user's /etc/hosts line must not permanently
+    stop managed-block maintenance (read_text would raise UnicodeDecodeError
+    every pass, wedging the block forever). surrogateescape lets us read past
+    it, rewrite our block, and preserve the odd bytes."""
+    from greasewood import hosts
+    hp = tmp_path / "hosts"
+    hp.write_bytes(b"127.0.0.1 localhost\n192.168.1.1 caf\xe9-router\n")  # latin-1 byte
+    # sync must not raise on the non-UTF-8 line, and must place its block.
+    hosts.sync([], "mesh.internal", path=hp)     # empty records → just the markers
+    hosts.remove_block("mesh.internal", path=hp) # read path again — must not raise
+    text = hp.read_text(errors="surrogateescape")
+    assert "localhost" in text                   # pre-existing lines preserved
