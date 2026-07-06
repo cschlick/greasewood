@@ -18,6 +18,7 @@ derived <out_dir>/<name>.{key,crt} + <out_dir>/ca.crt layout.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -253,13 +254,6 @@ def cert_expiry(crt_path) -> "dt.datetime | None":
         cert.not_valid_after.replace(tzinfo=_UTC)
 
 
-def entry_cert_path(entry: dict) -> "Path | None":
-    """The file carrying the leaf cert for a manifest entry — the profile's
-    cert/fullchain/bundle file, or the legacy crt_path."""
-    files = entry.get("files")
-    return _profile_cert_path(files) if files else entry_paths(entry)[1]
-
-
 def entry_paths(entry: dict) -> "tuple[Path, Path, Path]":
     """The (key, cert, ca) destinations for a managed-cert entry. Prefers the
     explicit per-file paths; falls back to the legacy out_dir + name scheme so a
@@ -270,6 +264,55 @@ def entry_paths(entry: dict) -> "tuple[Path, Path, Path]":
     out = Path(entry["out_dir"])
     name = entry["name"]
     return out / f"{name}.key", out / f"{name}.crt", out / "ca.crt"
+
+
+@dataclass
+class ManagedCert:
+    """One manifest entry, typed. The manifest stores plain dicts (the on-disk
+    format, record_managed); this wraps one for the behavior that must not be
+    re-derived per call site: WHICH file carries the leaf cert, WHAT was
+    placed, and HOW to renew — a profile entry re-fetches and RE-PLACES every
+    file with its owner/mode (so a service's key stays readable by its user
+    across renewals), a path entry re-issues into its three paths."""
+    name: str
+    cn: str
+    dns: list
+    ips: list
+    auto_renew: bool
+    reload_cmd: "str | None"
+    files: "list | None"        # profile [[file]] placements, or None
+    raw: dict                   # the manifest dict (for the path fallbacks)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ManagedCert":
+        return cls(name=d.get("name", "?"), cn=d.get("cn", ""),
+                   dns=list(d.get("dns", [])), ips=list(d.get("ips", [])),
+                   auto_renew=d.get("auto_renew", True),
+                   reload_cmd=d.get("reload_cmd"),
+                   files=d.get("files") or None, raw=d)
+
+    @property
+    def cert_path(self) -> "Path | None":
+        """The file carrying the leaf cert (drives the expiry check)."""
+        return (_profile_cert_path(self.files) if self.files
+                else entry_paths(self.raw)[1])
+
+    def placed_paths(self) -> list:
+        """Every file this cert placed (what cert-remove reports/deletes)."""
+        if self.files:
+            return [f["path"] for f in self.files]
+        return [str(p) for p in entry_paths(self.raw)]
+
+    def renew(self, anchor_url: str, keys, *, dns: "list | None" = None) -> None:
+        dns = self.dns if dns is None else dns
+        if self.files:
+            key_pem, cert_pem, ca_pem = fetch_cert(
+                anchor_url, keys, dns=dns, ips=self.ips, cn=self.cn)
+            place_cert_files(self.files, key_pem, cert_pem, ca_pem)
+        else:
+            kp, cp, ap = entry_paths(self.raw)
+            issue_cert(anchor_url, keys, dns=dns, ips=self.ips, cn=self.cn,
+                       key_path=kp, crt_path=cp, ca_path=ap)
 
 
 def cert_due_for_renewal(crt_path) -> bool:
@@ -353,34 +396,21 @@ class CertRenewalLoop(Loop):
         anchor_url = self._get_anchor_url()
         grace_old = _rename_grace_old_domain(self._data_dir)
         for entry in load_manifest(self._data_dir):
-            if not entry.get("auto_renew", True):
+            mc = ManagedCert.from_dict(entry)
+            if not mc.auto_renew:
                 continue
-            files = entry.get("files")            # profile-placed cert?
-            crt_path = entry_cert_path(entry)
-            if not crt_path or not cert_due_for_renewal(crt_path):
+            if not mc.cert_path or not cert_due_for_renewal(mc.cert_path):
                 continue
-            dns = entry.get("dns", [])
+            dns = mc.dns
             if grace_old and self._mesh_domain:
                 dns = _grace_dual_names(dns, self._mesh_domain, grace_old)
             try:
-                if files:
-                    # Re-fetch and RE-PLACE every file with its owner/mode, so a
-                    # service's key stays readable by its user across renewals
-                    # (the whole point of profiles — not just first issuance).
-                    key_pem, cert_pem, ca_pem = fetch_cert(
-                        anchor_url, self._keys, dns=dns,
-                        ips=entry.get("ips", []), cn=entry["cn"])
-                    place_cert_files(files, key_pem, cert_pem, ca_pem)
-                else:
-                    key_path, cp, ca_path = entry_paths(entry)
-                    issue_cert(anchor_url, self._keys, dns=dns,
-                               ips=entry.get("ips", []), cn=entry["cn"],
-                               key_path=key_path, crt_path=cp, ca_path=ca_path)
-                log.info("auto-renewed TLS cert %r", entry["name"])
-                self._run_reload(entry.get("reload_cmd"))
+                mc.renew(anchor_url, self._keys, dns=dns)
+                log.info("auto-renewed TLS cert %r", mc.name)
+                self._run_reload(mc.reload_cmd)
             except Exception as e:
                 log.warning("TLS cert auto-renewal for %r failed: %s",
-                            entry["name"], e)
+                            mc.name, e)
 
     # run/start/stop come from Loop; the tick keeps its public name
     # (check_all is also the "renew everything due, now" API).
