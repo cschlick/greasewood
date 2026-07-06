@@ -163,12 +163,29 @@ def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> N
     """Write each profile [[file]] with its composed content, mode, and owner —
     atomically (temp + rename), so a service reading the file never sees a
     half-written cert or a wrong-mode key. Fails loudly on a bad role, an
-    unwritable directory, or an unknown owner; never silently mis-places."""
+    unknown owner, or a target directory whose parent doesn't exist (a missing
+    service / wrong path); never silently mis-places into a fabricated tree."""
     for f in files:
         role, dest = f["role"], Path(f["path"])
         content = compose_role(role, key_pem, cert_pem, ca_pem).encode()
         mode = int(f["mode"], 8) if f.get("mode") else _ROLE_MODE.get(role, 0o644)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Create a cert subdir under an EXISTING directory, but never fabricate a
+        # deep tree from nothing (parents=False). A missing parent means the
+        # service isn't installed or the [[file]] path is wrong — e.g. the
+        # postgres profile's /var/lib/postgresql/17/main on a host running
+        # PG 16. Failing loudly here is the "never silently mis-places" promise;
+        # otherwise we'd drop a 0600 key into a freshly-invented tree no service
+        # ever reads. (Profiles that place into a new subdir list the files so
+        # an earlier one creates the intermediate — e.g. minio's certs/ before
+        # certs/CAs/.)
+        try:
+            dest.parent.mkdir(parents=False, exist_ok=True)
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"cert target dir {dest.parent} can't be created: its parent "
+                f"{dest.parent.parent} doesn't exist — is the service installed, "
+                f"and is the profile's [[file]] path right for this host? "
+                f"(greasewood won't fabricate a deep directory tree.)") from None
         # Deliberately NOT keys.atomic_write: the owner must change on the TEMP,
         # before the atomic swap, so the file appears fully-owned or not at all.
         tmp = dest.with_name(dest.name + ".gwtmp")
