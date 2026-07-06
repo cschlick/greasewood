@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import membership_key
@@ -792,10 +793,232 @@ def _diag_anchor_record(directory, cfg, own_rec):
     return None
 
 
-class _DiagCol:
+@dataclass
+class _DiagnoseColumn:
     """One column of the diagnose comparison — a node's resolved facts."""
-    __slots__ = ("label", "is_self", "rec", "addr", "u6", "u4",
-                 "caps", "segments", "cred", "has_ep", "ep_str", "hs", "fw")
+    label: str
+    is_self: bool
+    rec: object                            # NodeRecord | None (None: not in cache)
+    addr: str = "?"
+    underlay_v6: str = "-"
+    underlay_v4: str = "-"
+    caps: list = field(default_factory=list)
+    segments: str = ""                     # comma-joined segment names
+    credential: str = ""                   # human verdict, e.g. "valid · 23h"
+    has_endpoint: bool = False             # dialable iff it advertises an endpoint
+    endpoint: str = "—"                    # the endpoint to dial, or "—"
+    handshake_age: "int | None" = None     # secs since last handshake, or None
+    firewall: str = ""                     # this-host verdict / inferred / "???"
+
+
+def _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec) -> list:
+    """The up-to-three nodes to compare, as (label, rec, is_self): the requested
+    pair (or self↔anchor with no args, self↔A with one), plus the anchor as a
+    reference. Deduped by overlay address, capped at three, order preserved."""
+    from .hosts import sanitize
+
+    def find(name):
+        want = sanitize(name)
+        return next((r for r in directory.all() if sanitize(r.hostname) == want), None)
+
+    requested = [n for n in (getattr(args, "nodes", None) or []) if n]
+    picks = []                                  # list of (label, rec|None, is_self)
+    for name in requested:
+        rec = find(name)
+        if rec is None:
+            sys.exit(f"no node named {name!r} in the directory cache (see gw watch)")
+        picks.append((rec.hostname, rec, rec.id_pub == own_id_bytes))
+
+    if not requested:                           # 0 args: self ↔ anchor
+        picks.append((cfg.hostname, own_rec, True))
+    elif len(requested) == 1:                   # 1 arg: self ↔ A
+        picks.insert(0, (cfg.hostname, own_rec, True))
+
+    anchor_rec = _diag_anchor_record(directory, cfg, own_rec)  # anchor as reference
+    if anchor_rec is not None:
+        picks.append((anchor_rec.hostname, anchor_rec,
+                      anchor_rec.id_pub == own_id_bytes))
+
+    columns, seen = [], set()
+    for label, rec, is_self in picks:
+        key = rec.cred.addr if rec is not None else ("self" if is_self else label)
+        if key not in seen:
+            seen.add(key)
+            columns.append((label, rec, is_self))
+    return columns[:3]
+
+
+def _build_diag_facts(columns, cfg, own_addr, ca_pubs, revoked,
+                      live_peers, now, now_epoch, port) -> list:
+    """Turn (label, rec, is_self) columns into _DiagnoseColumn facts — the
+    credential verdict, underlay families, reachability, live handshake age, and
+    the firewall verdict (directly known for THIS host, inferred OPEN from an
+    observed handshake for a peer, else ???)."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from .wire import _canonical
+
+    def signed_by_trusted_ca(rec) -> bool:
+        body = _canonical(rec.cred._body_dict())
+        for raw_pub in ca_pubs:
+            try:
+                Ed25519PublicKey.from_public_bytes(raw_pub).verify(rec.cred.ca_sig, body)
+                return True
+            except InvalidSignature:
+                continue
+        return False
+
+    def credential_verdict(rec) -> str:
+        if rec is None:
+            return "(not in cache)"
+        if not signed_by_trusted_ca(rec):
+            return "✗ untrusted CA"
+        if rec.id_pub.hex() in revoked:
+            return "✗ REVOKED"
+        left = (rec.cred.exp - now).total_seconds()
+        if left < 0:
+            return f"✗ EXPIRED {int(-left // 60)}m ago"
+        return f"valid · {_dur_short(left)}"
+
+    def handshake_age(rec) -> "int | None":
+        if rec is None:
+            return None
+        live_peer = live_peers.get(_wg_key(rec))
+        if live_peer and live_peer.latest_handshake:
+            age = now_epoch - live_peer.latest_handshake
+            return age if age <= _LINK_FRESH_SECS else None
+        return None
+
+    facts = []
+    for label, rec, is_self in columns:
+        v6, v4 = _underlay_addrs(rec.endpoints if rec else cfg.endpoints)
+        has_endpoint = v6 != "-" or v4 != "-"
+        age = handshake_age(rec)
+        if is_self:
+            firewall = _self_firewall_verdict(port)
+        elif not has_endpoint:
+            firewall = "n/a (outbound-only)"
+        elif age is not None:
+            firewall = "OPEN (inferred: handshake)"
+        else:
+            firewall = "??? unconfirmed"
+        facts.append(_DiagnoseColumn(
+            label=label, is_self=is_self, rec=rec,
+            addr=rec.cred.addr if rec else (own_addr or "?"),
+            underlay_v6=v6, underlay_v4=v4,
+            caps=list(rec.cred.caps) if rec else list(cfg.caps),
+            segments=(",".join(_record_segments(rec)) if rec else
+                      ",".join(s[len("segment:"):] for s in cfg.caps
+                               if s.startswith("segment:"))),
+            credential=credential_verdict(rec),
+            has_endpoint=has_endpoint,
+            endpoint=v6 if v6 != "-" else (v4 if v4 != "-" else "—"),
+            handshake_age=age, firewall=firewall))
+    return facts
+
+
+def _print_diag_header(cfg, own_addr, port, ca_pubs) -> None:
+    print(f"diagnose · this host: {cfg.hostname} ({own_addr}) · "
+          f"iface {cfg.wg_interface} · mesh UDP {port}")
+    if not ca_pubs:
+        print("  ⚠ no trusted CA keys — nothing will verify (check [ca] trusted_pubs)")
+    if cfg.root_url:
+        skew = _anchor_clock_skew(cfg.root_url)
+        if skew is None:
+            print("  clock: anchor unreachable — skew check skipped")
+        elif abs(skew) >= 60:
+            print(f"  ⚠ clock {skew:+.0f}s off the anchor — FIX NTP (past ±300s "
+                  f"renewals refused; expiry checks misfire earlier)")
+    if os.geteuid() != 0:
+        print("  ⚠ not root — no live WireGuard state; link status & firewall "
+              "inference unavailable (re-run with sudo)")
+    print()
+
+
+def _print_diag_table(facts, port) -> None:
+    """The comparison table: one column per node, one row per fact."""
+    heads = [f"{col.label}{' (self)' if col.is_self else ''}" for col in facts]
+    rows = [("overlay", [col.addr for col in facts]),
+            ("underlay v6", [col.underlay_v6 for col in facts]),
+            ("underlay v4", [col.underlay_v4 for col in facts]),
+            ("reachable", ["yes (advertises endpoint)" if col.has_endpoint
+                           else "no (outbound-only)" for col in facts]),
+            ("segments", [col.segments or "-" for col in facts]),
+            ("credential", [col.credential for col in facts]),
+            (f"firewall udp/{port}", [col.firewall for col in facts])]
+    label_w = max([len(r[0]) for r in rows] + [0])
+    col_w = [max(len(heads[i]), *(len(r[1][i]) for r in rows))
+             for i in range(len(facts))]
+    print(" " * label_w + "  " +
+          "  ".join(f"{heads[i]:<{col_w[i]}}" for i in range(len(facts))))
+    for name, cells in rows:
+        print(f"{name:<{label_w}}  " +
+              "  ".join(f"{cells[i]:<{col_w[i]}}" for i in range(len(cells))))
+    print()
+
+
+def _print_pair_verdict(col_a, col_b, cfg, port) -> None:
+    """Whether col_a and col_b can form a tunnel, and if not, which factor blocks
+    it: shared segment → a dialable direction → live handshake, localizing a
+    failure to this host's firewall vs an upstream router/NAT when possible."""
+    from .reconcile import default_policy
+
+    print(f"  {col_a.label} ↔ {col_b.label}")
+    if not default_policy(col_a.caps, col_b.caps):
+        print("    ✗ no shared segment — they won't peer by design "
+              "(give them a common segment to change this)")
+        return
+    shared = "anchor is reach-all *" if ("*" in col_a.segments or "*" in col_b.segments) \
+        else "share " + repr(",".join(sorted(
+            set(col_a.segments.split(",")) & set(col_b.segments.split(",")))) or "?")
+    print(f"    segment: ✓ {shared}")
+
+    a_dials_b = col_b.has_endpoint     # a can dial b iff b listens with an endpoint
+    b_dials_a = col_a.has_endpoint
+    print(f"    {col_a.label} → {col_b.label}: " + (f"dial {col_b.endpoint}" if a_dials_b
+          else f"can't — {col_b.label} is outbound-only / advertises no endpoint"))
+    print(f"    {col_b.label} → {col_a.label}: " + (f"dial {col_a.endpoint}" if b_dials_a
+          else f"can't — {col_a.label} is outbound-only / advertises no endpoint"))
+    if not (a_dials_b or b_dials_a):
+        print("    ✗ no dialable direction — the link can't form "
+              "(both outbound-only)")
+        return
+
+    this_host = col_a if col_a.is_self else (col_b if col_b.is_self else None)
+    other = col_b if col_a.is_self else (col_a if col_b.is_self else None)
+    if this_host is None:
+        print("    live: (neither is this host) — should link per the "
+              "directory; run 'gw diagnose' from either for live confirmation")
+        return
+    if other.handshake_age is not None:
+        print(f"    live: ● LINKED (handshake {other.handshake_age}s ago) — path open; "
+              f"{other.label}'s firewall/router inferred OPEN")
+        # A LINKED peer can still silently blackhole full-size packets (a
+        # WG-over-cloud MTU mismatch): small pings pass, TLS handshakes hang.
+        if os.geteuid() == 0:
+            warn = _mtu_probe(cfg.wg_interface, other.addr,
+                              _iface_mtu(cfg.wg_interface))
+            if warn:
+                print(f"    ⚠ {warn}")
+        return
+    print("    live: ○ no handshake yet")
+    self_fw = this_host.firewall
+    if this_host.has_endpoint:
+        if self_fw.startswith("OPEN") or self_fw.startswith("open"):
+            print(f"    ⚠ our host firewall {self_fw} for udp/{port} — so the "
+                  f"block is NOT this host. If {other.label} can't reach us, "
+                  f"suspect an UPSTREAM router/NAT not forwarding udp/{port} to "
+                  f"this host, or {other.label}'s outbound/daemon.")
+        elif self_fw.startswith("CLOSED"):
+            print(f"    ⚠ our host firewall {self_fw} for udp/{port} — OPEN it "
+                  f"(create/join printed the exact rule).")
+        else:
+            print(f"    firewall udp/{port} here: {self_fw}")
+    if other.has_endpoint:
+        print(f"    ⚠ we can dial {other.label} at {other.endpoint} but it isn't "
+              f"answering — check {other.label}'s host firewall + any upstream "
+              f"port-forward for udp/{port}, and that its daemon is up "
+              f"('gw diagnose' on {other.label} shows its host firewall).")
 
 
 def cmd_diagnose(args) -> int:
@@ -816,13 +1039,8 @@ def cmd_diagnose(args) -> int:
     firewall allows the port, so a peer that still can't reach us points at an
     upstream router/NAT not forwarding it."
     """
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from .config import load_config
-    from .keys import derive_addr
     from .directory import Directory
-    from .reconcile import default_policy
-    from .wire import _canonical
     from . import wg as wgmod
 
     cfg_path = Path(args.config)
@@ -838,8 +1056,8 @@ def cmd_diagnose(args) -> int:
         return 1
     own_id_bytes = bytes.fromhex(own_id)
 
-    for w in _key_file_warnings(_secret_key_paths(cfg)):
-        print(f"  ⚠ {w}")
+    for warning in _key_file_warnings(_secret_key_paths(cfg)):
+        print(f"  ⚠ {warning}")
 
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
     revoked: set = set()
@@ -859,195 +1077,16 @@ def cmd_diagnose(args) -> int:
     now_epoch = int(time.time())
     own_rec = directory.get(own_id)
 
-    # ---- resolve the requested nodes → up to three columns (pair + anchor) ------
-    def _find(name):
-        from .hosts import sanitize
-        want = sanitize(name)
-        for r in directory.all():
-            if sanitize(r.hostname) == want:
-                return r
-        return None
+    columns = _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec)
+    facts = _build_diag_facts(columns, cfg, own_addr, ca_pubs, revoked,
+                              live_peers, now, now_epoch, port)
 
-    requested = [n for n in (getattr(args, "nodes", None) or []) if n]
-    picks = []                                  # list of (label, rec|None, is_self)
-    for name in requested:
-        r = _find(name)
-        if r is None:
-            sys.exit(f"no node named {name!r} in the directory cache (see gw watch)")
-        picks.append((r.hostname, r, r.id_pub == own_id_bytes))
+    _print_diag_header(cfg, own_addr, port, ca_pubs)
+    _print_diag_table(facts, port)
 
-    if not requested:                           # 0 args: self ↔ anchor
-        picks.append((cfg.hostname, own_rec, True))
-    elif len(requested) == 1:                   # 1 arg: self ↔ A
-        picks.insert(0, (cfg.hostname, own_rec, True))
-
-    anchor_rec = _diag_anchor_record(directory, cfg, own_rec)  # always add the anchor as reference
-    if anchor_rec is not None:
-        picks.append((anchor_rec.hostname, anchor_rec, anchor_rec.id_pub == own_id_bytes))
-
-    # Dedup by overlay address, cap at three, keep order.
-    cols, seen = [], set()
-    for label, rec, is_self in picks:
-        key = rec.cred.addr if rec is not None else ("self" if is_self else label)
-        if key in seen:
-            continue
-        seen.add(key)
-        cols.append((label, rec, is_self))
-    cols = cols[:3]
-
-    def _verify(rec) -> str:
-        if rec is None:
-            return "(not in cache)"
-        ok = False
-        body = _canonical(rec.cred._body_dict())
-        for raw in ca_pubs:
-            try:
-                Ed25519PublicKey.from_public_bytes(raw).verify(rec.cred.ca_sig, body)
-                ok = True
-                break
-            except InvalidSignature:
-                continue
-        if not ok:
-            return "✗ untrusted CA"
-        if rec.id_pub.hex() in revoked:
-            return "✗ REVOKED"
-        left = (rec.cred.exp - now).total_seconds()
-        if left < 0:
-            return f"✗ EXPIRED {int(-left // 60)}m ago"
-        return f"valid · {_dur_short(left)}"
-
-    def _hs_age(rec):
-        if rec is None:
-            return None
-        lp = live_peers.get(_wg_key(rec))
-        if lp and lp.latest_handshake:
-            age = now_epoch - lp.latest_handshake
-            return age if age <= _LINK_FRESH_SECS else None
-        return None
-
-    # Build a column of facts per node.
-    facts = []
-    for label, rec, is_self in cols:
-        c = _DiagCol()
-        c.label = label
-        c.is_self = is_self
-        c.rec = rec
-        c.addr = rec.cred.addr if rec else (own_addr or "?")
-        eps = rec.endpoints if rec else cfg.endpoints
-        c.u6, c.u4 = _underlay_addrs(eps)
-        c.caps = list(rec.cred.caps) if rec else list(cfg.caps)
-        c.segments = ",".join(_record_segments(rec)) if rec else \
-            ",".join(s[len("segment:"):] for s in cfg.caps if s.startswith("segment:"))
-        c.cred = _verify(rec)
-        # Reachability is emergent: a node is dialable iff it advertises an
-        # endpoint. No inbound flag anymore.
-        c.has_ep = (c.u6 != "-" or c.u4 != "-")
-        c.ep_str = c.u6 if c.u6 != "-" else (c.u4 if c.u4 != "-" else "—")
-        c.hs = _hs_age(rec)
-        if is_self:
-            c.fw = _self_firewall_verdict(port)
-        elif not c.has_ep:
-            c.fw = "n/a (outbound-only)"
-        elif c.hs is not None:
-            c.fw = "OPEN (inferred: handshake)"
-        else:
-            c.fw = "??? unconfirmed"
-        facts.append(c)
-
-    # ---- header -------------------------------------------------------------
-    print(f"diagnose · this host: {cfg.hostname} ({own_addr}) · "
-          f"iface {cfg.wg_interface} · mesh UDP {port}")
-    if not ca_pubs:
-        print("  ⚠ no trusted CA keys — nothing will verify (check [ca] trusted_pubs)")
-    if cfg.root_url:
-        skew = _anchor_clock_skew(cfg.root_url)
-        if skew is None:
-            print("  clock: anchor unreachable — skew check skipped")
-        elif abs(skew) >= 60:
-            print(f"  ⚠ clock {skew:+.0f}s off the anchor — FIX NTP (past ±300s "
-                  f"renewals refused; expiry checks misfire earlier)")
-    if os.geteuid() != 0:
-        print("  ⚠ not root — no live WireGuard state; link status & firewall "
-              "inference unavailable (re-run with sudo)")
-    print()
-
-    # ---- comparison table (nodes as columns) --------------------------------
-    heads = [f"{c.label}{' (self)' if c.is_self else ''}" for c in facts]
-    rows = [("overlay", [c.addr for c in facts]),
-            ("underlay v6", [c.u6 for c in facts]),
-            ("underlay v4", [c.u4 for c in facts]),
-            ("reachable", ["yes (advertises endpoint)" if c.has_ep
-                           else "no (outbound-only)" for c in facts]),
-            ("segments", [c.segments or "-" for c in facts]),
-            ("credential", [c.cred for c in facts]),
-            (f"firewall udp/{port}", [c.fw for c in facts])]
-    lblw = max([len(r[0]) for r in rows] + [0])
-    colw = [max(len(heads[i]), *(len(r[1][i]) for r in rows)) for i in range(len(facts))]
-    print(" " * lblw + "  " + "  ".join(f"{heads[i]:<{colw[i]}}" for i in range(len(facts))))
-    for name, cells in rows:
-        print(f"{name:<{lblw}}  " +
-              "  ".join(f"{cells[i]:<{colw[i]}}" for i in range(len(cells))))
-    print()
-
-    # ---- pairwise verdicts --------------------------------------------------
-    print(f"link viability  (direct-or-fail; ??? firewalls assumed open)")
-    for x, y in itertools.combinations(facts, 2):
-        print(f"  {x.label} ↔ {y.label}")
-        if not default_policy(x.caps, y.caps):
-            print("    ✗ no shared segment — they won't peer by design "
-                  "(give them a common segment to change this)")
-            continue
-        seg = "anchor is reach-all *" if ("*" in x.segments or "*" in y.segments) \
-            else "share " + repr(",".join(sorted(
-                set(x.segments.split(",")) & set(y.segments.split(",")))) or "?")
-        print(f"    segment: ✓ {seg}")
-
-        x_dials_y = y.has_ep       # x can dial y iff y listens with an endpoint
-        y_dials_x = x.has_ep
-        print(f"    {x.label} → {y.label}: " + (f"dial {y.ep_str}" if x_dials_y
-              else f"can't — {y.label} is outbound-only / advertises no endpoint"))
-        print(f"    {y.label} → {x.label}: " + (f"dial {x.ep_str}" if y_dials_x
-              else f"can't — {x.label} is outbound-only / advertises no endpoint"))
-        if not (x_dials_y or y_dials_x):
-            print("    ✗ no dialable direction — the link can't form "
-                  "(both outbound-only)")
-            continue
-
-        self_col = x if x.is_self else (y if y.is_self else None)
-        other = y if x.is_self else (x if y.is_self else None)
-        if self_col is None:
-            print("    live: (neither is this host) — should link per the "
-                  "directory; run 'gw diagnose' from either for live confirmation")
-            continue
-        if other.hs is not None:
-            print(f"    live: ● LINKED (handshake {other.hs}s ago) — path open; "
-                  f"{other.label}'s firewall/router inferred OPEN")
-            # A LINKED peer can still silently blackhole full-size packets (a
-            # WG-over-cloud MTU mismatch): small pings pass, TLS handshakes hang.
-            if os.geteuid() == 0:
-                warn = _mtu_probe(cfg.wg_interface, other.addr,
-                                  _iface_mtu(cfg.wg_interface))
-                if warn:
-                    print(f"    ⚠ {warn}")
-            continue
-        print("    live: ○ no handshake yet")
-        self_fw = self_col.fw
-        if self_col.has_ep:
-            if self_fw.startswith("OPEN") or self_fw.startswith("open"):
-                print(f"    ⚠ our host firewall {self_fw} for udp/{port} — so the "
-                      f"block is NOT this host. If {other.label} can't reach us, "
-                      f"suspect an UPSTREAM router/NAT not forwarding udp/{port} to "
-                      f"this host, or {other.label}'s outbound/daemon.")
-            elif self_fw.startswith("CLOSED"):
-                print(f"    ⚠ our host firewall {self_fw} for udp/{port} — OPEN it "
-                      f"(create/join printed the exact rule).")
-            else:
-                print(f"    firewall udp/{port} here: {self_fw}")
-        if other.has_ep:
-            print(f"    ⚠ we can dial {other.label} at {other.ep_str} but it isn't "
-                  f"answering — check {other.label}'s host firewall + any upstream "
-                  f"port-forward for udp/{port}, and that its daemon is up "
-                  f"('gw diagnose' on {other.label} shows its host firewall).")
+    print("link viability  (direct-or-fail; ??? firewalls assumed open)")
+    for col_a, col_b in itertools.combinations(facts, 2):
+        _print_pair_verdict(col_a, col_b, cfg, port)
     return 0
 
 
