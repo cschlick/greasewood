@@ -302,7 +302,6 @@ def _own_identity(data_dir: "Path") -> "tuple[str | None, str | None]":
     """(id_pub_hex, overlay_addr) from the world-readable id_pub.hex — never the
     private key. Read-only commands (nodes, diagnose) use this so they work
     without sudo: the public id is enough to mark 'self' and derive the addr."""
-    from .keys import derive_addr
     try:
         h = (data_dir / "id_pub.hex").read_text().strip()
         return h, derive_addr(bytes.fromhex(h))
