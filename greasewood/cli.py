@@ -629,8 +629,7 @@ def cmd_invite(args) -> int:
                 "different name."
             )
         caps.append("hostname-pinned")
-    _seen: set[str] = set()
-    caps = [c for c in caps if not (c in _seen or _seen.add(c))]
+    caps = list(dict.fromkeys(caps))          # de-dup, order-preserving
     log.info("this token grants caps=%s%s", caps,
              f"; hostname pinned to {pinned_hostname!r}" if pinned_hostname else "")
 
@@ -1443,8 +1442,12 @@ def cmd_join(args) -> int:
 
     # hosts sync: on by default; --no-hosts-sync turns it off; a re-join keeps a
     # previously-disabled setting.
-    hosts_sync = not (getattr(args, "hosts_sync", None) is False
-                      or (prior is not None and not prior.hosts_sync))
+    if args.hosts_sync is False:            # --no-hosts-sync given
+        hosts_sync = False
+    elif prior is not None:                 # re-join → keep the prior setting
+        hosts_sync = prior.hosts_sync
+    else:
+        hosts_sync = True
     # Name domain: the mesh has exactly ONE, carried in the token (declared at
     # its anchor's create / rename-mesh). The joiner adopts it, period — a collision
     # with another membership already hard-refused before the door dance. A

@@ -102,16 +102,8 @@ class PortInUse(RuntimeError):
 def _wg_iface_on_port(port: int, exclude: str = "") -> "str | None":
     """The name of the WireGuard interface currently listening on `port`, if any
     (other than `exclude`). Best-effort — parses `wg show <iface> listen-port`."""
-    r = _run("wg", "show", "interfaces", check=False)
-    if r.returncode != 0:
-        return None
-    for name in r.stdout.split():
-        if name == exclude:
-            continue
-        p = _run("wg", "show", name, "listen-port", check=False)
-        if p.returncode == 0 and p.stdout.strip() == str(port):
-            return name
-    return None
+    return next((name for name, p in wg_interface_ports().items()
+                 if p == port and name != exclude), None)
 
 
 def wg_interface_ports() -> dict:

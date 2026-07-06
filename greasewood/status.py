@@ -57,6 +57,32 @@ def _record_segments(r) -> list[str]:
     return [c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")]
 
 
+# A link counts as "up" if it handshaked within this window — the same ~180s
+# WireGuard-refresh window reconcile uses for its `reachable` set.
+_LINK_FRESH_SECS = 180
+
+
+def _wg_key(record) -> str:
+    """A record's WireGuard public key as the base64 string live-peer dicts are
+    keyed by."""
+    return base64.b64encode(record.cred.wg_pub).decode()
+
+
+def _handshake_fresh(live_peer, now_epoch: int) -> bool:
+    """True if this live peer handshaked recently enough to count as a live link
+    (the single definition of 'up' the roster, live view, and diagnose share)."""
+    return bool(live_peer and live_peer.latest_handshake
+                and (now_epoch - live_peer.latest_handshake) <= _LINK_FRESH_SECS)
+
+
+def _parse_iso(iso: str) -> "dt.datetime | None":
+    """Parse an RFC-3339 'Z' timestamp, or None if it's absent/malformed."""
+    try:
+        return dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def _fmt_bytes(n) -> str:
     """Human byte size: 4200000 → '4.0M'."""
     x = float(n)
@@ -110,7 +136,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                 return ("— not a peer", "", "")
             if lp is None:
                 return ("not installed", "", "")
-            if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+            if _handshake_fresh(lp, now_epoch):
                 return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)}",
                         (rates or {}).get(r.cred.addr, ""),
                         latency.get(r.cred.addr, "…"))   # … = ping in flight
@@ -123,7 +149,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
             return ("— not a peer", "")
         if lp is None:
             return ("not installed", "")
-        if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+        if _handshake_fresh(lp, now_epoch):
             return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)} ago",
                     f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
         return ("○ no handshake", "")
@@ -143,7 +169,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
             "yes" if r.endpoints else "no",
             ",".join(_record_segments(r)) or "-", _exp(r),
         ))
-        lp = (live_peers or {}).get(base64.b64encode(r.cred.wg_pub).decode())
+        lp = (live_peers or {}).get(_wg_key(r))
         right_rows.append(_right(r, r.id_pub.hex() == own_id,
                                  default_policy(cfg.caps, r.cred.caps), lp))
 
@@ -340,11 +366,11 @@ def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
                     # distinct from the healthy rows.
                     targets.append(r.cred.addr)
                     continue
-                pub = base64.b64encode(r.cred.wg_pub).decode()
+                pub = _wg_key(r)
                 lp = live.get(pub)
                 if not lp:
                     continue
-                if lp.latest_handshake and (now_epoch - lp.latest_handshake) <= 180:
+                if _handshake_fresh(lp, now_epoch):
                     targets.append(r.cred.addr)
                     p = prev.get(pub)
                     if p and mono > p[2]:
@@ -388,11 +414,8 @@ def _sync_freshness(cfg) -> "str | None":
     last = syncmod.read_last_sync(cfg.data_dir)
     if last is None:
         return "never synced (is the daemon running / reaching the anchor?)"
-    try:
-        age = (dt.datetime.now(_UTC) - dt.datetime.fromisoformat(
-            last.replace("Z", "+00:00"))).total_seconds()
-    except (ValueError, AttributeError):
-        age = 0.0
+    last_dt = _parse_iso(last)
+    age = (dt.datetime.now(_UTC) - last_dt).total_seconds() if last_dt else 0.0
     if age > 120:
         return (f"⚠ directory synced {_fmt_ago(last)} — anchor unreachable? "
                 f"this view may be stale")
@@ -401,9 +424,8 @@ def _sync_freshness(cfg) -> "str | None":
 
 def _fmt_ago(iso: str) -> str:
     """A coarse 'time since' for a timestamp: seconds, then minutes, then >1h."""
-    try:
-        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    t = _parse_iso(iso)
+    if t is None:
         return "?"
     s = (dt.datetime.now(_UTC) - t).total_seconds()
     if s < 0:
@@ -417,9 +439,8 @@ def _fmt_ago(iso: str) -> str:
 
 def _fmt_until(iso: str) -> str:
     """Minutes until a future timestamp (for the open door's close time)."""
-    try:
-        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    t = _parse_iso(iso)
+    if t is None:
         return "?"
     s = (t - dt.datetime.now(_UTC)).total_seconds()
     if s <= 0:
@@ -672,7 +693,9 @@ def _anchor_clock_skew(root_url: str, timeout: float = 3.0) -> "float | None":
             raw = json.loads(resp.read()).get("now")
         if not raw:
             return None
-        anchor_now = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        anchor_now = _parse_iso(raw)
+        if anchor_now is None:
+            return None
         return (dt.datetime.now(_UTC) - anchor_now).total_seconds()
     except Exception:
         return None
@@ -896,10 +919,10 @@ def cmd_diagnose(args) -> int:
     def _hs_age(rec):
         if rec is None:
             return None
-        lp = live_peers.get(base64.b64encode(rec.cred.wg_pub).decode())
+        lp = live_peers.get(_wg_key(rec))
         if lp and lp.latest_handshake:
             age = now_epoch - lp.latest_handshake
-            return age if age <= 180 else None
+            return age if age <= _LINK_FRESH_SECS else None
         return None
 
     # Build a column of facts per node.
@@ -968,7 +991,6 @@ def cmd_diagnose(args) -> int:
 
     # ---- pairwise verdicts --------------------------------------------------
     print(f"link viability  (direct-or-fail; ??? firewalls assumed open)")
-    import itertools
     for x, y in itertools.combinations(facts, 2):
         print(f"  {x.label} ↔ {y.label}")
         if not default_policy(x.caps, y.caps):
