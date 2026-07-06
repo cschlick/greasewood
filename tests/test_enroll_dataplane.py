@@ -100,3 +100,48 @@ def test_failed_install_keeps_preexisting_registration(monkeypatch):
     _attempt(monkeypatch, ca, joiner)
     assert ca.forgotten == []                            # untouched
     assert joiner.id_pub_bytes in ca.registered
+
+
+def test_second_leg_bug_is_loud_but_never_fails_enrollment(monkeypatch, caplog):
+    """The second leg runs AFTER enrollment succeeded, so a bug in it must not
+    propagate (the accept loop would mis-count a completed enrollment as a
+    failed attempt). It's swallowed — but LOUDLY (ERROR + traceback), not as a
+    soft warning that reads like a peer hiccup. This is the class of bug that a
+    broad `except Exception` once hid as 'older node / laggy recv'."""
+    import logging
+    from greasewood import enroll
+    from greasewood.directory import Directory
+    ctx = EnrollContext(ca=None, directory=Directory(),
+                        node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
+    srv = EnrollServer(ctx, lambda: None)
+    monkeypatch.setattr(enroll, "_recv_msg", lambda conn: {"record": {}})
+
+    def boom(_d):
+        raise NameError("simulated bug in record handling")
+    monkeypatch.setattr("greasewood.wire.NodeRecord.from_dict", boom)
+
+    with caplog.at_level(logging.WARNING, logger="greasewood.enroll"):
+        srv._receive_first_record(object())          # must NOT raise
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("bug" in r.getMessage() for r in errors)      # loud, not a warning
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_second_leg_bad_record_is_quiet(monkeypatch, caplog):
+    """A malformed/unverifiable record (ValueError/KeyError) is the EXPECTED
+    peer-side failure — a quiet warning, not the loud bug path."""
+    import logging
+    from greasewood import enroll
+    from greasewood.directory import Directory
+    ctx = EnrollContext(ca=None, directory=Directory(),
+                        node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
+    srv = EnrollServer(ctx, lambda: None)
+    # missing "record" key → KeyError, the expected reject path
+    monkeypatch.setattr(enroll, "_recv_msg", lambda conn: {})
+    monkeypatch.setattr(enroll, "_send_msg", lambda conn, msg: None)
+
+    with caplog.at_level(logging.WARNING, logger="greasewood.enroll"):
+        srv._receive_first_record(object())          # must NOT raise
+    assert any(r.levelname == "WARNING" and "rejected" in r.getMessage()
+               for r in caplog.records)
+    assert not any(r.levelname == "ERROR" for r in caplog.records)

@@ -378,12 +378,23 @@ class EnrollServer:
         on the door tunnel means the control plane never listens on the door
         interface. Nothing here can fail the enrollment — the credential is
         already issued and the reply sent; an older node simply doesn't send a
-        record and publishes once its overlay tunnel is up."""
+        record and publishes once its overlay tunnel is up.
+
+        This runs AFTER the credential was issued and the reply sent, so nothing
+        here may propagate: the accept loop would mis-count a completed
+        enrollment as a failed attempt (door left open, success never set). So
+        every failure is swallowed — but the two kinds are told apart:
+        expected peer/IO/verification failures are quiet, an internal bug is
+        LOUD (traceback), never a soft warning that reads like a peer hiccup."""
         from .wire import NodeRecord
         try:
             rec_msg = _recv_msg(conn)
+        except (OSError, ValueError):
+            return              # older node / laggy or truncated recv — already succeeded
         except Exception:
-            return              # older node / laggy recv — enrollment already succeeded
+            log.error("door record recv hit an unexpected error — this is a bug; "
+                      "enrollment already succeeded", exc_info=True)
+            return
         try:
             record = NodeRecord.from_dict(rec_msg["record"])
             record.verify(self._get_ca_pubs(), self._get_revoked())
@@ -392,12 +403,17 @@ class EnrollServer:
                 self._directory.save(self._cache_path)
             log.info("door-published record for %s", record.hostname)
             _send_msg(conn, {"v": 1, "ok": True})
-        except (ValueError, KeyError) as e:
+        except (OSError, ValueError, KeyError) as e:
+            # A bad/unverifiable record or a dropped reply socket — expected.
             log.warning("door record publish rejected: %s", e)
             try:
                 _send_msg(conn, {"v": 1, "ok": False, "error": str(e)})
             except Exception:
                 pass
+        except Exception:
+            # A bug, not a bad record — loud, but still swallowed (see above).
+            log.error("door record publish hit an unexpected error — this is a "
+                      "bug; enrollment already succeeded", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
