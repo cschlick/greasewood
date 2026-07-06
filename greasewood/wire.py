@@ -1,5 +1,7 @@
 """
-greasewood.wire — the two signed objects that constitute the entire protocol.
+greasewood.wire — the signed objects that constitute the protocol.
+
+Two are mesh STATE (what a reader trusts):
 
 Credential (CA-signed, §5.1):
   id_pub, wg_pub, addr, hostname, caps, iat, exp → ca_sig covers all of these.
@@ -11,13 +13,15 @@ NodeRecord (self-signed by id_priv, §5.2):
   Carries the full credential so any reader can verify without talking to the CA.
   Fast path — a node re-signs when its endpoints/links change, no CA involvement.
 
-Both objects use json.dumps(sort_keys=True) as the canonical signing form.
-Binary fields (keys, signatures) are standard base64.
+Two are self-signed REQUESTS to the anchor (proof of id_priv possession +
+nonce/ts against replay): RenewRequest (renew a credential) and CertRequest
+(issue a TLS leaf cert). Enrollment itself is out of band over the transient
+WireGuard "door" (`gw invite` / `gw join`, see greasewood.door /
+greasewood.enroll); the control plane has no network-reachable enroll endpoint.
 
-RenewRequest is sent by enrolled nodes to the anchor for credential renewal.
-Enrollment is out of band over the transient WireGuard "door" (`gw invite` /
-`gw join`, see greasewood.door / greasewood.enroll); the control plane has no
-network-reachable enrollment endpoint.
+Canonical signing form for all four: json.dumps(sort_keys=True,
+separators=(",", ":")) — the exact bytes a signature covers, so any second
+implementation must reproduce them. Binary fields (keys, sigs) are base64.
 """
 from __future__ import annotations
 
