@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from .directory import Directory
+from .loop import Loop
 from .wire import NodeRecord
 
 log = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def push_record(seed_url: str, record: NodeRecord, timeout: float = 10.0) -> Non
         raise RuntimeError(data["error"])
 
 
-class SyncLoop:
+class SyncLoop(Loop):
     def __init__(
         self,
         directory: Directory,
@@ -83,6 +84,7 @@ class SyncLoop:
         on_renew_after: "Callable[[dt.datetime], None] | None" = None,
         expected_domain: "str | None" = None,
     ) -> None:
+        super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
         # each pull to detect a fleet rename (None disables the check).
         self._expected_domain = expected_domain
@@ -91,11 +93,9 @@ class SyncLoop:
         # the configured seeds (the anchor).
         self._get_seeds = get_seeds
         self._cache_path = cache_path
-        self._interval = interval
         # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
-        self._stop = threading.Event()
         self._last_skew_warn: float | None = None
         self._warned_domain: str | None = None
 
@@ -198,20 +198,8 @@ class SyncLoop:
         except OSError:
             pass
 
-    def run(self) -> None:
-        while not self._stop.wait(self._interval):
-            try:
-                self._pull_once()
-            except Exception as e:
-                log.error("sync loop error: %s", e)
-
-    def start(self) -> threading.Thread:
-        t = threading.Thread(target=self.run, name="sync", daemon=True)
-        t.start()
-        return t
-
-    def stop(self) -> None:
-        self._stop.set()
+    # Loop plumbing (run/start/stop) comes from Loop.
+    _tick = _pull_once
 
 
 def stamp_sync_path(data_dir) -> "Path":

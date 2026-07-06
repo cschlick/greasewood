@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from .directory import Directory
+from .loop import Loop
 from .keys import NodeKeys
 from .wire import Credential, NodeRecord, RenewRequest
 
@@ -58,7 +59,7 @@ def _do_renew(root_url: str, node_keys: NodeKeys, timeout: float = 15.0) -> Cred
     return Credential.from_dict(data)
 
 
-class RenewalLoop:
+class RenewalLoop(Loop):
     def __init__(
         self,
         node_keys: NodeKeys,
@@ -71,6 +72,8 @@ class RenewalLoop:
         renew_spread: float = 2.0,
         aliases: "list[str] | None" = None,
     ) -> None:
+        # interval is unused (run() is event-driven — see the module docstring)
+        super().__init__(0.0, "renewal")
         self._keys = node_keys
         self._directory = directory
         # A callable returning the anchor URL to renew against (the configured anchor).
@@ -80,7 +83,6 @@ class RenewalLoop:
         self._endpoints = endpoints
         self._aliases = list(aliases or [])
         self._cache_path = cache_path
-        self._stop = threading.Event()
         # Fleet-wide renew hint (see gw renew-all): setting _renew_now wakes the
         # loop early. renew_spread is the jitter window PER NODE — the actual
         # window scales with the mesh size (window = N * renew_spread) so a
@@ -174,10 +176,7 @@ class RenewalLoop:
                     if self._stop.wait(backoff):
                         return
 
-    def start(self) -> threading.Thread:
-        t = threading.Thread(target=self.run, name="renewal", daemon=True)
-        t.start()
-        return t
+    # start() comes from Loop; run() is overridden above (event-driven).
 
     def stop(self) -> None:
         self._stop.set()

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable
 
 from .keys import atomic_write
+from .loop import Loop
 
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
@@ -316,12 +317,13 @@ def _grace_dual_names(dns: list, current_domain: str, old_domain: str) -> list:
     return sorted(out)
 
 
-class CertRenewalLoop:
+class CertRenewalLoop(Loop):
     """Re-issue each managed cert at ~half its lifetime and run its reload_cmd."""
 
     def __init__(self, node_keys, get_anchor_url: "Callable[[], str]", data_dir,
                  mesh_domain: "str | None" = None,
                  check_interval: float = 3600.0) -> None:
+        super().__init__(check_interval, "cert-renewal")
         self._keys = node_keys
         self._get_anchor_url = get_anchor_url
         self._data_dir = data_dir
@@ -329,8 +331,6 @@ class CertRenewalLoop:
         # certs must cover BOTH the new and the old name so TLS clients dialing
         # either verify (the hosts block already resolves both during grace).
         self._mesh_domain = mesh_domain
-        self._check_interval = check_interval
-        self._stop = threading.Event()
 
     def _run_reload(self, reload_cmd) -> None:
         if not reload_cmd:
@@ -356,8 +356,7 @@ class CertRenewalLoop:
             if not entry.get("auto_renew", True):
                 continue
             files = entry.get("files")            # profile-placed cert?
-            crt_path = (_profile_cert_path(files) if files
-                        else entry_paths(entry)[1])
+            crt_path = entry_cert_path(entry)
             if not crt_path or not cert_due_for_renewal(crt_path):
                 continue
             dns = entry.get("dns", [])
@@ -383,17 +382,7 @@ class CertRenewalLoop:
                 log.warning("TLS cert auto-renewal for %r failed: %s",
                             entry["name"], e)
 
-    def run(self) -> None:
-        while not self._stop.wait(self._check_interval):
-            try:
-                self.check_all()
-            except Exception as e:
-                log.error("cert renewal loop error: %s", e)
-
-    def start(self) -> threading.Thread:
-        t = threading.Thread(target=self.run, name="cert-renewal", daemon=True)
-        t.start()
-        return t
-
-    def stop(self) -> None:
-        self._stop.set()
+    # run/start/stop come from Loop; the tick keeps its public name
+    # (check_all is also the "renew everything due, now" API).
+    def _tick(self) -> None:
+        self.check_all()

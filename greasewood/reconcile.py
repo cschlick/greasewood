@@ -23,6 +23,7 @@ import time
 from typing import Callable
 
 from .directory import Directory
+from .loop import Loop
 from . import hosts
 from . import audit
 from . import wg as wgmod
@@ -298,7 +299,7 @@ def reconcile_once(
     return trusted, reachable
 
 
-class ReconcileLoop:
+class ReconcileLoop(Loop):
     def __init__(
         self,
         iface: str,
@@ -316,6 +317,7 @@ class ReconcileLoop:
         on_reachable: "Callable[[list[str]], None] | None" = None,
         reachable_min_interval: float = 30.0,
     ) -> None:
+        super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
         # live, the OLD domain's names keep resolving alongside the new; at
         # the deadline the old block + marker retire.
@@ -340,7 +342,6 @@ class ReconcileLoop:
         # restart to pick up a revocation.
         self._get_ca_pubs = get_ca_pubs
         self._get_revoked = get_revoked
-        self._interval = interval
         self._policy = policy
         # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
         self._hosts_domain = hosts_domain
@@ -355,7 +356,6 @@ class ReconcileLoop:
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
-        self._stop = threading.Event()
 
     def _maybe_publish_reachable(self, reachable: "list[str]") -> None:
         """Fire on_reachable when the live-link set changes AND at least
@@ -375,18 +375,8 @@ class ReconcileLoop:
         except Exception as e:
             log.warning("publishing reachable set failed: %s", e)
 
-    def run(self) -> None:
-        # Catch-all like the other loops: an exception escaping _cycle (e.g. a
-        # subprocess failure in the interface self-heal, before _cycle's inner
-        # try) must not kill the reconcile thread — a dead reconcile loop is a
-        # frozen data plane under a healthy-looking daemon.
-        while not self._stop.wait(self._interval):
-            try:
-                self._cycle()
-            except Exception as e:
-                log.error("reconcile loop error: %s", e)
 
-    def _cycle(self) -> None:
+    def _tick(self) -> None:
         if self._ensure_iface is not None and not wgmod.interface_exists(self._iface):
             log.warning("mesh interface %s is MISSING — recreating it. Something "
                         "deleted it while the daemon was running (a purge or "
@@ -447,10 +437,4 @@ class ReconcileLoop:
             marker.unlink(missing_ok=True)
             log.info("rename grace over — retired the old *.%s names", old_domain)
 
-    def start(self) -> threading.Thread:
-        t = threading.Thread(target=self.run, name="reconcile", daemon=True)
-        t.start()
-        return t
-
-    def stop(self) -> None:
-        self._stop.set()
+    # run/start/stop come from Loop.

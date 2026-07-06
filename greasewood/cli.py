@@ -1047,9 +1047,47 @@ def cmd_rename_mesh(args) -> int:
     return 0
 
 
+def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
+                          aliases=None, reachable=None, push_to=(),
+                          quiet_push=False):
+    """Re-sign this node's record (seq+1) carrying forward whatever isn't
+    overridden, save the cache, and best-effort push. Renewal, rename,
+    config-refresh, and the reachable-set publish ALL go through here — the
+    directory is the single seq source, so they compose with no shared state.
+    Returns the new record, or None if there's nothing to re-sign yet (no
+    record and no fresh credential supplied)."""
+    from .wire import NodeRecord
+    from .sync import push_record
+    existing = directory.get(keys.id_pub_hex)
+    if existing is None and cred is None:
+        return None
+
+    def carry(override, attr, default):
+        if override is not None:
+            return list(override)
+        return list(getattr(existing, attr)) if existing else default
+
+    record = NodeRecord(
+        id_pub=keys.id_pub_bytes,
+        seq=(existing.seq + 1) if existing else 1,
+        endpoints=carry(endpoints, "endpoints", list(cfg.endpoints)),
+        cred=cred if cred is not None else existing.cred,
+        aliases=carry(aliases, "aliases", _config_aliases(cfg)),
+        reachable=carry(reachable, "reachable", []),
+    ).sign(keys.id_priv)
+    directory.put(record)
+    directory.save(cfg.dir_cache_path)
+    for url in push_to:
+        try:
+            push_record(url, record)
+        except Exception as e:
+            (log.debug if quiet_push else log.warning)(
+                "published locally but push to %s failed (will sync): %s", url, e)
+    return record
+
+
 def cmd_join(args) -> int:
     _require_root("join")
-    import struct
     from .keys import NodeKeys
     from .wire import Credential, NodeRecord
     from .directory import Directory
@@ -1269,32 +1307,12 @@ def cmd_join(args) -> int:
         "wg_pub": node_keys.wg_pub_b64,
         "hostname": hostname,
     }
-    req_body = json.dumps(req, separators=(",", ":")).encode()
-
-    def _recv_framed(sock):
-        hdr = b""
-        while len(hdr) < 4:
-            chunk = sock.recv(4 - len(hdr))
-            if not chunk:
-                raise ConnectionError("connection closed")
-            hdr += chunk
-        length = struct.unpack(">I", hdr)[0]
-        raw = b""
-        while len(raw) < length:
-            chunk = sock.recv(length - len(raw))
-            if not chunk:
-                raise ConnectionError("connection closed")
-            raw += chunk
-        return json.loads(raw)
-
-    def _send_framed(sock, obj):
-        b = json.dumps(obj, separators=(",", ":")).encode()
-        sock.sendall(struct.pack(">I", len(b)) + b)
+    from .door import recv_msg as _recv_framed, send_msg as _send_framed
 
     # Leave the connection OPEN after the response — we send our signed record
     # back on it as a second leg (see below).
     try:
-        conn.sendall(struct.pack(">I", len(req_body)) + req_body)
+        _send_framed(conn, req)
         resp = _recv_framed(conn)
     except Exception as e:
         conn.close()
@@ -2210,22 +2228,8 @@ def cmd_rename_node(args) -> int:
 
     # Re-sign our record with the new name + fresh credential and publish it, so
     # peers and /etc/hosts pick up the rename promptly.
-    directory = Directory.load(cfg.dir_cache_path)
-    existing = directory.get(keys.id_pub_hex)
-    seq = (existing.seq + 1) if existing else 1
-    endpoints = list(existing.endpoints) if existing else list(cfg.endpoints)
-    aliases = list(existing.aliases) if existing else _config_aliases(cfg)
-    record = NodeRecord(
-        id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        cred=cred, aliases=aliases,
-    ).sign(keys.id_priv)
-    directory.put(record)
-    directory.save(cfg.dir_cache_path)
-    from .sync import push_record
-    try:
-        push_record(anchor_url, record)
-    except Exception as e:
-        log.warning("published locally but push to anchor failed (will sync): %s", e)
+    _republish_own_record(cfg, keys, Directory.load(cfg.dir_cache_path),
+                          cred=cred, push_to=[anchor_url])
 
     # Persist the new name in config.
     text = cfg_path.read_text()
@@ -2405,26 +2409,11 @@ def cmd_run(args) -> int:
 
     def _publish_reachable(reachable: list) -> None:
         # Re-sign our record with the new live-link set and push it, so the
-        # fleet sees the edge change. Reads the current record from the directory
-        # and bumps seq (composing cleanly with renewal, which preserves
-        # reachable the same way) — the directory is the single seq source.
-        from .wire import NodeRecord
-        cur = directory.get(keys.id_pub_hex)
-        if cur is None:
-            return
-        new = NodeRecord(
-            id_pub=keys.id_pub_bytes, seq=cur.seq + 1,
-            endpoints=list(cur.endpoints), cred=cur.cred,
-            aliases=list(cur.aliases), reachable=list(reachable),
-        ).sign(keys.id_priv)
-        directory.put(new)
-        directory.save(cfg.dir_cache_path)
-        for seed in cfg.seeds:
-            try:
-                push_record(seed, new)
-            except Exception as e:
-                log.debug("reachable push to %s failed: %s", seed, e)
-        log.debug("published reachable set (%d live links)", len(reachable))
+        # fleet sees the edge change. quiet_push: the anchor being down already
+        # warns via the sync loop; a 30s-cadence publish shouldn't pile on.
+        if _republish_own_record(cfg, keys, directory, reachable=reachable,
+                                 push_to=cfg.seeds, quiet_push=True):
+            log.debug("published reachable set (%d live links)", len(reachable))
 
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
@@ -2453,16 +2442,9 @@ def cmd_run(args) -> int:
     own_record = directory.get(keys.id_pub_hex)
     if own_record and (list(own_record.endpoints) != list(eff_endpoints)
                        or sorted(own_record.aliases) != sorted(want_aliases)):
-        from .wire import NodeRecord
-        own_record = NodeRecord(
-            id_pub=keys.id_pub_bytes,
-            seq=own_record.seq + 1,
-            endpoints=eff_endpoints,
-            cred=own_record.cred,
-            aliases=want_aliases,
-        ).sign(keys.id_priv)
-        directory.put(own_record)
-        directory.save(cfg.dir_cache_path)
+        own_record = _republish_own_record(cfg, keys, directory,
+                                           endpoints=eff_endpoints,
+                                           aliases=want_aliases)
         log.info("updated own record (endpoints=%s, aliases=%s)",
                  eff_endpoints, want_aliases)
 
@@ -2689,23 +2671,10 @@ def cmd_renew(args) -> int:
         sys.exit(f"renew failed: {e}\n(is the mesh up and the anchor reachable? "
                  f"renewal goes over the overlay)")
 
-    # Re-publish our record with the fresh credential, keeping our current seq+1,
-    # endpoints — highest-seq-wins means peers adopt this promptly.
-    directory = Directory.load(cfg.dir_cache_path)
-    existing = directory.get(keys.id_pub_hex)
-    seq = (existing.seq + 1) if existing else 1
-    endpoints = list(existing.endpoints) if existing else list(cfg.endpoints)
-    aliases = list(existing.aliases) if existing else _config_aliases(cfg)
-    record = NodeRecord(
-        id_pub=keys.id_pub_bytes, seq=seq, endpoints=endpoints,
-        cred=cred, aliases=aliases,
-    ).sign(keys.id_priv)
-    directory.put(record)
-    directory.save(cfg.dir_cache_path)
-    try:
-        push_record(cfg.root_url, record)
-    except Exception as e:
-        log.warning("published locally but push to anchor failed (will sync): %s", e)
+    # Re-publish our record with the fresh credential — highest-seq-wins means
+    # peers adopt this promptly.
+    _republish_own_record(cfg, keys, Directory.load(cfg.dir_cache_path),
+                          cred=cred, push_to=[cfg.root_url])
 
     print(f"renewed — credential now expires {cred.exp:%Y-%m-%d %H:%M UTC}")
 
