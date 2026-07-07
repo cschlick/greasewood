@@ -30,10 +30,10 @@ def _simulate_reboot(cid: str) -> None:
     # Stop the daemon. The [g]w trick keeps pkill from matching its own cmdline.
     pexec(cid, "pkill", "-f", "[g]w.*run", check=False)
     time.sleep(2)
-    for iface in ("gw_testmesh", "gw-door"):
+    for iface in ("gw-testmesh", "gw-door"):
         pexec(cid, "ip", "link", "del", iface, check=False)
     # Sanity: the interface is really gone.
-    assert pexec(cid, "ip", "link", "show", "gw_testmesh", check=False).returncode != 0
+    assert pexec(cid, "ip", "link", "show", "gw-testmesh", check=False).returncode != 0
 
 
 def _start_daemon(cid: str) -> None:

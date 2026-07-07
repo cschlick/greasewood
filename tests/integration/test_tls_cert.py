@@ -172,9 +172,10 @@ def test_node_requests_and_uses_tls_cert(gw_anchor, gw_image, gw_network):
         h = pexec(node["cid"], "python3", "-c", _TLS_HANDSHAKE)
         assert "HANDSHAKE_OK" in h.stdout, f"TLS handshake failed: {h.stdout}\n{h.stderr}"
 
-        # cert-status shows it.
-        st = pexec(node["cid"], "gw", "cert-status", "--out-dir", "/tmp/tls")
-        assert "postgres.crt" in st.stdout and "postgres.dbnode.testmesh.internal" in st.stdout, st.stdout
+        # cert-status shows it (manifest-based: no --out-dir flag anymore).
+        st = pexec(node["cid"], "gw", "cert-status")
+        assert "postgres" in st.stdout \
+            and "postgres.dbnode.testmesh.internal" in st.stdout, st.stdout
 
         # A node WITHOUT the tls cap is refused. tls is on by default now, so opt
         # out explicitly with --caps "" (empty overrides the anchor's default_caps).

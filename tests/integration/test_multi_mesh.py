@@ -146,13 +146,13 @@ def test_second_mesh_auto_slots(gw_anchor, gw_image, gw_network):
         # Slot 2 got the derived names + the mesh's OWN domain (carried in the
         # token — a mesh has ONE domain everywhere; no local aliasing exists).
         cfg2 = pexec(node, "cat", "/etc/greasewood_anchorcmesh.toml").stdout
-        assert 'interface = "gw_anchorcmesh"' in cfg2
+        assert 'interface = "gw-anchorcmesh"' in cfg2
         assert "listen_port = 51910" in cfg2
         assert 'mesh_domain = "anchorcmesh.internal"' in cfg2
         assert f'overlay_prefix = "{PREFIX_C}"' in cfg2
         assert 'data_dir = "/var/lib/greasewood_anchorcmesh"' in cfg2
         cfg1 = pexec(node, "cat", "/etc/greasewood_testmesh.toml").stdout
-        assert 'interface = "gw_testmesh"' in cfg1 and "listen_port = 51900" in cfg1
+        assert 'interface = "gw-testmesh"' in cfg1 and "listen_port = 51900" in cfg1
         assert 'mesh_domain = "testmesh.internal"' in cfg1        # adopted from token
 
         # Both daemons up; both overlays reachable.
