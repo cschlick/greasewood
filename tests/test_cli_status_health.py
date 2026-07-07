@@ -103,8 +103,8 @@ def test_sync_stamp_written_on_successful_pull(tmp_path, monkeypatch):
 
 def test_split_roster_live_links(tmp_path, monkeypatch, capsys):
     """With root + live WireGuard state, the roster's right side shows THIS
-    node's data links: linked peers with traffic, a non-peer (no shared
-    segment), and a peer with no handshake."""
+    node's data links: linked peers with traffic, a non-peer (the policy
+    grants no tunnel), and a peer with no handshake."""
     import base64
     import os
     import time
@@ -115,7 +115,7 @@ def test_split_roster_live_links(tmp_path, monkeypatch, capsys):
 hostname = "me"
 data_dir = "{tmp_path}"
 role = "node"
-caps = ["segment:prod"]
+caps = ["role:prod"]
 [network]
 interface = "gw-mesh"
 seeds = []
@@ -126,7 +126,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
 
     def rec(k, name, segs):
         cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
-                          hostname=name, caps=[f"segment:{s}" for s in segs],
+                          hostname=name, caps=[f"role:{s}" for s in segs],
                           iat=now, exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
         return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
                           cred=cred).sign(k.id_priv)
@@ -134,10 +134,16 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     linked, other, silent = NodeKeys.generate(), NodeKeys.generate(), NodeKeys.generate()
     d = Directory()
     d.put(rec(keys, "me", ["prod"]))
-    d.put(rec(linked, "db01", ["prod"]))          # shared segment → peer, and linked
-    d.put(rec(other, "laptop", ["dev"]))          # different segment → not a peer
+    d.put(rec(linked, "db01", ["prod"]))          # granted prod↔prod → peer, linked
+    d.put(rec(other, "laptop", ["dev"]))          # no grant covers dev → not a peer
     d.put(rec(silent, "old", ["prod"]))           # peer but no handshake
     d.save(tmp_path / "directory.json")
+    # A policy that grants only prod↔prod — what makes laptop a non-peer under
+    # the derived topology (with no policy, everyone would peer).
+    import json as _json
+    (tmp_path / "policy.json").write_text(_json.dumps({
+        "seq": 1, "ca_sig": "",
+        "grants": [{"from": ["prod"], "to": ["prod"], "ports": ["*"]}]}))
 
     nowe = int(time.time())
     live = {

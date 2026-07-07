@@ -15,7 +15,7 @@ no SSH, no HTTP on the underlay:
 
 Everything else groups around that: observe (watch, diagnose, narrate, config,
 firewall), administer nodes on the anchor (invite/close-door, revoke, set-caps,
-set-segments, renew-all), maintain this node (renew, rename-node, rename-mesh,
+set-roles, renew-all), maintain this node (renew, rename-node, rename-mesh,
 purge), TLS service certs (cert-request/-profiles/-status/-remove), and anchor
 lifecycle (anchor-promote, anchor-backup, anchor-restore).
 """
@@ -362,9 +362,9 @@ def cmd_create(args) -> int:
     hostname = args.hostname or socket.gethostname().split(".")[0] or "anchor"
     listen_port = args.listen_port if args.listen_port is not None else _free_listen_port()
     control_port = args.control_port
-    # The anchor must reach every segment (it serves the control plane + door), so
-    # it carries the reach-all wildcard segment. Plus any ability caps (--caps).
-    caps = ["segment:*"]
+    # The anchor must reach every node (it serves the control plane + door), so
+    # it carries the reach-all wildcard role. Plus any ability caps (--caps).
+    caps = ["role:*"]
     if args.caps:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     ttl = _parse_duration(args.credential_ttl)
@@ -592,20 +592,20 @@ def cmd_invite(args) -> int:
 
     window = cfg.door_window
 
-    # The anchor decides caps + segments HERE and issues them to whoever redeems the
+    # The anchor decides caps + roles HERE and issues them to whoever redeems the
     # token — the joiner does not choose (no self-assertion). They're stored in
     # the door window; the enroll server issues from them, ignoring the joiner's.
-    #   segments (segment:<name>) control who-talks-to-whom.
+    #   roles (role:<name>) are the grant-table vocabulary (who-talks-to-whom).
     #   --caps grants abilities, e.g. tls.
     # When a flag is omitted, fall back to the anchor's configured defaults for new
-    # nodes ([anchor] default_segments / default_caps, read fresh each invite — so
-    # editing them changes what future enrollments get). --segments/--caps
+    # nodes ([anchor] default_roles / default_caps, read fresh each invite — so
+    # editing them changes what future enrollments get). --roles/--caps
     # override for this one token.
-    if args.segments is not None:
-        segments = [s.strip() for s in args.segments.split(",") if s.strip()]
+    if args.roles is not None:
+        roles = [r.strip() for r in args.roles.split(",") if r.strip()]
     else:
-        segments = list(cfg.default_segments)
-    caps = ["segment:" + s for s in segments]
+        roles = list(cfg.default_roles)
+    caps = ["role:" + r for r in roles]
     if args.caps is not None:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     else:
@@ -1292,7 +1292,7 @@ def cmd_join(args) -> int:
         # Default to the machine's short hostname (first label, no domain).
         hostname = socket.gethostname().split(".")[0] or "node"
 
-    # Caps/segments are NOT chosen here. The anchor decides them at `gw invite` and
+    # Caps/roles are NOT chosen here. The anchor decides them at `gw invite` and
     # binds them into the credential issued over the door; we read them back
     # from that credential below and write them to config. (No self-assertion:
     # whatever a joiner might request is ignored by the anchor.)
@@ -1501,7 +1501,7 @@ def cmd_join(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_revoke(args) -> int:
-    # Same anchor-only guard as set-caps/set-segments: explicit role check first,
+    # Same anchor-only guard as set-caps/set-roles: explicit role check first,
     # then ca_key_file + CA load — so a non-anchor fails with one clear message and
     # never reaches a traceback.
     cfg, ca = _load_anchor_ca(args, "revoke")
@@ -1520,7 +1520,7 @@ def cmd_revoke(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# set-caps / set-segments — change an enrolled node's caps on the anchor
+# set-caps / set-roles — change an enrolled node's caps on the anchor
 # ---------------------------------------------------------------------------
 
 def _load_anchor_ca(args, cmd: str):
@@ -1577,26 +1577,26 @@ def cmd_set_caps(args) -> int:
     cfg, ca = _load_anchor_ca(args, "set-caps")
     id_pub, name = _resolve_node(ca, cfg, args.node)
     caps = [c.strip() for c in args.caps.split(",") if c.strip()]
-    if not any(c.startswith("segment:") for c in caps):
-        log.warning("caps %s include no segment — %r will peer with no one "
-                    "(add e.g. segment:mesh)", caps, name)
+    if not any(c.startswith("role:") for c in caps):
+        log.warning("caps %s include no role: tag — once a grant table is "
+                    "applied, %r will reach only the anchor (add e.g. "
+                    "role:mesh)", caps, name)
     ca.set_caps(id_pub, caps)
     print(f"caps for {name} ({id_pub.hex()}) → {caps}")
     print(_NEXT_RENEWAL_NOTE)
     return 0
 
 
-def cmd_set_segments(args) -> int:
-    cfg, ca = _load_anchor_ca(args, "set-segments")
+def cmd_set_roles(args) -> int:
+    cfg, ca = _load_anchor_ca(args, "set-roles")
     id_pub, name = _resolve_node(ca, cfg, args.node)
     _, current = ca.node_info(id_pub)
-    # Replace only the segment: tags; keep tls/hostname-pinned and anything else.
-    kept = [c for c in current if not c.startswith("segment:")]
-    segs = [s.strip() for s in args.segments.split(",") if s.strip()] or ["mesh"]
-    segments = ["segment:" + s for s in segs]
-    caps = kept + segments
+    # Replace only the role: tags; keep tls/hostname-pinned and anything else.
+    kept = [c for c in current if not c.startswith("role:")]
+    names = [r.strip() for r in args.roles.split(",") if r.strip()] or ["mesh"]
+    caps = kept + ["role:" + r for r in names]
     ca.set_caps(id_pub, caps)
-    print(f"segments for {name} ({id_pub.hex()}) → {segs}  (caps now {caps})")
+    print(f"roles for {name} ({id_pub.hex()}) → {names}  (caps now {caps})")
     print(_NEXT_RENEWAL_NOTE)
     return 0
 
@@ -1708,11 +1708,11 @@ def cmd_anchor_promote(args) -> int:
     # this anchor accepts the credentials it issues.
     trusted = list(dict.fromkeys([*cfg.ca_pubs_hex, ca_pub_hex]))
 
-    # An anchor must reach every segment — ensure the wildcard segment. (Its own
+    # An anchor must reach every node — ensure the wildcard role. (Its own
     # credential picks this up on the next renewal under the new CA.)
     anchor_caps = list(cfg.caps)
-    if "segment:*" not in anchor_caps:
-        anchor_caps.append("segment:*")
+    if "role:*" not in anchor_caps:
+        anchor_caps.append("role:*")
 
     cfg_path.write_text(render_config(
         hostname=cfg.hostname, data_dir=cfg.data_dir, role="anchor",
@@ -2316,13 +2316,13 @@ def cmd_run(args) -> int:
 
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
-    # Peering is decided by shared segment:<name> tags. A caps list without one
-    # (e.g. a hand-written legacy "mesh") peers with NOBODY and fails silently
-    # per-record at reconcile — say it loudly once, up front.
-    if not any(c.startswith("segment:") for c in cfg.caps):
-        log.warning("[node] caps = %s contains no segment:<name> tag — this "
-                    "node will not peer with anyone (add e.g. segment:mesh)",
-                    cfg.caps)
+    # Roles are the grant-table vocabulary. With no policy applied everyone
+    # peers regardless; once one exists, a node with no role: tag reaches only
+    # the anchor — worth saying once, up front.
+    if not any(c.startswith("role:") for c in cfg.caps):
+        log.warning("[node] caps = %s contains no role:<name> tag — once a "
+                    "grant table is applied, this node will reach only the "
+                    "anchor (add e.g. role:mesh)", cfg.caps)
 
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     log.info("overlay addr: %s", keys.addr)
@@ -2372,7 +2372,7 @@ def cmd_run(args) -> int:
     # out), so acting on the anchor's fleet renew hint needs no reordering.
     # The live grant table (roles → roles : ports) drives tunnel existence.
     # Loaded from last-known-good on disk; the sync loop offers fresh tables
-    # (CA-verified, seq-monotonic). No table → legacy segment peering.
+    # (CA-verified, seq-monotonic). No table → flat mesh (everyone peers).
     from .policy import GrantPolicy, POLICY_BASENAME
     grant_policy = GrantPolicy(cache_path=cfg.data_dir / POLICY_BASENAME,
                                get_ca_pubs=get_ca_pubs)
@@ -2693,7 +2693,7 @@ def cmd_policy(args) -> int:
 
     for tag in sorted(polmod.unmatched_tags(grants, records)):
         print(f"  ⚠ grant names {tag!r} but NO current node holds role:{tag} "
-              f"or segment:{tag} — typo? (it grants nothing until a node does)")
+              f"— typo? (it grants nothing until a node holds it)")
 
     created, removed = polmod.tunnel_delta(
         records, old_table.grants if old_table else None, grants)
@@ -2726,8 +2726,8 @@ def cmd_renew(args) -> int:
     Force an immediate credential renewal for THIS node. Normally the daemon
     renews on its own (~half the credential TTL); this fetches a fresh credential
     from the anchor right now, re-publishes the record so peers stop serving the old
-    expiry, and adopts any caps/segments the anchor changed in the meantime (so
-    `gw set-caps` / `gw set-segments` take effect immediately instead of at the
+    expiry, and adopts any caps/roles the anchor changed in the meantime (so
+    `gw set-caps` / `gw set-roles` take effect immediately instead of at the
     next scheduled renewal).
 
     Run it ON THE NODE: renewal is self-signed by the node's id_priv, so the anchor
@@ -2764,7 +2764,7 @@ def cmd_renew(args) -> int:
 
     print(f"renewed — credential now expires {cred.exp:%Y-%m-%d %H:%M UTC}")
 
-    # Adopt caps/segments if the anchor changed them since we last renewed. Editing
+    # Adopt caps/roles if the anchor changed them since we last renewed. Editing
     # this line grants nothing on its own (peers enforce against the credential),
     # but the daemon reads its LOCAL side of the peering policy from here, so we
     # keep it in sync with what the CA just issued.
@@ -3134,7 +3134,7 @@ def main(argv=None) -> int:
                     help="full domain override (default: <name>.internal)")
     sp.add_argument("--caps", default="",
                     help="extra ability caps for the anchor (it always carries "
-                         "segment:* to reach every segment), e.g. 'tls'")
+                         "role:* to reach every node), e.g. 'tls'")
     sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
@@ -3152,17 +3152,16 @@ def main(argv=None) -> int:
                     help="pin the invited node's mesh hostname (the anchor fixes it; "
                          "the joiner can't choose or later `gw rename-node` it). Omit "
                          "to let the node name itself at join.")
-    sp.add_argument("--segments", default=None, metavar="S1,S2",
-                    help="segments the invited node belongs to (comma-sep). The "
-                         "anchor decides this — the joiner cannot. A node peers only "
-                         "with nodes sharing a segment. Omitted → the anchor's "
-                         "[anchor] default_segments (ships as 'mesh', the flat default "
-                         "pool). Naming other segments isolates the node; list "
-                         "several to bridge them.")
+    sp.add_argument("--roles", default=None, metavar="R1,R2",
+                    help="roles the invited node holds (comma-sep) — the grant-table "
+                         "vocabulary (`gw policy`). The anchor decides this; the "
+                         "joiner cannot. Omitted → the anchor's [anchor] "
+                         "default_roles (ships as 'mesh'). With no policy applied "
+                         "every node peers regardless; grants reference these roles.")
     sp.add_argument("--caps", default=None,
                     help="ability caps granted to the invited node (comma-sep), "
                          "e.g. 'tls'. Omitted → the anchor's [anchor] default_caps "
-                         "(ships as 'tls'). Segmentation is set with --segments.")
+                         "(ships as 'tls'). Roles are set with --roles.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay address, v6 or v4, to embed in the token (auto-detected if omitted)")
     sp.add_argument("--standing", action="store_true",
@@ -3236,9 +3235,10 @@ def main(argv=None) -> int:
     sp.add_argument("--snapshot", action="store_true",
                     help="print a single static view and exit (no root needed) — "
                          "for piping/logging. Auto-used when there's no terminal.")
-    sp.add_argument("--by-segment", action="store_true",
-                    help="group into one table per segment (a node appears under "
-                         "each of its segments; segment:* nodes appear under all)")
+    sp.add_argument("--by-role", dest="by_role", action="store_true",
+                    help="group into one table per role (a node appears under "
+                         "each of its roles; the anchor appears under all) with "
+                         "per-group connectivity health")
     sp.add_argument("--interval", type=float, default=2.0, metavar="SECS",
                     help="live refresh interval (default 2s; min 1s)")
     sp.set_defaults(fn=cmd_watch)
@@ -3264,7 +3264,7 @@ def main(argv=None) -> int:
     sp = sub.add_parser(
         "diagnose",
         help="pairwise link diagnosis: compare up to two nodes + the anchor side "
-             "by side and explain whether a tunnel can form (segments, "
+             "by side and explain whether a tunnel can form (policy/roles, "
              "reachability, firewall directionality). No args = this host ↔ anchor.")
     sp.add_argument("nodes", nargs="*", metavar="NODE",
                     help="0, 1, or 2 node hostnames. none → this host ↔ anchor; "
@@ -3284,17 +3284,17 @@ def main(argv=None) -> int:
                         help="[sudo, anchor] change an enrolled node's caps (effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("caps", help="comma-separated full tag set, e.g. "
-                                 "'segment:prod,tls' (replaces the node's current caps)")
+                                 "'role:web,tls' (replaces the node's current caps)")
     sp.set_defaults(fn=cmd_set_caps)
 
-    # set-segments (anchor) — change only a node's segments
-    sp = sub.add_parser("set-segments",
-                        help="[sudo, anchor] change an enrolled node's segments "
+    # set-roles (anchor) — change only a node's roles
+    sp = sub.add_parser("set-roles",
+                        help="[sudo, anchor] change an enrolled node's roles "
                              "(effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
-    sp.add_argument("segments", help="comma-separated segments, e.g. 'prod,web' "
-                                     "(replaces segment tags; keeps tls; empty = mesh default)")
-    sp.set_defaults(fn=cmd_set_segments)
+    sp.add_argument("roles", help="comma-separated roles, e.g. 'web,worker' "
+                                  "(replaces role: tags; keeps tls; empty = mesh default)")
+    sp.set_defaults(fn=cmd_set_roles)
 
     # policy — the grant table (roles → roles : ports; derives the topology)
     sp = sub.add_parser("policy",
@@ -3424,7 +3424,7 @@ def main(argv=None) -> int:
     # renew
     sp = sub.add_parser("renew",
                         help="[sudo] force an immediate credential renewal for THIS "
-                             "node (applies an anchor-side set-caps/set-segments now, "
+                             "node (applies an anchor-side set-caps/set-roles now, "
                              "instead of waiting ~half the TTL)")
     sp.set_defaults(fn=cmd_renew)
 

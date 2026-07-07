@@ -36,7 +36,7 @@ def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
 @pytest.mark.parametrize("cmd,fn", [
     ("revoke", "cmd_revoke"),
     ("set-caps", "cmd_set_caps"),
-    ("set-segments", "cmd_set_segments"),
+    ("set-roles", "cmd_set_roles"),
     ("renew-all", "cmd_renew_all"),
     ("cert-request", "cmd_cert_request"),
     ("anchor-backup", "cmd_anchor_backup"),
@@ -63,7 +63,7 @@ def test_require_root_passes_as_root(monkeypatch):
 @pytest.mark.parametrize("cmd,fn", [
     ("revoke", "cmd_revoke"),
     ("set-caps", "cmd_set_caps"),
-    ("set-segments", "cmd_set_segments"),
+    ("set-roles", "cmd_set_roles"),
     ("renew-all", "cmd_renew_all"),
 ])
 def test_anchor_commands_refuse_non_anchor(cmd, fn, tmp_path, monkeypatch):
@@ -84,7 +84,7 @@ seeds = []
 trusted_pubs = []
 """)
     ns = types.SimpleNamespace(config=str(cfg), id_pub_hex="00" * 32,
-                              node="n1", caps="tls", segments="mesh")
+                              node="n1", caps="tls", roles="mesh")
     with pytest.raises(SystemExit) as e:
         getattr(cli, fn)(ns)
     assert "must be run on the anchor" in str(e.value)
@@ -211,7 +211,7 @@ trusted_pubs = []
 """)
     import types
     return types.SimpleNamespace(config=str(cfg), quiet=True, endpoint=None,
-                                 segments=None, caps=None, hostname=None)
+                                 roles=None, caps=None, hostname=None)
 
 
 def test_invite_preflight_requires_mesh_interface(tmp_path, monkeypatch):

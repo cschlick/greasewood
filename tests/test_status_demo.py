@@ -1,8 +1,8 @@
 """
 `gw status` output demonstration + regression, on a full (12-node) directory.
 
-Builds a varied directory cache and runs the real `cmd_status`: mixed segments
-(the default `mesh` pool, `prod`/`dev`/`web`, a multi-segment *bridge*, the
+Builds a varied directory cache and runs the real `cmd_status`: mixed roles
+(the default `mesh` pool, `prod`/`dev`/`web`, a multi-role *bridge*, the
 reach-all `*`), and varied credential states (`23h` / `<1h!` / `EXPIRED`) in the
 split roster — LEFT is the mesh (fleet-wide), RIGHT is 'this node' (the `peer?`
 policy answer without root; live links + traffic with sudo). It prints the full
@@ -28,7 +28,7 @@ def _cred(ca, node, hostname, segs, *, hours=24, secs=None):
     return Credential(
         id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
         addr=derive_addr(node.id_pub_bytes), hostname=hostname,
-        caps=["segment:" + s for s in segs], iat=now, exp=exp,
+        caps=["role:" + s for s in segs], iat=now, exp=exp,
     ).sign(ca.ca_priv)
 
 
@@ -44,7 +44,7 @@ def test_nodes_full_directory(tmp_path, capsys):
 hostname = "api1"
 data_dir = "{tmp_path}"
 role = "node"
-caps = ["segment:prod"]
+caps = ["role:prod"]
 [network]
 interface = "gw-mesh"
 seeds = []
@@ -80,23 +80,23 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
 
     assert "role     : node" in out and "hostname : api1" in out     # self header
     assert "│ self" in out                                            # self marked in the 'this node' column
-    assert "name" in out and "segments" in out                       # left (mesh) columns
+    assert "name" in out and "roles" in out                       # left (mesh) columns
     assert "this node" in out and "peer?" in out                     # the split; non-root right side
     assert "run 'sudo gw watch'" in out                             # hint to see live links
     assert "12 record(s) in local directory cache" in out            # self + 11
-    assert "prod,web" in out                                          # multi-segment bridge
-    assert "*" in out                                                 # reach-all segment
+    assert "prod,web" in out                                          # multi-role bridge
+    assert "*" in out                                                 # reach-all role
     assert "EXPIRED" in out and "<1h!" in out                         # expired + expiring exp cells
 
 
-def test_nodes_by_segment(tmp_path, capsys):
+def test_nodes_by_role(tmp_path, capsys):
     ca = CAKeys.generate()
     me = NodeKeys.load_or_generate(tmp_path)
     (tmp_path / "gw.toml").write_text(f"""[node]
 hostname = "api1"
 data_dir = "{tmp_path}"
 role = "node"
-caps = ["segment:prod"]
+caps = ["role:prod"]
 [network]
 interface = "gw-mesh"
 seeds = []
@@ -117,12 +117,12 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
 
     import types as _types
     cli.cmd_watch(_types.SimpleNamespace(config=str(tmp_path / "gw.toml"),
-                                         by_segment=True))
+                                         by_role=True))
     out = capsys.readouterr().out
     print(out)   # visible under `pytest -s`
 
-    for s in ("dev", "prod", "web"):                 # one table per named segment
-        assert f"segment: {s}" in out
+    for s in ("dev", "prod", "web"):                 # one table per named role
+        assert f"role: {s}" in out
     assert "segment: *" not in out                   # * isn't a group, it's ubiquitous
     assert out.count("anchor.gw.internal") >= 3         # reach-all appears under every segment
     assert out.count("web1.gw.internal") >= 2        # a 2-segment node under both

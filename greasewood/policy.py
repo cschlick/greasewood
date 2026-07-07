@@ -4,9 +4,10 @@ greasewood.policy — roles, grants, and the derived tunnel topology.
 The mesh's access policy is a single allow-only grant table (grants.toml on
 the anchor → CA-signed GrantTable → distributed via directory sync). Grants
 are sentences about ROLES — `from = ["web"], to = ["api"], ports = ["tcp/8000"]`
-— where a role is just a CA-signed cap (`role:web`), the same mechanism as
-segments. `segment:X` and `role:X` are one vocabulary here: both contribute
-the tag `X`, so existing fleets' segment caps work in grants unchanged.
+— where a role is a CA-signed cap (`role:web`), anchor-assigned, never
+self-asserted. Roles are the ONLY configured vocabulary; "segments" are the
+emergent, unnamed structure the grant graph produces (nodes a grant connects
+share one), reported by `gw watch`, configured by nothing.
 
 The table DERIVES the tunnel topology: a WireGuard peer link exists between
 two nodes iff some grant connects their tags, in either direction (tunnels
@@ -22,9 +23,9 @@ deletable in grants.toml:
      channel that carries the policy must never be prunable BY the policy,
      or one bad edit bricks the fleet (nodes could never receive the fix).
 
-  2. With NO table at all, peering falls back to legacy segment intersection
-     (today's flat-mesh behavior, byte-for-byte). A fresh mesh needs no
-     policy file; `role:` tags are inert until a table exists.
+  2. With NO table at all, every verified member peers — the flat trusted
+     mesh (implicitly `* -> * : *`). A fresh mesh needs no policy file;
+     roles are inert until a table exists.
 
 Adoption is monotonic: nodes accept a table only with a higher seq than the
 one they hold (and a valid CA signature), and keep last-known-good on disk —
@@ -42,19 +43,20 @@ from .wire import GrantTable, _validate_grant
 
 log = logging.getLogger(__name__)
 
-# Both cap prefixes contribute to one tag vocabulary (segment:db ≡ role:db for
-# policy purposes). Segments keep their legacy no-table meaning; roles are the
-# go-forward name for grant vocabulary.
-_TAG_PREFIXES = ("segment:", "role:")
+# Roles are THE configured vocabulary. "Segments" are not caps at all — they
+# are the emergent, unnamed connectivity structure the grant graph produces
+# (role:client and role:server nodes granted an interface share an unnamed
+# segment; delete the grant and it dissolves). `gw watch` reports them;
+# nothing configures them.
+_TAG_PREFIXES = ("role:",)
 
 POLICY_BASENAME = "policy.json"      # the signed table (anchor: source; node: cache)
 GRANTS_BASENAME = "grants.toml"      # the human-authored file (anchor only)
 
 
 def node_tags(caps: list) -> set:
-    """The policy tags a node holds — its segment: and role: caps, prefix
-    stripped, one namespace. Includes '*' if the node holds a wildcard cap
-    (the anchor)."""
+    """The roles a node holds — its role: caps, prefix stripped. Includes '*'
+    if the node holds the wildcard role (the anchor)."""
     return {c.split(":", 1)[1] for c in caps if c.startswith(_TAG_PREFIXES)}
 
 
@@ -89,19 +91,19 @@ def peers_allowed(local_caps: list, peer_caps: list,
                   grants: "list | None") -> bool:
     """THE tunnel-existence decision (used as reconcile's step-6 policy).
 
-    Hardwired first, beneath any table: the anchor ('*' tag on either side)
+    Hardwired first, beneath any table: the anchor ('*' role on either side)
     peers with everyone — the control plane is never prunable by policy.
-    Then: no table → legacy segment intersection; with a table → a link exists
-    iff some grant connects the two nodes' tags in either direction.
+    Then: NO table → the flat trusted mesh (every verified member peers; the
+    implicit policy is `* -> * : *`, so a fresh mesh needs no file). With a
+    table → a link exists iff some grant connects the two nodes' roles in
+    either direction. Roles never create connectivity by themselves; only
+    grants (or the absence of any policy) do.
     """
     local, peer = node_tags(local_caps), node_tags(peer_caps)
     if "*" in local or "*" in peer:
         return True
     if grants is None:
-        # Legacy flat mesh: shared segment = tunnel, all ports. Note roles are
-        # deliberately NOT rooms — only segment: caps peer in this mode.
-        from .reconcile import default_policy
-        return default_policy(local_caps, peer_caps)
+        return True          # no policy → flat mesh among verified members
     return any(_grant_connects(g, local, peer) or _grant_connects(g, peer, local)
                for g in grants)
 
@@ -207,8 +209,9 @@ def render_grants(table: "GrantTable | None") -> str:
     """The compact arrow form for `gw policy show` (display-only — nothing
     parses this back)."""
     if table is None:
-        return ("no policy — legacy peering: nodes tunnel iff they share a "
-                "segment (all ports)")
+        return ("no policy — flat mesh: every verified member tunnels with "
+                "every other (implicitly `* -> * : *`); apply a grant table "
+                "to derive the topology from roles")
     if not table.grants:
         return (f"policy v{table.seq}: EMPTY — no grants; only anchor tunnels "
                 f"exist")

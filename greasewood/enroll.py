@@ -118,7 +118,7 @@ class EnrollServer:
         self._max_attempts = max_attempts
         # Caps the anchor authorized for this window (from `gw invite`).
         # The joiner does NOT choose these — the window is authoritative.
-        self._caps = list(caps) if caps else ["segment:mesh"]
+        self._caps = list(caps) if caps else ["role:mesh"]
         # If set (`gw invite --hostname`), the anchor pins the name: the joiner's
         # requested hostname is ignored and it can't rename later.
         self._pinned_hostname = pinned_hostname

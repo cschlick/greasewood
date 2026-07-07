@@ -20,7 +20,7 @@ its features!
   IPv4 or IPv6. No NAT traversal.
 - **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
   address is a hash of its identity key.
-- **[Segmented.](#access-control-segments)** Optional `segment:` tags control who
+- **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
   talks to whom.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
@@ -38,7 +38,7 @@ its features!
 
 > Status: early but functional. The full path — enrollment, directory, the
 > reconcile loop, door-based join, credential renewal, expiry-driven revocation,
-> segmentation, TLS service certs, and name resolution — works end to end
+> access policy, TLS service certs, and name resolution — works end to end
 > and is covered by unit + container integration tests. It's a personal project,
 > so expect rough edges.
 
@@ -125,7 +125,7 @@ seconds each node walks the directory and, per peer, runs seven checks — verif
 the CA signature, check expiry, verify the self-signature, verify the address
 derives from `id_pub`, check the revoke list, check the authorization policy —
 then installs or removes that peer with `wg set`. Membership changes,
-revocations, key rotations, and segmentation all reduce to "add or remove a
+revocations, key rotations, and access policy all reduce to "add or remove a
 peer," computed locally with no coordinator. A link forms as long as at least one
 side is reachable (see [Reachability](#reachability)); two unreachable
 nodes can't pair.
@@ -203,7 +203,7 @@ network) just forge the source IP. In greasewood there's no mapping to poison an
 no authority to subvert for the address — it's derived, not granted.
 
 The cost, to keep it honest: the address is an opaque hash (no human- or
-segment-legible structure — which is why [segmentation](#access-control-segments)
+policy-legible structure — which is why [access control](#access-control-roles--grants)
 is tag-based, not CIDR), and the 64-bit host portion makes a *deliberate*
 collision ~2⁶⁴ work rather than impossible. Both are deliberate trades for "the
 address is the identity, and nobody assigns it."
@@ -390,7 +390,7 @@ sudo wg show gw-myfleet    # live WireGuard peers
 
 `gw diagnose` is the tool to reach for when a peer won't connect. It's
 **pairwise**: it lays up to two named nodes plus the anchor side by side and
-explains, per pair, whether a tunnel can form — segments, reachability, and the
+explains, per pair, whether a tunnel can form — policy (roles/grants), reachability, and the
 firewall/routing directionality that's usually the real question. (`gw watch`
 is the fleet-wide link overview; diagnose is the focused deep-dive.)
 
@@ -400,7 +400,7 @@ sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
 sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
-The comparison table shows each node's addresses, reachability, segments,
+The comparison table shows each node's addresses, reachability, roles,
 credential, and firewall for the mesh UDP port. Since diagnose runs on one node,
 **only this host's firewall is directly known** — a peer's is *inferred `OPEN`*
 whenever a handshake has been observed (packets flowing prove its whole inbound
@@ -468,7 +468,7 @@ it:
   partway on whichever file access breaks first. Root-needing commands: the
   data-plane set (`run`, `join`, `create`, `invite`, `purge`, `renew`,
   `rename`, `anchor-promote`, `anchor-restore`) and the anchor
-  registry/key set (`revoke`, `set-caps`, `set-segments`, `renew-all`,
+  registry/key set (`revoke`, `set-caps`, `set-roles`, `renew-all`,
   `cert-request`, `anchor-backup`).
 - **Environment variables.** `sudo` strips the environment by default. This only
   matters if you protect the CA key with `ca_key_passphrase_env`: a var exported
@@ -701,81 +701,32 @@ dialable direction`.
 An **anchor** must be reachable (it serves the control plane), so
 `anchor-promote` refuses a node that advertises no endpoint.
 
-## Access control (segments)
+## Access control (roles & grants)
 
-By default every mesh node can talk to every other — one flat segment. To
-control **who talks to whom**, put nodes in different **segments**. Two nodes peer
-only if they **share a segment**; every node is in `segment:mesh` by default (the
-flat default pool), and putting a node in another segment isolates it.
+By default the mesh is **flat**: every verified member tunnels with every
+other (implicitly `* -> * : *`). To control **who talks to whom, on what**,
+give nodes **roles** and write a **grant table** — the mesh then *derives its
+tunnel topology from the policy*.
 
-Segments are `segment:<name>` tags in the node's CA-signed credential. Crucially,
-**the anchor assigns them at `gw invite` — a joining node cannot choose its own** (no
-self-assertion). Whoever you hand a token to gets exactly the segments that invite
-specified:
+**Roles are CA-signed caps** (`role:<name>`), and crucially **the anchor
+assigns them — a node cannot choose its own** (no self-assertion):
 
 ```bash
-# On the anchor — the invite decides the node's segments:
-TOKEN=$(sudo gw invite --segments prod,web)   # a token for a node in prod + web
-# On the new node — join takes no segment flags; it gets what the token granted:
+# On the anchor — the invite decides the node's roles:
+TOKEN=$(sudo gw invite --roles web)          # a token for a role:web node
+# On the new node — join takes no role flags; it gets what the token granted:
 sudo gw join "$TOKEN" --hostname web1
+# Change later without re-joining (effective at the node's next renewal):
+sudo gw set-roles web1 web,worker
 ```
 
-A node's segments show up in `gw watch` (a `segments` column). To change them
-later **without re-joining**, run `gw set-segments <node> prod,web` on the anchor —
-it takes effect at the node's next renewal (or re-invite + re-join for an
-immediate change).
+**Defaults for new nodes** live in the anchor's config — `[anchor]
+default_roles` (ships `["mesh"]`) and `default_caps` (ships `["tls"]`). A
+plain `gw invite` uses them; the flags override per token; they're read fresh
+at each invite, so editing the config changes future enrollments with no
+restart.
 
-**Defaults for new nodes** live in the anchor's config — `[anchor] default_segments`
-(ships `["mesh"]`) and `default_caps` (ships `["tls"]`, so TLS is on by default).
-A plain `gw invite` with no `--segments`/`--caps` uses them; the flags override
-per token. They're read fresh at each invite, so **editing the config changes
-what future enrollments get, anytime, with no restart** — e.g. set
-`default_caps = []` to make TLS opt-in, or `default_segments = ["core"]` to rename
-the default segment. (Renaming it only affects *new* nodes; existing
-`segment:mesh` nodes stay in `mesh` until you `gw set-segments` them too.)
-
-The rule is one line — **share a segment** (`reconcile.default_policy`):
-
-- **share a segment** → may peer (a node in several segments peers with anyone
-  sharing one — a "bridge" node).
-- **default** → every node gets `segment:mesh`, so a fleet with no segments set is
-  one open mesh (everyone shares `mesh`).
-- **`segment:*`** on either side → reaches everyone. The anchor carries it
-  automatically (it must serve every node); grant it to a shared-services node
-  with `gw invite --segments '*'`.
-- **no shared segment** → **denied** (putting a node in `segment:prod` drops it
-  from `mesh`, isolating it from the default pool; a node in *no* segment peers
-  with no one).
-
-**`mesh` vs `*`:** `mesh` is just the default segment every node lands in — an
-ordinary name that reaches only other `mesh` nodes; `*` is the reach-all wildcard
-(special-cased), so a `segment:*` node reaches *every* segment:
-
-| node A | node B | peer? | why |
-|--------|--------|-------|-----|
-| `segment:mesh` | `segment:mesh` | ✅ | share `mesh` |
-| `segment:mesh` | `segment:prod` | ❌ | no shared segment |
-| `segment:*`    | `segment:prod` | ✅ | `*` reaches all |
-| `segment:*`    | `segment:mesh` | ✅ | `*` reaches all |
-
-Two properties worth knowing:
-
-- **Anchor-assigned, attested, mutually enforced.** Segments are decided by the anchor
-  at admission and bound into the CA-signed credential — a node **can't
-  self-assert** a segment it wasn't granted. A tunnel needs *both* ends to install
-  each other, and each side reads the *other's* segments from its credential, so a
-  node can neither talk its way into a segment nor be forced into a link it denies.
-- **Node-level and symmetric**, not port-level or one-way. Segments decide whether
-  two nodes may have a tunnel *at all*. For directed, port-grained policy
-  ("web may reach api:8000, and nothing else talks"), use **roles and the
-  grant table** — the next section.
-
-## Roles & the grant table (`gw policy`)
-
-Segments give you rooms; **roles + grants** give you sentences. When you need
-more than "everyone in the room may talk" — client/server asymmetry, per-port
-least privilege, a topology that mirrors your actual service graph — write a
-**grant table** and the mesh derives its tunnels from it:
+### The grant table derives the topology
 
 ```toml
 # <data_dir>/grants.toml on the anchor  (full reference: grants.toml.example)
@@ -800,32 +751,38 @@ sudo gw policy apply        # validates, PREVIEWS the tunnel delta, signs, publi
 gw policy show              # on any node: the active table (no root)
 ```
 
-**Roles are CA-signed caps**, assigned by the anchor exactly like segments
-(`gw invite --caps 'segment:mesh,role:web,tls'`, or `gw set-caps` later — a
-node can't self-assert a role). `segment:X` and `role:X` are one vocabulary in
-grants: both mean the tag `X`, so existing segment caps work unchanged.
+With a policy applied, a tunnel exists between two nodes **iff some grant
+connects their roles** (either direction — tunnels are symmetric; the grant's
+direction is for port filtering). Tunnels are **minimal by construction**:
+delete a grant and its tunnels are torn down on the next sync; peers,
+keepalives, and handshake exposure all shrink to the grant graph. Two `web`
+nodes have no tunnel unless someone writes `web -> web` — client and server
+are roles that coexist without talking sideways.
 
-**The table derives the topology.** With a policy applied, a tunnel exists
-between two nodes **iff some grant connects their roles** (either direction —
-tunnels are symmetric; the grant's direction is for port filtering). Tunnels
-are minimal by construction: delete a grant and its tunnels are torn down on
-the next sync; peers, keepalives, and handshake exposure all shrink to the
-grant graph. With **no** policy applied, peering is the legacy flat-segment
-behavior above — a fresh mesh needs no policy file at all.
+**Segments are emergent, not configured.** There is no segment cap, flag, or
+config key: a "segment" is the unnamed connected structure the grant graph
+produces — `role:web` and `role:api` nodes granted an interface share one,
+and it dissolves when the grant does. `gw watch --by-role` shows the groups
+and flags **policy-expected links that are down** (a real fault) without
+false-alarming on pairs the policy correctly keeps apart.
 
-Three properties to rely on:
+Properties to rely on:
 
 - **Allow-only, by schema.** A flow passes iff some grant covers it; a deny
   rule is *not expressible* (no action field exists). No ordering, no
   conflicts — grants are a set, not a program.
 - **The anchor is hardwired beneath the table.** Every node always tunnels to
-  the anchor, and no grant can remove that: the policy rides the directory
-  sync, which rides the anchor tunnel — the channel that carries the policy
-  must never be prunable *by* the policy (one bad edit could otherwise brick
-  the fleet beyond remote repair).
+  the anchor (`role:*`), and no grant can remove that: the policy rides the
+  directory sync, which rides the anchor tunnel — the channel that carries
+  the policy must never be prunable *by* the policy (one bad edit could
+  otherwise brick the fleet beyond remote repair).
 - **Signed and replay-proof.** The table is CA-signed with a monotonic
   version; nodes adopt only newer, validly-signed tables and keep
   last-known-good on disk across reboots.
+- **Anchor-assigned, attested, mutually enforced.** A tunnel needs *both*
+  ends to install each other, and each side reads the *other's* roles from
+  its CA-signed credential — a node can neither talk its way into a role it
+  wasn't issued nor be forced into a link it denies.
 
 `ports` is **advisory in this version**: grants decide tunnel *existence*
 today, and `gw policy show` documents the intended port scopes; per-port
@@ -842,12 +799,12 @@ own nftables on `gw-<mesh>` remains the enforced option meanwhile — see
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |
-| `watch`            | sudo  | **Live** mesh dashboard (redraws in place, so it needs sudo for live WireGuard state): the split roster + link state, per-second throughput, and a latency column that fills in as pings return. Ctrl-C to exit. **`--snapshot`** prints one static view and exits (no root; auto-used when piped). **`--by-segment`** groups by segment and, per segment, reports **connectivity** — connected components (islands), and expected-but-down edges with a firewall/NAT hint — computed fleet-wide from each node's self-reported live links. Shows how fresh the view is (time since last sync) up top. |
+| `watch`            | sudo  | **Live** mesh dashboard (redraws in place, so it needs sudo for live WireGuard state): the split roster + link state, per-second throughput, and a latency column that fills in as pings return. Ctrl-C to exit. **`--snapshot`** prints one static view and exits (no root; auto-used when piped). **`--by-role`** groups by role and, per group, reports **connectivity** — connected components (the emergent segments), and policy-expected-but-down edges with a firewall/NAT hint — computed fleet-wide from each node's self-reported live links. Shows how fresh the view is (time since last sync) up top. |
 | `config [key]`     | no    | Print resolved config facts machine-readably for scripting — `gw config interface` gives the mesh interface name (`gw-<mesh>`), no arg lists all as `key<TAB>value`. |
 | `firewall`         | no    | Print the recommended firewall ruleset (a **suggestion** — greasewood never changes your firewall; nothing is applied). The same posture on every node; with `sudo` also flags anything that looks blocked. |
-| `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
+| `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (policy/roles, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
 | `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
-| `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
+| `set-roles <node> <r>` | no | Change a node's roles (on the anchor; effective next renewal). |
 | `policy`           | show: no · apply: sudo | The mesh's grant table (roles → roles : ports; derives which tunnels exist). `show` renders the active policy on any node; `apply` (anchor) validates `grants.toml`, previews the tunnel delta, signs with the CA key, publishes. See [Roles & the grant table](#roles--the-grant-table-gw-policy). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
@@ -858,7 +815,7 @@ own nftables on `gw-<mesh>` remains the enforced option meanwhile — see
 | `narrate`          | no    | Translate the `ip`/`wg` command trail (`audit.log`) into a plain-English story of what greasewood did and why. Filters: `--since`, `--peer`, `--grep`, `--failures`, `--stats`, `--raw`. |
 | `rename-node <name>` | yes | Change this node's mesh hostname (anchor-validated, no re-join; refused if the anchor pinned the name). |
 | `rename-mesh <name>` | yes | Rename this mesh — domain, config, data dir, interface, and service move together. Run on the anchor, then on each member (surfaced in its `gw watch`). Old names resolve + verify in TLS through a one-TTL grace window. See the [RUNBOOK SOP](RUNBOOK.md). |
-| `renew`            | yes   | Force an immediate credential renewal for this node (applies an anchor-side `set-caps`/`set-segments` now, instead of at the ~half-TTL renewal). |
+| `renew`            | yes   | Force an immediate credential renewal for this node (applies an anchor-side `set-caps`/`set-roles` now, instead of at the ~half-TTL renewal). |
 | `renew-all`        | no    | On the anchor: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the anchor's rate stays ~constant with mesh size). |
 | `anchor-backup`       | no    | On the anchor: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and anchor identity. Store it offline. |
 | `anchor-restore`      | yes   | Restore a `anchor-backup` archive onto a replacement host (same CA key → a restore, not a re-root). |
@@ -879,7 +836,7 @@ manual credential-copy path.
 [node]
 hostname = "node01"
 role     = "node"          # "anchor" | "node"
-caps     = ["segment:mesh"]  # segment:<x> tags segment the mesh; "tls" allows certs
+caps     = ["role:mesh"]     # role:<x> tags are the grant-table vocabulary; "tls" allows certs
 
 [network]
 interface  = "gw-myfleet"
@@ -907,7 +864,7 @@ open a **standing door** instead:
 
 ```bash
 # On the anchor, once per fleet:
-sudo gw invite --standing --segments autoscale --endpoint anchor.example.com -q
+sudo gw invite --standing --roles autoscale --endpoint anchor.example.com -q
 # → ONE token. Put it in the image or launch template's user-data.
 ```
 
@@ -919,11 +876,11 @@ and *nothing else*) — the door just doesn't close afterward. Joins serialize
 every couple of seconds; have the first-boot script retry on failure.
 
 Threat model, honestly: a leaked standing token lets its holder **enroll a
-rogue node** into the pinned segment — a bounded, visible (`gw watch` shows
+rogue node** with the pinned roles — a bounded, visible (`gw watch` shows
 `door: OPEN (standing) — N enrolled`; every join is in the audit trail), and
 reversible (`gw revoke`) failure. That is the deliberate trade against the
 alternatives (e.g. giving instances SSH to the anchor, whose failure mode is anchor
-compromise). Contain it with a quarantine segment and rotate freely:
+compromise). Contain it with a quarantine role (grant it nothing) and rotate freely:
 
 ```bash
 sudo gw close-door                 # token permanently dead, fleet-wide, instantly
