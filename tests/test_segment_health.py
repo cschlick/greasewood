@@ -19,7 +19,7 @@ def _rec(name, endpoints, reachable=()):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
                       addr=derive_addr(k.id_pub_bytes), hostname=name,
-                      caps=["segment:db"], iat=now,
+                      caps=["role:db"], iat=now,
                       exp=now + dt.timedelta(hours=1)).sign(CA.ca_priv)
     return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=list(endpoints),
                       cred=cred, reachable=list(reachable)).sign(k.id_priv)
