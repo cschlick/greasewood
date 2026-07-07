@@ -121,6 +121,30 @@ def wg_interface_ports() -> dict:
     return out
 
 
+def nft_load(script: str) -> None:
+    """Apply an nft ruleset document atomically via `nft -f -`. Used ONLY for
+    greasewood's own `table inet greasewood` (port enforcement) — the one place
+    greasewood writes firewall state, and only when --enforce-ports is set."""
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run(["nft", "-f", "-"], input=script,
+                           capture_output=True, text=True, check=True)
+        audit.record_command(("nft", "-f", "-"), r.returncode,
+                             int((time.monotonic() - t0) * 1000), r.stdout, r.stderr)
+    except subprocess.CalledProcessError as e:
+        audit.record_command(("nft", "-f", "-"), e.returncode,
+                             int((time.monotonic() - t0) * 1000),
+                             e.stdout or "", e.stderr or "", failed=True)
+        if e.stderr:
+            log.error("nft -f failed: %s", e.stderr.strip())
+        raise
+
+
+def nft_delete_table(table: str) -> None:
+    """Remove one of our own inet tables (idempotent — a missing table is fine)."""
+    _run("nft", "delete", "table", "inet", table, check=False)
+
+
 def interface_exists(iface: str) -> bool:
     """True if `iface` currently exists. Read-only (`show`), so it lands at
     DEBUG in the audit trail, not the durable log."""

@@ -2414,6 +2414,22 @@ def cmd_run(args) -> int:
                                  push_to=cfg.seeds, quiet_push=True):
             log.debug("published reachable set (%d live links)", len(reachable))
 
+    # Opt-in per-port enforcement of the grant table (--enforce-ports). Refuses
+    # LOUDLY up front if nftables is unusable — an operator who asked to enforce
+    # must never run with silently-absent enforcement (fail closed).
+    port_enforcer = None
+    if getattr(args, "enforce_ports", False):
+        from .portfilter import PortFilter, NftUnavailable, ensure_available
+        try:
+            ensure_available()
+        except NftUnavailable as e:
+            sys.exit(f"gw run --enforce-ports: {e}")
+        port_enforcer = PortFilter(cfg.wg_interface, _control_port(cfg),
+                                   cfg.caps, grant_policy)
+        log.info("port enforcement ON (--enforce-ports): greasewood's own "
+                 "nftables table on %s, default-deny within the mesh",
+                 cfg.wg_interface)
+
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
         directory=directory,
@@ -2427,6 +2443,7 @@ def cmd_run(args) -> int:
         ensure_iface=_ensure_mesh_iface,
         data_dir=cfg.data_dir,
         on_reachable=_publish_reachable,
+        port_enforcer=port_enforcer,
     )
     recon.start()
 
@@ -2973,6 +2990,17 @@ def cmd_purge(args) -> int:
         subprocess.run(["ip", "link", "delete", iface], capture_output=True)
         removed.append(f"interface {iface}")
 
+    # Remove greasewood's own nftables table (port enforcement). It PERSISTS
+    # across daemon stop by design (fail closed); purge is its explicit
+    # teardown. Idempotent — a no-op if enforcement was never on.
+    from .portfilter import TABLE as _NFT_TABLE
+    chk = subprocess.run(["nft", "list", "table", "inet", _NFT_TABLE],
+                         capture_output=True)
+    if chk.returncode == 0:
+        subprocess.run(["nft", "delete", "table", "inet", _NFT_TABLE],
+                       capture_output=True)
+        removed.append(f"nftables table inet {_NFT_TABLE}")
+
     # Remove data directory
     if data_dir.exists():
         try:
@@ -3224,6 +3252,13 @@ def main(argv=None) -> int:
 
     # run
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
+    sp.add_argument("--enforce-ports", dest="enforce_ports", action="store_true",
+                    help="enforce the grant table's PORT scopes with nftables "
+                         "(off by default; grants already enforce which tunnels "
+                         "exist). Writes ONLY greasewood's own table, scoped to "
+                         "the mesh interface — never your host firewall. Refuses "
+                         "to start if nftables is unusable. Persists across "
+                         "restarts (fail closed); `gw purge` removes it.")
     sp.set_defaults(fn=cmd_run)
 
     # watch — live mesh view by default; --snapshot for a static one-shot
