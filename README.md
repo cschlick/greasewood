@@ -766,9 +766,72 @@ Two properties worth knowing:
   each other, and each side reads the *other's* segments from its credential, so a
   node can neither talk its way into a segment nor be forced into a link it denies.
 - **Node-level and symmetric**, not port-level or one-way. Segments decide whether
-  two nodes may have a tunnel *at all*; "A may reach B:5432 but not B:22" is a
-  firewall concern — use your own nftables on the mesh interface (see
-  [SECURITY.md](SECURITY.md)).
+  two nodes may have a tunnel *at all*. For directed, port-grained policy
+  ("web may reach api:8000, and nothing else talks"), use **roles and the
+  grant table** — the next section.
+
+## Roles & the grant table (`gw policy`)
+
+Segments give you rooms; **roles + grants** give you sentences. When you need
+more than "everyone in the room may talk" — client/server asymmetry, per-port
+least privilege, a topology that mirrors your actual service graph — write a
+**grant table** and the mesh derives its tunnels from it:
+
+```toml
+# <data_dir>/grants.toml on the anchor  (full reference: grants.toml.example)
+[[grant]]
+from  = ["web", "worker"]
+to    = ["api"]
+ports = ["tcp/8000"]
+# why: the app tier calls the API; nothing else does.
+
+[[grant]]
+from  = ["metrics"]
+to    = ["*"]
+ports = ["tcp/9100"]
+# why: prometheus scrapes everyone — hub-and-spoke tunnels, not a clique.
+```
+
+```bash
+sudo gw policy apply        # validates, PREVIEWS the tunnel delta, signs, publishes
+#   policy v1 → v2: 2 grant(s)
+#     - tunnel  web1 ↔ web2      ← edits show exactly what they create/destroy
+#   apply? [y/N]
+gw policy show              # on any node: the active table (no root)
+```
+
+**Roles are CA-signed caps**, assigned by the anchor exactly like segments
+(`gw invite --caps 'segment:mesh,role:web,tls'`, or `gw set-caps` later — a
+node can't self-assert a role). `segment:X` and `role:X` are one vocabulary in
+grants: both mean the tag `X`, so existing segment caps work unchanged.
+
+**The table derives the topology.** With a policy applied, a tunnel exists
+between two nodes **iff some grant connects their roles** (either direction —
+tunnels are symmetric; the grant's direction is for port filtering). Tunnels
+are minimal by construction: delete a grant and its tunnels are torn down on
+the next sync; peers, keepalives, and handshake exposure all shrink to the
+grant graph. With **no** policy applied, peering is the legacy flat-segment
+behavior above — a fresh mesh needs no policy file at all.
+
+Three properties to rely on:
+
+- **Allow-only, by schema.** A flow passes iff some grant covers it; a deny
+  rule is *not expressible* (no action field exists). No ordering, no
+  conflicts — grants are a set, not a program.
+- **The anchor is hardwired beneath the table.** Every node always tunnels to
+  the anchor, and no grant can remove that: the policy rides the directory
+  sync, which rides the anchor tunnel — the channel that carries the policy
+  must never be prunable *by* the policy (one bad edit could otherwise brick
+  the fleet beyond remote repair).
+- **Signed and replay-proof.** The table is CA-signed with a monotonic
+  version; nodes adopt only newer, validly-signed tables and keep
+  last-known-good on disk across reboots.
+
+`ports` is **advisory in this version**: grants decide tunnel *existence*
+today, and `gw policy show` documents the intended port scopes; per-port
+packet filtering on the mesh interface is the planned enforcement step (your
+own nftables on `gw-<mesh>` remains the enforced option meanwhile — see
+[SECURITY.md](SECURITY.md)).
 
 ## Command reference
 
@@ -785,6 +848,7 @@ Two properties worth knowing:
 | `diagnose [A [B]]` | sudo  | Pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (segments, reachability, firewall directionality with `OPEN`-inferred-from-handshake and upstream-router localization). No args = this host ↔ anchor. |
 | `revoke <node>`    | no    | Revoke a node on the anchor (denies renew/publish, evicts it, frees its hostname). `<node>` = hostname, `<host>.<mesh_domain>` mesh name, or 64-char id_pub hex. |
 | `set-segments <node> <s>` | no | Change a node's segments (on the anchor; effective next renewal). |
+| `policy`           | show: no · apply: sudo | The mesh's grant table (roles → roles : ports; derives which tunnels exist). `show` renders the active policy on any node; `apply` (anchor) validates `grants.toml`, previews the tunnel delta, signs with the CA key, publishes. See [Roles & the grant table](#roles--the-grant-table-gw-policy). |
 | `set-caps <node> <caps>` | no | Change a node's full tag set (on the anchor; effective next renewal). |
 | `anchor-promote`      | yes   | Turn this enrolled node into an anchor (generate its own CA key).  |
 | `cert-request`     | no    | Get an x509 TLS cert from the anchor for a local service. The daemon auto-renews it at ~half its TTL; `--reload-cmd` runs a command after each renewal, `--no-auto-renew` opts out. **`--profile <name\|path>`** issues + places the key/cert/ca where the service wants them (right owner/mode) and re-places on every renewal; `--profile <name> --show` prints a bundled template to adapt. |
