@@ -286,7 +286,7 @@ def parse_window(data: dict) -> "Window | None":
             return None
     return Window(standing=standing, expires=expires,
                   expires_str=data.get("expires"),
-                  caps=list(data.get("caps") or ["segment:mesh"]),
+                  caps=list(data.get("caps") or ["role:mesh"]),
                   hostname=data.get("hostname"),
                   guest_pub=data.get("guest_pub"), psk=data.get("psk"))
 

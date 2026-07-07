@@ -21,7 +21,7 @@ from greasewood.wire import Credential, NodeRecord
 _UTC = dt.timezone.utc
 
 
-def _cred(node, ca, hostname, caps=("segment:mesh",), ttl=3600):
+def _cred(node, ca, hostname, caps=("role:mesh",), ttl=3600):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
@@ -43,7 +43,7 @@ def _write_cfg(tmp_path, ca_hex):
 hostname = "self"
 data_dir = "{tmp_path}"
 role = "node"
-caps = ["segment:mesh"]
+caps = ["role:mesh"]
 [network]
 interface = "gw-mesh"
 seeds = []
@@ -98,25 +98,30 @@ def test_diagnose_revoked_and_missing(tmp_path, capsys, monkeypatch):
     assert "no node named 'ghost'" in str(e.value)
 
 
-def test_diagnose_pairwise_no_shared_segment(tmp_path, capsys, monkeypatch):
-    """Two nodes in different segments → the pairwise verdict says they won't
-    peer by design (not a firewall/reachability problem)."""
+def test_diagnose_pairwise_no_grant(tmp_path, capsys, monkeypatch):
+    """Under a grant table with no grant connecting the pair, the pairwise
+    verdict says the POLICY blocks it (not a firewall/reachability problem)."""
+    import json as _json
     monkeypatch.setattr("greasewood.wg.get_peers", lambda iface: {})
     NodeKeys.load_or_generate(tmp_path)
     trusted = CAKeys.generate()
     cfg = _write_cfg(tmp_path, trusted.ca_pub_hex)
     directory = Directory()
     a = NodeKeys.generate()
-    directory.put(_record(a, _cred(a, trusted, "web", caps=("segment:web",))))
+    directory.put(_record(a, _cred(a, trusted, "web", caps=("role:web",))))
     b = NodeKeys.generate()
-    directory.put(_record(b, _cred(b, trusted, "db", caps=("segment:db",))))
+    directory.put(_record(b, _cred(b, trusted, "db", caps=("role:db",))))
     directory.save(tmp_path / "directory.json")
+    # a policy that grants web↔web only — nothing connects web and db
+    (tmp_path / "policy.json").write_text(_json.dumps({
+        "seq": 1, "ca_sig": "",
+        "grants": [{"from": ["web"], "to": ["web"], "ports": ["*"]}]}))
 
     assert cli.cmd_diagnose(types.SimpleNamespace(config=str(cfg),
                                                   nodes=["web", "db"])) == 0
     out = capsys.readouterr().out
     assert "web ↔ db" in out
-    assert "no shared segment" in out
+    assert "no grant connects their roles" in out
 
 
 def test_diagnose_targeted_single_peer(tmp_path, capsys, monkeypatch):

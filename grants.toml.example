@@ -13,13 +13,16 @@
 #    · hardwired beneath the table, never editable here: every node <-> anchor
 #      (the channel that carries this policy must not be prunable by it)
 #
-#  Roles are CA-signed caps, assigned at invite / set-caps:
-#      sudo gw invite --caps 'segment:mesh,role:web,tls'
-#      sudo gw set-caps db01 'segment:mesh,role:db,tls'
-#  `segment:X` and `role:X` are one vocabulary here — both mean the tag X.
+#  Roles are CA-signed caps, assigned at invite / set-roles / set-caps:
+#      sudo gw invite --roles web            # → role:web (+ default caps)
+#      sudo gw set-roles db01 db             # → role:db
+#  Roles are the ONLY configured vocabulary. "Segments" are emergent: the
+#  unnamed connected structure this table produces (role:client and
+#  role:server nodes granted an interface share one; delete the grant and it
+#  dissolves). `gw watch --by-role` reports them; nothing configures them.
 #
-#  With NO applied policy, peering is the legacy flat mesh: nodes tunnel iff
-#  they share a segment (all ports). A fresh mesh needs no policy at all.
+#  With NO applied policy the mesh is flat — every verified member peers
+#  (implicitly `* -> * : *`). A fresh mesh needs no policy at all.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[grant]]

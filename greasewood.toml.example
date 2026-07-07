@@ -19,16 +19,17 @@ role = "node"
 # endpoint automatically, so a wrong guess just goes quiet, not noisy.)
 
 # The node's tag set. Two kinds of tag live here:
-#   segments — "segment:<name>" controls who-talks-to-whom. Two nodes peer only
-#     if they share a segment. Every node is in "segment:mesh" by default (the
-#     flat default pool); "segment:*" (the anchor) reaches all.
+#   roles — "role:<name>" is the grant-table vocabulary (`gw policy`). With no
+#     policy applied every node peers (flat mesh); once a grant table exists,
+#     tunnels derive from grants over these roles. "role:*" (the anchor)
+#     reaches all, hardwired beneath any policy.
 #   abilities — e.g. "tls" (may request TLS certs).
-# Both are decided by the ANCHOR at `gw invite [--segments …] [--caps …]` and bound
+# Both are decided by the ANCHOR at `gw invite [--roles …] [--caps …]` and bound
 # into the CA-signed credential — the joining node cannot choose its own. This
 # line just reflects what the anchor issued; editing it grants nothing (peers
-# enforce against your credential, not this file). To change: `gw set-segments`/
+# enforce against your credential, not this file). To change: `gw set-roles`/
 # `gw set-caps` on the anchor, or re-invite + re-join.
-caps = ["segment:mesh"]
+caps = ["role:mesh"]
 
 # Underlay endpoint(s) other nodes dial to reach this one. The overlay is always
 # IPv6, but the underlay may be IPv4 or IPv6 — list v4 and/or v6 (v6 bracketed).
@@ -117,14 +118,14 @@ renew_before = "12h"
 # (and runs its --reload-cmd). Revocation is passive. This is an anchor-wide setting.
 tls_cert_ttl = "7d"
 
-# What NEW nodes get at `gw invite` when --segments/--caps are omitted. Read
+# What NEW nodes get at `gw invite` when --roles/--caps are omitted. Read
 # fresh at each invite, so editing these changes future enrollments with no
-# restart (a per-invite --segments/--caps still overrides).
-#   default_segments — the segment(s) a new node lands in. "mesh" is the flat
+# restart (a per-invite --roles/--caps still overrides).
+#   default_roles — the role(s) a new node holds. "mesh" is the conventional
 #     default pool; rename it (e.g. ["core"]) to change what "the default" means.
 #   default_caps     — abilities. Ships with "tls" ON. Set [] for TLS off-by-
 #     default (a node can still be granted it later with `gw set-caps`).
-default_segments = ["mesh"]
+default_roles = ["mesh"]
 default_caps = ["tls"]
 
 # Enrollment flow (door-based — no SSH, no underlay HTTP):

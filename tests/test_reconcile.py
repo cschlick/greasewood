@@ -22,53 +22,52 @@ from greasewood.wire import Credential, NodeRecord
 _UTC = dt.timezone.utc
 
 
-def test_same_default_segment_allowed():
-    # Two default nodes both carry segment:mesh → they peer (the flat default).
-    assert default_policy(["segment:mesh"], ["segment:mesh"]) is True
+def test_no_policy_is_flat_mesh():
+    # Without a grant table, every verified member peers (implicit * -> * : *);
+    # role tags are inert until a policy exists.
+    assert default_policy(["role:mesh"], ["role:mesh"]) is True
+    assert default_policy(["role:prod"], ["role:dev"]) is True
+    assert default_policy([], []) is True
+    assert default_policy(["tls"], []) is True
 
 
-def test_shared_segment_allowed():
-    assert default_policy(["segment:prod"], ["segment:prod"]) is True
+def test_wildcard_role_reaches_everyone():
+    # The anchor carries role:* — hardwired beneath any policy.
+    from greasewood.policy import peers_allowed
+    assert peers_allowed(["role:*"], ["role:prod"], []) is True
+    assert peers_allowed(["role:prod"], ["role:*"], []) is True
 
 
-def test_different_segments_denied():
-    assert default_policy(["segment:prod"], ["segment:dev"]) is False
+def test_isolation_comes_from_the_grant_table():
+    # Under a policy, tunnels derive from grants: prod↔prod granted, dev is
+    # isolated from prod, and a node with no role reaches only the anchor.
+    from greasewood.policy import peers_allowed
+    grants = [{"from": ["prod"], "to": ["prod"], "ports": ["*"]}]
+    assert peers_allowed(["role:prod"], ["role:prod"], grants) is True
+    assert peers_allowed(["role:prod"], ["role:dev"], grants) is False
+    assert peers_allowed([], ["role:prod"], grants) is False
 
 
-def test_default_and_segmented_denied():
-    # Putting a node in segment:prod drops it from mesh, so it's isolated from
-    # the default pool.
-    assert default_policy(["segment:mesh"], ["segment:prod"]) is False
-
-
-def test_no_segment_denied():
-    # A node in no segment peers with no one.
-    assert default_policy([], []) is False
-    assert default_policy([], ["segment:mesh"]) is False
-
-
-def test_wildcard_reaches_every_segment():
-    # The anchor carries segment:* and must reach every node, in any segment.
-    assert default_policy(["segment:*"], ["segment:prod"]) is True
-    assert default_policy(["segment:prod"], ["segment:*"]) is True
-    assert default_policy(["segment:*"], ["segment:mesh"]) is True
-
-
-def test_bridge_node_reaches_multiple_segments():
-    # A node in several segments peers with anyone sharing one (the bridge case:
-    # A=mesh, B=mesh+dev, C=dev → A-B and B-C peer, A-C don't).
-    a, b, c = ["segment:mesh"], ["segment:mesh", "segment:dev"], ["segment:dev"]
-    assert default_policy(a, b) is True   # share mesh
-    assert default_policy(b, c) is True   # share dev
-    assert default_policy(a, c) is False  # share nothing
+def test_bridge_role_reaches_multiple_groups():
+    # A node holding several roles links wherever a grant names one of them
+    # (A=web, B=web+db, C=db; grants web↔web and db↔db → A-B and B-C, not A-C).
+    from greasewood.policy import peers_allowed
+    grants = [{"from": ["web"], "to": ["web"], "ports": ["*"]},
+              {"from": ["db"], "to": ["db"], "ports": ["*"]}]
+    a, b, c = ["role:web"], ["role:web", "role:db"], ["role:db"]
+    assert peers_allowed(a, b, grants) is True
+    assert peers_allowed(b, c, grants) is True
+    assert peers_allowed(a, c, grants) is False
 
 
 def test_capabilities_do_not_affect_peering():
-    # Ability/marker tags (tls, hostname-pinned) are not segments: they neither
-    # create nor block a link.
-    assert default_policy(["tls"], ["tls"]) is False               # no segment → no link
-    assert default_policy(["segment:mesh", "tls", "hostname-pinned"],
-                          ["segment:mesh"]) is True                 # shared segment wins
+    # Ability/marker tags (tls, hostname-pinned) are not roles: they neither
+    # create nor block a link under a policy.
+    from greasewood.policy import peers_allowed
+    grants = [{"from": ["mesh"], "to": ["mesh"], "ports": ["*"]}]
+    assert peers_allowed(["tls"], ["tls"], grants) is False
+    assert peers_allowed(["role:mesh", "tls", "hostname-pinned"],
+                         ["role:mesh"], grants) is True
 
 
 # ---------------------------------------------------------------------------

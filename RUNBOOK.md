@@ -18,7 +18,7 @@ sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
 The comparison table shows each node's overlay/underlay addresses, reachability,
-segments, credential, and firewall for the mesh UDP port. **Only this host's
+roles, credential, and firewall for the mesh UDP port. **Only this host's
 firewall is directly known**; a peer's is *inferred `OPEN`* when a handshake has
 been observed (packets flowing prove its whole inbound path — host firewall,
 any router/NAT, and daemon), and shown `???` otherwise. Run it **on the node
@@ -35,7 +35,7 @@ localizes the block, e.g.:
 | `no handshake` + "our host firewall OPEN … suspect an UPSTREAM router/NAT" | Our port is open locally but the peer can't reach us. | Check the upstream router/NAT port-forward for the mesh UDP port; confirm the peer's daemon/outbound. |
 | `no handshake` + "our host firewall CLOSED … OPEN it" | This host's own firewall blocks the port. | Open the mesh UDP port (create/join printed the rule). |
 | `no handshake` + "we can dial X but it isn't answering" | The remote isn't responding. | Check X's host firewall + upstream forward, and that its daemon is up (`gw diagnose` on X shows its own firewall). |
-| `✗ no shared segment` | They won't peer by design. | Give them a common segment. |
+| `✗ policy: no grant connects their roles` | They won't peer by design. | Add a grant to grants.toml and `gw policy apply`. |
 | `✗ no dialable direction (both outbound-only)` | Neither advertises an endpoint. | Give at least one an advertised endpoint (`[node] endpoints`, or `--endpoint` at join). |
 | credential `✗ EXPIRED` / `✗ untrusted CA` / `✗ REVOKED` | Bad credential. | Renewal/clock (expired); `[ca] trusted_pubs` after a re-root (untrusted); expected (revoked). |
 

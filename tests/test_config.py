@@ -49,7 +49,7 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.mesh_domain == "gw.internal"    # namespaced under reserved TLD
     # The default caps must place the node in the default segment — a bare
     # "mesh" tag is NOT a segment, and default_policy would peer it with nobody.
-    assert cfg.caps == ["segment:mesh"]
+    assert cfg.caps == ["role:mesh"]
     assert cfg.aliases == []                    # no published service names by default
 
 
@@ -64,7 +64,7 @@ def test_new_node_defaults_fallback(tmp_path):
     # No [anchor] defaults set → ship defaults: mesh segment, tls on.
     p = _write(tmp_path, '[node]\nhostname = "n1"\n')
     cfg = load_config(p)
-    assert cfg.default_segments == ["mesh"]
+    assert cfg.default_roles == ["mesh"]
     assert cfg.default_caps == ["tls"]
 
 
@@ -73,9 +73,9 @@ def test_new_node_defaults_explicit(tmp_path):
     # default segment) — read fresh at each invite.
     p = _write(tmp_path,
                '[node]\nhostname = "anchor"\nrole = "anchor"\n'
-               '[anchor]\ndefault_segments = ["core"]\ndefault_caps = []\n')
+               '[anchor]\ndefault_roles = ["core"]\ndefault_caps = []\n')
     cfg = load_config(p)
-    assert cfg.default_segments == ["core"]
+    assert cfg.default_roles == ["core"]
     assert cfg.default_caps == []
 
 

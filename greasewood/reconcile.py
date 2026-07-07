@@ -55,36 +55,22 @@ class ReconcileResult(NamedTuple):
     reachable: list             # overlay addrs with a live handshake (published)
 
 
-def _segments(caps: list[str]) -> set[str]:
-    """A node's segments, carried as `segment:<name>` tags in its CA-signed caps
-    (attested, anchor-assigned, renewed) — no separate wire field. Every node is in
-    `segment:mesh` by default; `segment:*` is the reach-all wildcard (the anchor)."""
-    return {c[len("segment:"):] for c in caps if c.startswith("segment:")}
+def _roles(caps: list[str]) -> set[str]:
+    """A node's roles, carried as `role:<name>` tags in its CA-signed caps
+    (attested, anchor-assigned, renewed) — no separate wire field. `role:*` is
+    the reach-all wildcard (the anchor carries it)."""
+    return {c[len("role:"):] for c in caps if c.startswith("role:")}
 
 
 def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
-    """Two nodes may hold a tunnel iff they **share a segment** (§9). Segments
-    are `segment:<name>` tags; the single rule is set intersection:
-
-    - `segment:*` on either side → allowed (the reach-all wildcard: the anchor,
-      which must reach every node, and any shared-services node).
-    - otherwise                  → allowed iff their segment sets intersect.
-    - a node in no segment at all → allowed with no one.
-
-    Every node gets `segment:mesh` at enrollment, so by default the whole fleet
-    shares one segment and is a flat mesh. Putting a node in a different segment
-    (e.g. `segment:prod`) drops it from `mesh` and isolates it; a node can sit in
-    several segments to bridge them. Enforcement is mutual: a link needs both
-    ends to install each other, and peer segments are read from the peer's
-    CA-signed credential, so a node can't talk its way into a segment it wasn't
-    issued.
-    """
-    local, peer = _segments(local_caps), _segments(peer_caps)
-    if not local or not peer:
-        return False
-    if "*" in local or "*" in peer:
-        return True
-    return bool(local & peer)
+    """The peering decision when the daemon is wired without a GrantPolicy
+    (tests, embedding): defer to policy.peers_allowed with no table — the flat
+    trusted mesh. The real decision lives in greasewood.policy; enforcement is
+    mutual either way (a link needs BOTH ends to install each other, each
+    reading the other's roles from its CA-signed credential — a node can't
+    talk its way into a role it wasn't issued)."""
+    from .policy import peers_allowed
+    return peers_allowed(local_caps, peer_caps, None)
 
 
 def _endpoint_candidates(endpoints: list[str],
@@ -260,8 +246,8 @@ def reconcile_once(
         desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
         # Context for the audit trail: name + segments, so every peer command
         # says WHO and WHY, not just a bare pubkey.
-        segs = ",".join(sorted(_segments(record.cred.caps))) or "-"
-        context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] seg={segs}"
+        roles = ",".join(sorted(_roles(record.cred.caps))) or "-"
+        context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] roles={roles}"
 
     # The three-way diff, named by intent: authorized-but-absent get installed,
     # present get their endpoint/route/keepalive re-checked, no-longer-authorized

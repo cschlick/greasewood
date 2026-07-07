@@ -77,15 +77,15 @@ Additional control-plane protections:
   signature, expiry, revocation), never from the raw directory cache. Revoking
   a node removes its name on the same reconcile cycle that removes its tunnel;
   an expired credential drops out of resolution the same way.
-- **Caps/segments are anchor-decided, not self-asserted** — a node's capabilities
-  (e.g. `tls`) and segments (`segment:<name>` tags) are chosen by the anchor at
+- **Caps/roles are anchor-decided, not self-asserted** — a node's capabilities
+  (e.g. `tls`) and roles (`role:<name>` tags, the grant-table vocabulary) are chosen by the anchor at
   `gw invite` and bound into the CA-signed credential; the enroll server issues
   from the door window and ignores anything the joiner sends. A member cannot
-  grant itself a capability or place itself in a segment it wasn't issued (e.g.
-  `segment:prod`, or the reach-all `segment:*`). Renewal re-issues from the tags
+  grant itself a capability or a role it wasn't issued (e.g.
+  `role:prod`, or the reach-all `role:*`). Renewal re-issues from the tags
   the anchor already recorded, so they can't drift upward at renew either — and
-  `gw set-segments`/`gw set-caps` let the anchor change them later (effective next
-  renewal). This is what makes segmentation a real boundary, not just
+  `gw set-roles`/`gw set-caps` let the anchor change them later (effective next
+  renewal). This is what makes the grant-table policy a real boundary, not just
   honest-node configuration.
 - **Trust is a static set** (`[ca] trusted_pubs`) — nodes accept credentials
   only from the CA keys they are configured to trust. Moving the CA is a

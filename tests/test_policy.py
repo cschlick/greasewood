@@ -3,9 +3,9 @@ Roles + grants + derived topology (greasewood.policy / wire.GrantTable).
 
 The invariants under test:
   - tunnel existence derives from the grant table (either-direction match);
-    with a table, even segment-mates DON'T peer without a grant
-  - no table → legacy segment-intersection peering, byte-for-byte (roles inert)
-  - the anchor ('*' tag) peers with everyone REGARDLESS of the table — the
+    with a table, even same-role nodes DON'T peer without a grant
+  - no table → the flat trusted mesh (implicit * -> * : *); roles inert
+  - the anchor (role:*) peers with everyone REGARDLESS of the table — the
     control plane is hardwired beneath policy, never prunable by it
   - adoption is CA-verified and seq-monotonic (no replay of an old table)
   - grants.toml is allow-only by schema: a deny rule is not expressible
@@ -45,24 +45,24 @@ def _grants(*triples):
 # tag vocabulary
 # ---------------------------------------------------------------------------
 
-def test_node_tags_unifies_segment_and_role_caps():
-    caps = ["segment:mesh", "role:web", "tls", "segment:*"]
-    assert policy.node_tags(caps) == {"mesh", "web", "*"}   # tls is not a tag
+def test_node_tags_reads_role_caps_only():
+    # Roles are the ONLY configured vocabulary. segment: caps are not a thing —
+    # segments are emergent (the structure the grant graph produces).
+    caps = ["role:web", "role:*", "tls", "segment:legacy"]
+    assert policy.node_tags(caps) == {"web", "*"}
 
 
 # ---------------------------------------------------------------------------
 # peers_allowed — the tunnel-existence decision
 # ---------------------------------------------------------------------------
 
-class TestLegacyFallback:
-    def test_no_table_is_segment_intersection(self):
-        assert policy.peers_allowed(["segment:db"], ["segment:db"], None)
-        assert not policy.peers_allowed(["segment:db"], ["segment:web"], None)
-
-    def test_roles_are_inert_without_a_table(self):
-        # role: caps must NOT create legacy peering — they're grant vocabulary,
-        # not rooms.
-        assert not policy.peers_allowed(["role:web"], ["role:web"], None)
+class TestNoPolicyFlatMesh:
+    def test_no_table_everyone_peers(self):
+        # No policy → the flat trusted mesh (implicit * -> * : *). A fresh mesh
+        # needs no file, and roles are inert until a table exists.
+        assert policy.peers_allowed(["role:db"], ["role:db"], None)
+        assert policy.peers_allowed(["role:db"], ["role:web"], None)
+        assert policy.peers_allowed([], [], None)
 
 
 class TestDerivedTopology:
@@ -72,16 +72,17 @@ class TestDerivedTopology:
         assert policy.peers_allowed(["role:web"], ["role:api"], grants)
         assert policy.peers_allowed(["role:api"], ["role:web"], grants)
 
-    def test_with_a_table_segment_mates_do_not_peer_without_a_grant(self):
-        # THE derived-topology property: the table replaces room-based peering.
+    def test_with_a_table_same_role_does_not_peer_without_a_grant(self):
+        # THE derived-topology property: only grants create tunnels. Two web
+        # nodes share no tunnel until someone writes web -> web.
         grants = _grants((["web"], ["api"], ["tcp/8000"]))
-        assert not policy.peers_allowed(["segment:mesh", "role:web"],
-                                        ["segment:mesh", "role:web"], grants)
+        assert not policy.peers_allowed(["role:web"], ["role:web"], grants)
 
-    def test_segment_caps_work_as_grant_vocabulary(self):
-        # segment:db ≡ role:db in grants — old fleets need no cap migration.
+    def test_segment_caps_are_not_grant_vocabulary(self):
+        # Segments are emergent, not caps: a segment: tag matches nothing.
         grants = _grants((["db"], ["db"], ["tcp/5432"]))
-        assert policy.peers_allowed(["segment:db"], ["segment:db"], grants)
+        assert not policy.peers_allowed(["segment:db"], ["segment:db"], grants)
+        assert policy.peers_allowed(["role:db"], ["role:db"], grants)
 
     def test_wildcard_tag_in_grant_matches_any_node(self):
         grants = _grants((["metrics"], ["*"], ["tcp/9100"]))
@@ -91,8 +92,8 @@ class TestDerivedTopology:
     def test_anchor_hardwired_beneath_the_table(self):
         # An empty table prunes everything EXCEPT the anchor — the channel that
         # carries the policy is not prunable by the policy.
-        assert policy.peers_allowed(["segment:*"], ["role:web"], [])
-        assert policy.peers_allowed(["role:web"], ["segment:*"], [])
+        assert policy.peers_allowed(["role:*"], ["role:web"], [])
+        assert policy.peers_allowed(["role:web"], ["role:*"], [])
         assert not policy.peers_allowed(["role:web"], ["role:web"], [])
 
 
@@ -192,9 +193,9 @@ class TestGrantPolicyAdoption:
     def test_offer_adopts_valid_and_persists(self, tmp_path):
         gp = policy.GrantPolicy(cache_path=tmp_path / "policy.json",
                                 get_ca_pubs=lambda: [CA.ca_pub_bytes])
-        assert gp(["segment:db"], ["segment:db"])          # legacy before adoption
+        assert gp(["role:db"], ["role:db"])                # flat mesh before adoption
         assert gp.offer(self._signed(1, _grants((["web"], ["api"], ["*"]))))
-        assert not gp(["segment:db"], ["segment:db"])      # table now governs
+        assert not gp(["role:db"], ["role:db"])            # table now governs
         assert gp(["role:web"], ["role:api"])
         # persisted → a fresh holder loads last-known-good
         gp2 = policy.GrantPolicy(cache_path=tmp_path / "policy.json",
@@ -230,15 +231,15 @@ class TestGrantPolicyAdoption:
 # ---------------------------------------------------------------------------
 
 def test_tunnel_delta_reports_created_and_removed():
-    web = _rec("web1", ["segment:mesh", "role:web"])
-    api = _rec("api1", ["segment:mesh", "role:api"])
-    db = _rec("db1", ["segment:mesh", "role:db"])
-    anchor = _rec("anchor", ["segment:*"])
+    web = _rec("web1", ["role:web"])
+    api = _rec("api1", ["role:api"])
+    db = _rec("db1", ["role:db"])
+    anchor = _rec("anchor", ["role:*"])
     records = [web, api, db, anchor]
 
     created, removed = policy.tunnel_delta(
         records, None, _grants((["web"], ["api"], ["tcp/8000"])))
-    # legacy had web↔api, web↔db, api↔db (all segment:mesh); table keeps only web↔api
+    # flat mesh had web↔api, web↔db, api↔db; the table keeps only web↔api
     assert created == []
     assert sorted(removed) == [("api1", "db1"), ("web1", "db1")]
     # anchor pairs never appear in a delta — hardwired beneath policy

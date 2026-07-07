@@ -53,9 +53,9 @@ def _underlay_addrs(endpoints: list[str]) -> tuple[str, str]:
     return v6, v4
 
 
-def _record_segments(r) -> list[str]:
-    """The segment names a record belongs to (from its `segment:` caps)."""
-    return [c[len("segment:"):] for c in r.cred.caps if c.startswith("segment:")]
+def _record_roles(r) -> list[str]:
+    """The roles a record holds (from its `role:` caps)."""
+    return [c[len("role:"):] for c in r.cred.caps if c.startswith("role:")]
 
 
 # A link counts as "up" if it handshaked within this window — the same ~180s
@@ -105,16 +105,32 @@ def _fmt_handshake_age(age_s: float) -> str:
     return f"{int(age_s // 86400)}d"
 
 
+def _load_policy_grants(cfg) -> "list | None":
+    """The active grant table's grants for DISPLAY (roster peer decisions,
+    diagnose verdicts, health expectations), from the policy.json cache the
+    daemon maintains. None = no policy (flat mesh). Display-only read; the
+    daemon verifies signatures on adoption."""
+    from .policy import POLICY_BASENAME
+    from .wire import GrantTable
+    try:
+        return GrantTable.from_dict(
+            json.loads((cfg.data_dir / POLICY_BASENAME).read_text())).grants
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
-                  latency=None, rates=None) -> list:
+                  latency=None, rates=None, grants=None) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
-    every node — name, addr, reachable, segments, credential); RIGHT is THIS
+    every node — name, addr, reachable, roles, credential); RIGHT is THIS
     node's view. Without root the right side is just the policy 'would I peer'
     answer. With root it's the live link + cumulative traffic. In LIVE mode
     (latency dict supplied) the right side is link + per-second RATE + a latency
     column that fills in asynchronously (blank until each peer's ping returns)."""
     from .hosts import mesh_name
-    from .reconcile import default_policy
+    from .policy import peers_allowed
 
     have_live = live_peers is not None
     is_live = latency is not None
@@ -155,7 +171,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                     f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
         return ("○ no handshake", "")
 
-    left_hdr = ("name", "addr", "in", "segments", "exp")
+    left_hdr = ("name", "addr", "in", "roles", "exp")
     if is_live:
         right_hdr = ("link", "rate", "latency")
     elif have_live:
@@ -168,11 +184,11 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         left_rows.append((
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
             "yes" if r.endpoints else "no",
-            ",".join(_record_segments(r)) or "-", _exp(r),
+            ",".join(_record_roles(r)) or "-", _exp(r),
         ))
         lp = (live_peers or {}).get(_wg_key(r))
         right_rows.append(_right(r, r.id_pub.hex() == own_id,
-                                 default_policy(cfg.caps, r.cred.caps), lp))
+                                 peers_allowed(cfg.caps, r.cred.caps, grants), lp))
 
     def _col_width(header, i, rows):
         return max(len(header), *(len(row[i]) for row in rows)) if rows else len(header)
@@ -199,18 +215,25 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     return out
 
 
-def _print_node_table(records, cfg, now, own_id, live_peers, is_root) -> None:
-    for line in _roster_lines(records, cfg, now, own_id, live_peers, is_root):
+def _print_node_table(records, cfg, now, own_id, live_peers, is_root,
+                      grants=None) -> None:
+    for line in _roster_lines(records, cfg, now, own_id, live_peers, is_root,
+                              grants=grants):
         print(line)
 
 
-def _segment_analysis(members):
-    """Fleet-wide connectivity within a segment, from each node's self-reported
-    `reachable` set (synced in the directory — no root or live wg needed).
-    Returns (components, missing_edges). An edge is UP if EITHER end reports the
-    other (a session is bidirectional, so one end suffices — robust to one-sided
-    staleness). An edge is EXPECTED (so its absence is a fault) when at least one
-    end advertises an endpoint, i.e. a dialable direction exists."""
+def _segment_analysis(members, grants=None):
+    """Connectivity within a group, from each node's self-reported `reachable`
+    set (synced in the directory — no root or live wg needed). Returns
+    (components, missing_edges). An edge is UP if EITHER end reports the other
+    (a session is bidirectional, so one end suffices — robust to one-sided
+    staleness). An edge is EXPECTED (so its absence is a fault) only when the
+    POLICY says the pair should tunnel (peers_allowed under the active grant
+    table — under a derived topology, two group-mates without a grant are
+    correctly unlinked, not a fault) AND a dialable direction exists (at least
+    one end advertises an endpoint)."""
+    from .policy import peers_allowed
+
     def linked(a, b):
         return b.cred.addr in a.reachable or a.cred.addr in b.reachable
     parent = {r.cred.addr: r.cred.addr for r in members}
@@ -228,8 +251,9 @@ def _segment_analysis(members):
         for b in members[i + 1:]:
             if linked(a, b):
                 parent[find(a.cred.addr)] = find(b.cred.addr)
-            elif a.endpoints or b.endpoints:   # a link was possible but is absent
-                missing.append((a, b))
+            elif peers_allowed(a.cred.caps, b.cred.caps, grants) \
+                    and (a.endpoints or b.endpoints):
+                missing.append((a, b))         # possible + authorized, but absent
     comps = {}
     for r in members:
         comps.setdefault(find(r.cred.addr), []).append(r)
@@ -250,13 +274,14 @@ def _edge_down_hint(a, b, cfg) -> str:
     return f"{na} ✗ {nb}  ({na} can't reach {nb} at {b.endpoints[0]} — {nb}'s firewall/NAT?)"
 
 
-def _print_segment_health(members, cfg) -> None:
-    """Under a segment's roster: fully-connected, or the partition/down-edge
-    breakdown. Uses only the synced `reachable` sets, so it works non-root."""
+def _print_segment_health(members, cfg, grants=None) -> None:
+    """Under a group's roster: fully-connected, or the partition/down-edge
+    breakdown (the EMERGENT segments — the connected structure the grant graph
+    produces). Uses only the synced `reachable` sets, so it works non-root."""
     from .hosts import mesh_name
     if len(members) < 2:
         return
-    comps, missing = _segment_analysis(members)
+    comps, missing = _segment_analysis(members, grants)
     if len(comps) <= 1 and not missing:
         print("  ✓ fully connected")
         return
@@ -385,7 +410,8 @@ def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
             prober.set_targets(targets)
 
             body = _roster_lines(records, cfg, now, own_id, live, True,
-                                 latency=prober.results, rates=rates)
+                                 latency=prober.results, rates=rates,
+                                 grants=_load_policy_grants(cfg))
             up = len(targets)
             fresh = _sync_freshness(cfg)
             frame = ["\033[H\033[J",
@@ -651,31 +677,35 @@ def cmd_watch(args) -> int:
         except Exception:
             live_peers = None
 
-    if getattr(args, "by_segment", False):
-        # One table per named segment. A node appears under every segment it's in,
-        # and a reach-all (segment:*) node appears under ALL of them — so many
-        # nodes show up in more than one table.
-        named = sorted({s for r in records for s in _record_segments(r) if s != "*"})
+    grants = _load_policy_grants(cfg)
+    if getattr(args, "by_role", False):
+        # One table per named role. A node appears under every role it holds,
+        # and the anchor (role:*) appears under ALL of them — so many nodes
+        # show up in more than one table. Health under each group flags only
+        # policy-EXPECTED links that are down (the emergent-segment view).
+        named = sorted({t for r in records for t in _record_roles(r) if t != "*"})
         shown: set[str] = set()
-        for s in named:
+        for tag in named:
             members = [r for r in records
-                       if s in _record_segments(r) or "*" in _record_segments(r)]
+                       if tag in _record_roles(r) or "*" in _record_roles(r)]
             shown.update(r.id_pub.hex() for r in members)
-            print(f"segment: {s}  ({len(members)} node{'' if len(members) == 1 else 's'})")
-            _print_node_table(members, cfg, now, own_id, live_peers, is_root)
-            _print_segment_health(members, cfg)
+            print(f"role: {tag}  ({len(members)} node{'' if len(members) == 1 else 's'})")
+            _print_node_table(members, cfg, now, own_id, live_peers, is_root,
+                              grants=grants)
+            _print_segment_health(members, cfg, grants)
             print()
-        # Anything not shown above — unsegmented nodes (can't peer), or reach-all
-        # nodes with no named segment to fall under — so the grouped view drops
-        # nobody.
+        # Anything not shown above — nodes with no role. They still peer on a
+        # flat mesh (no policy); under a policy they reach only the anchor.
         leftover = [r for r in records if r.id_pub.hex() not in shown]
         if leftover:
-            print(f"(no segment)  ({len(leftover)} node{'' if len(leftover) == 1 else 's'}) "
-                  f"— unsegmented, can't peer until given a segment")
-            _print_node_table(leftover, cfg, now, own_id, live_peers, is_root)
+            print(f"(no role)  ({len(leftover)} node{'' if len(leftover) == 1 else 's'}) "
+                  f"— hold no role: tag; under a grant table they reach only the anchor")
+            _print_node_table(leftover, cfg, now, own_id, live_peers, is_root,
+                              grants=grants)
             print()
     else:
-        _print_node_table(records, cfg, now, own_id, live_peers, is_root)
+        _print_node_table(records, cfg, now, own_id, live_peers, is_root,
+                          grants=grants)
         print()
 
     print(f"{len(records)} record(s) in local directory cache")
@@ -805,7 +835,7 @@ class _DiagnoseColumn:
     underlay_v6: str = "-"
     underlay_v4: str = "-"
     caps: list = field(default_factory=list)
-    segments: str = ""                     # comma-joined segment names
+    roles: str = ""                        # comma-joined role names
     credential: str = ""                   # human verdict, e.g. "valid · 23h"
     has_endpoint: bool = False             # dialable iff it advertises an endpoint
     endpoint: str = "—"                    # the endpoint to dial, or "—"
@@ -909,9 +939,9 @@ def _build_diag_facts(columns, cfg, own_addr, ca_pubs, revoked,
             addr=rec.cred.addr if rec else (own_addr or "?"),
             underlay_v6=v6, underlay_v4=v4,
             caps=list(rec.cred.caps) if rec else list(cfg.caps),
-            segments=(",".join(_record_segments(rec)) if rec else
-                      ",".join(s[len("segment:"):] for s in cfg.caps
-                               if s.startswith("segment:"))),
+            roles=(",".join(_record_roles(rec)) if rec else
+                   ",".join(s[len("role:"):] for s in cfg.caps
+                            if s.startswith("role:"))),
             credential=credential_verdict(rec),
             has_endpoint=has_endpoint,
             endpoint=v6 if v6 != "-" else (v4 if v4 != "-" else "—"),
@@ -945,7 +975,7 @@ def _print_diag_table(facts, port) -> None:
             ("underlay v4", [col.underlay_v4 for col in facts]),
             ("reachable", ["yes (advertises endpoint)" if col.has_endpoint
                            else "no (outbound-only)" for col in facts]),
-            ("segments", [col.segments or "-" for col in facts]),
+            ("roles", [col.roles or "-" for col in facts]),
             ("credential", [col.credential for col in facts]),
             (f"firewall udp/{port}", [col.firewall for col in facts])]
     label_w = max([len(r[0]) for r in rows] + [0])
@@ -959,21 +989,25 @@ def _print_diag_table(facts, port) -> None:
     print()
 
 
-def _print_pair_verdict(col_a, col_b, cfg, port) -> None:
+def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
     """Whether col_a and col_b can form a tunnel, and if not, which factor blocks
-    it: shared segment → a dialable direction → live handshake, localizing a
-    failure to this host's firewall vs an upstream router/NAT when possible."""
-    from .reconcile import default_policy
+    it: policy (the grant table) → a dialable direction → live handshake,
+    localizing a failure to this host's firewall vs an upstream router/NAT when
+    possible."""
+    from .policy import peers_allowed
 
     print(f"  {col_a.label} ↔ {col_b.label}")
-    if not default_policy(col_a.caps, col_b.caps):
-        print("    ✗ no shared segment — they won't peer by design "
-              "(give them a common segment to change this)")
+    if not peers_allowed(col_a.caps, col_b.caps, grants):
+        print("    ✗ policy: no grant connects their roles — no tunnel by design "
+              "(add a grant to grants.toml and `gw policy apply` to change this)")
         return
-    shared = "anchor is reach-all *" if ("*" in col_a.segments or "*" in col_b.segments) \
-        else "share " + repr(",".join(sorted(
-            set(col_a.segments.split(",")) & set(col_b.segments.split(",")))) or "?")
-    print(f"    segment: ✓ {shared}")
+    if "*" in col_a.roles or "*" in col_b.roles:
+        why = "anchor is reach-all (hardwired beneath the policy)"
+    elif grants is None:
+        why = "no policy — flat mesh, every verified member tunnels"
+    else:
+        why = "a grant connects their roles"
+    print(f"    policy: ✓ {why}")
 
     a_dials_b = col_b.has_endpoint     # a can dial b iff b listens with an endpoint
     b_dials_a = col_a.has_endpoint
@@ -1086,9 +1120,10 @@ def cmd_diagnose(args) -> int:
     _print_diag_header(cfg, own_addr, port, ca_pubs)
     _print_diag_table(facts, port)
 
+    grants = _load_policy_grants(cfg)
     print("link viability  (direct-or-fail; ??? firewalls assumed open)")
     for col_a, col_b in itertools.combinations(facts, 2):
-        _print_pair_verdict(col_a, col_b, cfg, port)
+        _print_pair_verdict(col_a, col_b, cfg, port, grants)
     return 0
 
 

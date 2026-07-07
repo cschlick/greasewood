@@ -98,8 +98,8 @@ def test_revoke_unknown_hostname_exits(tmp_path, monkeypatch):
     assert "no node named 'ghost'" in str(e.value)
 
 
-def test_set_caps_and_segments_echo_resolved_id(tmp_path, capsys, monkeypatch):
-    """set-caps / set-segments resolve a hostname (or mesh name) and echo the
+def test_set_caps_and_roles_echo_resolved_id(tmp_path, capsys, monkeypatch):
+    """set-caps / set-roles resolve a hostname (or mesh name) and echo the
     resolved node name AND its id, like revoke."""
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     ca_keys = CAKeys.generate()
@@ -107,16 +107,16 @@ def test_set_caps_and_segments_echo_resolved_id(tmp_path, capsys, monkeypatch):
     ca_keys.save(ca_key)
     ca = CA(ca_keys, tmp_path)
     n = NodeKeys.generate()
-    ca.issue(n.id_pub_bytes, n.wg_pub_bytes, "db01", ["segment:mesh"])
+    ca.issue(n.id_pub_bytes, n.wg_pub_bytes, "db01", ["role:mesh"])
     cfg = _anchor_cfg(tmp_path, ca_key)     # mesh_domain = test.internal
 
     assert cli.cmd_set_caps(types.SimpleNamespace(
-        config=str(cfg), node="db01", caps="segment:mesh,tls")) == 0
+        config=str(cfg), node="db01", caps="role:mesh,tls")) == 0
     out = capsys.readouterr().out
     assert "db01" in out and n.id_pub_hex in out
 
-    assert cli.cmd_set_segments(types.SimpleNamespace(
-        config=str(cfg), node="db01.test.internal", segments="prod")) == 0
+    assert cli.cmd_set_roles(types.SimpleNamespace(
+        config=str(cfg), node="db01.test.internal", roles="prod")) == 0
     out = capsys.readouterr().out
     assert "db01" in out and n.id_pub_hex in out          # by full mesh name too
 

@@ -61,9 +61,9 @@ class Config:
     tls_cert_ttl: dt.timedelta
     door_port: int
     # Defaults granted to NEW nodes at `gw invite` when the operator doesn't pass
-    # --segments / --caps. Read fresh at each invite, so editing them changes what
+    # --roles / --caps. Read fresh at each invite, so editing them changes what
     # future enrollments get (no restart). `default_caps` ships with "tls" on.
-    default_segments: list[str]
+    default_roles: list[str]
     default_caps: list[str]
 
     @property
@@ -154,7 +154,7 @@ door_window = "15m"
 door_port = {anchor["door_port"]}
 # Defaults granted to new nodes at `gw invite` (when --segments/--caps are
 # omitted). Edit anytime — the next invite reads them fresh, no restart.
-default_segments = ["mesh"]
+default_roles = ["mesh"]
 default_caps = ["tls"]
 """
     return text
@@ -183,9 +183,10 @@ def load_config(path: Path) -> Config:
         data_dir=data_dir,
         hostname=node["hostname"],
         role=node.get("role", "node"),
-        # Default must be a segment: tag — peering is decided by shared
-        # segments, so a bare "mesh" cap would silently peer with nobody.
-        caps=node.get("caps", ["segment:mesh"]),
+        # role:mesh is the conventional default tag. With no policy applied
+        # every verified member peers regardless; once a grant table exists,
+        # grants reference roles like this one.
+        caps=node.get("caps", ["role:mesh"]),
         endpoints=node.get("endpoints", []),
 
         wg_interface=net.get("interface", "gw-mesh"),
@@ -210,7 +211,7 @@ def load_config(path: Path) -> Config:
         door_window=_duration(anchor, "door_window", "15m"),
         tls_cert_ttl=_duration(anchor, "tls_cert_ttl", "7d"),
         door_port=int(anchor.get("door_port", 51901)),
-        default_segments=list(anchor.get("default_segments", ["mesh"])),
+        default_roles=list(anchor.get("default_roles", ["mesh"])),
         default_caps=list(anchor.get("default_caps", ["tls"])),
     )
 
