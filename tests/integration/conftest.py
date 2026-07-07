@@ -249,7 +249,8 @@ def door_enroll(gw_anchor, node_cid: str, node_ipv6: str, *,
 
 def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
                   caps: str | None = None, roles: str | None = None,
-                  invite_hostname: str | None = None) -> dict:
+                  invite_hostname: str | None = None,
+                  run_args: "list[str] | None" = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
@@ -276,7 +277,8 @@ def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
                 invite_hostname=invite_hostname)
 
     id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
-    podman("exec", "-d", cid, "sh", "-c", "gw -v run >> /tmp/gw.log 2>&1")
+    run_cmd = "gw -v run " + " ".join(run_args or []) + " >> /tmp/gw.log 2>&1"
+    podman("exec", "-d", cid, "sh", "-c", run_cmd)
 
     return {
         "cid": cid,

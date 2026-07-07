@@ -327,6 +327,7 @@ class ReconcileLoop(Loop):
         ensure_iface: "Callable[[], None] | None" = None,
         data_dir: "Path | None" = None,
         on_reachable: "Callable[[list[str]], None] | None" = None,
+        port_enforcer=None,   # portfilter.PortFilter | None (opt-in --enforce-ports)
         reachable_min_interval: float = 30.0,
     ) -> None:
         super().__init__(interval, "reconcile")
@@ -342,6 +343,7 @@ class ReconcileLoop(Loop):
         # fails (door enrollments included) until a restart. With this hook the
         # loop self-heals: each cycle re-checks and recreates if it's gone.
         self._ensure_iface = ensure_iface
+        self._port_enforcer = port_enforcer
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
@@ -416,6 +418,11 @@ class ReconcileLoop(Loop):
             log.error("reconcile error: %s", e)
             return  # no verified set this cycle; hosts stays as-is, heals next pass
         self._maybe_publish_reachable(reachable)
+        if self._port_enforcer is not None:
+            # trusted = the fully-verified records; the enforcer maps their
+            # roles → source addresses under the active grant table. Same set
+            # the hosts block is built from, so filter and names never disagree.
+            self._port_enforcer.apply(trusted)
         if self._hosts_domain:
             try:
                 # Only fully-verified records (never directory.all()): a revoked
