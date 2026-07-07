@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood grant table — the mesh's access policy (grants.toml)
+#
+#  Place at <data_dir>/grants.toml on the ANCHOR, then:  sudo gw policy apply
+#  (previews the tunnel delta, signs with the CA key, publishes via sync).
+#
+#  Semantics — allow-only, and the table DERIVES the topology:
+#    · a tunnel exists between two nodes iff some grant connects their roles
+#      (in either direction — tunnels are symmetric; direction matters to
+#      port filtering, which is advisory in this version)
+#    · deleting a grant tears its tunnels down on the next sync + reconcile
+#    · a deny rule is NOT expressible — omit the grant instead
+#    · hardwired beneath the table, never editable here: every node <-> anchor
+#      (the channel that carries this policy must not be prunable by it)
+#
+#  Roles are CA-signed caps, assigned at invite / set-caps:
+#      sudo gw invite --caps 'segment:mesh,role:web,tls'
+#      sudo gw set-caps db01 'segment:mesh,role:db,tls'
+#  `segment:X` and `role:X` are one vocabulary here — both mean the tag X.
+#
+#  With NO applied policy, peering is the legacy flat mesh: nodes tunnel iff
+#  they share a segment (all ports). A fresh mesh needs no policy at all.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[grant]]
+from  = ["web", "worker"]
+to    = ["api"]
+ports = ["tcp/8000"]
+# why: the app tier calls the API; nothing else does.
+
+[[grant]]
+from  = ["web"]
+to    = ["db"]
+ports = ["tcp/5432"]
+# why: only web reaches postgres — workers go through the API.
+
+[[grant]]
+from  = ["metrics"]
+to    = ["*"]                  # every node
+ports = ["tcp/9100"]
+# why: prometheus scrapes node_exporter fleet-wide (hub-and-spoke tunnels).

@@ -412,3 +412,90 @@ class CertRequest:
             ts=_parse_ts(d["ts"]),
             sig=_b64d(d["sig"]),
         )
+
+# ---------------------------------------------------------------------------
+# GrantTable — the mesh's access policy (§ roles & grants)
+# ---------------------------------------------------------------------------
+
+def _validate_grant(g: dict, i: int) -> dict:
+    """Normalize + validate one [[grant]] record. Allow-only by construction:
+    there is no action/deny field to validate — a deny rule is not expressible.
+    Unknown keys are a hard error (catches typos like `form =` before they
+    silently change the fleet's topology)."""
+    if not isinstance(g, dict):
+        raise ValueError(f"grant #{i}: must be a table of from/to/ports")
+    unknown = set(g) - {"from", "to", "ports"}
+    if unknown:
+        raise ValueError(f"grant #{i}: unknown key(s) {sorted(unknown)} "
+                         f"(allowed: from, to, ports)")
+    src = _str_list(g.get("from"), f"grant #{i} from")
+    dst = _str_list(g.get("to"), f"grant #{i} to")
+    ports = _str_list(g.get("ports", ["*"]), f"grant #{i} ports")
+    if not src or not dst:
+        raise ValueError(f"grant #{i}: from and to must be non-empty")
+    for p in ports:
+        if p == "*":
+            continue
+        proto, _, num = p.partition("/")
+        if proto not in ("tcp", "udp") or not num.isdigit() \
+                or not (1 <= int(num) <= 65535):
+            raise ValueError(f"grant #{i}: bad port {p!r} "
+                             f"(want 'tcp/5432', 'udp/51900', or '*')")
+    return {"from": sorted(src), "to": sorted(dst), "ports": sorted(ports)}
+
+
+@dataclass
+class GrantTable:
+    """
+    The mesh's signed access policy: an allow-only list of grants,
+    `from-roles → to-roles : ports`. CA-signed and distributed via the
+    directory sync, so nodes adopt it like any other signed fact.
+
+    This table DERIVES the tunnel topology (a peer link exists iff some grant
+    connects two nodes' roles — see policy.peers_allowed), with one rule
+    hardwired BENEATH it in code, deliberately not expressible here: every
+    node always peers with the anchor (role/segment `*`). The channel that
+    carries the policy must never be prunable by the policy.
+
+    seq is monotonic: nodes adopt a table only if its seq exceeds the one they
+    hold, so an old table can't be replayed to reopen a deleted grant.
+    """
+    seq: int
+    grants: list          # normalized [{"from": [...], "to": [...], "ports": [...]}]
+    ca_sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {"grants": self.grants, "seq": self.seq}
+
+    def sign(self, ca_priv: Ed25519PrivateKey) -> "GrantTable":
+        sig = ca_priv.sign(_canonical(self._body_dict()))
+        return replace(self, ca_sig=sig)
+
+    def verify(self, ca_pubs: list[bytes]) -> None:
+        """Verify the CA signature against the trusted set (any match).
+        Raises ValueError on failure."""
+        body = _canonical(self._body_dict())
+        for raw_pub in ca_pubs:
+            pub = Ed25519PublicKey.from_public_bytes(raw_pub)
+            try:
+                pub.verify(self.ca_sig, body)
+                return
+            except InvalidSignature:
+                continue
+        raise ValueError("policy: no trusted CA signature found")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["ca_sig"] = _b64e(self.ca_sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GrantTable":
+        seq = d["seq"]
+        if not isinstance(seq, int) or seq < 0:
+            raise ValueError("policy seq must be a non-negative integer")
+        raw_grants = d["grants"]
+        if not isinstance(raw_grants, list):
+            raise ValueError("policy grants must be a list")
+        grants = [_validate_grant(g, i) for i, g in enumerate(raw_grants)]
+        return cls(seq=seq, grants=grants, ca_sig=_b64d(d["ca_sig"]))

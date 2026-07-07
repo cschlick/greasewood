@@ -81,6 +81,7 @@ class _Handler(BaseHTTPRequestHandler):
     # timestamp string (or None). Served in /directory so cooperating nodes whose
     # credential predates it renew. Read fresh per request (no restart needed).
     get_renew_after: "callable" = staticmethod(lambda: None)
+    get_policy: "callable" = staticmethod(lambda: None)
     replay: "_ReplayGuard" = _ReplayGuard()
 
     def log_message(self, fmt, *args) -> None:
@@ -122,6 +123,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "records": [r.to_dict() for r in self.directory.all()],
                 "renew_after": self.get_renew_after(),
                 "mesh_domain": self.mesh_domain,
+                # The signed GrantTable dict, or None. Re-read per request so a
+                # `gw policy apply` takes effect without an anchor restart.
+                "policy": self.get_policy(),
                 "now": self._now_iso(),
             })
         elif self.path == "/ca-cert":
@@ -381,6 +385,7 @@ class ControlServer:
         tls_cert_ttl=None,
         mesh_domain: str = "gw.internal",
         get_renew_after=lambda: None,
+        get_policy=lambda: None,
         request_timeout: float = 30.0,
         max_workers: int = 32,
     ) -> None:
@@ -400,6 +405,7 @@ class ControlServer:
         Handler.tls_cert_ttl = tls_cert_ttl
         Handler.mesh_domain = mesh_domain
         Handler.get_renew_after = staticmethod(get_renew_after)
+        Handler.get_policy = staticmethod(get_policy)
         Handler.replay = _ReplayGuard()
 
         # Bind one socket per address — typically the anchor's overlay address and

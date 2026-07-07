@@ -32,7 +32,7 @@ def test_pull_directory_returns_anchor_time(tmp_path):
     port = srv._server.server_address[1]
     srv.start()
     try:
-        records, renew_after, anchor_now, _dom = pull_directory(f"http://[::1]:{port}")
+        records, renew_after, anchor_now, _dom, _policy = pull_directory(f"http://[::1]:{port}")
         assert records == [] and renew_after is None
         assert anchor_now is not None and anchor_now.tzinfo is not None
         assert abs((dt.datetime.now(_UTC) - anchor_now).total_seconds()) < 30

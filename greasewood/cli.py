@@ -2264,10 +2264,23 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs):
         except FileNotFoundError:
             return None
 
+    def read_policy():
+        # The signed GrantTable dict `gw policy apply` wrote, or None. Re-read
+        # per request so an apply takes effect without an anchor restart.
+        from .policy import POLICY_BASENAME
+        try:
+            return json.loads((cfg.data_dir / POLICY_BASENAME).read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            log.warning("policy file unreadable, serving none: %s", e)
+            return None
+
     server = ControlServer(
         listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
         ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
-        mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after)
+        mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
+        get_policy=read_policy)
     server.start()
 
     door_watcher = DoorWatcher(
@@ -2357,10 +2370,19 @@ def cmd_run(args) -> int:
     # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval
     # out), so acting on the anchor's fleet renew hint needs no reordering.
+    # The live grant table (roles → roles : ports) drives tunnel existence.
+    # Loaded from last-known-good on disk; the sync loop offers fresh tables
+    # (CA-verified, seq-monotonic). No table → legacy segment peering.
+    from .policy import GrantPolicy, POLICY_BASENAME
+    grant_policy = GrantPolicy(cache_path=cfg.data_dir / POLICY_BASENAME,
+                               get_ca_pubs=get_ca_pubs)
+    grant_policy.load_cache()
+
     sync = SyncLoop(
         directory, lambda: cfg.seeds, cfg.dir_cache_path,
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
         expected_domain=cfg.mesh_domain,
+        on_policy=grant_policy.offer,
     )
     sync.start()
 
@@ -2399,6 +2421,7 @@ def cmd_run(args) -> int:
         local_caps=cfg.caps,
         get_ca_pubs=get_ca_pubs,
         get_revoked=get_revoked,
+        policy=grant_policy,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
         local_families=_local_families(),
         ensure_iface=_ensure_mesh_iface,
@@ -2609,6 +2632,92 @@ def cmd_firewall(args) -> int:
     print()
     # Advisory check of the LIVE ruleset (read-only; needs root to see it).
     _fw.check(_fw.anchor_rules(cfg.listen_port, control_port, cfg.wg_interface), log)
+    return 0
+
+
+
+# ---------------------------------------------------------------------------
+# policy — the mesh's grant table (roles → roles : ports; derives the topology)
+# ---------------------------------------------------------------------------
+
+def cmd_policy(args) -> int:
+    """`gw policy show` — render the active grant table (any node, no root).
+    `gw policy apply [file]` — anchor: validate grants.toml, preview the tunnel
+    delta it causes, sign it with the CA key, and publish it (nodes adopt on
+    their next directory sync)."""
+    from .config import load_config
+    from . import policy as polmod
+    from .wire import GrantTable
+
+    if args.action == "show":
+        cfg = load_config(Path(args.config))
+        table = None
+        cache = cfg.data_dir / polmod.POLICY_BASENAME
+        if cache.exists():
+            try:
+                table = GrantTable.from_dict(json.loads(cache.read_text()))
+            except (ValueError, KeyError) as e:
+                sys.exit(f"policy cache at {cache} is corrupt: {e}")
+        print(polmod.render_grants(table))
+        return 0
+
+    # ---- apply (anchor, root: signs with the CA key) ----
+    from .directory import Directory
+    from .keys import CAKeys, atomic_write
+    _require_root("policy apply", "it signs the table with the CA key")
+    cfg = load_config(Path(args.config))
+    if cfg.role != "anchor":
+        sys.exit("gw policy apply must be run on the anchor (role = anchor)")
+    if cfg.ca_key_file is None:
+        sys.exit("policy apply requires ca_key_file in [anchor]")
+
+    grants_path = Path(args.file) if args.file else cfg.data_dir / polmod.GRANTS_BASENAME
+    if not grants_path.exists():
+        sys.exit(f"no grants file at {grants_path} — write one (see "
+                 f"grants.toml.example) or pass a path")
+    try:
+        grants = polmod.parse_grants_toml(grants_path.read_text())
+    except ValueError as e:
+        sys.exit(str(e))
+
+    # Current table (for seq + delta) and the fleet (for delta + typo check).
+    old_table = None
+    cache = cfg.data_dir / polmod.POLICY_BASENAME
+    if cache.exists():
+        try:
+            old_table = GrantTable.from_dict(json.loads(cache.read_text()))
+        except (ValueError, KeyError):
+            log.warning("existing policy cache unreadable; treating as none")
+    directory = Directory.load(cfg.dir_cache_path)
+    records = directory.all()
+
+    for tag in sorted(polmod.unmatched_tags(grants, records)):
+        print(f"  ⚠ grant names {tag!r} but NO current node holds role:{tag} "
+              f"or segment:{tag} — typo? (it grants nothing until a node does)")
+
+    created, removed = polmod.tunnel_delta(
+        records, old_table.grants if old_table else None, grants)
+    new_seq = (old_table.seq + 1) if old_table else 1
+    print(f"policy v{old_table.seq if old_table else '—'} → v{new_seq}: "
+          f"{len(grants)} grant(s)")
+    for a, b in created:
+        print(f"  + tunnel  {a} ↔ {b}")
+    for a, b in removed:
+        print(f"  - tunnel  {a} ↔ {b}")
+    if not created and not removed:
+        print("  (no topology change — port scopes only)")
+
+    if not getattr(args, "yes", False):
+        answer = input("apply? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("not applied.")
+            return 1
+
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    table = GrantTable(seq=new_seq, grants=grants).sign(ca_keys.ca_priv)
+    atomic_write(cache, json.dumps(table.to_dict(), indent=2), mode=0o644)
+    print(f"policy v{new_seq} applied — nodes adopt it on their next directory "
+          f"sync; tunnels reconcile within a cycle.")
     return 0
 
 
@@ -3186,6 +3295,21 @@ def main(argv=None) -> int:
     sp.add_argument("segments", help="comma-separated segments, e.g. 'prod,web' "
                                      "(replaces segment tags; keeps tls; empty = mesh default)")
     sp.set_defaults(fn=cmd_set_segments)
+
+    # policy — the grant table (roles → roles : ports; derives the topology)
+    sp = sub.add_parser("policy",
+                        help="show the mesh's grant table, or [sudo, anchor] "
+                             "apply grants.toml — the allow-only role policy "
+                             "that derives which tunnels exist")
+    sp.add_argument("action", choices=["show", "apply"],
+                    help="show: render the active table (no root). "
+                         "apply: validate + preview tunnel delta + sign + publish")
+    sp.add_argument("file", nargs="?", default=None,
+                    help="grants.toml path (apply only; default: "
+                         "<data_dir>/grants.toml)")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="apply without the interactive confirmation")
+    sp.set_defaults(fn=cmd_policy)
 
     # anchor-promote (on the prospective new anchor)
     sp = sub.add_parser("anchor-promote",

@@ -96,7 +96,7 @@ def test_sync_stamp_written_on_successful_pull(tmp_path, monkeypatch):
     loop = syncmod.SyncLoop(directory=Directory(),
                             get_seeds=lambda: ["http://seed"],
                             cache_path=tmp_path / "directory.json")
-    monkeypatch.setattr(syncmod, "pull_directory", lambda url, timeout=10.0: ([], None, None, None))
+    monkeypatch.setattr(syncmod, "pull_directory", lambda url, timeout=10.0: ([], None, None, None, None))
     loop._pull_once()
     assert syncmod.read_last_sync(tmp_path) is not None
 

@@ -52,8 +52,9 @@ def pull_directory(seed_url: str, timeout: float = 10.0):
             records = [NodeRecord.from_dict(r) for r in raw.get("records", [])]
             return (records, _parse_renew_after(raw.get("renew_after")),
                     _parse_renew_after(raw.get("now")),
-                    raw.get("mesh_domain") or None)
-        return [NodeRecord.from_dict(r) for r in raw], None, None, None
+                    raw.get("mesh_domain") or None,
+                    raw.get("policy") or None)
+        return [NodeRecord.from_dict(r) for r in raw], None, None, None, None
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
@@ -83,6 +84,7 @@ class SyncLoop(Loop):
         interval: float = 20.0,
         on_renew_after: "Callable[[dt.datetime], None] | None" = None,
         expected_domain: "str | None" = None,
+        on_policy: "Callable[[dict], bool] | None" = None,
     ) -> None:
         super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
@@ -96,6 +98,9 @@ class SyncLoop(Loop):
         # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
+        # Offered the raw signed-policy dict from each pull; the receiver
+        # (policy.GrantPolicy.offer) verifies + adopts. Sync stays dumb.
+        self._on_policy = on_policy
         self._last_skew_warn: float | None = None
         self._warned_domain: str | None = None
 
@@ -174,7 +179,8 @@ class SyncLoop(Loop):
 
         for seed in self._get_seeds():
             try:
-                records, renew_after, anchor_now, anchor_domain = pull_directory(seed)
+                (records, renew_after, anchor_now, anchor_domain,
+                 policy_dict) = pull_directory(seed)
                 n = self._directory.merge(records)
                 if n:
                     self._directory.save(self._cache_path)
@@ -184,6 +190,8 @@ class SyncLoop(Loop):
                 self._note_mesh_domain(anchor_domain)
                 if self._on_renew_after and renew_after is not None:
                     self._on_renew_after(renew_after)
+                if self._on_policy and policy_dict is not None:
+                    self._on_policy(policy_dict)
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
