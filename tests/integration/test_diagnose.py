@@ -28,15 +28,14 @@ def test_diagnose_reports_linked(gw_anchor, gw_image, gw_network):
         assert "LINKED" in out, f"expected a LINKED peer, got:\n{out}"
         assert "REJECTED" not in out, f"unexpected rejection:\n{out}"
 
-        # From the anchor's perspective: the node should show as LINKED too.
-        out_anchor = pexec(gw_anchor["cid"], "gw", "diagnose").stdout
+        # From the anchor's perspective: no-arg diagnose is self ↔ anchor,
+        # which on the anchor is just itself (the pairwise design) — so target
+        # the node explicitly. It should show as LINKED there too.
+        out_anchor = pexec(gw_anchor["cid"], "gw",
+                           "diagnose", "diagnode").stdout
         assert "diagnode" in out_anchor, out_anchor
         assert "LINKED" in out_anchor, f"anchor should see node linked:\n{out_anchor}"
-
-        # Targeted form: `gw diagnose <hostname>` narrows to that one peer.
-        one = pexec(gw_anchor["cid"], "gw",
-                    "diagnose", "diagnode").stdout
-        assert one.count("●") == 1 and "diagnode" in one
+        assert out_anchor.count("●") == 1
     finally:
         if node:
             podman("rm", "-f", node["cid"], check=False)
