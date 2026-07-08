@@ -744,12 +744,24 @@ ports = ["tcp/9100"]
 ```
 
 ```bash
-sudo gw policy apply        # validates, PREVIEWS the tunnel delta, signs, publishes
+# edit the anchor's <data_dir>/grants.toml, and the running anchor daemon
+# auto-signs + publishes it within a sync interval — no command needed.
+sudo gw policy apply        # OPTIONAL: preview the tunnel delta + apply NOW
 #   policy v1 → v2: 2 grant(s)
 #     - tunnel  web1 ↔ web2      ← edits show exactly what they create/destroy
 #   apply? [y/N]
 gw policy show              # on any node: the active table (no root)
 ```
+
+**grants.toml is the source of truth.** `gw create` writes it (the explicit
+open default, `* -> * : *`) and signs it into the distributed, CA-signed
+`policy.json` — the form nodes actually receive and trust. The running anchor
+watches grants.toml and re-signs on any edit (logging the tunnel delta), so
+editing the file *is* how you change policy; `gw policy apply` is just the
+explicit preview-and-apply-now path (and works with the daemon stopped). A
+joining node is handed the current signed policy at enrollment, so it enforces
+the real table from its first run — the mesh never operates on an implicit
+default.
 
 With a policy applied, a tunnel exists between two nodes **iff some grant
 connects their roles** (either direction — tunnels are symmetric; the grant's

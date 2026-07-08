@@ -437,12 +437,15 @@ def cmd_create(args) -> int:
     # Drop the default grant table, explicit: `* -> * : *` (fully open — exactly
     # the no-policy behavior, written out so the operator edits from a visible
     # baseline). Idempotent: never clobber an existing grants.toml on re-create.
-    from .policy import GRANTS_BASENAME, DEFAULT_GRANTS_TOML
+    from .policy import GRANTS_BASENAME, DEFAULT_GRANTS_TOML, sign_default_policy
     grants_path = data_dir / GRANTS_BASENAME
     if not grants_path.exists():
         grants_path.write_text(DEFAULT_GRANTS_TOML)
-        log.info("wrote default grant table → %s (fully open; edit + "
-                 "`gw policy apply` to tighten)", grants_path)
+        log.info("wrote default grant table → %s (fully open)", grants_path)
+    # Sign it into policy.json v1 now, so the anchor has a real signed policy
+    # sourced from grants.toml from birth — the daemon runs on grants.toml's
+    # content, not an implicit default. The running daemon re-signs on edits.
+    sign_default_policy(data_dir, ca_keys)
 
     ca = CA(ca_keys, data_dir, ttl)
     cred = ca.issue(node_keys.id_pub_bytes, node_keys.wg_pub_bytes, hostname, caps)
@@ -1414,6 +1417,13 @@ def cmd_join(args) -> int:
     directory.put(record)
     directory.save(dir_cache)
 
+    # Pre-seed the signed policy the anchor sent, so this node's first `gw run`
+    # enforces the real grant table immediately — no implicit-open window before
+    # its first directory sync. The daemon re-verifies it under the CA on load.
+    if resp.get("policy"):
+        from .policy import POLICY_BASENAME
+        (data_dir / POLICY_BASENAME).write_text(json.dumps(resp["policy"], indent=2))
+
     # Send our signed record back over the SAME door connection; the anchor merges
     # it into its directory so the ReconcileLoop keeps the peer it just installed
     # (the bootstrap chicken-and-egg). Doing this on the door tunnel — rather
@@ -2239,7 +2249,7 @@ def cmd_rename_node(args) -> int:
 # run
 # ---------------------------------------------------------------------------
 
-def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs):
+def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy):
     """Bring up the anchor-only services and return (get_revoked, door_watcher):
     load the CA, start the HTTP control plane, and start the enrollment door
     watcher. get_revoked is the live revoke-list reader the reconcile loop uses;
@@ -2274,17 +2284,20 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs):
         except FileNotFoundError:
             return None
 
+    # grants.toml is the SOURCE OF TRUTH: the signer re-signs it into the
+    # distributed policy.json whenever the file changes (nodes receive the
+    # CA-signed form, which is what they can trust). read_policy runs on the
+    # /directory serve path — cheap, mtime-guarded — so an edit auto-applies
+    # within one node sync, no manual `gw policy apply` and no implicit default.
+    # It also feeds the anchor's OWN grant_policy so the anchor's data plane
+    # tracks grants.toml live.
+    from .policy import AnchorPolicySigner
+    policy_signer = AnchorPolicySigner(cfg.data_dir, ca_keys,
+                                       get_records=directory.all)
+    policy_signer.refresh(offer_to=grant_policy)   # establish current at startup
+
     def read_policy():
-        # The signed GrantTable dict `gw policy apply` wrote, or None. Re-read
-        # per request so an apply takes effect without an anchor restart.
-        from .policy import POLICY_BASENAME
-        try:
-            return json.loads((cfg.data_dir / POLICY_BASENAME).read_text())
-        except FileNotFoundError:
-            return None
-        except (OSError, ValueError) as e:
-            log.warning("policy file unreadable, serving none: %s", e)
-            return None
+        return policy_signer.refresh(offer_to=grant_policy)
 
     server = ControlServer(
         listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
@@ -2372,22 +2385,23 @@ def cmd_run(args) -> int:
     # Revoke list is re-read live (not snapshotted) so `gw revoke` takes effect
     # without a daemon restart — both for control-plane refusal and local
     # eviction. Plain nodes have no revoke list (expiry-based revocation).
-    get_revoked: "callable" = set
-    if cfg.role == "anchor":
-        get_revoked, door_watcher = _start_anchor_control_plane(
-            cfg, keys, directory, get_ca_pubs)
-
-    # Directory sync — pull from the configured seeds (the anchor). The renewal loop
-    # is built below; the callback reads it lazily (the first pull is one interval
-    # out), so acting on the anchor's fleet renew hint needs no reordering.
     # The live grant table (roles → roles : ports) drives tunnel existence.
     # Loaded from last-known-good on disk; the sync loop offers fresh tables
-    # (CA-verified, seq-monotonic). No table → flat mesh (everyone peers).
+    # (CA-verified, seq-monotonic). Built BEFORE the anchor block so the anchor
+    # can feed its own copy from grants.toml (see _start_anchor_control_plane).
     from .policy import GrantPolicy, POLICY_BASENAME
     grant_policy = GrantPolicy(cache_path=cfg.data_dir / POLICY_BASENAME,
                                get_ca_pubs=get_ca_pubs)
     grant_policy.load_cache()
 
+    get_revoked: "callable" = set
+    if cfg.role == "anchor":
+        get_revoked, door_watcher = _start_anchor_control_plane(
+            cfg, keys, directory, get_ca_pubs, grant_policy)
+
+    # Directory sync — pull from the configured seeds (the anchor). The renewal loop
+    # is built below; the callback reads it lazily (the first pull is one interval
+    # out), so acting on the anchor's fleet renew hint needs no reordering.
     sync = SyncLoop(
         directory, lambda: cfg.seeds, cfg.dir_cache_path,
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
@@ -2683,8 +2697,9 @@ def cmd_firewall(args) -> int:
 def cmd_policy(args) -> int:
     """`gw policy show` — render the active grant table (any node, no root).
     `gw policy apply [file]` — anchor: validate grants.toml, preview the tunnel
-    delta it causes, sign it with the CA key, and publish it (nodes adopt on
-    their next directory sync)."""
+    delta, sign, and publish it NOW. Note the running anchor daemon ALSO
+    auto-applies grants.toml edits within a sync interval; apply is the explicit
+    preview-and-apply-immediately path (and works with the daemon stopped)."""
     from .config import load_config
     from . import policy as polmod
     from .wire import GrantTable
@@ -2757,7 +2772,8 @@ def cmd_policy(args) -> int:
     table = GrantTable(seq=new_seq, grants=grants).sign(ca_keys.ca_priv)
     atomic_write(cache, json.dumps(table.to_dict(), indent=2), mode=0o644)
     print(f"policy v{new_seq} applied — nodes adopt it on their next directory "
-          f"sync; tunnels reconcile within a cycle.")
+          f"sync; tunnels reconcile within a cycle. (The running daemon also "
+          f"auto-applies grants.toml edits; this was the immediate, previewed path.)")
     return 0
 
 

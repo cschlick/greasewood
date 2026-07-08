@@ -2,10 +2,13 @@
 #  greasewood grant table — the mesh's access policy (grants.toml)
 #
 #  `gw create` already drops a copy of the DEFAULT (the `* -> * : *` grant
-#  below) at <data_dir>/grants.toml on the anchor. This file is the fuller
-#  reference. Edit the anchor's grants.toml, then:  sudo gw policy apply
-#  (previews the tunnel delta, signs with the CA key, publishes via sync).
-#  Changes take effect ONLY after apply.
+#  below) at <data_dir>/grants.toml on the anchor, and signs it into the
+#  distributed policy.json. This file is the fuller reference.
+#
+#  grants.toml is the SOURCE OF TRUTH: the running anchor watches it and
+#  auto-signs edits into policy.json within a sync interval (logging the
+#  tunnel delta) — editing this file IS how you change policy, no command
+#  needed. `sudo gw policy apply` is the optional preview-and-apply-now path.
 #
 #  Semantics — allow-only, and the table DERIVES the topology:
 #    · a tunnel exists between two nodes iff some grant connects their roles
