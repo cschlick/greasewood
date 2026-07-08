@@ -80,62 +80,64 @@ def test_two_outbound_only_not_flagged(capsys):
 
 
 # ---------------------------------------------------------------------------
-# gw watch: the enforcement (greasewood nftables table) summary block
+# gw watch: the greasewood nftables table, shown verbatim (command + output)
 # ---------------------------------------------------------------------------
 
-def test_enforcement_lines_open_default(monkeypatch):
+def _cfg(enforce=True):
     import types
+    return types.SimpleNamespace(enforce_ports=enforce, mesh_domain="pm.internal",
+                                 caps=["role:api"])
+
+
+def test_nft_table_lines_shows_command_then_raw_output(monkeypatch):
+    import subprocess, types
     from greasewood import status
-    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)   # non-root: skip nft read
-    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
-                                caps=["role:api"])
-    out = "\n".join(status._enforcement_lines(cfg, None))
-    assert "port enforcement on" in out and "greasewood_pm" in out
-    assert "mesh open" in out and "* → * : *" in out
+    raw = ("table inet greasewood_pm {\n"
+           "\tchain meshfilter {\n"
+           "\t\tiifname \"gw-pm\" accept\n"
+           "\t}\n}")
+    monkeypatch.setattr(status.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, raw, ""))
+    lines = status._nft_table_lines(_cfg())
+    assert lines[0] == "$ sudo nft list table inet greasewood_pm"   # literal command
+    assert lines[1:] == raw.splitlines()                            # verbatim output
 
 
-def test_enforcement_lines_tightened_shows_inbound_scopes(monkeypatch):
-    import types
+def test_nft_table_lines_off(monkeypatch):
+    from greasewood import status
+    out = "\n".join(status._nft_table_lines(_cfg(enforce=False)))
+    assert out.startswith("$ sudo nft list table inet greasewood_pm")
+    assert "enforcement off" in out
+
+
+def test_nft_table_lines_needs_root(monkeypatch):
+    import subprocess
     from greasewood import status
     monkeypatch.setattr(status.os, "geteuid", lambda: 1000)
-    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
-                                caps=["role:api"])
-    grants = [{"from": ["web", "worker"], "to": ["api"], "ports": ["tcp/8000"]},
-              {"from": ["web"], "to": ["db"], "ports": ["tcp/5432"]}]
-    out = "\n".join(status._enforcement_lines(cfg, grants))
-    assert "tcp/8000 ← web,worker" in out           # this node's inbound grant
-    assert "5432" not in out                         # the db grant isn't inbound here
+    monkeypatch.setattr(status.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
+    out = "\n".join(status._nft_table_lines(_cfg()))
+    assert "run as root" in out
 
 
-def test_enforcement_lines_tightened_no_inbound_is_default_deny(monkeypatch):
-    import types
+def test_nft_table_lines_missing_table_as_root(monkeypatch):
+    import subprocess
     from greasewood import status
-    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)
-    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
-                                caps=["role:worker"])   # no grant targets worker
-    grants = [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]
-    out = "\n".join(status._enforcement_lines(cfg, grants))
-    assert "default-deny" in out
+    monkeypatch.setattr(status.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(status.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(
+                            a, 1, "", "Error: No such file or directory"))
+    out = "\n".join(status._nft_table_lines(_cfg()))
+    assert "no such table" in out.lower()
 
 
-def test_enforcement_lines_off(monkeypatch):
-    import types
+def test_nft_table_lines_nft_absent(monkeypatch):
     from greasewood import status
-    cfg = types.SimpleNamespace(enforce_ports=False, mesh_domain="pm.internal",
-                                caps=["role:api"])
-    out = "\n".join(status._enforcement_lines(cfg, None))
-    assert "OFF" in out and "advisory" in out
-
-
-def test_enforcement_lines_warns_when_table_missing_as_root(monkeypatch):
-    import types
-    from greasewood import status, wg
-    monkeypatch.setattr(status.os, "geteuid", lambda: 0)         # root → reads nft
-    monkeypatch.setattr(wg, "nft_table_exists", lambda t: False) # simulate flush window
-    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
-                                caps=["role:api"])
-    out = "\n".join(status._enforcement_lines(cfg, None))
-    assert "not in kernel yet" in out
+    def boom(*a, **k):
+        raise FileNotFoundError()
+    monkeypatch.setattr(status.subprocess, "run", boom)
+    out = "\n".join(status._nft_table_lines(_cfg()))
+    assert "nft not installed" in out
 
 
 # ---------------------------------------------------------------------------
