@@ -385,8 +385,15 @@ def _nft_table_lines(cfg) -> list:
     `nft list table` command, then its raw output. No summary — what the kernel
     holds, exactly as `nft` prints it (we run without sudo since watch is already
     root; the displayed command keeps sudo so it's copy-pasteable elsewhere)."""
+    from . import platform as gwplat
     from .portfilter import table_name
     from .config import membership_key
+    if gwplat.IS_MACOS:
+        # No nft on macOS and no pf backend yet — say that, not "(nft not
+        # installed)" as if the operator forgot a package.
+        return ["firewall : port enforcement not available on macOS yet (pf "
+                "backend planned) — port scopes advisory; tunnels still "
+                "policy-controlled"]
     tbl = table_name(membership_key(cfg.mesh_domain))
     cmd = [f"$ sudo nft list table inet {tbl}"]
 
@@ -1099,7 +1106,12 @@ def _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec) -> list:
     from .hosts import sanitize
 
     def find(name):
+        # Accept the full mesh name too (the roster prints bastion.pm.internal,
+        # so that's what people copy into diagnose) — strip the domain suffix.
         want = sanitize(name)
+        dom = sanitize("x." + cfg.mesh_domain)[1:]     # ".pm.internal", sanitized
+        if want.endswith(dom):
+            want = want[:-len(dom)]
         return next((r for r in directory.all() if sanitize(r.hostname) == want), None)
 
     requested = [n for n in (getattr(args, "nodes", None) or []) if n]
