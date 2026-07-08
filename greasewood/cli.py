@@ -2997,6 +2997,65 @@ def cmd_anchor_restore(args) -> int:
 # purge  (decommission or start-over — removes all local greasewood state)
 # ---------------------------------------------------------------------------
 
+def _gw_daemons_for_mesh(cfg_path: Path) -> "tuple[list[int], list[int]]":
+    """(mine, others): PIDs of running greasewood `run` daemons, split into those
+    that belong to THIS mesh (safe for purge to kill — the user is destroying it)
+    and those referencing a DIFFERENT config (another mesh — never touched).
+
+    A daemon's mesh is read from its `-c <config>` argument; a bare `gw run` with
+    no -c is discovery-based, which only starts on a single-mesh host, so it is
+    treated as this mesh."""
+    import re
+    r = subprocess.run(["pgrep", "-af", "run"], capture_output=True, text=True)
+    mine, others = [], []
+    me = os.getpid()
+    want = cfg_path.name
+    for line in (r.stdout or "").splitlines():
+        pid_s, _, cmd = line.partition(" ")
+        if not pid_s.isdigit() or int(pid_s) == me:
+            continue
+        # A greasewood daemon: the `gw` entrypoint running the `run` subcommand.
+        if not re.search(r"(^|/)gw\b", cmd) or not re.search(r"\brun\b", cmd):
+            continue
+        m = re.search(r"-c\s+(\S+)", cmd)
+        if m:
+            (mine if os.path.basename(m.group(1)) == want else others).append(int(pid_s))
+        else:
+            mine.append(int(pid_s))     # bare `gw run` → single-mesh → this mesh
+    return mine, others
+
+
+def _kill_daemons(pids: "list[int]") -> None:
+    """SIGTERM the given daemons, then SIGKILL any that don't exit within a few
+    seconds. Best-effort: a PID that's already gone (or unkillable) is skipped."""
+    import signal
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + 3.0
+    alive = list(pids)
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.2)
+        alive = [p for p in alive if _pid_alive(p)]
+    for pid in alive:                   # stragglers → hard kill
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                     # exists, just not ours to signal
+
+
 def cmd_purge(args) -> int:
     _require_root("purge")
     cfg_path = Path(args.config)
@@ -3044,23 +3103,46 @@ def cmd_purge(args) -> int:
             subprocess.run([systemctl, "disable", "--now", unit],
                            capture_output=True)
             removed.append(f"stopped {unit}")
-    # A manual `gw run` can't be stopped safely from here — but it MUST not
-    # survive the purge, so at least say so loudly.
-    r = subprocess.run(["pgrep", "-f", "gw run"], capture_output=True, text=True)
-    stray = [p for p in (r.stdout or "").split()
-             if p.isdigit() and int(p) != os.getpid()]
-    if r.returncode == 0 and stray:
-        print(f"⚠ a greasewood daemon still appears to be running (pid "
-              f"{', '.join(stray)}) — kill it before re-creating a mesh on this "
-              f"host, or it will serve enrollments with stale keys and no "
-              f"interface.")
+    # A stray daemon that survives the purge haunts the next mesh: it holds the
+    # control port (the next create crash-loops on EADDRINUSE) and self-heals
+    # its interface (recreating what we delete below). The systemd instance is
+    # already stopped; this catches a manual `gw run` or an orphan from an older
+    # version whose unit is gone. Kill the ones that belong to THIS mesh (the
+    # user already confirmed destroying it) — but never another mesh's daemon.
+    mine, others = _gw_daemons_for_mesh(cfg_path)
+    if mine:
+        _kill_daemons(mine)
+        removed.append(f"stray daemon(s) pid {', '.join(str(p) for p in mine)}")
+    if others:
+        print(f"⚠ other greasewood daemon(s) are running (pid "
+              f"{', '.join(str(p) for p in others)}) — left alone (they belong "
+              f"to a different mesh). Not this mesh's, so not killed.")
 
-    # Tear down WireGuard interface
-    r = subprocess.run(["ip", "link", "show", iface], capture_output=True)
-    if r.returncode == 0:
-        subprocess.run(["ip", "link", "set", iface, "down"], capture_output=True)
-        subprocess.run(["ip", "link", "delete", iface], capture_output=True)
-        removed.append(f"interface {iface}")
+    # Tear down the mesh WireGuard interface — both the current hyphenated name
+    # and the legacy underscore form (gw_<mesh>), so an interface left by a
+    # pre-upgrade daemon is cleaned up too.
+    for name in dict.fromkeys([iface, iface.replace("-", "_")]):
+        r = subprocess.run(["ip", "link", "show", name], capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(["ip", "link", "set", name, "down"], capture_output=True)
+            subprocess.run(["ip", "link", "delete", name], capture_output=True)
+            removed.append(f"interface {name}")
+
+    # Anchor door residue: the transient door interface (may linger if the daemon
+    # died mid-window) and the door isolation routing (blackhole table + ip rule,
+    # which setup_door_routing installs and nothing else removes). Both are safe
+    # no-ops when absent, so purge attempts them regardless of last-known role.
+    from .door import DOOR_IFACE
+    for name in dict.fromkeys([DOOR_IFACE, DOOR_IFACE.replace("-", "_")]):
+        r = subprocess.run(["ip", "link", "show", name], capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(["ip", "link", "delete", name], capture_output=True)
+            removed.append(f"door interface {name}")
+    try:
+        from . import wg as wgmod
+        wgmod.teardown_door_routing()
+    except Exception as e:
+        failed.append(f"door routing: {e}")
 
     # Remove greasewood's own nftables table (port enforcement). It PERSISTS
     # across daemon stop by design (fail closed); purge is its explicit
