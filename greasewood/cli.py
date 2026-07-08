@@ -3056,6 +3056,20 @@ def _pid_alive(pid: int) -> bool:
         return True                     # exists, just not ours to signal
 
 
+def _other_peer_count(cfg) -> int:
+    """How many mesh members OTHER than this node are in the directory cache —
+    sizes the anchor-purge warning ('dissolves the mesh for N peers'). Best
+    effort: 0 if the directory or identity can't be read."""
+    try:
+        from .directory import Directory
+        from .keys import _own_identity
+        own_id, _ = _own_identity(cfg.data_dir)
+        recs = Directory.load(cfg.dir_cache_path).all()
+        return sum(1 for r in recs if r.id_pub.hex() != own_id)
+    except Exception:
+        return 0
+
+
 def cmd_purge(args) -> int:
     _require_root("purge")
     cfg_path = Path(args.config)
@@ -3087,6 +3101,22 @@ def cmd_purge(args) -> int:
         if answer != "y":
             print("Aborted.")
             return 1
+
+        # Purging the ANCHOR is categorically worse than a leaf node: it destroys
+        # the CA and the control plane, so every other member loses enrollment,
+        # renewal, and directory sync — the mesh cannot be recovered from here.
+        # Gate that behind a second, explicit confirmation.
+        if cfg.role == "anchor":
+            n = _other_peer_count(cfg)
+            if n > 0:
+                print(f"\n⚠ THIS HOST IS THE ANCHOR. Purging it destroys the CA "
+                      f"and control plane and dissolves the mesh for {n} other "
+                      f"peer{'s' if n != 1 else ''}: they lose enrollment, "
+                      f"renewal, and directory sync, and the mesh cannot be "
+                      f"recovered from here.")
+                if input("Are you REALLY sure? [y/N] ").strip().lower() != "y":
+                    print("Aborted.")
+                    return 1
 
     removed = []
     failed = []
