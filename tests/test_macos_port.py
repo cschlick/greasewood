@@ -267,3 +267,65 @@ def test_macos_adds_lo0_self_route(macos, monkeypatch):
     # delete-then-add for idempotency
     assert flat.index("route -q -n delete -inet6 fd8d::42/128") < \
            flat.index("route -q -n add -inet6 fd8d::42/128 -interface lo0")
+
+
+def test_wedge_heal_rebuilds_dead_interface(macos, monkeypatch):
+    """macOS: interface up + peers installed + zero live links for a sustained
+    time → rebuild the interface (destroy + recreate) to rebind wireguard-go.
+    Backs off; recovers instantly when a link appears."""
+    from greasewood import reconcile
+    loop = reconcile.ReconcileLoop.__new__(reconcile.ReconcileLoop)
+    loop._local_id_pub = b"self"
+    loop._iface = "gw-pm"
+    loop._wedge_since = None
+    loop._heal_backoff = reconcile._WEDGE_HEAL_MIN
+    rebuilt = []
+    loop._ensure_iface = lambda: rebuilt.append("create")
+    monkeypatch.setattr(reconcile.wgmod, "destroy_interface",
+                        lambda i: rebuilt.append("destroy"))
+
+    peer = types.SimpleNamespace(id_pub=b"peer")
+    trusted = [types.SimpleNamespace(id_pub=b"self"), peer]
+
+    clock = [1000.0]
+    monkeypatch.setattr(reconcile.time, "monotonic", lambda: clock[0])
+
+    loop._maybe_heal_wedged(trusted, reachable=[])      # first sighting → arm
+    assert rebuilt == []
+    clock[0] += 10                                       # not past the threshold
+    loop._maybe_heal_wedged(trusted, reachable=[])
+    assert rebuilt == []
+    clock[0] += reconcile._WEDGE_HEAL_MIN                # now past it → rebuild
+    loop._maybe_heal_wedged(trusted, reachable=[])
+    assert rebuilt == ["destroy", "create"]
+    assert loop._heal_backoff == reconcile._WEDGE_HEAL_MIN * 2   # backed off
+
+    # a live link clears the wedge + resets backoff
+    loop._maybe_heal_wedged(trusted, reachable=["fd8d::9"])
+    assert loop._wedge_since is None
+    assert loop._heal_backoff == reconcile._WEDGE_HEAL_MIN
+
+
+def test_wedge_heal_noop_without_peers(macos):
+    from greasewood import reconcile
+    loop = reconcile.ReconcileLoop.__new__(reconcile.ReconcileLoop)
+    loop._local_id_pub = b"self"
+    loop._ensure_iface = lambda: None
+    loop._wedge_since = 1.0
+    loop._heal_backoff = 999.0
+    # only self in trusted → nothing to reach → not a wedge
+    loop._maybe_heal_wedged([types.SimpleNamespace(id_pub=b"self")], reachable=[])
+    assert loop._wedge_since is None
+
+
+def test_wedge_heal_is_macos_only():
+    """On Linux the check is inert — kernel WireGuard rebinds on its own, and
+    the Linux data plane stays byte-identical."""
+    from greasewood import reconcile
+    loop = reconcile.ReconcileLoop.__new__(reconcile.ReconcileLoop)
+    loop._ensure_iface = lambda: None
+    loop._local_id_pub = b"self"
+    loop._wedge_since = None
+    # gwplat.IS_MACOS is False on this (Linux) host → immediate return, no arming
+    loop._maybe_heal_wedged([types.SimpleNamespace(id_pub=b"peer")], reachable=[])
+    assert loop._wedge_since is None
