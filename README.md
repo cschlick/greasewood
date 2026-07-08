@@ -744,21 +744,24 @@ ports = ["tcp/9100"]
 ```
 
 ```bash
-# edit the anchor's <data_dir>/grants.toml, and the running anchor daemon
-# auto-signs + publishes it within a sync interval — no command needed.
-sudo gw policy apply        # OPTIONAL: preview the tunnel delta + apply NOW
-#   policy v1 → v2: 2 grant(s)
-#     - tunnel  web1 ↔ web2      ← edits show exactly what they create/destroy
+# edit the anchor's <data_dir>/grants.toml, then apply it — with a preview:
+sudo gw policy apply
+#   this will change the policy: v1 → v2
+#     - grant  * -> * : *
+#     + grant  web -> api : tcp/8000     ← the rule change (X → Y)
+#     - tunnel web1 ↔ web2               ← what actually connects/disconnects
 #   apply? [y/N]
-gw policy show              # on any node: the active table (no root)
+gw policy show              # on any node: the active table (flags unapplied edits)
 ```
 
-**grants.toml is the source of truth.** `gw create` writes it (the explicit
-open default, `* -> * : *`) and signs it into the distributed, CA-signed
-`policy.json` — the form nodes actually receive and trust. The running anchor
-watches grants.toml and re-signs on any edit (logging the tunnel delta), so
-editing the file *is* how you change policy; `gw policy apply` is just the
-explicit preview-and-apply-now path (and works with the daemon stopped). A
+**grants.toml is the source of truth, applied deliberately.** `gw create`
+writes it (the explicit open default, `* -> * : *`) and signs it into the
+distributed, CA-signed `policy.json` — the form nodes actually receive and
+trust (a node can't trust a plaintext file from another host). To change
+policy you edit grants.toml and run `gw policy apply`, which **previews the
+change and asks you to confirm** before signing it: a policy change tears down
+tunnels, so it is never applied silently by a stray file save. `gw policy show`
+flags an edited-but-unapplied grants.toml so a forgotten apply is visible. A
 joining node is handed the current signed policy at enrollment, so it enforces
 the real table from its first run — the mesh never operates on an implicit
 default.
