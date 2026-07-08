@@ -999,6 +999,9 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     if systemctl:
         subprocess.run([systemctl, "disable", "--now", old_unit],
                        capture_output=True)
+    if gwplat.IS_MACOS:
+        from . import launchd
+        launchd.remove(old_key)            # stop + drop the old-name job
 
     # Data dir moves first (the new config points at it).
     new_data = mp["data_dir"]
@@ -1037,6 +1040,9 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     if systemctl and (_UNIT_DIR / "greasewood@.service").exists():
         subprocess.run([systemctl, "enable", "--now",
                         f"greasewood@{new_key}.service"], check=False)
+    if gwplat.IS_MACOS:
+        from . import launchd
+        launchd.install(new_key, mp["config"])   # start under the new name
     return mp["config"]
 
 
@@ -1739,11 +1745,34 @@ def _unit_for_config(cfg_path) -> str:
 
 def _print_daemon_guidance(key: str, cfg_path, then: str = "",
                            no_service: bool = False) -> None:
-    """Bring up (and report) this membership's daemon. By default create/join
-    install the systemd template + enable this mesh's instance so it's running
-    and boot-persistent with no extra command; --no-service skips systemd and
-    prints the manual `gw run` line. `then` is an optional trailing clause."""
+    """Bring up (and report) this membership's daemon under the host's service
+    manager. By default create/join install + start it so it's running and
+    boot-persistent with no extra command — systemd (greasewood@<key>) on
+    Linux, launchd (com.greasewood.<key>) on macOS; --no-service skips that
+    and prints the manual `gw run` line. `then` is an optional trailing clause."""
     tail = f" — {then}" if then else ""
+
+    if gwplat.IS_MACOS and not no_service:
+        from . import launchd
+        state = launchd.install(key, cfg_path)
+        if state == "active":
+            print(f"launchd job {launchd.label(key)} is running{tail} "
+                  f"(and starts at boot).")
+            print(f"  status: sudo launchctl print system/{launchd.label(key)}"
+                  f"   logs: tail -f {launchd.LOG_DIR / (key + '.log')}")
+        elif state == "manual":
+            print(f"Couldn't manage launchd here — start this mesh's "
+                  f"daemon{tail}:")
+            print(f"  sudo gw -c {cfg_path} run")
+        else:
+            print(f"⚠ launchd job {launchd.label(key)} is installed but not "
+                  f"running — it is likely crashing at startup, so the mesh "
+                  f"isn't up yet.")
+            print(f"  see why:  tail -40 {launchd.LOG_DIR / (key + '.log')}")
+            print(f"  or run it in the foreground to watch:  "
+                  f"sudo gw -c {cfg_path} run")
+        return
+
     if no_service or not _systemd_available():
         print(f"Start this mesh's daemon{tail}:")
         print(f"  sudo gw -c {cfg_path} run")
@@ -1751,6 +1780,10 @@ def _print_daemon_guidance(key: str, cfg_path, then: str = "",
             print(f"  (or switch to systemd later: 'gw create/join' installs the "
                   f"greasewood@ template — enable with 'systemctl enable --now "
                   f"greasewood@{key}')")
+        elif no_service and gwplat.IS_MACOS:
+            print(f"  (or switch to launchd later: re-run the join, or "
+                  f"sudo launchctl bootstrap system "
+                  f"{Path('/Library/LaunchDaemons') / ('com.greasewood.' + key + '.plist')})")
         return
 
     _write_service_template()          # ensure the template exists, then enable
@@ -3257,6 +3290,12 @@ def cmd_purge(args) -> int:
             subprocess.run([systemctl, "disable", "--now", unit],
                            capture_output=True)
             removed.append(f"stopped {unit}")
+    if gwplat.IS_MACOS:
+        # The launchd job (com.greasewood.<key>): bootout + remove its plist.
+        from . import launchd
+        key = membership_key(cfg.mesh_domain)
+        if launchd.remove(key):
+            removed.append(f"launchd job {launchd.label(key)} (+ plist)")
     # A stray daemon that survives the purge haunts the next mesh: it holds the
     # control port (the next create crash-loops on EADDRINUSE) and self-heals
     # its interface (recreating what we delete below). The systemd instance is
