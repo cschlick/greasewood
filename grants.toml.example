@@ -5,10 +5,11 @@
 #  below) at <data_dir>/grants.toml on the anchor, and signs it into the
 #  distributed policy.json. This file is the fuller reference.
 #
-#  grants.toml is the SOURCE OF TRUTH: the running anchor watches it and
-#  auto-signs edits into policy.json within a sync interval (logging the
-#  tunnel delta) — editing this file IS how you change policy, no command
-#  needed. `sudo gw policy apply` is the optional preview-and-apply-now path.
+#  grants.toml is the SOURCE OF TRUTH, applied deliberately: edit it, then run
+#  `sudo gw policy apply`, which PREVIEWS the change (grant diff + tunnel
+#  delta) and asks to confirm before signing it into policy.json. A policy
+#  change tears down tunnels, so it is never applied silently. `gw policy show`
+#  flags an edited-but-unapplied grants.toml.
 #
 #  Semantics — allow-only, and the table DERIVES the topology:
 #    · a tunnel exists between two nodes iff some grant connects their roles

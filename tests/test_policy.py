@@ -350,3 +350,47 @@ class TestAnchorPolicySigner:
         (tmp_path / "policy.json").write_text(json.dumps(ext.to_dict()))
         d = s.refresh()                            # grants.toml unchanged content
         assert d["seq"] == 5                        # serves the external truth, no bump
+
+
+# ---------------------------------------------------------------------------
+# confirmed-apply model: the anchor reloads applied policy; edits are surfaced
+# ---------------------------------------------------------------------------
+
+def test_grant_policy_refresh_from_cache_picks_up_apply(tmp_path):
+    """The anchor has no seeds to sync from, so its data plane picks up a
+    `gw policy apply` by reloading policy.json (mtime-guarded, seq-monotonic)."""
+    from greasewood.wire import GrantTable
+    cache = tmp_path / "policy.json"
+    gp = policy.GrantPolicy(cache_path=cache, get_ca_pubs=lambda: [CA.ca_pub_bytes])
+    # v1: web -> api
+    cache.write_text(json.dumps(GrantTable(
+        seq=1, grants=[{"from": ["web"], "to": ["api"], "ports": ["*"]}]
+    ).sign(CA.ca_priv).to_dict()))
+    assert gp.refresh_from_cache() is True
+    assert gp(["role:web"], ["role:api"]) and not gp(["role:web"], ["role:db"])
+    assert gp.refresh_from_cache() is False        # unchanged → no reload
+    # an apply writes v2 tightening to web -> db
+    import os, time
+    cache.write_text(json.dumps(GrantTable(
+        seq=2, grants=[{"from": ["web"], "to": ["db"], "ports": ["*"]}]
+    ).sign(CA.ca_priv).to_dict()))
+    os.utime(cache, (time.time() + 1, time.time() + 1))
+    assert gp.refresh_from_cache() is True
+    assert gp(["role:web"], ["role:db"]) and not gp(["role:web"], ["role:api"])
+
+
+def test_unapplied_edits_flags_pending_changes(tmp_path):
+    from greasewood.wire import GrantTable
+    (tmp_path / "grants.toml").write_text(
+        '[[grant]]\nfrom=["web"]\nto=["api"]\nports=["*"]\n')
+    # no policy.json yet → the edit is pending
+    assert policy.unapplied_edits(tmp_path)
+    # apply it (matching signed policy) → nothing pending
+    (tmp_path / "policy.json").write_text(json.dumps(GrantTable(
+        seq=1, grants=[{"from": ["web"], "to": ["api"], "ports": ["*"]}]
+    ).sign(CA.ca_priv).to_dict()))
+    assert policy.unapplied_edits(tmp_path) == ""
+    # edit grants.toml again → pending until re-applied
+    (tmp_path / "grants.toml").write_text(
+        '[[grant]]\nfrom=["web"]\nto=["db"]\nports=["*"]\n')
+    assert "grant(s)" in policy.unapplied_edits(tmp_path)

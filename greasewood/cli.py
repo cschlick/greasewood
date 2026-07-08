@@ -2284,20 +2284,30 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
         except FileNotFoundError:
             return None
 
-    # grants.toml is the SOURCE OF TRUTH: the signer re-signs it into the
-    # distributed policy.json whenever the file changes (nodes receive the
-    # CA-signed form, which is what they can trust). read_policy runs on the
-    # /directory serve path — cheap, mtime-guarded — so an edit auto-applies
-    # within one node sync, no manual `gw policy apply` and no implicit default.
-    # It also feeds the anchor's OWN grant_policy so the anchor's data plane
-    # tracks grants.toml live.
-    from .policy import AnchorPolicySigner
-    policy_signer = AnchorPolicySigner(cfg.data_dir, ca_keys,
-                                       get_records=directory.all)
-    policy_signer.refresh(offer_to=grant_policy)   # establish current at startup
+    # grants.toml is the SOURCE OF TRUTH, but changes are APPLIED DELIBERATELY:
+    # `gw policy apply` previews the X→Y change and asks to confirm before
+    # signing it into policy.json. The daemon does NOT silently auto-apply edits
+    # — a background daemon can't prompt, and a policy change tears down tunnels,
+    # so it should be confirmed, not triggered by a stray file save. At startup
+    # (and via `gw policy show`) an unapplied edit is surfaced, so a forgotten
+    # apply is visible rather than silently ineffective.
+    from .policy import unapplied_edits
+    pending = unapplied_edits(cfg.data_dir)
+    if pending:
+        log.warning("grants.toml has unapplied changes (%s) — run "
+                    "`sudo gw policy apply` to review and apply them", pending)
 
     def read_policy():
-        return policy_signer.refresh(offer_to=grant_policy)
+        # Serve the signed, APPLIED policy.json (or None). Nodes trust the CA
+        # signature; they never see raw grants.toml.
+        from .policy import POLICY_BASENAME
+        try:
+            return json.loads((cfg.data_dir / POLICY_BASENAME).read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            log.warning("policy.json unreadable, serving none: %s", e)
+            return None
 
     server = ControlServer(
         listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
@@ -2481,6 +2491,7 @@ def cmd_run(args) -> int:
         data_dir=cfg.data_dir,
         on_reachable=_publish_reachable,
         port_enforcer=port_enforcer,
+        policy_refresh=grant_policy.refresh_from_cache,
     )
     recon.start()
 
@@ -2696,10 +2707,11 @@ def cmd_firewall(args) -> int:
 
 def cmd_policy(args) -> int:
     """`gw policy show` — render the active grant table (any node, no root).
-    `gw policy apply [file]` — anchor: validate grants.toml, preview the tunnel
-    delta, sign, and publish it NOW. Note the running anchor daemon ALSO
-    auto-applies grants.toml edits within a sync interval; apply is the explicit
-    preview-and-apply-immediately path (and works with the daemon stopped)."""
+    `gw policy apply [file]` — anchor: validate grants.toml, PREVIEW the change
+    (grant diff + tunnel delta), ask to confirm, then sign + publish. This is
+    the deliberate path a policy change takes — grants.toml is the source, but
+    it is never applied silently: a change tears down tunnels, so it is
+    confirmed, not triggered by a stray file save."""
     from .config import load_config
     from . import policy as polmod
     from .wire import GrantTable
@@ -2714,6 +2726,10 @@ def cmd_policy(args) -> int:
             except (ValueError, KeyError) as e:
                 sys.exit(f"policy cache at {cache} is corrupt: {e}")
         print(polmod.render_grants(table))
+        pending = polmod.unapplied_edits(cfg.data_dir)
+        if pending:
+            print(f"\n⚠ grants.toml has unapplied changes ({pending}) — run "
+                  f"`sudo gw policy apply` to review and apply them.")
         return 0
 
     # ---- apply (anchor, root: signs with the CA key) ----
@@ -2750,17 +2766,32 @@ def cmd_policy(args) -> int:
         print(f"  ⚠ grant names {tag!r} but NO current node holds role:{tag} "
               f"— typo? (it grants nothing until a node holds it)")
 
-    created, removed = polmod.tunnel_delta(
-        records, old_table.grants if old_table else None, grants)
     new_seq = (old_table.seq + 1) if old_table else 1
-    print(f"policy v{old_table.seq if old_table else '—'} → v{new_seq}: "
-          f"{len(grants)} grant(s)")
+    old_grants = old_table.grants if old_table else []
+    print(f"this will change the policy: v{old_table.seq if old_table else '—'} "
+          f"→ v{new_seq}")
+
+    # Grant-level diff (the rules themselves — the "X → Y").
+    def _fmt(g):
+        return (f"{', '.join(g['from'])} -> {', '.join(g['to'])} : "
+                f"{', '.join(g['ports'])}")
+    added = [g for g in grants if g not in old_grants]
+    dropped = [g for g in old_grants if g not in grants]
+    if not added and not dropped:
+        print("  grants: (unchanged)")
+    for g in dropped:
+        print(f"  - grant  {_fmt(g)}")
+    for g in added:
+        print(f"  + grant  {_fmt(g)}")
+
+    # Tunnel-level effect (what actually connects/disconnects on the wire).
+    created, removed = polmod.tunnel_delta(records, old_grants or None, grants)
     for a, b in created:
-        print(f"  + tunnel  {a} ↔ {b}")
+        print(f"  + tunnel {a} ↔ {b}")
     for a, b in removed:
-        print(f"  - tunnel  {a} ↔ {b}")
+        print(f"  - tunnel {a} ↔ {b}")
     if not created and not removed:
-        print("  (no topology change — port scopes only)")
+        print("  tunnels: (no change — port scopes only)")
 
     if not getattr(args, "yes", False):
         answer = input("apply? [y/N] ").strip().lower()
@@ -2772,8 +2803,7 @@ def cmd_policy(args) -> int:
     table = GrantTable(seq=new_seq, grants=grants).sign(ca_keys.ca_priv)
     atomic_write(cache, json.dumps(table.to_dict(), indent=2), mode=0o644)
     print(f"policy v{new_seq} applied — nodes adopt it on their next directory "
-          f"sync; tunnels reconcile within a cycle. (The running daemon also "
-          f"auto-applies grants.toml edits; this was the immediate, previewed path.)")
+          f"sync; tunnels reconcile within a cycle.")
     return 0
 
 
