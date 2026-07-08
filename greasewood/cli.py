@@ -198,9 +198,16 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
         print(f"  iifname \"gw-*\" accept                  # admit the overlay; greasewood's")
         print(f"                                         # nftables table filters the ports on it")
     else:
-        # Enforcement off: greasewood installs no table, so the operator gates
-        # the overlay ports and MUST keep the door locked to enrollment (else a
-        # joining node could reach any ::-bound service, e.g. SSH, over the door).
+        # Enforcement off: greasewood installs no table. These rules replace what
+        # its table would have done for the overlay — but they need nftables
+        # too, so they only help if you turned enforcement off deliberately
+        # WHILE having nftables. If enforcement is off because this host has no
+        # nftables, you can't add them either: the door port lockdown is simply
+        # unavailable, and the door rests on WireGuard keys + blackhole routing
+        # (mesh stays isolated; the anchor's own ::-bound services, e.g. SSH,
+        # are reachable by an invitee during a window). If you HAVE nftables,
+        # prefer leaving enforce_ports on and greasewood applies all of this.
+        print("  # (these need nftables; if you have it, prefer enforce_ports = true)")
         print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept   # control plane (when anchor)")
         print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept   # enrollment (when anchor)")
         print(f"  iifname \"{DOOR_IFACE}\" drop                    # door carries ONLY enrollment")
