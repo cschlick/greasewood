@@ -192,3 +192,72 @@ def test_teardown_door_routing_removes_rule_and_table(monkeypatch):
     flat = [" ".join(c) for c in calls]
     assert any("rule del" in f and "51820" in f for f in flat)   # rule removed
     assert any("route flush table 51820" in f for f in flat)     # table flushed
+
+
+# ---------------------------------------------------------------------------
+# anchor purge — a second, explicit confirmation (dissolves the mesh)
+# ---------------------------------------------------------------------------
+
+def _anchor_cfg(tmp_path, data_dir):
+    p = tmp_path / "gw.toml"
+    p.write_text(f'''[node]
+hostname = "anchor"
+data_dir = "{data_dir}"
+role = "anchor"
+[network]
+interface = "gw-pm"
+mesh_domain = "internal"
+seeds = []
+root_url = ""
+''')
+    return p
+
+
+def test_anchor_purge_second_confirm_yes_proceeds(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg = _anchor_cfg(tmp_path, data_dir)
+    monkeypatch.setattr(_subprocess, "run", _fake_run([], iface_present=False))
+    monkeypatch.setattr(cli, "_other_peer_count", lambda c: 3)
+    answers = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    args = types.SimpleNamespace(config=str(cfg), yes=False)
+    assert cli.cmd_purge(args) == 0
+    assert not data_dir.exists()                 # both confirmed → purged
+
+
+def test_anchor_purge_second_confirm_no_aborts(tmp_path, monkeypatch, capsys):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg = _anchor_cfg(tmp_path, data_dir)
+    monkeypatch.setattr(_subprocess, "run", _fake_run([], iface_present=False))
+    monkeypatch.setattr(cli, "_other_peer_count", lambda c: 3)
+    answers = iter(["y", "n"])                    # first yes, second no
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    args = types.SimpleNamespace(config=str(cfg), yes=False)
+    assert cli.cmd_purge(args) == 1
+    assert data_dir.exists()                     # NOT purged
+    out = capsys.readouterr().out
+    assert "THIS HOST IS THE ANCHOR" in out and "3 other peers" in out
+
+
+def test_anchor_purge_no_other_peers_only_one_prompt(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg = _anchor_cfg(tmp_path, data_dir)
+    monkeypatch.setattr(_subprocess, "run", _fake_run([], iface_present=False))
+    monkeypatch.setattr(cli, "_other_peer_count", lambda c: 0)
+    calls = []
+    monkeypatch.setattr("builtins.input", lambda *a: calls.append(1) or "y")
+    args = types.SimpleNamespace(config=str(cfg), yes=False)
+    assert cli.cmd_purge(args) == 0
+    assert len(calls) == 1                        # solo anchor → no second prompt
+
+
+def test_anchor_purge_yes_flag_skips_both_prompts(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg = _anchor_cfg(tmp_path, data_dir)
+    monkeypatch.setattr(_subprocess, "run", _fake_run([], iface_present=False))
+    monkeypatch.setattr(cli, "_other_peer_count", lambda c: 5)
+    def boom(*a):
+        raise AssertionError("-y must not prompt")
+    monkeypatch.setattr("builtins.input", boom)
+    args = types.SimpleNamespace(config=str(cfg), yes=True)
+    assert cli.cmd_purge(args) == 0              # scripted purge unaffected
