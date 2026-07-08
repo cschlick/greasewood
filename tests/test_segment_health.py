@@ -221,3 +221,16 @@ def test_toggle_nft_collapses_the_top_block():
     assert len(collapsed) < len(expanded)              # collapsing shrinks the pinned top
     assert any("f to expand" in ln for ln in collapsed)    # still shows how to restore
     assert any("nft list table" in ln for ln in collapsed) # keeps the command line
+
+
+def test_frame_clears_before_content_and_expands_tabs():
+    """Regression: nft output is tab-indented; the redraw must clear each line
+    BEFORE writing (a tab skips columns without erasing them) and expand tabs so
+    stale content in the indent can't show through."""
+    from greasewood.status import _WatchApp
+    f = _WatchApp._frame(["header", "\tchain x {", "\t\tdrop"], cols=80)
+    assert f.startswith("\x1b[H") and f.endswith("\x1b[J")
+    assert "\t" not in f                          # tabs expanded (no cursor-skip)
+    line = f.split("\r\n")[1]
+    assert line.startswith("\x1b[K")              # cleared BEFORE the content
+    assert "chain x {" in line
