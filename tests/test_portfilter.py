@@ -218,3 +218,21 @@ def test_reasserts_table_when_externally_removed(monkeypatch):
     present["v"] = True
     enforcer.apply(FLEET)                         # back + present → skip again
     assert len(loads) == 2
+
+
+def test_set_local_caps_reroles_this_node_live(monkeypatch):
+    """After the anchor changes our roles and we renew, set_local_caps must make
+    the NEXT apply() render this node's inbound rules for the NEW role."""
+    loads = []
+    monkeypatch.setattr("greasewood.wg.nft_load", lambda s: loads.append(s))
+    monkeypatch.setattr("greasewood.wg.nft_table_exists", lambda t: True)
+    grants = [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]
+    gp = types.SimpleNamespace(table=types.SimpleNamespace(grants=grants))
+    # start as role:web (a client — no inbound grant to it) → default-deny mesh
+    enforcer = pf.PortFilter("greasewood_test", "gw-mesh", 51902, ["role:web"], gp)
+    enforcer.apply(FLEET)
+    assert "dport 8000" not in loads[-1]        # web has no inbound 8000 rule
+    # anchor re-roles us to api → now we're the 8000 destination
+    enforcer.set_local_caps(["role:api"])
+    enforcer.apply(FLEET)
+    assert "tcp dport 8000" in loads[-1] and "p_tcp_8000" in loads[-1]

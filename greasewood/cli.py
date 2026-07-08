@@ -1609,7 +1609,10 @@ def _resolve_node(ca, cfg, handle: str, *, require_enrolled: bool = True):
 
 _NEXT_RENEWAL_NOTE = (
     "Takes effect at the node's next renewal (~half the credential TTL); no "
-    "re-join needed. To apply immediately, run `sudo gw renew` on that node."
+    "re-join needed. To apply now WITHOUT touching the node, run `sudo gw "
+    "renew-all` on the anchor — its daemon renews and adopts the new roles "
+    "live (no restart). (`sudo gw renew` on the node works too, but that CLI "
+    "path needs a daemon restart to take effect.)"
 )
 
 
@@ -2518,6 +2521,26 @@ def cmd_run(args) -> int:
     )
     recon.start()
 
+    # Roles live in the CA-signed credential, not the config file. The loops were
+    # built with cfg.caps, but the credential is authoritative — so adopt its
+    # roles now (in case the anchor changed them while we were down) and on every
+    # renewal, feeding the reconcile loop + port enforcer live. That's what makes
+    # `gw set-roles` + `gw renew-all` take full effect with no restart. A routine
+    # renewal (roles unchanged) is a no-op, so this is quiet in steady state.
+    _applied_caps = [sorted(cfg.caps)]
+
+    def _adopt_caps(cred):
+        caps = list(cred.caps)
+        if sorted(caps) == _applied_caps[0]:
+            return
+        _applied_caps[0] = sorted(caps)
+        recon.set_local_caps(caps)
+        if port_enforcer is not None:
+            port_enforcer.set_local_caps(caps)
+        roles = [c[len("role:"):] for c in caps if c.startswith("role:")]
+        log.info("roles changed by the anchor — adopted live from the credential: "
+                 "%s (no restart needed)", roles or "(none)")
+
     # We advertise whatever endpoint config gives us (empty = naturally
     # outbound-only; peers back off a dead one).
     eff_endpoints = list(cfg.endpoints)
@@ -2535,6 +2558,9 @@ def cmd_run(args) -> int:
                                            aliases=want_aliases)
         log.info("updated own record (endpoints=%s, aliases=%s)",
                  eff_endpoints, want_aliases)
+
+    if own_record:
+        _adopt_caps(own_record.cred)      # honor a role change made while we were down
 
     # Push our own record so the rest of the mesh knows about us. This gets a
     # newly enrolled node into the anchor's directory; it is also how endpoint
@@ -2558,6 +2584,7 @@ def cmd_run(args) -> int:
             endpoints=eff_endpoints,
             cache_path=cfg.dir_cache_path,
             aliases=want_aliases,
+            on_renew=_adopt_caps,         # adopt anchor-side role changes live
         )
         renewal.start()
     else:

@@ -547,3 +547,13 @@ class TestUnreadableLiveState:
                                 [], set())
         assert result == ([], [])                # nothing derived
         assert set_peer_calls == []              # no kernel mutation on a misread
+
+
+def test_reconcile_set_local_caps_updates_peering_view():
+    """set_local_caps swaps the role set the loop peers with — the mechanism the
+    daemon uses to adopt an anchor-side role change after renewal, no restart."""
+    from greasewood import reconcile
+    loop = reconcile.ReconcileLoop.__new__(reconcile.ReconcileLoop)
+    loop._local_caps = ["role:mesh"]
+    loop.set_local_caps(["role:web", "role:db", "tls"])
+    assert loop._local_caps == ["role:web", "role:db", "tls"]

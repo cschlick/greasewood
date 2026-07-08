@@ -201,6 +201,11 @@ class PortFilter:
         self._grant_policy = grant_policy      # .table → GrantTable | None
         self._applied: "str | None" = None
 
+    def set_local_caps(self, caps: list) -> None:
+        """Adopt new local caps live (after a mid-run role change + renewal); the
+        next apply() re-renders this node's inbound rules with the new roles."""
+        self._local_caps = list(caps)
+
     def _grants(self):
         table = self._grant_policy.table if self._grant_policy else None
         return table.grants if table else None

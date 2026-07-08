@@ -373,6 +373,13 @@ class ReconcileLoop(Loop):
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
 
+    def set_local_caps(self, caps: list) -> None:
+        """Adopt a new local role set live — used when the anchor changed our
+        roles and we renewed our credential mid-run. The next reconcile tick
+        makes peering decisions with the new roles; no restart needed. (A bare
+        reference swap: reconcile reads it once per tick.)"""
+        self._local_caps = list(caps)
+
     def _maybe_publish_reachable(self, reachable: "list[str]") -> None:
         """Fire on_reachable when the live-link set changes AND at least
         reachable_min_interval has passed since the last publish — so a flapping
