@@ -71,6 +71,7 @@ class RenewalLoop(Loop):
         cache_path: Path,
         renew_spread: float = 2.0,
         aliases: "list[str] | None" = None,
+        on_renew: "Callable[[Credential], None] | None" = None,
     ) -> None:
         # interval is unused (run() is event-driven — see the module docstring)
         super().__init__(0.0, "renewal")
@@ -91,6 +92,11 @@ class RenewalLoop(Loop):
         self._renew_now = threading.Event()
         self._renew_spread = renew_spread
         self._acted_renew_after: "dt.datetime | None" = None
+        # Called with the fresh Credential after a renewal — the daemon adopts
+        # any role change the anchor made (via set-roles) into its LIVE peering
+        # + port-enforcement decisions, no restart. The renewed cred is the
+        # authoritative role source; local_caps follows it.
+        self._on_renew = on_renew
 
     def maybe_renew_after(self, ts: "dt.datetime | None") -> None:
         """Act on the anchor's fleet-wide renew hint. If our current credential was
@@ -152,6 +158,11 @@ class RenewalLoop(Loop):
         self._cred = new_cred
         record = self._publish(new_cred)
         push_record(self._get_anchor_url(), record)
+        if self._on_renew is not None:
+            try:
+                self._on_renew(new_cred)   # adopt any anchor-side role change, live
+            except Exception as e:
+                log.warning("on_renew hook failed (roles may need a restart): %s", e)
         return new_cred
 
     def run(self) -> None:
