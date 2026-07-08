@@ -424,6 +424,7 @@ class ReconcileLoop(Loop):
         except Exception as e:
             log.error("reconcile error: %s", e)
             return  # no verified set this cycle; hosts stays as-is, heals next pass
+        self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -439,6 +440,19 @@ class ReconcileLoop(Loop):
                 self._rename_grace(trusted, hosts)
             except Exception as e:
                 log.error("hosts sync error: %s", e)
+
+    def _stamp_reconcile(self) -> None:
+        """Record the time of a completed reconcile pass, so `gw watch` can show
+        reconcile freshness — the 'is the daemon alive and working' signal, and
+        the only freshness the anchor has (it's the sync source, so it never
+        stamps last_sync). Written every pass, even a no-op one."""
+        if self._data_dir is None:
+            return
+        try:
+            stamp_reconcile_path(self._data_dir).write_text(
+                dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat())
+        except OSError:
+            pass
 
     def _rename_grace(self, trusted, hosts) -> None:
         """During a rename-mesh grace window, keep the OLD domain's names
@@ -464,3 +478,17 @@ class ReconcileLoop(Loop):
             log.info("rename grace over — retired the old *.%s names", old_domain)
 
     # run/start/stop come from Loop.
+
+
+def stamp_reconcile_path(data_dir) -> "Path":
+    """Where the last-completed-reconcile timestamp lives (the daemon-liveness
+    heartbeat, parallel to sync's last_sync)."""
+    return Path(data_dir) / "last_reconcile"
+
+
+def read_last_reconcile(data_dir) -> "str | None":
+    """The ISO time of the last completed reconcile pass, or None."""
+    try:
+        return stamp_reconcile_path(data_dir).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None

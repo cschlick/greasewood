@@ -367,6 +367,9 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     fresh = _sync_freshness(cfg)
     if fresh:
         lines.append(f"synced   : {fresh}")
+    recon = _reconcile_freshness(cfg)              # daemon-liveness heartbeat (all roles)
+    if recon:
+        lines.append(f"daemon   : {recon}")
     lines += _self_health_lines(cfg, directory, own_id)
     if cfg.role == "anchor":                       # the door only exists here
         lines += _door_status_lines(cfg)
@@ -640,6 +643,22 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
     finally:
         prober.stop()
     return 0
+
+
+def _reconcile_freshness(cfg) -> "str | None":
+    """Last completed reconcile pass — the 'is the daemon alive and working'
+    heartbeat, shown in `gw watch` for EVERY role (the anchor never syncs, so
+    this is its only freshness signal). None if the marker isn't there yet."""
+    from . import reconcile as rmod
+    last = rmod.read_last_reconcile(cfg.data_dir)
+    if last is None:
+        return "never reconciled — is the daemon running? (sudo gw run)"
+    last_dt = _parse_iso(last)
+    age = (dt.datetime.now(_UTC) - last_dt).total_seconds() if last_dt else 0.0
+    if age > 30:                      # reconcile runs every ~5s; 30s = wedged/stopped
+        return (f"⚠ last reconcile {_fmt_ago(last)} — daemon stalled or stopped? "
+                f"(should be seconds)")
+    return f"reconciled {_fmt_ago(last)}"
 
 
 def _sync_freshness(cfg) -> "str | None":
