@@ -221,3 +221,12 @@ def test_ping_rtt_uses_ping6_on_macos(macos, monkeypatch):
     monkeypatch.setattr(status.subprocess, "run", fake_run)
     assert status._ping_rtt("fd8d::1") == "1ms"
     assert seen["cmd"][0] == "ping6" and "-W" not in seen["cmd"]
+
+
+def test_nft_table_lines_macos_says_not_available(macos):
+    from greasewood import status
+    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
+                                caps=["role:mesh"])
+    out = "\n".join(status._nft_table_lines(cfg))
+    assert "not available on macOS" in out
+    assert "nft" not in out                       # no misleading nft command line

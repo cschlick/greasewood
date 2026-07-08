@@ -281,3 +281,19 @@ def test_reconcile_heartbeat_round_trips(tmp_path):
     assert reconcile.read_last_reconcile(tmp_path) is None
     reconcile.stamp_reconcile_path(tmp_path).write_text("2026-07-08T00:00:00+00:00")
     assert reconcile.read_last_reconcile(tmp_path) == "2026-07-08T00:00:00+00:00"
+
+
+def test_diagnose_find_accepts_mesh_names(monkeypatch):
+    """The roster prints full mesh names (bastion.pm.internal); diagnose must
+    accept them, not just the bare hostname."""
+    import types as _t
+    from greasewood import status
+    me = _rec("me", ["203.0.113.2:51900"])
+    bastion = _rec("bastion", ["203.0.113.1:51900"])
+    directory = _t.SimpleNamespace(all=lambda: [me, bastion])
+    cfg = _t.SimpleNamespace(mesh_domain="pm.internal", hostname="me",
+                             role="node", root_url="")
+    args = _t.SimpleNamespace(nodes=["bastion.pm.internal"])
+    # reach into the picker: full-name lookup must resolve, not sys.exit
+    picks = status._resolve_diag_columns(args, cfg, directory, me.id_pub, me)
+    assert any(lbl == "bastion" for lbl, r, _ in picks if r is not None)
