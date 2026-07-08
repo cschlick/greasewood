@@ -122,3 +122,42 @@ def test_remove_boots_out_and_unlinks(macos, monkeypatch):
     assert not launchd.plist_path("pm").exists()
     assert ["launchctl", "bootout", "system/com.greasewood.pm"] in ctl.calls
     assert not launchd.remove("pm") or True      # idempotent (no crash)
+
+
+# ---------------------------------------------------------------------------
+# purge on macOS (regression: a local membership_key re-import shadowed the
+# module-level name and crashed the launchd block with UnboundLocalError)
+# ---------------------------------------------------------------------------
+
+def test_purge_on_macos_removes_launchd_job(macos, monkeypatch, tmp_path):
+    from greasewood import cli, hosts as _hosts, wg
+    monkeypatch.setattr(cli.gwplat, "IS_MACOS", True, raising=False)
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(_hosts, "remove_block", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])
+    monkeypatch.setattr(cli, "_UNIT_DIR", tmp_path / "units")
+    monkeypatch.setattr(wg, "interface_exists", lambda i: False)
+    monkeypatch.setattr(wg, "teardown_door_routing", lambda: None)
+    removed_jobs = []
+    monkeypatch.setattr(launchd, "remove",
+                        lambda key: removed_jobs.append(key) or True)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k:
+                        _subprocess.CompletedProcess(a, 1, "", ""))
+    monkeypatch.setattr(cli.shutil, "which", lambda n: None)   # no systemctl/nft
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text(f'''[node]
+hostname = "melvin2"
+data_dir = "{data_dir}"
+role = "node"
+[network]
+interface = "gw-pm"
+mesh_domain = "pm.internal"
+seeds = []
+root_url = ""
+''')
+    args = types.SimpleNamespace(config=str(cfg), yes=True)
+    assert cli.cmd_purge(args) == 0                 # no UnboundLocalError
+    assert removed_jobs == ["pm"]                   # launchd job torn down
+    assert not data_dir.exists() and not cfg.exists()

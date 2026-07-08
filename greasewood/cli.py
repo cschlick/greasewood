@@ -2589,9 +2589,10 @@ def cmd_run(args) -> int:
                     "(WireGuard keys + forwarding-off).", gwplat.os_name())
         enforce = False
     if enforce:
+        # membership_key: module-level import — never re-import it locally
+        # inside a function that also uses it earlier (UnboundLocalError).
         from .portfilter import (PortFilter, NftUnavailable, ensure_available,
                                  table_name)
-        from .config import membership_key
         try:
             ensure_available()
         except NftUnavailable as e:
@@ -3247,11 +3248,17 @@ def cmd_purge(args) -> int:
     if not args.yes:
         last = not [k for k, p in _memberships() if p.resolve() != cfg_path.resolve()]
         print(f"This will permanently remove this mesh from the host:")
-        print(f"  service instance    : {unit} (stop + disable)")
+        if gwplat.IS_MACOS:
+            from . import launchd
+            print(f"  launchd job         : "
+                  f"{launchd.label(membership_key(cfg.mesh_domain))} "
+                  f"(stop + remove plist)")
+        else:
+            print(f"  service instance    : {unit} (stop + disable)")
         print(f"  WireGuard interface : {iface}")
         print(f"  data directory      : {data_dir}  (keys, CA, credentials)")
         print(f"  config file         : {cfg_path}")
-        if last:
+        if last and not gwplat.IS_MACOS:
             print(f"  systemd template    : greasewood@.service (last mesh → "
                   f"full reset)")
         answer = input("Proceed? [y/N] ").strip().lower()
@@ -3341,8 +3348,10 @@ def cmd_purge(args) -> int:
     # teardown. Idempotent — a no-op if enforcement was never on, and skipped
     # where enforcement doesn't exist (macOS v1, no nft binary).
     if shutil.which("nft"):
+        # NOTE: membership_key comes from the module-level import — a local
+        # re-import here would shadow it for the WHOLE function and break the
+        # launchd block above (UnboundLocalError; bitten once on macOS).
         from .portfilter import table_name as _nft_table
-        from .config import membership_key
         _tbl = _nft_table(membership_key(cfg.mesh_domain))
         chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
         if chk.returncode == 0:
