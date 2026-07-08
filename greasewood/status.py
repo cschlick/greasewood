@@ -372,6 +372,49 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     return lines
 
 
+def _enforcement_lines(cfg, grants) -> list:
+    """A compact view of THIS node's port enforcement (the greasewood nftables
+    table) for `gw watch`: whether it's on, whether the table is actually in the
+    kernel (root only — reading nft needs privilege), and the inbound port
+    scopes the policy allows here. A readable summary of the table by role, not
+    the raw nft syntax (that's `sudo nft list table inet <name>`)."""
+    from .policy import node_tags
+    from .portfilter import table_name, _fully_open
+    from .config import membership_key
+
+    if not getattr(cfg, "enforce_ports", True):
+        return ["firewall : port enforcement OFF (enforce_ports=false) — grants "
+                "still gate tunnels; port scopes are advisory"]
+
+    tbl = table_name(membership_key(cfg.mesh_domain))
+    warn = ""
+    if os.geteuid() == 0:                           # only root can read nft
+        try:
+            from . import wg as wgmod
+            if not wgmod.nft_table_exists(tbl):
+                warn = " — ⚠ not in kernel yet (re-asserts within a cycle)"
+        except Exception:
+            pass
+    head = f"firewall : port enforcement on · nftables table {tbl}{warn}"
+
+    if _fully_open(grants):
+        return [head, "           mesh open — default * → * : * (every port "
+                "allowed among peers)"]
+
+    inbound: dict = {}
+    my = node_tags(cfg.caps)
+    for g in grants:
+        if "*" in g["to"] or (my & set(g["to"])):
+            for spec in g["ports"]:
+                inbound.setdefault(spec, set()).update(g["from"])
+    if not inbound:
+        return [head, "           inbound to this node: default-deny (control "
+                "plane + icmp + established replies only)"]
+    scopes = "   ".join(f"{spec} ← {','.join(sorted(frm))}"
+                        for spec, frm in sorted(inbound.items()))
+    return [head, f"           inbound to this node: {scopes}"]
+
+
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
     """Live, redraw-in-place `gw watch`: link state + per-second throughput
     (from the sample delta between frames) + an async latency column. Root +
@@ -428,14 +471,17 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
                 prev[pub] = (lp.rx_bytes, lp.tx_bytes, mono)
             prober.set_targets(targets)
 
+            grants = _load_policy_grants(cfg)
             body = _roster_lines(records, cfg, now, own_id, live, True,
                                  latency=prober.results, rates=rates,
-                                 grants=_load_policy_grants(cfg))
+                                 grants=grants)
             up = len(targets)
-            # Same header block as --snapshot (role/addr/self-health/door),
-            # re-rendered each frame so door state + sync freshness stay live.
+            # Same header + enforcement block as --snapshot, re-rendered each
+            # frame so door state, sync freshness, and the live nftables table
+            # presence stay current.
             frame = ["\033[H\033[J"]
             frame += _watch_header(cfg, directory, own_id, own_addr)
+            frame += _enforcement_lines(cfg, grants)
             frame += [""]
             frame += body
             frame += ["", f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up "
@@ -661,8 +707,11 @@ def cmd_watch(args) -> int:
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
 
     directory = Directory.load(cfg.dir_cache_path)
+    grants = _load_policy_grants(cfg)
 
     for line in _watch_header(cfg, directory, own_id, own_addr):
+        print(line)
+    for line in _enforcement_lines(cfg, grants):   # the greasewood table, summarized
         print(line)
     print()
 
@@ -685,7 +734,6 @@ def cmd_watch(args) -> int:
         except Exception:
             live_peers = None
 
-    grants = _load_policy_grants(cfg)
     if getattr(args, "by_role", False):
         # One table per named role. A node appears under every role it holds,
         # and the anchor (role:*) appears under ALL of them — so many nodes
