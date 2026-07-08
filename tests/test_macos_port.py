@@ -34,11 +34,15 @@ def _wire(run_dir, logical="gw-pm", dev="utun4"):
 # platform module
 # ---------------------------------------------------------------------------
 
-def test_linux_capabilities_on_this_host():
-    # the suite runs on Linux: enforcement available, resolution is identity
-    assert gwplat.IS_LINUX
-    assert gwplat.port_enforcement_available()
-    assert wg.resolve_iface("gw-pm") == "gw-pm"
+def test_capabilities_on_this_host():
+    # platform-correct on whichever OS the suite runs on (Linux CI or a Mac)
+    if gwplat.IS_LINUX:
+        assert gwplat.port_enforcement_available()
+        assert wg.resolve_iface("gw-pm") == "gw-pm"   # identity on Linux
+    elif gwplat.IS_MACOS:
+        assert not gwplat.port_enforcement_available()   # pf backend not built
+    else:
+        pytest.skip("unsupported host OS")
 
 
 def test_macos_has_no_port_enforcement_v1(macos):
