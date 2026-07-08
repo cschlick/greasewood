@@ -38,6 +38,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import platform as gwplat
 from .config import membership_key, render_config
 from .keys import _key_file_warnings, _own_identity, _secret_key_paths
 from .status import _dur_short, _version, cmd_diagnose, cmd_watch
@@ -180,6 +181,19 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
     connection until that node actually becomes an anchor and binds it.
     """
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
+    if gwplat.IS_MACOS:
+        # macOS default = no packet filter configured; that's the expected
+        # posture and there is nothing to add. The two UDP ports just need to
+        # not be blocked if the user runs the (off-by-default) application
+        # firewall or a pf config of their own.
+        print("Firewall (greasewood never edits it). macOS runs no packet filter by")
+        print("default — nothing to configure. If you enable one, allow inbound")
+        print(f"udp/{listen_port} (mesh WireGuard) and udp/{DOOR_PORT} (enrollment door).")
+        print("Port enforcement (the grant table's port scopes) is not available on")
+        print("macOS yet — a pf backend is planned; tunnel-level access control is")
+        print("fully enforced. The enrollment door is isolated by WireGuard keys +")
+        print("IPv6 forwarding staying off (greasewood checks and warns).")
+        return
     if header:
         print("Firewall (greasewood never edits it). Recommended posture — the SAME")
         print("rules on every node, so any node can become the anchor with no firewall")
@@ -229,42 +243,56 @@ def _detect_public_ipv6() -> str | None:
     GUA = 2000::/3 (first 3 bits are 001).  ULA (fc/fd) and link-local
     (fe80) are excluded because they are not routable across the internet.
     """
-    try:
-        r = subprocess.run(
-            ["ip", "-6", "-o", "addr", "show", "scope", "global"],
-            capture_output=True, text=True, check=False,
-        )
-    except FileNotFoundError:
-        return None
-
     stable, temporary, any_gua = [], [], []
-
-    for line in r.stdout.splitlines():
-        # Format: <idx>: <iface>    inet6 <addr/prefix> scope global [flags...]
-        parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet6":
-            continue
+    for addr_str, flags in _inet6_addrs():
         try:
-            addr = ipaddress.IPv6Address(parts[3].split("/")[0])
+            addr = ipaddress.IPv6Address(addr_str)
         except ValueError:
             continue
-
         # GUA: 2000::/3  (first 3 bits == 001)
         if addr.packed[0] & 0xe0 != 0x20:
             continue
-
-        flags = line
         is_temp = "temporary" in flags
         is_deprecated = "deprecated" in flags
-
         if not is_deprecated and not is_temp:
             stable.append(str(addr))
         elif not is_deprecated:
             temporary.append(str(addr))
         else:
             any_gua.append(str(addr))
-
     return (stable or temporary or any_gua or [None])[0]
+
+
+def _inet6_addrs() -> "list[tuple[str, str]]":
+    """Every global-ish inet6 address on this host as (addr, flags-line) pairs
+    — the OS-specific parse behind _detect_public_ipv6. Linux reads `ip -6 -o
+    addr show scope global`; macOS reads `ifconfig -a` (its inet6 lines carry
+    the same temporary/deprecated flags, and zone ids like %en0 are stripped —
+    a zoned address is link-local anyway and gets filtered by the GUA check)."""
+    out: "list[tuple[str, str]]" = []
+    if gwplat.IS_MACOS:
+        try:
+            r = subprocess.run(["ifconfig", "-a"],
+                               capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return out
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            # "inet6 <addr>[%zone] prefixlen N [autoconf secured temporary ...]"
+            if len(parts) >= 2 and parts[0] == "inet6":
+                out.append((parts[1].split("%")[0], line))
+        return out
+    try:
+        r = subprocess.run(["ip", "-6", "-o", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return out
+    for line in r.stdout.splitlines():
+        # "<idx>: <iface>    inet6 <addr/prefix> scope global [flags...]"
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet6":
+            out.append((parts[3].split("/")[0], line))
+    return out
 
 
 def _detect_public_ipv4() -> str | None:
@@ -273,19 +301,25 @@ def _detect_public_ipv4() -> str | None:
     holds only a private v4) this returns None, so inbound v4 nodes should pass
     `--endpoint <public-v4>` explicitly. Only the underlay may be v4; the overlay
     stays IPv6."""
+    cmd = (["ifconfig", "-a"] if gwplat.IS_MACOS
+           else ["ip", "-4", "-o", "addr", "show", "scope", "global"])
     try:
-        r = subprocess.run(
-            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
-            capture_output=True, text=True, check=False,
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return None
     for line in r.stdout.splitlines():
         parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
+        # macOS: "inet <a.b.c.d> netmask ..." / Linux: "N: eth0 inet <a.b.c.d>/nn ..."
+        if gwplat.IS_MACOS:
+            if len(parts) < 2 or parts[0] != "inet":
+                continue
+            raw = parts[1]
+        else:
+            if len(parts) < 4 or parts[2] != "inet":
+                continue
+            raw = parts[3].split("/")[0]
         try:
-            addr = ipaddress.IPv4Address(parts[3].split("/")[0])
+            addr = ipaddress.IPv4Address(raw)
         except ValueError:
             continue
         if not (addr.is_private or addr.is_loopback or addr.is_link_local):
@@ -298,11 +332,20 @@ def _local_families() -> set[int]:
     default-route presence. Used to pick a reachable peer endpoint. Falls back to
     assuming both if detection fails."""
     fams: set[int] = set()
-    for fam, flag in ((6, "-6"), (4, "-4")):
+    for fam, cmd in ((6, (["route", "-n", "get", "-inet6", "default"]
+                          if gwplat.IS_MACOS else
+                          ["ip", "-6", "route", "show", "default"])),
+                     (4, (["route", "-n", "get", "default"]
+                          if gwplat.IS_MACOS else
+                          ["ip", "-4", "route", "show", "default"]))):
         try:
-            r = subprocess.run(["ip", flag, "route", "show", "default"],
-                               capture_output=True, text=True, check=False)
-            if r.stdout.strip():
+            r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            # macOS `route get` exits non-zero with "not in table" when absent;
+            # Linux `ip route show default` prints nothing.
+            if gwplat.IS_MACOS:
+                if r.returncode == 0 and "gateway" in (r.stdout or ""):
+                    fams.add(fam)
+            elif r.stdout.strip():
                 fams.add(fam)
         except FileNotFoundError:
             pass
@@ -2502,6 +2545,16 @@ def cmd_run(args) -> int:
     # closed); an nft-less host sets enforce_ports = false to opt out explicitly.
     enforce = cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)
     port_enforcer = None
+    if enforce and not gwplat.port_enforcement_available():
+        # macOS v1: no pf backend yet. Not an error the operator caused — the
+        # capability just isn't built for this OS — so degrade loudly rather
+        # than hard-exit like a broken-nftables Linux host (there the operator
+        # asked for something the OS *can* do and must fix or opt out).
+        log.warning("port enforcement is not available on %s yet (a pf backend "
+                    "is planned) — running with port scopes ADVISORY. Grants "
+                    "still control which tunnels exist; the door stays isolated "
+                    "(WireGuard keys + forwarding-off).", gwplat.os_name())
+        enforce = False
     if enforce:
         from .portfilter import (PortFilter, NftUnavailable, ensure_available,
                                  table_name)
@@ -2761,6 +2814,8 @@ def cmd_firewall(args) -> int:
     print()
     _print_firewall_help(cfg.listen_port, control_port, cfg.wg_interface,
                          header=False, enforce_ports=cfg.enforce_ports)
+    if gwplat.IS_MACOS:
+        return 0            # the macOS help above is complete; no nft to inspect
     print()
     print("The two UDP ports ride the underlay (WireGuard listens there) — always")
     print("your firewall's job. The overlay interfaces (gw-* incl. the door) are")
@@ -3219,40 +3274,41 @@ def cmd_purge(args) -> int:
 
     # Tear down the mesh WireGuard interface — both the current hyphenated name
     # and the legacy underscore form (gw_<mesh>), so an interface left by a
-    # pre-upgrade daemon is cleaned up too.
+    # pre-upgrade daemon is cleaned up too. wg.destroy_interface is platform-
+    # aware (Linux: ip link del; macOS: remove the wireguard-go UAPI socket).
+    from . import wg as wgmod
     for name in dict.fromkeys([iface, iface.replace("-", "_")]):
-        r = subprocess.run(["ip", "link", "show", name], capture_output=True)
-        if r.returncode == 0:
-            subprocess.run(["ip", "link", "set", name, "down"], capture_output=True)
-            subprocess.run(["ip", "link", "delete", name], capture_output=True)
+        if wgmod.interface_exists(name):
+            wgmod.destroy_interface(name)
             removed.append(f"interface {name}")
 
     # Anchor door residue: the transient door interface (may linger if the daemon
     # died mid-window) and the door isolation routing (blackhole table + ip rule,
-    # which setup_door_routing installs and nothing else removes). Both are safe
+    # which setup_door_routing installs and nothing else removes; macOS has
+    # neither — its door isolation is forwarding-off, nothing persists). Safe
     # no-ops when absent, so purge attempts them regardless of last-known role.
     from .door import DOOR_IFACE
     for name in dict.fromkeys([DOOR_IFACE, DOOR_IFACE.replace("-", "_")]):
-        r = subprocess.run(["ip", "link", "show", name], capture_output=True)
-        if r.returncode == 0:
-            subprocess.run(["ip", "link", "delete", name], capture_output=True)
+        if wgmod.interface_exists(name):
+            wgmod.destroy_interface(name)
             removed.append(f"door interface {name}")
     try:
-        from . import wg as wgmod
         wgmod.teardown_door_routing()
     except Exception as e:
         failed.append(f"door routing: {e}")
 
     # Remove greasewood's own nftables table (port enforcement). It PERSISTS
     # across daemon stop by design (fail closed); purge is its explicit
-    # teardown. Idempotent — a no-op if enforcement was never on.
-    from .portfilter import table_name as _nft_table
-    from .config import membership_key
-    _tbl = _nft_table(membership_key(cfg.mesh_domain))
-    chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
-    if chk.returncode == 0:
-        subprocess.run(["nft", "delete", "table", "inet", _tbl], capture_output=True)
-        removed.append(f"nftables table inet {_tbl}")
+    # teardown. Idempotent — a no-op if enforcement was never on, and skipped
+    # where enforcement doesn't exist (macOS v1, no nft binary).
+    if shutil.which("nft"):
+        from .portfilter import table_name as _nft_table
+        from .config import membership_key
+        _tbl = _nft_table(membership_key(cfg.mesh_domain))
+        chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
+        if chk.returncode == 0:
+            subprocess.run(["nft", "delete", "table", "inet", _tbl], capture_output=True)
+            removed.append(f"nftables table inet {_tbl}")
 
     # Remove data directory
     if data_dir.exists():
@@ -3384,6 +3440,7 @@ def main(argv=None) -> int:
                         "when the host is on several meshes)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=f"greasewood {_version()}")
+    gwplat.require_supported()            # Linux or macOS; anything else exits clearly
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # create

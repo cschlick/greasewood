@@ -305,10 +305,14 @@ def _fmt_rate(bytes_per_s: float) -> str:
 
 def _ping_rtt(addr: str) -> str:
     """Round-trip time to an overlay address via one ICMPv6 echo, as 'Nms', or
-    '—' on timeout/unreachable. Numeric only (-n), 1s deadline (-W1)."""
+    '—' on timeout/unreachable. Linux: `ping -6` with a 1s deadline (-W1).
+    macOS: `ping6` (no per-reply deadline flag — the subprocess timeout is the
+    deadline). Both print `time=N ms`, so the parse is shared."""
+    from . import platform as gwplat
+    cmd = (["ping6", "-n", "-c", "1", addr] if gwplat.IS_MACOS
+           else ["ping", "-6", "-n", "-c", "1", "-W", "1", addr])
     try:
-        r = subprocess.run(["ping", "-6", "-n", "-c", "1", "-W", "1", addr],
-                           capture_output=True, text=True, timeout=3)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
     except Exception:
         return "—"
     if r.returncode != 0:
@@ -444,7 +448,7 @@ def _cbreak_terminal():
     """Put the tty in cbreak mode (keys a char at a time, no echo) with the
     cursor hidden, restoring both on exit — even on exception. cbreak (not raw)
     keeps signals, so Ctrl-C still raises KeyboardInterrupt, and output newline
-    translation stays on. Linux-only, like the rest of greasewood. Yields the
+    translation stays on. POSIX (termios/tty — Linux and macOS). Yields the
     stdin fd for the key reader."""
     import termios
     import tty
@@ -960,9 +964,19 @@ _ICMP6_OVERHEAD = 48
 
 
 def _iface_mtu(iface: str) -> "int | None":
-    """The MTU of the WireGuard interface, or None if it can't be read."""
-    r = subprocess.run(["ip", "-o", "link", "show", iface],
-                       capture_output=True, text=True)
+    """The MTU of the WireGuard interface, or None if it can't be read. Both
+    `ip -o link show` (Linux) and `ifconfig` (macOS) print an `mtu <N>` token,
+    so only the command and the logical→utun resolution differ."""
+    from . import platform as gwplat
+    from . import wg as wgmod
+    if gwplat.IS_MACOS:
+        dev = wgmod.resolve_iface(iface)
+        if dev is None:
+            return None
+        r = subprocess.run(["ifconfig", dev], capture_output=True, text=True)
+    else:
+        r = subprocess.run(["ip", "-o", "link", "show", iface],
+                           capture_output=True, text=True)
     if r.returncode != 0:
         return None
     parts = r.stdout.split()
@@ -980,7 +994,20 @@ def _ping6_df(addr: str, payload: int, timeout: int = 1) -> "bool | None":
     overlay. True if a reply came back, False if not, None if ping is missing.
     -M do forbids fragmentation, so an oversized packet is dropped rather than
     split — which is exactly what a full-size tunnel packet does over a
-    too-small underlay path."""
+    too-small underlay path. Linux: `ping -6 -M do`. macOS: `ping6 -m`
+    (suppress source fragmentation — IPv6 never fragments in transit, so
+    source-side is the only fragmentation there is)."""
+    from . import platform as gwplat
+    if gwplat.IS_MACOS:
+        if not shutil.which("ping6"):
+            return None
+        cmd = ["ping6", "-m", "-n", "-c", "1", "-s", str(payload), addr]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout + 2)
+        except subprocess.TimeoutExpired:
+            return False
+        return r.returncode == 0
     ping = shutil.which("ping")
     if not ping:
         return None
@@ -1004,10 +1031,13 @@ def _mtu_probe(iface: str, addr: str, iface_mtu: "int | None") -> "str | None":
     payload = iface_mtu - _ICMP6_OVERHEAD
     if _ping6_df(addr, payload):
         return None  # full-size packets pass → no blackhole
+    from . import platform as gwplat
+    lower = (f"ifconfig <utun> mtu 1280" if gwplat.IS_MACOS
+             else f"ip link set {iface} mtu 1280")
     return (f"PATH MTU BLACKHOLE: {payload}-byte (full {iface_mtu}-MTU) packets "
             f"to {addr} are dropped though small ones pass — TLS handshakes and "
             f"other large transfers will hang. Lower the tunnel MTU "
-            f"(ip link set {iface} mtu 1280) or fix the underlay path MTU.")
+            f"({lower}) or fix the underlay path MTU.")
 
 
 def _self_firewall_verdict(port: int) -> str:
