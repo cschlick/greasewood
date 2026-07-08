@@ -30,8 +30,9 @@ its features!
   lifetime — nodes run from cache.
 - **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
   you apply them.
-- **[Linux-only.](#linux-only)** Built on the Linux kernel's own WireGuard and
-  networking — not a portable userspace/Go stack. Best run as a systemd service.
+- **[Linux-first, macOS-capable.](#platforms)** Linux uses the kernel's own
+  WireGuard and networking (best run as a systemd service); macOS runs the same
+  mesh over `wireguard-go` (port enforcement not yet available there).
 - **[Auditable.](#auditable)** Pure Python, one dependency, driving it all through
   the stock `wg`/`ip` tools over subprocess — and logging **every one of those
   commands**, with context, to a durable trail. Greasy.
@@ -56,8 +57,9 @@ the "more" is consistent:
 - **They assign addresses.** A control plane hands them out, or they're baked
   into the cert. greasewood **derives** the address from the identity key — no
   allocator.
-- **Broader reach.** All three run beyond Linux. greasewood is **Linux-only**,
-  with an **IPv6-only overlay** (the underlay may be v4 or v6).
+- **Broader reach.** All three run beyond Linux/macOS (Windows, mobile).
+  greasewood runs on **Linux and macOS**, with an **IPv6-only overlay** (the
+  underlay may be v4 or v6).
 
 That's the whole trade — and it's why the feature list above doubles as a list of
 limitations. Everything greasewood *won't* do — traverse NAT, assign addresses,
@@ -217,20 +219,44 @@ enrollments and credential renewals need a reachable anchor. Restore or replace 
 anchor within that window (see [Moving the anchor](#moving-the-anchor-re-root) and the
 [RUNBOOK](RUNBOOK.md)) and nothing ever drops.
 
-## Linux-only
+## Platforms
 
-greasewood is built on **Linux-specific kernel interfaces** — the in-kernel
-WireGuard module and the kernel's own networking — and is best run as a
-**systemd** service (the recommended way to keep the daemon up across reboots and
-crashes; a bare `gw run` works for dev). It relies on the
-kernel's WireGuard and on systemd rather than shipping its own userspace
-transport (the way a Go implementation such as `wireguard-go` does) or its own
-supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
-(see [Auditable](#auditable)). A macOS/Windows port would mean a different
-data-plane backend and is out of scope — but [PORTING.md](PORTING.md) sketches
-what a macOS port would actually cost (spoiler: the audit trail is the *cheapest*
-part to carry across, and staying "greasy" — root + subprocess, `brew`-installed,
-not a Network Extension — is the only version consistent with the project).
+**Linux** is the primary platform: greasewood drives the in-kernel WireGuard
+module and the kernel's own networking via the stock `wg`/`ip` tools (see
+[Auditable](#auditable)), and is best run as a **systemd** service (a bare
+`gw run` works for dev).
+
+**macOS** runs the same mesh. There is no kernel WireGuard on macOS, so the
+data plane is `wireguard-go` (userspace, the reference Go implementation) on a
+`utun` device, driven through the same audited-subprocess style (`wg`,
+`ifconfig`, `route`). greasewood keeps its own interface names (`gw-<mesh>`)
+as *logical* names, mapped to the dynamic `utunN` via the standard
+`/var/run/wireguard/<name>.name` convention — the same one `wg-quick` uses.
+
+```
+brew install wireguard-go wireguard-tools
+sudo gw join <token>        # then: sudo gw run
+```
+
+macOS differences, honestly:
+
+- **Port enforcement is not available yet** (it's nftables; a `pf` backend is
+  planned). The grant table still fully controls **which tunnels exist** —
+  only the per-port layer inside granted tunnels is absent, and `gw run` says
+  so loudly. On the expected default posture (no firewall configured) this is
+  the same position a `enforce_ports = false` Linux host is in.
+- **The enrollment door is isolated the same way it fundamentally is on
+  Linux**: WireGuard keys pin who can inject packets, and the anchor is not a
+  router — greasewood never enables IP forwarding (off by default on both
+  OSes), and on macOS it *checks* `net.inet6.ip6.forwarding` and warns loudly
+  if something else turned it on. (Linux adds a belt-and-suspenders blackhole
+  route; macOS has no source-scoped policy routing without pf, and doesn't
+  need it for this.)
+- **No service supervisor yet**: run `sudo gw run` directly (a launchd plist
+  is planned; systemd remains Linux-only).
+
+Windows is out of scope. [PORTING.md](PORTING.md) has the original port
+analysis.
 
 ## Auditable
 

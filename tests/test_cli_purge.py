@@ -95,8 +95,8 @@ def test_purge_tears_down_present_interface(tmp_path, monkeypatch):
 
     args = types.SimpleNamespace(config=str(cfg), yes=True)
     assert cli.cmd_purge(args) == 0
-    assert ["ip", "link", "set", "gw-mesh", "down"] in calls
-    assert ["ip", "link", "delete", "gw-mesh"] in calls
+    # teardown goes through wg.destroy_interface (platform-aware) now
+    assert ["ip", "link", "del", "gw-mesh"] in [list(c) for c in calls]
 
 
 def test_purge_last_mesh_removes_template(tmp_path, monkeypatch, _isolate_system):

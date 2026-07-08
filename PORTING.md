@@ -1,9 +1,10 @@
 # Porting notes
 
-Exploratory notes on what a **macOS port** would actually cost. greasewood is
-[Linux-only by design](README.md#linux-only) and there is no port planned — this
-document exists so the reasoning isn't lost, and so that if the day ever comes,
-whoever picks it up starts from a clear-eyed estimate instead of a hunch.
+Exploratory notes written BEFORE the macOS port, on what it would cost. The
+port has since landed (v1: full mesh on `wireguard-go`; no pf port enforcement
+yet — see [README → Platforms](README.md#platforms)). Kept because the
+reasoning still governs the remaining piece (the pf backend) and any future
+platform.
 
 The short version: the parts that *look* hard (naming, the audit trail) are
 cheap; one thing needs a modest rethink (the interface is a process, not a kernel
