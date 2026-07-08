@@ -577,10 +577,13 @@ That coarse `iifname "gw-*" accept` is required (greasewood's table can only
 rule you write — greasewood's table then scopes the control plane to `gw-<mesh>`,
 locks `gw-door` to enrollment only, and applies the grant table's port scopes.
 
-**If you turn enforcement off** (`enforce_ports = false`, for a host with no
-usable nftables), greasewood installs no table, so you gate the overlay ports
-yourself — and you **must** keep the door locked to enrollment, or a joining node
-could reach any `::`-bound service (e.g. SSH) over the door tunnel:
+Note there's nothing to configure for the door on a host with **no firewall**:
+enforcement is on by default, and greasewood's own table locks `gw-door` down
+regardless of whether you've set up a host firewall. The door is protected out
+of the box.
+
+**If you turn enforcement off** (`enforce_ports = false`), greasewood installs no
+table, and the overlay port rules become yours:
 
 ```
 udp dport { 51900, 51901 } accept
@@ -589,6 +592,16 @@ iifname "gw-myfleet" tcp dport 51902 accept
 iifname "gw-door"    tcp dport 51903 accept
 iifname "gw-door"    drop
 ```
+
+But note the catch: those rules need nftables too. `enforce_ports = false` only
+makes sense in two cases. If you *have* nftables but want greasewood to touch no
+table at all, write them yourself as above. If you turned enforcement off because
+the host has **no usable nftables**, then you can't add them either — the door
+port lockdown is simply unavailable there, and the door rests on its other two
+layers (WireGuard keys + blackhole routing). Those keep the *mesh* isolated, but
+the anchor's own `::`-bound services (e.g. SSH) are reachable by an invitee
+during a window. The remedy isn't a firewall rule — it's installing nftables and
+leaving enforcement on.
 
 The four ports sit in one contiguous block, **51900–51903**, deliberately clear
 of the WireGuard default (51820) and Docker Swarm / Serf (7946) so greasewood
