@@ -230,3 +230,22 @@ def test_nft_table_lines_macos_says_not_available(macos):
     out = "\n".join(status._nft_table_lines(cfg))
     assert "not available on macOS" in out
     assert "nft" not in out                       # no misleading nft command line
+
+
+def test_audit_readonly_knows_macos_probes():
+    """The reconcile loop's existence probe on macOS is `ifconfig utunN` — it
+    must classify as read-only (DEBUG) or it spams the audit log every 5s
+    (seen on the first real Mac). Mutating ifconfig forms stay loud."""
+    from greasewood import audit
+    assert audit.is_readonly(["ifconfig", "utun7"])            # probe
+    assert audit.is_readonly(["ifconfig", "-a"])               # detection sweep
+    assert audit.is_readonly(["route", "-n", "get", "default"])
+    assert audit.is_readonly(["sysctl", "-n", "net.inet6.ip6.forwarding"])
+    assert not audit.is_readonly(["ifconfig", "utun7", "up"])  # mutation
+    assert not audit.is_readonly(
+        ["ifconfig", "utun7", "inet6", "fd8d::1", "prefixlen", "128", "alias"])
+    assert not audit.is_readonly(["route", "-q", "-n", "add", "-inet6", "x"])
+    # Linux classification unchanged
+    assert audit.is_readonly(["ip", "link", "show", "gw-pm"])
+    assert audit.is_readonly(["wg", "show", "gw-pm", "dump"])
+    assert not audit.is_readonly(["wg", "set", "gw-pm", "peer", "X"])
