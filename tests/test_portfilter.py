@@ -134,12 +134,13 @@ def test_ruleset_is_deterministic():
 def test_apply_skips_reload_when_unchanged(monkeypatch):
     loads = []
     monkeypatch.setattr("greasewood.wg.nft_load", lambda script: loads.append(script))
+    monkeypatch.setattr("greasewood.wg.nft_table_exists", lambda t: True)  # table stays present
     gp = types.SimpleNamespace(
         table=types.SimpleNamespace(
             grants=[{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]))
     enforcer = pf.PortFilter("greasewood_test", "gw-mesh", 51902, ["role:api"], gp)
     enforcer.apply(FLEET)
-    enforcer.apply(FLEET)                      # identical → no second reload
+    enforcer.apply(FLEET)                      # identical + present → no second reload
     assert len(loads) == 1
     # a membership change (new web node) triggers exactly one more reload
     enforcer.apply(FLEET + [_rec("fd8d::5", ["web"])])
@@ -173,3 +174,28 @@ def test_table_name_is_per_mesh_and_nft_safe():
     assert pf.table_name("prod") == "greasewood_prod"
     assert pf.table_name("gw-a.b") == "greasewood_gw_a_b"
     assert pf.table_name("prod") != pf.table_name("dev")
+
+
+def test_reasserts_table_when_externally_removed(monkeypatch):
+    """An `nft flush ruleset` (operator's nft -f) wipes our table; the enforcer
+    must notice via a kernel presence check and reinstall, not trust its cache
+    and leave the mesh unenforced."""
+    loads = []
+    monkeypatch.setattr("greasewood.wg.nft_load", lambda script: loads.append(script))
+    present = {"v": True}
+    monkeypatch.setattr("greasewood.wg.nft_table_exists", lambda t: present["v"])
+    gp = types.SimpleNamespace(
+        table=types.SimpleNamespace(
+            grants=[{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]))
+    enforcer = pf.PortFilter("greasewood_test", "gw-mesh", 51902, ["role:api"], gp)
+
+    enforcer.apply(FLEET)
+    assert len(loads) == 1                       # initial install
+    enforcer.apply(FLEET)                         # unchanged + present → skip
+    assert len(loads) == 1
+    present["v"] = False                          # simulate `flush ruleset`
+    enforcer.apply(FLEET)                         # unchanged but GONE → reinstall
+    assert len(loads) == 2
+    present["v"] = True
+    enforcer.apply(FLEET)                         # back + present → skip again
+    assert len(loads) == 2

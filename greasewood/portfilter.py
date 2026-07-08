@@ -197,10 +197,25 @@ class PortFilter:
         table = self._grant_policy.table if self._grant_policy else None
         return table.grants if table else None
 
+    def _installed(self) -> bool:
+        """Is our table actually present in the kernel? If we can't tell, assume
+        yes (don't thrash reinstalls on a transient nft hiccup)."""
+        from . import wg as wgmod
+        try:
+            return wgmod.nft_table_exists(self._table)
+        except Exception:
+            return True
+
     def apply(self, records) -> None:
         desired = render_ruleset(self._table, self._iface, self._control_port,
                                  records, self._local_caps, self._grants())
-        if desired == self._applied:
+        # Skip only when the ruleset is unchanged AND our table is still in the
+        # kernel. The in-memory cache alone isn't enough: an operator's
+        # `nft -f` that starts with `flush ruleset` wipes every table including
+        # ours, and the cache would wrongly think it's still installed — leaving
+        # the mesh coarsely admitted but no longer tightened (fail OPEN). The
+        # presence check re-asserts our table within one reconcile cycle.
+        if desired == self._applied and self._installed():
             return
         # Replace our table atomically: `delete table` (ignored if absent) +
         # the fresh definition in one `nft -f` transaction, so a peer never

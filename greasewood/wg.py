@@ -145,6 +145,16 @@ def nft_delete_table(table: str) -> None:
     _run("nft", "delete", "table", "inet", table, check=False)
 
 
+def nft_table_exists(table: str) -> bool:
+    """True if our inet table is present in the LIVE ruleset. Read-only, so it
+    goes straight to `nft` (not audited like a mutation). Lets the port enforcer
+    notice its table was wiped out from under it (e.g. an operator's `nft -f`
+    that begins with `flush ruleset`) and re-assert it."""
+    r = subprocess.run(["nft", "list", "table", "inet", table],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def interface_exists(iface: str) -> bool:
     """True if `iface` currently exists. Read-only (`show`), so it lands at
     DEBUG in the audit trail, not the durable log."""
