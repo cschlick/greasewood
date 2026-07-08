@@ -72,10 +72,22 @@ def _q(s: str) -> str:
 
 
 def is_readonly(argv) -> bool:
-    """A state-query, not a change: `wg show …`, `ip … show`. These run every
-    reconcile cycle (get_peers, existence probes), so they'd drown a change log
-    — they go to debug, and the durable trail keeps only mutations."""
-    return bool(argv) and argv[0] in ("wg", "ip") and "show" in argv
+    """A state-query, not a change: `wg show …`, `ip … show`, and the macOS
+    equivalents — a bare `ifconfig [dev]` (an ifconfig with a third arg
+    mutates), `route … get`, `sysctl -n`. These run every reconcile cycle
+    (get_peers, existence probes), so they'd drown a change log — they go to
+    debug, and the durable trail keeps only mutations."""
+    if not argv:
+        return False
+    if argv[0] in ("wg", "ip") and "show" in argv:
+        return True
+    if argv[0] == "ifconfig" and len(argv) <= 2:
+        return True                       # `ifconfig` / `ifconfig utun7` = read
+    if argv[0] == "route" and "get" in argv:
+        return True
+    if argv[0] == "sysctl" and "-n" in argv:
+        return True
+    return False
 
 
 def record_command(argv, rc: int, elapsed_ms: int,
