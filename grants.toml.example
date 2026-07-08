@@ -1,13 +1,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  greasewood grant table — the mesh's access policy (grants.toml)
 #
-#  Place at <data_dir>/grants.toml on the ANCHOR, then:  sudo gw policy apply
+#  `gw create` already drops a copy of the DEFAULT (the `* -> * : *` grant
+#  below) at <data_dir>/grants.toml on the anchor. This file is the fuller
+#  reference. Edit the anchor's grants.toml, then:  sudo gw policy apply
 #  (previews the tunnel delta, signs with the CA key, publishes via sync).
+#  Changes take effect ONLY after apply.
 #
 #  Semantics — allow-only, and the table DERIVES the topology:
 #    · a tunnel exists between two nodes iff some grant connects their roles
-#      (in either direction — tunnels are symmetric; direction matters to
-#      port filtering — enforced by default, see below)
+#      (either direction — tunnels are symmetric; direction matters to port
+#      filtering, enforced by default; set enforce_ports=false to opt out)
 #    · deleting a grant tears its tunnels down on the next sync + reconcile
 #    · a deny rule is NOT expressible — omit the grant instead
 #    · hardwired beneath the table, never editable here: every node <-> anchor
@@ -20,31 +23,33 @@
 #  unnamed connected structure this table produces (role:client and
 #  role:server nodes granted an interface share one; delete the grant and it
 #  dissolves). `gw watch --by-role` reports them; nothing configures them.
-#
-#  With NO applied policy the mesh is flat — every verified member peers
-#  (implicitly `* -> * : *`). A fresh mesh needs no policy at all.
-#
-#  `ports` is enforced with nftables BY DEFAULT (greasewood's own table on the
-#  mesh interface; the default policy is fully open, so a fresh mesh is flat
-#  until you write grants). A host without usable nftables sets
-#  `enforce_ports = false` under [network] to run unenforced — then grants
-#  still control which TUNNELS exist, but port scopes go advisory.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# THE DEFAULT — everything open. This is exactly how a mesh with no policy
+# behaves (a flat mesh); it's written out so you edit from a visible baseline.
+# Leaving it in keeps the mesh fully open no matter what else you add below.
 [[grant]]
-from  = ["web", "worker"]
-to    = ["api"]
-ports = ["tcp/8000"]
-# why: the app tier calls the API; nothing else does.
+from  = ["*"]
+to    = ["*"]
+ports = ["*"]
 
-[[grant]]
-from  = ["web"]
-to    = ["db"]
-ports = ["tcp/5432"]
-# why: only web reaches postgres — workers go through the API.
-
-[[grant]]
-from  = ["metrics"]
-to    = ["*"]                  # every node
-ports = ["tcp/9100"]
-# why: prometheus scrapes node_exporter fleet-wide (hub-and-spoke tunnels).
+# ── To tighten, DELETE the wildcard grant above and use specific grants. ─────
+# A worked example (uncomment + adapt to your roles):
+#
+# [[grant]]
+# from  = ["web", "worker"]
+# to    = ["api"]
+# ports = ["tcp/8000"]
+# # why: the app tier calls the API; nothing else does.
+#
+# [[grant]]
+# from  = ["web"]
+# to    = ["db"]
+# ports = ["tcp/5432"]
+# # why: only web reaches postgres — workers go through the API.
+#
+# [[grant]]
+# from  = ["metrics"]
+# to    = ["*"]                  # every node
+# ports = ["tcp/9100"]
+# # why: prometheus scrapes node_exporter fleet-wide (hub-and-spoke tunnels).
