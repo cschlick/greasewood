@@ -259,6 +259,15 @@ macOS differences, honestly:
   (the audit trail stays in `<data_dir>/audit.log` as on Linux).
   `--no-service` opts out; `gw purge` removes the job.
 
+**Testing on a Mac**: the unit suite is host-portable (`pip install pytest
+hypothesis`, then `pytest tests/ --ignore=tests/integration` — the Linux
+integration suite is podman-based and stays on Linux). For the real Darwin
+runtime there's a live smoke test that builds a throwaway single-node mesh
+(`gwsmoke`, non-default ports, self-purging — it never touches your real
+membership): `sudo bash tests/mac_smoke.sh`. It exercises wireguard-go + utun
+naming, the data plane, the forwarding assertion, the launchd job lifecycle,
+and a clean purge.
+
 Windows is out of scope. [PORTING.md](PORTING.md) has the original port
 analysis.
 
