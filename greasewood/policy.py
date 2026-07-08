@@ -54,6 +54,41 @@ POLICY_BASENAME = "policy.json"      # the signed table (anchor: source; node: c
 GRANTS_BASENAME = "grants.toml"      # the human-authored file (anchor only)
 
 
+# The starting grants.toml `gw create` drops on a new anchor: the default policy
+# made EXPLICIT. `* -> * : *` is exactly what a mesh with no policy does
+# (everything open) — written out so the operator sees the baseline and edits
+# from it, rather than starting from a blank file or a guessed restriction.
+DEFAULT_GRANTS_TOML = """\
+# greasewood grant table — the mesh's access policy.
+#
+# This is the DEFAULT policy, made explicit: `* -> * : *` means every node may
+# reach every node on every port — a flat mesh. It is exactly how greasewood
+# behaves with no policy applied; it's spelled out here so you can see the
+# baseline and tighten from it.
+#
+# To restrict: replace the wildcard grant below with specific role-to-role
+# grants, then run  sudo gw policy apply  (it previews the tunnel changes,
+# signs with the CA key, and publishes). Changes take effect ONLY after apply.
+#
+#   [[grant]]
+#   from  = ["web", "worker"]   # roles (role:web ... — assigned at gw invite)
+#   to    = ["api"]
+#   ports = ["tcp/8000"]        # a flow passes iff some grant covers it
+#
+# Roles are the only vocabulary; a "segment" is just the connected structure
+# the grants produce (see `gw watch --by-role`). A deny rule is not
+# expressible — omit the grant instead. Every node <-> anchor is hardwired and
+# not editable here. Full reference + examples: grants.toml.example.
+
+[[grant]]
+from  = ["*"]
+to    = ["*"]
+ports = ["*"]
+# ^ the open default. Delete or narrow this once you add real grants —
+#   leaving it in keeps the mesh fully open regardless of anything below.
+"""
+
+
 def node_tags(caps: list) -> set:
     """The roles a node holds — its role: caps, prefix stripped. Includes '*'
     if the node holds the wildcard role (the anchor)."""
