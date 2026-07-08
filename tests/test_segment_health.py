@@ -77,3 +77,62 @@ def test_two_outbound_only_not_flagged(capsys):
     status._print_segment_health([a, b], types.SimpleNamespace(mesh_domain="m.internal"))
     out = capsys.readouterr().out
     assert "down" not in out                           # no expected edge → not degraded
+
+
+# ---------------------------------------------------------------------------
+# gw watch: the enforcement (greasewood nftables table) summary block
+# ---------------------------------------------------------------------------
+
+def test_enforcement_lines_open_default(monkeypatch):
+    import types
+    from greasewood import status
+    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)   # non-root: skip nft read
+    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
+                                caps=["role:api"])
+    out = "\n".join(status._enforcement_lines(cfg, None))
+    assert "port enforcement on" in out and "greasewood_pm" in out
+    assert "mesh open" in out and "* → * : *" in out
+
+
+def test_enforcement_lines_tightened_shows_inbound_scopes(monkeypatch):
+    import types
+    from greasewood import status
+    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)
+    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
+                                caps=["role:api"])
+    grants = [{"from": ["web", "worker"], "to": ["api"], "ports": ["tcp/8000"]},
+              {"from": ["web"], "to": ["db"], "ports": ["tcp/5432"]}]
+    out = "\n".join(status._enforcement_lines(cfg, grants))
+    assert "tcp/8000 ← web,worker" in out           # this node's inbound grant
+    assert "5432" not in out                         # the db grant isn't inbound here
+
+
+def test_enforcement_lines_tightened_no_inbound_is_default_deny(monkeypatch):
+    import types
+    from greasewood import status
+    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)
+    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
+                                caps=["role:worker"])   # no grant targets worker
+    grants = [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]
+    out = "\n".join(status._enforcement_lines(cfg, grants))
+    assert "default-deny" in out
+
+
+def test_enforcement_lines_off(monkeypatch):
+    import types
+    from greasewood import status
+    cfg = types.SimpleNamespace(enforce_ports=False, mesh_domain="pm.internal",
+                                caps=["role:api"])
+    out = "\n".join(status._enforcement_lines(cfg, None))
+    assert "OFF" in out and "advisory" in out
+
+
+def test_enforcement_lines_warns_when_table_missing_as_root(monkeypatch):
+    import types
+    from greasewood import status, wg
+    monkeypatch.setattr(status.os, "geteuid", lambda: 0)         # root → reads nft
+    monkeypatch.setattr(wg, "nft_table_exists", lambda t: False) # simulate flush window
+    cfg = types.SimpleNamespace(enforce_ports=True, mesh_domain="pm.internal",
+                                caps=["role:api"])
+    out = "\n".join(status._enforcement_lines(cfg, None))
+    assert "not in kernel yet" in out
