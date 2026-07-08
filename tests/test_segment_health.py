@@ -234,3 +234,50 @@ def test_frame_clears_before_content_and_expands_tabs():
     line = f.split("\r\n")[1]
     assert line.startswith("\x1b[K")              # cleared BEFORE the content
     assert "chain x {" in line
+
+
+# ---------------------------------------------------------------------------
+# gw watch: reconcile (daemon-liveness) heartbeat freshness
+# ---------------------------------------------------------------------------
+
+def test_reconcile_freshness_states(tmp_path):
+    import datetime as _dt
+    from greasewood import status, reconcile
+    cfg = types.SimpleNamespace(role="anchor", data_dir=tmp_path,
+                                mesh_domain="pm.internal")
+    # no heartbeat yet → "never" (daemon not running / never reconciled)
+    assert "never reconciled" in status._reconcile_freshness(cfg)
+    # fresh heartbeat → healthy
+    reconcile.stamp_reconcile_path(tmp_path).write_text(
+        _dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
+    assert status._reconcile_freshness(cfg).startswith("reconciled ")
+    # stale heartbeat → warning (daemon stalled/stopped)
+    reconcile.stamp_reconcile_path(tmp_path).write_text(
+        (_dt.datetime.now(_UTC) - _dt.timedelta(minutes=5)).replace(
+            microsecond=0).isoformat())
+    out = status._reconcile_freshness(cfg)
+    assert "⚠" in out and "stalled or stopped" in out
+
+
+def test_reconcile_freshness_shown_for_anchor_in_header(tmp_path, monkeypatch):
+    # the anchor has no sync line (it's the source), so the reconcile heartbeat
+    # is its only freshness signal — it must appear in the watch header.
+    import datetime as _dt
+    from greasewood import status, reconcile
+    reconcile.stamp_reconcile_path(tmp_path).write_text(
+        _dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
+    # isolate the header's freshness assembly from the (cfg-heavy) sub-blocks
+    monkeypatch.setattr(status, "_self_health_lines", lambda *a: [])
+    monkeypatch.setattr(status, "_door_status_lines", lambda *a: [])
+    cfg = types.SimpleNamespace(role="anchor", data_dir=tmp_path,
+                                mesh_domain="pm.internal", hostname="anchor")
+    lines = status._watch_header(cfg, None, "abc", "fd8d::1")
+    assert not any(ln.startswith("synced") for ln in lines)   # anchor doesn't sync
+    assert any(ln.startswith("daemon   : reconciled") for ln in lines)
+
+
+def test_reconcile_heartbeat_round_trips(tmp_path):
+    from greasewood import reconcile
+    assert reconcile.read_last_reconcile(tmp_path) is None
+    reconcile.stamp_reconcile_path(tmp_path).write_text("2026-07-08T00:00:00+00:00")
+    assert reconcile.read_last_reconcile(tmp_path) == "2026-07-08T00:00:00+00:00"
