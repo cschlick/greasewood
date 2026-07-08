@@ -26,9 +26,16 @@ from .directory import Directory
 from .loop import Loop
 from . import hosts
 from . import audit
+from . import platform as gwplat
 from . import wg as wgmod
 
 log = logging.getLogger(__name__)
+
+# Wedged-interface heal (macOS): rebuild the interface after this many seconds
+# of zero live links despite installed peers, backing off (doubling) up to the
+# cap so a genuinely offline node doesn't churn.
+_WEDGE_HEAL_MIN = 30.0
+_WEDGE_HEAL_MAX = 300.0
 
 # persistent-keepalive (secs) for a healthy or still-probing peer. A peer whose
 # endpoint has gone dead past a full probe cycle drops to 0 — see _EndpointTracker.
@@ -372,6 +379,10 @@ class ReconcileLoop(Loop):
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
+        # Wedged-interface heal state (macOS): when zero live links started, and
+        # the current backoff before the next rebuild attempt.
+        self._wedge_since: "float | None" = None
+        self._heal_backoff = _WEDGE_HEAL_MIN
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -379,6 +390,46 @@ class ReconcileLoop(Loop):
         makes peering decisions with the new roles; no restart needed. (A bare
         reference swap: reconcile reads it once per tick.)"""
         self._local_caps = list(caps)
+
+    def _maybe_heal_wedged(self, trusted: list, reachable: list) -> None:
+        """Rebuild the interface when the data plane is UP BUT DEAD — the
+        interface exists and peers are installed, yet nothing has a live
+        handshake for a sustained time. Distinct from the existence-heal at the
+        top of the tick (interface vanished); this is the wireguard-go socket
+        that bound before the network was ready at boot (or across sleep/wake)
+        and stayed stuck. Only a fresh interface rebinds it — `wg set` retries
+        don't. macOS-only: kernel WireGuard rebinds its socket on its own, so
+        Linux doesn't wedge this way, and gating here keeps the Linux data
+        plane untouched.
+
+        Backs off (doubling, capped) so a genuinely offline node — where a
+        rebuild can't help — churns at most every few minutes, and recovers
+        within one MIN interval once connectivity returns."""
+        if self._ensure_iface is None or not gwplat.IS_MACOS:
+            return
+        peer_count = len([r for r in trusted if r.id_pub != self._local_id_pub])
+        if reachable or peer_count == 0:         # a live link, or nothing to reach
+            self._wedge_since = None
+            self._heal_backoff = _WEDGE_HEAL_MIN
+            return
+        now = time.monotonic()
+        if self._wedge_since is None:
+            self._wedge_since = now
+            return
+        if now - self._wedge_since < self._heal_backoff:
+            return
+        log.warning("data plane looks wedged — %s is up and %d peer(s) are "
+                    "installed, but no live handshake in %.0fs (wireguard-go "
+                    "likely bound before the network was ready). Rebuilding the "
+                    "interface to re-bind the underlay socket.",
+                    self._iface, peer_count, now - self._wedge_since)
+        try:
+            wgmod.destroy_interface(self._iface)
+            self._ensure_iface()
+        except Exception as e:
+            log.error("wedge-heal: could not rebuild %s: %s", self._iface, e)
+        self._wedge_since = now
+        self._heal_backoff = min(self._heal_backoff * 2, _WEDGE_HEAL_MAX)
 
     def _maybe_publish_reachable(self, reachable: "list[str]") -> None:
         """Fire on_reachable when the live-link set changes AND at least
@@ -432,6 +483,7 @@ class ReconcileLoop(Loop):
             log.error("reconcile error: %s", e)
             return  # no verified set this cycle; hosts stays as-is, heals next pass
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
+        self._maybe_heal_wedged(trusted, reachable)
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their

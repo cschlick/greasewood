@@ -73,6 +73,16 @@ soft  "ping6 -c 1 ${ADDR:-none}"                      "own overlay address answe
 check "grep -q 'forwarding is off' /var/log/greasewood/${MESH}.log" \
       "door isolation: forwarding-off asserted"
 
+say "── self-heal: kill wireguard-go out from under the daemon"
+UTUN_BEFORE=$(cat "$NAMEFILE" 2>/dev/null | head -1)
+rm -f "/var/run/wireguard/${UTUN_BEFORE}.sock"   # this wireguard-go exits
+sleep 12                                          # a couple of reconcile cycles
+check "[ -f $NAMEFILE ]"                          "daemon rebuilt the interface"
+UTUN_AFTER=$(cat "$NAMEFILE" 2>/dev/null | head -1)
+check "wg show ${UTUN_AFTER:-none}"              "rebuilt interface is live (wg reads it)"
+NAMEFILE_UTUN_CHANGED=$([ "$UTUN_BEFORE" != "$UTUN_AFTER" ] && echo ok || echo same)
+say "  · $UTUN_BEFORE → ${UTUN_AFTER:-<none>} (self-heal ${NAMEFILE_UTUN_CHANGED})"
+
 say "── restart resilience (launchd kickstart)"
 launchctl kickstart -k system/com.greasewood.$MESH >/dev/null 2>&1
 sleep 5
