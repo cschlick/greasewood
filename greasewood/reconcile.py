@@ -328,6 +328,7 @@ class ReconcileLoop(Loop):
         data_dir: "Path | None" = None,
         on_reachable: "Callable[[list[str]], None] | None" = None,
         port_enforcer=None,   # portfilter.PortFilter | None (opt-in --enforce-ports)
+        policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
     ) -> None:
         super().__init__(interval, "reconcile")
@@ -344,6 +345,7 @@ class ReconcileLoop(Loop):
         # loop self-heals: each cycle re-checks and recreates if it's gone.
         self._ensure_iface = ensure_iface
         self._port_enforcer = port_enforcer
+        self._policy_refresh = policy_refresh
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
@@ -391,6 +393,11 @@ class ReconcileLoop(Loop):
 
 
     def _tick(self) -> None:
+        if self._policy_refresh is not None:
+            try:
+                self._policy_refresh()   # pick up an applied policy change from disk
+            except Exception as e:
+                log.warning("policy reload failed: %s", e)
         if self._ensure_iface is not None and not wgmod.interface_exists(self._iface):
             log.warning("mesh interface %s is MISSING — recreating it. Something "
                         "deleted it while the daemon was running (a purge or "

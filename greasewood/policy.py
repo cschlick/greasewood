@@ -155,6 +155,7 @@ class GrantPolicy:
         self._cache_path = Path(cache_path) if cache_path else None
         self._get_ca_pubs = get_ca_pubs or (lambda: [])
         self._table: "GrantTable | None" = None
+        self._cache_mtime = None
         self._lock = threading.Lock()
 
     @property
@@ -181,6 +182,27 @@ class GrantPolicy:
         with self._lock:
             self._table = table
         log.info("policy v%d loaded (%d grants)", table.seq, len(table.grants))
+
+    def refresh_from_cache(self) -> bool:
+        """Reload policy.json if it changed on disk (mtime-guarded) — how the
+        ANCHOR's own data plane picks up a `gw policy apply` (the anchor has no
+        seeds to sync from, so the sync path doesn't feed it). Seq-monotonic via
+        offer(). Returns True if a newer table was adopted. Cheap: a stat + a
+        read only when the file actually changed."""
+        if self._cache_path is None:
+            return False
+        try:
+            mtime = self._cache_path.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        if mtime == self._cache_mtime:
+            return False
+        self._cache_mtime = mtime
+        try:
+            return self.offer(json.loads(self._cache_path.read_text()))
+        except (OSError, ValueError) as e:
+            log.warning("policy cache reload failed: %s", e)
+            return False
 
     def offer(self, policy_dict: "dict | None") -> bool:
         """A freshly-synced policy dict from the anchor. Adopt iff it parses,
@@ -318,6 +340,32 @@ def unmatched_tags(grants: list, records) -> set:
     for g in grants:
         named |= set(g["from"]) | set(g["to"])
     return {t for t in named - held if t != "*"}
+
+
+def unapplied_edits(data_dir) -> str:
+    """A short summary if the anchor's grants.toml differs from the applied,
+    signed policy.json — i.e. edits made but not yet `gw policy apply`d — else
+    "". Surfaced at daemon startup and in `gw policy show` so a forgotten apply
+    is visible rather than a silently-ineffective edit."""
+    from pathlib import Path as _P
+    gp, pp = _P(data_dir) / GRANTS_BASENAME, _P(data_dir) / POLICY_BASENAME
+    if not gp.exists():
+        return ""
+    try:
+        pending = parse_grants_toml(gp.read_text())
+    except (ValueError, OSError):
+        return "grants.toml is currently invalid"
+    applied = None
+    if pp.exists():
+        try:
+            applied = GrantTable.from_dict(json.loads(pp.read_text())).grants
+        except (ValueError, KeyError, OSError):
+            applied = None
+    if pending == applied:
+        return ""
+    added = [g for g in pending if g not in (applied or [])]
+    removed = [g for g in (applied or []) if g not in pending]
+    return f"+{len(added)}/-{len(removed)} grant(s) vs the applied policy"
 
 
 def render_grants(table: "GrantTable | None") -> str:
