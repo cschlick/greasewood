@@ -119,3 +119,44 @@ def test_describe_ip_bare_line_does_not_crash():
     assert N._describe_ip(["ip"]) == "ip "
     assert N._describe_ip(["ip", "-6"]).startswith("ip")
     assert N._describe_ip(["ip", "link"]).startswith("ip")
+
+
+def test_cycle_period_detects_repeats():
+    import types
+    def E(argv): return types.SimpleNamespace(argv=argv, t_ms=1, failed=False)
+    A, B = ["wg", "set", "x"], ["ip", "link", "up"]
+    assert N._cycle_period([E(A), E(B), E(A), E(B), E(A), E(B)]) == 2   # ABAB… → 2
+    assert N._cycle_period([E(A), E(A), E(A)]) == 1                     # AAA → 1
+    assert N._cycle_period([E(A), E(B), E(A)]) == 0                     # not a clean cycle
+    assert N._cycle_period([E(A), E(B)]) == 0                           # <2 reps → no collapse
+
+
+def test_render_collapses_crashloop_cycle():
+    # a crash-loop: the same Configure/Bring-up pair recorded N times under one
+    # context should render as the 2-command cycle ×N, not 2N lines.
+    lines = []
+    for _ in range(50):
+        lines += [
+            'ts=2026-07-08T09:38:30Z cmd rc=0 t=1ms ctx="startup: ensure interface gw-pm [fd8d::1]" argv="wg set gw-pm private-key /k listen-port 51900"',
+            'ts=2026-07-08T09:38:30Z cmd rc=0 t=1ms ctx="startup: ensure interface gw-pm [fd8d::1]" argv="ip link set gw-pm up"',
+        ]
+    entries = [N.parse_line(x) for x in lines]
+    out = "\n".join(N.narrate(entries, color=False))
+    assert out.count("✓") == 2                     # collapsed to the 2 cycle commands
+    assert "×50" in out
+    assert "2-command cycle ×50" in out
+    assert "100 commands" in out                   # footer still reports the true total
+
+
+def test_render_does_not_collapse_when_a_command_failed():
+    # a failure inside the run must stay visible — no cycle collapse.
+    lines = [
+        'ts=2026-07-08T09:38:30Z cmd rc=0 t=1ms ctx="startup: ensure interface gw-pm [x]" argv="wg set gw-pm private-key /k listen-port 51900"',
+        'ts=2026-07-08T09:38:30Z cmd rc=1 t=1ms ctx="startup: ensure interface gw-pm [x]" argv="ip link set gw-pm up" stderr="boom"',
+        'ts=2026-07-08T09:38:30Z cmd rc=0 t=1ms ctx="startup: ensure interface gw-pm [x]" argv="wg set gw-pm private-key /k listen-port 51900"',
+        'ts=2026-07-08T09:38:30Z cmd rc=0 t=1ms ctx="startup: ensure interface gw-pm [x]" argv="ip link set gw-pm up"',
+    ]
+    entries = [N.parse_line(x) for x in lines]
+    out = "\n".join(N.narrate(entries, color=False))
+    assert "×" not in out                           # no collapse
+    assert "✗" in out and "boom" in out             # the failure is shown
