@@ -121,6 +121,32 @@ def test_set_caps_and_roles_echo_resolved_id(tmp_path, capsys, monkeypatch):
     assert "db01" in out and n.id_pub_hex in out          # by full mesh name too
 
 
+def test_set_roles_now_requests_fleet_renewal(tmp_path, capsys, monkeypatch):
+    """--now writes the same renew_after hint as `gw renew-all`, so the change
+    takes effect live; without it, no renewal is requested."""
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    ca_keys = CAKeys.generate()
+    ca_key = tmp_path / "ca.key"
+    ca_keys.save(ca_key)
+    ca = CA(ca_keys, tmp_path)
+    n = NodeKeys.generate()
+    ca.issue(n.id_pub_bytes, n.wg_pub_bytes, "db01", ["role:mesh"])
+    cfg = _anchor_cfg(tmp_path, ca_key)
+    renew_after = tmp_path / "renew_after"
+
+    # without --now: no fleet renewal, just the next-renewal note
+    assert cli.cmd_set_roles(types.SimpleNamespace(
+        config=str(cfg), node="db01", roles="web", now=False)) == 0
+    assert not renew_after.exists()
+    assert "next renewal" in capsys.readouterr().out
+
+    # with --now: writes the renew_after hint
+    assert cli.cmd_set_roles(types.SimpleNamespace(
+        config=str(cfg), node="db01", roles="db", now=True)) == 0
+    assert renew_after.exists() and renew_after.read_text().strip()
+    assert "--now" in capsys.readouterr().out
+
+
 def test_revoke_without_ca_key_exits(tmp_path):
     p = tmp_path / "gw.toml"
     p.write_text('[node]\nhostname = "n1"\nrole = "node"\n')
