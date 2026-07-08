@@ -253,3 +253,17 @@ def test_audit_readonly_knows_macos_probes():
     assert audit.is_readonly(["ip", "link", "show", "gw-pm"])
     assert audit.is_readonly(["wg", "show", "gw-pm", "dump"])
     assert not audit.is_readonly(["wg", "set", "gw-pm", "peer", "X"])
+
+
+def test_macos_adds_lo0_self_route(macos, monkeypatch):
+    """On macOS the node's own overlay /128 gets a loopback delivery route
+    (Linux does this automatically; macOS needs it explicit for a utun)."""
+    calls = []
+    monkeypatch.setattr(wg, "_run", lambda *a, **k: (
+        calls.append(list(a)), _subprocess.CompletedProcess(a, 0, "", ""))[1])
+    wg._macos_self_route("fd8d::42")
+    flat = [" ".join(c) for c in calls]
+    assert "route -q -n add -inet6 fd8d::42/128 -interface lo0" in flat
+    # delete-then-add for idempotency
+    assert flat.index("route -q -n delete -inet6 fd8d::42/128") < \
+           flat.index("route -q -n add -inet6 fd8d::42/128 -interface lo0")

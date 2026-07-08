@@ -161,6 +161,20 @@ def _route_replace(dev: str, addr: str) -> None:
     _run("ip", "-6", "route", "replace", f"{addr}/128", "dev", dev)
 
 
+def _macos_self_route(addr: str) -> None:
+    """Make the node's OWN overlay address locally deliverable on macOS. Linux
+    auto-adds a local (loopback) delivery route when an address is assigned to
+    an interface; macOS doesn't for a utun, so without this a node can't reach
+    its own overlay /128 — breaking gw watch's self-latency row and any local
+    client that dials the node via its overlay address. A host route via lo0
+    fixes it. Best-effort (check=False): peer traffic never flows through this
+    route (inbound is wireguard-go delivery; outbound uses peers' own /128s),
+    so if it doesn't take, only self-delivery is affected — never the mesh."""
+    _run("route", "-q", "-n", "delete", "-inet6", f"{addr}/128", check=False)
+    _run("route", "-q", "-n", "add", "-inet6", f"{addr}/128",
+         "-interface", "lo0", check=False)
+
+
 def _route_del(dev: str, addr: str) -> None:
     if gwplat.IS_MACOS:
         _run("route", "-q", "-n", "delete", "-inet6", f"{addr}/128", check=False)
@@ -194,6 +208,8 @@ def ensure_interface(
             r.returncode, ["wg", "set", dev, "..."], r.stdout, r.stderr)
 
     _add_overlay_addr(dev, overlay_addr)
+    if gwplat.IS_MACOS:
+        _macos_self_route(overlay_addr)
 
     # Bringing a WireGuard interface up binds its listen-port (Linux kernel WG);
     # EADDRINUSE here means ANOTHER wg interface already holds this UDP port —
