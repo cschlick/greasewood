@@ -265,6 +265,31 @@ def setup_door_routing() -> None:
         log.info("door routing: source rule for %s → table %d", GUEST_DOOR_IP, DOOR_TABLE)
 
 
+def teardown_door_routing() -> None:
+    """Undo setup_door_routing — remove the source rule and the blackhole route
+    in the door table. Idempotent (each step is check=False, a no-op if absent).
+    `gw purge` calls this so a torn-down anchor leaves no policy-routing residue.
+    Removes ALL rules pointing at DOOR_TABLE, not just the current GUEST_DOOR_IP,
+    so a stale rule from an older install is cleaned up too."""
+    from .door import GUEST_DOOR_IP, DOOR_TABLE
+    from . import audit
+
+    with audit.context("door: remove isolation routing"):
+        # Delete any ip rule feeding the door table (loop: there may be more than
+        # one from repeated setups; `rule del` removes one match at a time). No
+        # priority in the match, so a rule from an older install with a different
+        # priority is still removed.
+        for _ in range(8):
+            r = _run("ip", "-6", "rule", "show", check=False)
+            if str(DOOR_TABLE) not in (r.stdout or ""):
+                break
+            _run("ip", "-6", "rule", "del",
+                 "from", GUEST_DOOR_IP, "lookup", str(DOOR_TABLE), check=False)
+        # Flush the blackhole default from the door table.
+        _run("ip", "-6", "route", "flush", "table", str(DOOR_TABLE), check=False)
+        log.info("door routing: removed source rule + table %d", DOOR_TABLE)
+
+
 def ensure_anchor_door_interface(
     door_key_path: Path,
     guest_pub_b64: str,

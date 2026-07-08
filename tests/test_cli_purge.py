@@ -124,3 +124,71 @@ def test_purge_keeps_template_when_other_mesh_remains(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     assert (_isolate_system / "greasewood@.service").exists()       # template kept
     assert "kept greasewood@.service" in out and "other" in out
+
+
+# ---------------------------------------------------------------------------
+# stray-daemon handling: kill THIS mesh's daemons, never another mesh's
+# ---------------------------------------------------------------------------
+
+def _pgrep_stub(lines):
+    """A subprocess.run stub that answers `pgrep -af run` with `lines` and
+    treats `ip link show` as absent; everything else is a rc=0 no-op."""
+    def run(cmd, *a, **k):
+        if cmd[:1] == ["pgrep"]:
+            return _subprocess.CompletedProcess(cmd, 0, "\n".join(lines), "")
+        if cmd[:3] == ["ip", "link", "show"]:
+            return _subprocess.CompletedProcess(cmd, 1, "", "")
+        return _subprocess.CompletedProcess(cmd, 0, "", "")
+    return run
+
+
+def test_gw_daemons_split_this_mesh_from_others(monkeypatch, tmp_path):
+    cfg = _cfg(tmp_path, tmp_path / "data")           # basename gw.toml
+    monkeypatch.setattr(_subprocess, "run", _pgrep_stub([
+        f"111 /usr/local/bin/gw -c {cfg} run",        # this mesh (by config)
+        "222 gw run",                                 # bare → single-mesh → this mesh
+        "333 /usr/local/bin/gw -c /etc/greasewood_other.toml run",  # another mesh
+        "444 /usr/bin/python somethingelse run",      # not greasewood
+    ]))
+    from pathlib import Path
+    mine, others = cli._gw_daemons_for_mesh(Path(str(cfg)))
+    assert set(mine) == {111, 222}
+    assert others == [333]
+
+
+def test_purge_kills_this_mesh_stray_but_not_others(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, tmp_path / "data")
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(_subprocess, "run", _pgrep_stub([
+        f"111 /usr/local/bin/gw -c {cfg} run",
+        "333 /usr/local/bin/gw -c /etc/greasewood_other.toml run",
+    ]))
+    killed = []
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: False)   # exits on SIGTERM
+
+    args = types.SimpleNamespace(config=str(cfg), yes=True)
+    assert cli.cmd_purge(args) == 0
+    out = capsys.readouterr().out
+    assert any(pid == 111 for pid, _ in killed)      # this mesh's daemon killed
+    assert all(pid != 333 for pid, _ in killed)      # the OTHER mesh untouched
+    assert "333" in out and "different mesh" in out  # and it's reported, not killed
+
+
+def test_teardown_door_routing_removes_rule_and_table(monkeypatch):
+    from greasewood import wg
+    calls = []
+
+    def fake_run(*args, check=True):
+        calls.append(list(args))
+        # First rule-show reports the table present; second reports it gone.
+        show = list(args)[:3] == ["ip", "-6", "rule"]
+        n_shows = sum(1 for c in calls if c[:3] == ["ip", "-6", "rule"] and "show" in c)
+        out = "51820" if (show and "show" in args and n_shows == 1) else ""
+        return _subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(wg, "_run", fake_run)
+    wg.teardown_door_routing()
+    flat = [" ".join(c) for c in calls]
+    assert any("rule del" in f and "51820" in f for f in flat)   # rule removed
+    assert any("route flush table 51820" in f for f in flat)     # table flushed
