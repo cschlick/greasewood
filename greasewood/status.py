@@ -11,6 +11,7 @@ a system (that story lives in wg.py/reconcile.py, recorded by audit.py).
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import itertools
 import json
@@ -415,13 +416,205 @@ def _enforcement_lines(cfg, grants) -> list:
     return [head, f"           inbound to this node: {scopes}"]
 
 
-def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
-    """Live, redraw-in-place `gw watch`: link state + per-second throughput
-    (from the sample delta between frames) + an async latency column. Root +
-    a terminal required; Ctrl-C exits."""
-    from .directory import Directory
-    from . import wg as wgmod
+# ---------------------------------------------------------------------------
+# gw watch — interactive live view (scrollable; groundwork for a TUI)
+# ---------------------------------------------------------------------------
 
+def _scroll_clamp(off: int, total: int, view_h: int) -> int:
+    """Keep a scroll offset within [0, total - view_h] so the viewport never
+    runs past the content (or before the start)."""
+    return max(0, min(off, max(0, total - view_h)))
+
+
+def _scroll_key(action: str, off: int, total: int, view_h: int) -> int:
+    """Apply a scroll action to the offset, clamped. Pure: the input layer maps
+    keypresses to these action names, and the view math lives here so it's
+    testable without a terminal."""
+    if action == "top":
+        off = 0
+    elif action == "bottom":
+        off = total
+    else:
+        off += {"up": -1, "down": 1,
+                "pgup": -view_h, "pgdown": view_h}.get(action, 0)
+    return _scroll_clamp(off, total, view_h)
+
+
+# Keypress bytes → action. Single keys plus the common escape sequences (arrows,
+# PgUp/PgDn, Home/End). This table is the seam where future interactive ops
+# (sort, filter, select a peer and act on it) attach.
+_KEY_ACTIONS = {
+    b"j": "down",   b"\x1b[B": "down",
+    b"k": "up",     b"\x1b[A": "up",
+    b" ": "pgdown", b"\x1b[6~": "pgdown",
+    b"b": "pgup",   b"\x1b[5~": "pgup",
+    b"g": "top",    b"\x1b[H": "top",
+    b"G": "bottom", b"\x1b[F": "bottom",
+    b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
+}
+
+
+@contextlib.contextmanager
+def _cbreak_terminal():
+    """Put the tty in cbreak mode (keys a char at a time, no echo) with the
+    cursor hidden, restoring both on exit — even on exception. cbreak (not raw)
+    keeps signals, so Ctrl-C still raises KeyboardInterrupt, and output newline
+    translation stays on. Linux-only, like the rest of greasewood. Yields the
+    stdin fd for the key reader."""
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\x1b[?25l")                 # hide cursor
+    sys.stdout.flush()
+    try:
+        yield fd
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\x1b[?25h\x1b[0m\n")    # show cursor, reset attrs, newline
+        sys.stdout.flush()
+
+
+def _read_action(fd: int, timeout: float) -> "str | None":
+    """Block up to `timeout` for a keypress; return its action name, None on
+    timeout, or "" for an unmapped key. One os.read grabs a whole escape
+    sequence, so arrow keys arrive intact."""
+    import select
+    if not select.select([fd], [], [], timeout)[0]:
+        return None
+    data = os.read(fd, 16)
+    if not data:
+        return "quit"                             # EOF on stdin
+    return _KEY_ACTIONS.get(data, "")
+
+
+class _WatchApp:
+    """Interactive `gw watch`: a scrollable dashboard over the mesh roster.
+    Fixed header + enforcement block on top, a scrollable peer viewport in the
+    middle, a status/keys footer pinned to the bottom.
+
+    Built as an app (state + fetch + compose + input) rather than a print loop,
+    so richer interaction — sort, filter, select a peer and act on it — can grow
+    here without reworking the render path. Data refreshes every `interval`;
+    scrolling responds immediately in between."""
+
+    def __init__(self, cfg, own_id, own_addr, prober, interval: float) -> None:
+        self._cfg = cfg
+        self._own_id = own_id
+        self._own_addr = own_addr
+        self._prober = prober
+        self._interval = interval
+        self._off = 0                    # scroll offset into the peer rows
+        self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
+        self._top: list = []             # pinned: header + enforcement + roster chrome
+        self._rows: list = []            # scrollable: one line per peer
+        self._up = 0                     # live-link count (for the footer)
+
+    def _fetch(self) -> None:
+        """Refresh the data snapshot (directory + live WireGuard state) and
+        rebuild the pinned header and scrollable peer rows. The I/O-heavy work,
+        run every `interval` — not on every keypress."""
+        from .directory import Directory
+        from . import wg as wgmod
+        directory = Directory.load(self._cfg.dir_cache_path)
+        records = sorted(directory.all(), key=lambda r: r.hostname)
+        try:
+            live = wgmod.get_peers(self._cfg.wg_interface) or {}
+        except Exception:
+            live = {}
+        now = dt.datetime.now(_UTC)
+        now_epoch = int(now.timestamp())
+        mono = time.monotonic()
+
+        rates, targets = {}, []
+        for r in records:
+            if r.id_pub.hex() == self._own_id:
+                targets.append(r.cred.addr)   # ping self (~0ms) so its row shows too
+                continue
+            key = _wg_key(r)
+            lp = live.get(key)
+            if not lp:
+                continue
+            if _handshake_fresh(lp, now_epoch):
+                targets.append(r.cred.addr)
+                p = self._prev.get(key)
+                if p and mono > p[2]:
+                    dts = mono - p[2]
+                    rates[r.cred.addr] = (
+                        f"↓{_fmt_rate((lp.rx_bytes - p[0]) / dts)} "
+                        f"↑{_fmt_rate((lp.tx_bytes - p[1]) / dts)}")
+            self._prev[key] = (lp.rx_bytes, lp.tx_bytes, mono)
+        self._prober.set_targets(targets)
+        self._up = len(targets)
+
+        grants = _load_policy_grants(self._cfg)
+        roster = _roster_lines(records, self._cfg, now, self._own_id, live, True,
+                               latency=self._prober.results, rates=rates,
+                               grants=grants)
+        # Roster chrome (title, column header, separator) pins with the header;
+        # the per-peer rows below the separator are what scrolls.
+        sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
+        self._top = (_watch_header(self._cfg, directory, self._own_id, self._own_addr)
+                     + _enforcement_lines(self._cfg, grants)
+                     + [""] + roster[:sep + 1])
+        self._rows = roster[sep + 1:]
+
+    def _footer(self, view_h: int) -> str:
+        now = dt.datetime.now(_UTC)
+        total = len(self._rows)
+        if total <= view_h:
+            pos = f"all {total}"
+        else:
+            off = _scroll_clamp(self._off, total, view_h)
+            pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
+        return (f"{now:%H:%M:%S}Z · {self._up} link"
+                f"{'' if self._up == 1 else 's'} up · {pos} · "
+                f"↑↓/PgUp/PgDn/g/G scroll · q quit")
+
+    def _compose(self, cols: int, term_h: int) -> list:
+        """The full frame as a list of exactly term_h lines: pinned top, the
+        scrolled peer window (padded so the footer stays at the bottom), footer.
+        Pure — no terminal I/O — so the scroll windowing is unit-testable."""
+        view_h = max(1, term_h - len(self._top) - 1)      # 1 row for the footer
+        self._off = _scroll_clamp(self._off, len(self._rows), view_h)
+        visible = self._rows[self._off:self._off + view_h]
+        body = visible + [""] * (view_h - len(visible))
+        return self._top + body + [self._footer(view_h)]
+
+    def _view_h(self, term_h: int) -> int:
+        return max(1, term_h - len(self._top) - 1)
+
+    def _render(self) -> None:
+        cols, term_h = shutil.get_terminal_size((80, 24))
+        lines = self._compose(cols, term_h)
+        # Low-flicker redraw: home the cursor, rewrite each line clearing to EOL,
+        # then clear anything left below (a previous, taller frame).
+        sys.stdout.write("\x1b[H"
+                         + "\r\n".join(ln[:cols] + "\x1b[K" for ln in lines)
+                         + "\x1b[J")
+        sys.stdout.flush()
+
+    def run(self, fd: int) -> None:
+        last = -1e9
+        while True:
+            if time.monotonic() - last >= self._interval:
+                self._fetch()
+                last = time.monotonic()
+            self._render()
+            action = _read_action(fd, min(0.25, self._interval))
+            if action == "quit":
+                return
+            if action:
+                _, term_h = shutil.get_terminal_size((80, 24))
+                self._off = _scroll_key(action, self._off, len(self._rows),
+                                        self._view_h(term_h))
+
+
+def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
+    """Live, scrollable `gw watch`: link state + per-second throughput + an
+    async latency column, in a viewport that scrolls when there are more peers
+    than screen rows. See _WatchApp. Root + a terminal required."""
     if not sys.stdout.isatty():
         sys.exit("gw watch needs a terminal to redraw into; "
                  "use 'gw watch --snapshot' for piped/one-shot output")
@@ -431,70 +624,16 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
         sys.exit("gw watch needs root — it reads live WireGuard state "
                  "(wg show). Try: sudo gw watch  (or gw watch --snapshot "
                  "for a no-root static view)")
-
     prober = _LatencyProber()
     prober.start()
-    prev: dict = {}          # wg_pub_b64 -> (rx, tx, monotonic) for the rate delta
-    sys.stdout.write("\033[?25l")   # hide cursor
+    app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval))
     try:
-        while True:
-            directory = Directory.load(cfg.dir_cache_path)
-            records = sorted(directory.all(), key=lambda r: r.hostname)
-            try:
-                live = wgmod.get_peers(cfg.wg_interface) or {}
-            except Exception:
-                live = {}
-            now = dt.datetime.now(_UTC)
-            now_epoch = int(now.timestamp())
-            mono = time.monotonic()
-
-            rates, targets = {}, []
-            for r in records:
-                if r.id_pub.hex() == own_id:
-                    # Ping our own overlay address (~0ms) so the self row shows a
-                    # latency too — makes a peer with NO latency (broken) visually
-                    # distinct from the healthy rows.
-                    targets.append(r.cred.addr)
-                    continue
-                pub = _wg_key(r)
-                lp = live.get(pub)
-                if not lp:
-                    continue
-                if _handshake_fresh(lp, now_epoch):
-                    targets.append(r.cred.addr)
-                    p = prev.get(pub)
-                    if p and mono > p[2]:
-                        dts = mono - p[2]
-                        rates[r.cred.addr] = (
-                            f"↓{_fmt_rate((lp.rx_bytes - p[0]) / dts)} "
-                            f"↑{_fmt_rate((lp.tx_bytes - p[1]) / dts)}")
-                prev[pub] = (lp.rx_bytes, lp.tx_bytes, mono)
-            prober.set_targets(targets)
-
-            grants = _load_policy_grants(cfg)
-            body = _roster_lines(records, cfg, now, own_id, live, True,
-                                 latency=prober.results, rates=rates,
-                                 grants=grants)
-            up = len(targets)
-            # Same header + enforcement block as --snapshot, re-rendered each
-            # frame so door state, sync freshness, and the live nftables table
-            # presence stay current.
-            frame = ["\033[H\033[J"]
-            frame += _watch_header(cfg, directory, own_id, own_addr)
-            frame += _enforcement_lines(cfg, grants)
-            frame += [""]
-            frame += body
-            frame += ["", f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up "
-                      f"· latency fills in live · throughput per-second · Ctrl-C to exit"]
-            sys.stdout.write("\n".join(frame))
-            sys.stdout.flush()
-            time.sleep(interval)
+        with _cbreak_terminal() as fd:
+            app.run(fd)
     except KeyboardInterrupt:
         pass
     finally:
         prober.stop()
-        sys.stdout.write("\033[?25h\n")   # restore cursor
-        sys.stdout.flush()
     return 0
 
 
