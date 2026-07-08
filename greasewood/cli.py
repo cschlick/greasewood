@@ -434,6 +434,16 @@ def cmd_create(args) -> int:
                 "door_port": args.door_port}))
     log.info("wrote config → %s", cfg_path)
 
+    # Drop the default grant table, explicit: `* -> * : *` (fully open — exactly
+    # the no-policy behavior, written out so the operator edits from a visible
+    # baseline). Idempotent: never clobber an existing grants.toml on re-create.
+    from .policy import GRANTS_BASENAME, DEFAULT_GRANTS_TOML
+    grants_path = data_dir / GRANTS_BASENAME
+    if not grants_path.exists():
+        grants_path.write_text(DEFAULT_GRANTS_TOML)
+        log.info("wrote default grant table → %s (fully open; edit + "
+                 "`gw policy apply` to tighten)", grants_path)
+
     ca = CA(ca_keys, data_dir, ttl)
     cred = ca.issue(node_keys.id_pub_bytes, node_keys.wg_pub_bytes, hostname, caps)
 

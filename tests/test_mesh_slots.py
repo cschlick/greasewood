@@ -430,3 +430,29 @@ def test_cmd_join_second_leg_framing_is_in_scope():
     assert "send_msg" in src and "recv_msg" in src
     assert "from .door import recv_msg, send_msg" in src or \
            "from .door import send_msg, recv_msg" in src
+
+
+def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
+    """gw create drops an explicit-open grants.toml so the operator has a
+    visible policy baseline to edit (idempotent — never clobbers one)."""
+    import types
+    from greasewood import cli
+    monkeypatch.setattr(cli, "_require_root", lambda *a, **k: None)
+    data_dir = tmp_path / "var"
+    cfg_path = tmp_path / "gw.toml"
+    ns = types.SimpleNamespace(
+        name="prod", config=str(cfg_path), data_dir=str(data_dir),
+        hostname="anchor", endpoint=None, interface=None, listen_port=None,
+        control_port=51902, door_port=51901, credential_ttl="24h",
+        hosts_sync=True, no_service=True, caps="", mesh_domain=None,
+        overlay_prefix="fd8d:e5c1:db1a:7::", force=False)
+    assert cli.cmd_create(ns) == 0
+    grants = data_dir / "grants.toml"
+    assert grants.exists()
+    from greasewood.policy import parse_grants_toml
+    assert parse_grants_toml(grants.read_text()) == \
+        [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+    # idempotent: a hand-edited grants.toml survives a re-create
+    grants.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["tcp/8000"]\n')
+    cli.cmd_create(ns)
+    assert "web" in grants.read_text()          # not clobbered

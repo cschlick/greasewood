@@ -250,3 +250,28 @@ def test_unmatched_tags_flags_typos():
     records = [_rec("web1", ["role:web"])]
     tags = policy.unmatched_tags(_grants((["wbe"], ["web"], ["*"])), records)
     assert tags == {"wbe"}
+
+
+# ---------------------------------------------------------------------------
+# the default grant table `gw create` materializes
+# ---------------------------------------------------------------------------
+
+def test_default_grants_toml_is_explicit_open():
+    """The starting grants.toml spells out the default policy — `* -> * : *` —
+    which parses to exactly the open wildcard grant and is treated as fully
+    open (same behavior as no policy, just visible)."""
+    from greasewood.portfilter import _fully_open
+    grants = policy.parse_grants_toml(policy.DEFAULT_GRANTS_TOML)
+    assert grants == [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+    assert _fully_open(grants)
+    # and it means everyone peers, like the implicit default
+    assert policy.peers_allowed(["role:web"], ["role:db"], grants)
+
+
+def test_example_grants_toml_parses_to_open_default():
+    """The shipped grants.toml.example leads with the explicit-open default
+    (restrictive samples are commented), so copying it yields an open mesh."""
+    import pathlib
+    example = pathlib.Path(__file__).resolve().parent.parent / "grants.toml.example"
+    grants = policy.parse_grants_toml(example.read_text())
+    assert grants == [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
