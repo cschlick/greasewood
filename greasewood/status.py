@@ -373,47 +373,28 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     return lines
 
 
-def _enforcement_lines(cfg, grants) -> list:
-    """A compact view of THIS node's port enforcement (the greasewood nftables
-    table) for `gw watch`: whether it's on, whether the table is actually in the
-    kernel (root only — reading nft needs privilege), and the inbound port
-    scopes the policy allows here. A readable summary of the table by role, not
-    the raw nft syntax (that's `sudo nft list table inet <name>`)."""
-    from .policy import node_tags
-    from .portfilter import table_name, _fully_open
+def _nft_table_lines(cfg) -> list:
+    """The greasewood nftables table shown verbatim in `gw watch`: the literal
+    `nft list table` command, then its raw output. No summary — what the kernel
+    holds, exactly as `nft` prints it (we run without sudo since watch is already
+    root; the displayed command keeps sudo so it's copy-pasteable elsewhere)."""
+    from .portfilter import table_name
     from .config import membership_key
+    tbl = table_name(membership_key(cfg.mesh_domain))
+    cmd = [f"$ sudo nft list table inet {tbl}"]
 
     if not getattr(cfg, "enforce_ports", True):
-        return ["firewall : port enforcement OFF (enforce_ports=false) — grants "
-                "still gate tunnels; port scopes are advisory"]
-
-    tbl = table_name(membership_key(cfg.mesh_domain))
-    warn = ""
-    if os.geteuid() == 0:                           # only root can read nft
-        try:
-            from . import wg as wgmod
-            if not wgmod.nft_table_exists(tbl):
-                warn = " — ⚠ not in kernel yet (re-asserts within a cycle)"
-        except Exception:
-            pass
-    head = f"firewall : port enforcement on · nftables table {tbl}{warn}"
-
-    if _fully_open(grants):
-        return [head, "           mesh open — default * → * : * (every port "
-                "allowed among peers)"]
-
-    inbound: dict = {}
-    my = node_tags(cfg.caps)
-    for g in grants:
-        if "*" in g["to"] or (my & set(g["to"])):
-            for spec in g["ports"]:
-                inbound.setdefault(spec, set()).update(g["from"])
-    if not inbound:
-        return [head, "           inbound to this node: default-deny (control "
-                "plane + icmp + established replies only)"]
-    scopes = "   ".join(f"{spec} ← {','.join(sorted(frm))}"
-                        for spec, frm in sorted(inbound.items()))
-    return [head, f"           inbound to this node: {scopes}"]
+        return cmd + ["  (port enforcement off — enforce_ports=false; no table)"]
+    try:
+        r = subprocess.run(["nft", "list", "table", "inet", tbl],
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return cmd + ["  (nft not installed)"]
+    if r.returncode == 0:
+        return cmd + r.stdout.rstrip("\n").splitlines()
+    if os.geteuid() != 0:
+        return cmd + ["  (run as root to read the table)"]
+    return cmd + [f"  (no such table — {(r.stderr or '').strip() or 're-asserts within a cycle'})"]
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +537,7 @@ class _WatchApp:
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
         self._top = (_watch_header(self._cfg, directory, self._own_id, self._own_addr)
-                     + _enforcement_lines(self._cfg, grants)
+                     + _nft_table_lines(self._cfg)
                      + [""] + roster[:sep + 1])
         self._rows = roster[sep + 1:]
 
@@ -850,7 +831,7 @@ def cmd_watch(args) -> int:
 
     for line in _watch_header(cfg, directory, own_id, own_addr):
         print(line)
-    for line in _enforcement_lines(cfg, grants):   # the greasewood table, summarized
+    for line in _nft_table_lines(cfg):             # the greasewood nftables table, verbatim
         print(line)
     print()
 
