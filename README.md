@@ -252,8 +252,12 @@ macOS differences, honestly:
   if something else turned it on. (Linux adds a belt-and-suspenders blackhole
   route; macOS has no source-scoped policy routing without pf, and doesn't
   need it for this.)
-- **No service supervisor yet**: run `sudo gw run` directly (a launchd plist
-  is planned; systemd remains Linux-only).
+- **launchd supervision**: `gw join` installs a LaunchDaemon
+  (`com.greasewood.<mesh>`) so the daemon starts at boot and restarts on
+  crash — the systemd equivalent. Status: `sudo launchctl print
+  system/com.greasewood.<mesh>`; logs: `/var/log/greasewood/<mesh>.log`
+  (the audit trail stays in `<data_dir>/audit.log` as on Linux).
+  `--no-service` opts out; `gw purge` removes the job.
 
 Windows is out of scope. [PORTING.md](PORTING.md) has the original port
 analysis.
