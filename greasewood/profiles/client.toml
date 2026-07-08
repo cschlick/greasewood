@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  greasewood TLS cert profile — generic mTLS CLIENT
+#
+#  original template based on :  (generic — no specific service)
+#  adapted for this host      :  ..............................................
+#
+#  A TEMPLATE for the client side of a mutual-TLS (mTLS) setup: this node
+#  authenticates TO a server by presenting a certificate, and verifies the
+#  server against the mesh CA. Every greasewood leaf cert carries clientAuth as
+#  well as serverAuth, so the cert issued here works for client authentication.
+#
+#  It places three files (edit the paths for your client app):
+#    · key  — this client's private key
+#    · cert — this client's certificate, presented to the server
+#    · ca   — the mesh CA, used to verify the SERVER's certificate
+#
+#  The client's identity is its SAN, which defaults to this node's
+#  <hostname>.<mesh_domain> (+ overlay address) — that's the name the server
+#  sees and can authorize. Pass --san to override.
+#
+#  Wrong paths / a missing owner fail LOUDLY at `gw cert-request` time; nothing
+#  is ever silently mis-placed.
+#
+#  Issue it:
+#    sudo gw cert-request --profile client
+#    sudo gw cert-request --profile client --name db-client   # tag it for renewal/status
+#
+#  Use it (examples — the paths below):
+#    curl --cert /etc/greasewood/client-tls/client.crt \
+#         --key  /etc/greasewood/client-tls/client.key \
+#         --cacert /etc/greasewood/client-tls/ca.crt \
+#         https://api.myfleet.internal:8443/
+#
+#    psql "host=db.myfleet.internal sslmode=verify-full \
+#          sslcert=/etc/greasewood/client-tls/client.crt \
+#          sslkey=/etc/greasewood/client-tls/client.key \
+#          sslrootcert=/etc/greasewood/client-tls/ca.crt"
+#
+#  There is no `reload` here: a client is usually invoked on demand and reads
+#  the cert fresh each time, so auto-renewal (on by default) just works. If your
+#  client is a LONG-RUNNING service that caches the cert, add a line like
+#    reload = "systemctl reload myclient"
+#  so the daemon restarts it after each renewal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[file]]
+role  = "key"
+path  = "/etc/greasewood/client-tls/client.key"
+owner = "root:root"
+mode  = "0600"
+
+[[file]]
+role  = "cert"
+path  = "/etc/greasewood/client-tls/client.crt"
+owner = "root:root"
+mode  = "0644"
+
+[[file]]
+role  = "ca"
+path  = "/etc/greasewood/client-tls/ca.crt"
+owner = "root:root"
+mode  = "0644"
