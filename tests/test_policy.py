@@ -275,3 +275,78 @@ def test_example_grants_toml_parses_to_open_default():
     example = pathlib.Path(__file__).resolve().parent.parent / "grants.toml.example"
     grants = policy.parse_grants_toml(example.read_text())
     assert grants == [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+
+
+# ---------------------------------------------------------------------------
+# AnchorPolicySigner — grants.toml is the source of truth, auto-signed
+# ---------------------------------------------------------------------------
+
+class TestAnchorPolicySigner:
+    def _ca(self):
+        return CA   # module-level CAKeys
+
+    def test_signs_grants_toml_into_policy_json(self, tmp_path):
+        (tmp_path / "grants.toml").write_text(
+            '[[grant]]\nfrom=["web"]\nto=["api"]\nports=["tcp/8000"]\n')
+        s = policy.AnchorPolicySigner(tmp_path, CA)
+        d = s.refresh()
+        assert d["seq"] == 1
+        assert d["grants"] == [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]
+        # it wrote policy.json, and it verifies under the CA
+        from greasewood.wire import GrantTable
+        on_disk = GrantTable.from_dict(json.loads((tmp_path / "policy.json").read_text()))
+        on_disk.verify([CA.ca_pub_bytes])
+        assert on_disk.seq == 1
+
+    def test_resigns_only_on_content_change_bumping_seq(self, tmp_path):
+        gp = tmp_path / "grants.toml"
+        gp.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["*"]\n')
+        s = policy.AnchorPolicySigner(tmp_path, CA)
+        assert s.refresh()["seq"] == 1
+        # unchanged file → no bump (same seq), even across a new signer instance
+        assert s.refresh()["seq"] == 1
+        assert policy.AnchorPolicySigner(tmp_path, CA).refresh()["seq"] == 1
+        # edit → bump to 2
+        import os, time
+        gp.write_text('[[grant]]\nfrom=["web"]\nto=["db"]\nports=["*"]\n')
+        os.utime(gp, (time.time() + 1, time.time() + 1))   # ensure mtime moves
+        d = s.refresh()
+        assert d["seq"] == 2 and d["grants"][0]["to"] == ["db"]
+
+    def test_invalid_grants_toml_keeps_last_good(self, tmp_path):
+        gp = tmp_path / "grants.toml"
+        gp.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["*"]\n')
+        s = policy.AnchorPolicySigner(tmp_path, CA)
+        assert s.refresh()["seq"] == 1
+        import os, time
+        gp.write_text('this is not valid toml [[[')
+        os.utime(gp, (time.time() + 1, time.time() + 1))
+        d = s.refresh()                            # must NOT crash or revert to open
+        assert d["seq"] == 1                        # last good still served
+        assert d["grants"] == [{"from": ["web"], "to": ["api"], "ports": ["*"]}]
+
+    def test_feeds_grant_policy_live(self, tmp_path):
+        (tmp_path / "grants.toml").write_text(
+            '[[grant]]\nfrom=["web"]\nto=["api"]\nports=["*"]\n')
+        gp = policy.GrantPolicy(get_ca_pubs=lambda: [CA.ca_pub_bytes])
+        s = policy.AnchorPolicySigner(tmp_path, CA)
+        s.refresh(offer_to=gp)
+        # the anchor's own data plane now sees the signed table
+        assert gp.table is not None and gp.table.seq == 1
+        assert gp(["role:web"], ["role:api"]) is True
+        assert gp(["role:web"], ["role:web"]) is False   # not granted → no tunnel
+
+    def test_disk_authoritative_seq_survives_external_apply(self, tmp_path):
+        # If `gw policy apply` writes a higher seq, the signer baselines off it
+        # (reads policy.json) rather than an in-memory counter — no drift.
+        (tmp_path / "grants.toml").write_text(
+            '[[grant]]\nfrom=["web"]\nto=["api"]\nports=["*"]\n')
+        s = policy.AnchorPolicySigner(tmp_path, CA)
+        s.refresh()                                # v1
+        # simulate an external apply bumping to v5 with the SAME grants
+        from greasewood.wire import GrantTable
+        ext = GrantTable(seq=5, grants=[{"from": ["web"], "to": ["api"],
+                                         "ports": ["*"]}]).sign(CA.ca_priv)
+        (tmp_path / "policy.json").write_text(json.dumps(ext.to_dict()))
+        d = s.refresh()                            # grants.toml unchanged content
+        assert d["seq"] == 5                        # serves the external truth, no bump

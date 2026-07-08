@@ -373,6 +373,17 @@ class EnrollServer:
         }
         if self._mesh_domain:
             reply["mesh_domain"] = self._mesh_domain
+        # Ship the current signed policy so the joining node has it from t=0 —
+        # its very first daemon run enforces the real grant table, with no
+        # implicit-open window before its first directory sync.
+        if self._data_dir is not None:
+            from .policy import POLICY_BASENAME
+            try:
+                import json as _json
+                reply["policy"] = _json.loads(
+                    (self._data_dir / POLICY_BASENAME).read_text())
+            except (FileNotFoundError, ValueError, OSError):
+                pass
         _send_msg(conn, reply)
 
     def _receive_first_record(self, conn) -> None:

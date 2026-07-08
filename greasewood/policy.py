@@ -210,6 +210,86 @@ class GrantPolicy:
         return True
 
 
+class AnchorPolicySigner:
+    """Anchor-only: keeps the signed, distributed policy.json in step with the
+    human-edited grants.toml. grants.toml is the SOURCE OF TRUTH; this signs it
+    (with the CA key) into policy.json — the CA-signed form nodes actually
+    receive and trust (a node can't trust raw grants.toml from another host).
+
+    refresh() is cheap and idempotent: it re-signs only when grants.toml's
+    CONTENT changed (mtime-guarded to skip re-parsing), bumping the seq. A
+    malformed grants.toml is logged and IGNORED — the last good signed policy
+    keeps serving; the daemon never reverts to open or crashes on a bad edit.
+    This is what makes 'edit grants.toml' take effect with no manual step; the
+    trade vs `gw policy apply` is that there's no pre-change preview, so the
+    applied delta is logged instead."""
+
+    def __init__(self, data_dir: "Path", ca_keys, get_records=None) -> None:
+        self._grants_path = Path(data_dir) / GRANTS_BASENAME
+        self._policy_path = Path(data_dir) / POLICY_BASENAME
+        self._ca_priv = ca_keys.ca_priv
+        self._get_records = get_records or (lambda: [])
+        self._mtime = None                        # grants.toml mtime last parsed
+
+    def _current(self) -> "GrantTable | None":
+        """The signed policy currently on disk (policy.json) — the authority for
+        both seq and grants. Reading it every refresh (rather than caching in
+        memory) means a manual `gw policy apply` and this signer can never
+        disagree about the sequence number: whoever wrote policy.json last set
+        it, and the signer only bumps when grants.toml's CONTENT differs."""
+        try:
+            return GrantTable.from_dict(json.loads(self._policy_path.read_text()))
+        except (FileNotFoundError, ValueError, KeyError, OSError):
+            return None
+
+    def refresh(self, offer_to=None) -> "dict | None":
+        """Return the current signed policy dict (for /directory), re-signing
+        from grants.toml first if the file changed. offer_to (a GrantPolicy) is
+        updated in place so the anchor's OWN data plane tracks grants.toml live."""
+        current = self._current()
+        try:
+            mtime = self._grants_path.stat().st_mtime
+        except FileNotFoundError:
+            # No grants.toml → no source to sign; serve whatever policy.json holds
+            # (create writes the default, so a live anchor rarely lacks it).
+            return current.to_dict() if current else None
+        if mtime == self._mtime and current is not None:
+            return current.to_dict()              # grants.toml unchanged → serve on-disk
+
+        try:
+            grants = parse_grants_toml(self._grants_path.read_text())
+        except (ValueError, OSError) as e:
+            log.warning("grants.toml invalid — keeping the last signed policy "
+                        "(v%s); fix it and it auto-applies: %s",
+                        current.seq if current else "none", e)
+            self._mtime = mtime                    # don't re-warn until next edit
+            return current.to_dict() if current else None
+
+        self._mtime = mtime
+        if current is not None and grants == current.grants:
+            return current.to_dict()              # no real change
+
+        seq = (current.seq + 1) if current else 1
+        table = GrantTable(seq=seq, grants=grants).sign(self._ca_priv)
+        atomic_write(self._policy_path, json.dumps(table.to_dict(), indent=2),
+                     mode=0o644)
+        created, removed = tunnel_delta(
+            self._get_records(), current.grants if current else None, grants)
+        log.info("auto-applied grants.toml → policy v%d (%d grant(s); "
+                 "+%d/-%d tunnels)", seq, len(grants), len(created), len(removed))
+        if offer_to is not None:
+            offer_to.offer(table.to_dict())
+        return table.to_dict()
+
+
+def sign_default_policy(data_dir: "Path", ca_keys) -> None:
+    """`gw create`: sign the freshly-written default grants.toml into policy.json
+    v1, so a new anchor has a real, signed, explicit policy from birth (not an
+    implicit fallback). No-op if grants.toml is absent."""
+    signer = AnchorPolicySigner(data_dir, ca_keys)
+    signer.refresh()
+
+
 def tunnel_delta(records, old_grants: "list | None",
                  new_grants: "list | None"):
     """(created, removed) tunnel pairs a policy change would cause, as
