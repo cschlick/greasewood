@@ -553,21 +553,41 @@ greasewood host with no firewall is therefore no more exposed than a plain
 WireGuard host with no firewall. The rules below matter only on a host that runs
 a **default-drop** policy and so must explicitly *allow* those ports through.
 
-On a default-drop host, allow (nftables):
+On a default-drop host, allow (nftables). With port enforcement on (the
+default), greasewood's own nftables table filters the overlay interfaces
+(control plane, enrollment + door lockdown, and the grant-derived ports), so
+your firewall just opens the two underlay UDP ports and **admits** the overlay —
+greasewood does the rest:
 
 | Interface  | Rule                          | Purpose                              |
 |------------|-------------------------------|--------------------------------------|
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
 | underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
-| `lo`       | `iifname "lo" accept`         | the anchor talks to itself (`::1:51902`)|
-| `gw-<name>` | `tcp dport 51902 accept`      | control plane — **only used when this node is the anchor** |
-| `gw-door`  | `tcp dport 51903 accept`      | enrollment exchange — **only when anchor** |
+| `lo`       | `iifname "lo" accept`         | the host talks to itself (`::1:51902`)|
+| `gw-*`     | `iifname "gw-*" accept`       | admit the overlay; greasewood's table filters the ports on it |
+
+```
+udp dport { 51900, 51901 } accept
+iifname "lo" accept
+iifname "gw-*" accept
+```
+
+That coarse `iifname "gw-*" accept` is required (greasewood's table can only
+*tighten* what your firewall admits, never open it), and it's the only overlay
+rule you write — greasewood's table then scopes the control plane to `gw-<mesh>`,
+locks `gw-door` to enrollment only, and applies the grant table's port scopes.
+
+**If you turn enforcement off** (`enforce_ports = false`, for a host with no
+usable nftables), greasewood installs no table, so you gate the overlay ports
+yourself — and you **must** keep the door locked to enrollment, or a joining node
+could reach any `::`-bound service (e.g. SSH) over the door tunnel:
 
 ```
 udp dport { 51900, 51901 } accept
 iifname "lo" accept
 iifname "gw-myfleet" tcp dport 51902 accept
-iifname "gw-door" tcp dport 51903 accept
+iifname "gw-door"    tcp dport 51903 accept
+iifname "gw-door"    drop
 ```
 
 The four ports sit in one contiguous block, **51900–51903**, deliberately clear

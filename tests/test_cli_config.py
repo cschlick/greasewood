@@ -60,14 +60,42 @@ def test_config_unknown_key_errors(tmp_path):
     assert "unknown config key 'nope'" in str(e.value)
 
 
-def test_firewall_prints_suggestion_and_the_four_ports(tmp_path, capsys, monkeypatch):
+def test_firewall_enforce_on_recommends_two_udp_plus_coarse_admit(tmp_path, capsys, monkeypatch):
     from greasewood import firewall
     monkeypatch.setattr(firewall, "_load_ruleset", lambda: None)   # no live nft
-    cfg = _cfg(tmp_path)
+    cfg = _cfg(tmp_path)                                # enforce_ports defaults on
     assert cli.cmd_firewall(types.SimpleNamespace(config=str(cfg))) == 0
     out = capsys.readouterr().out
     assert "NEVER modifies your firewall" in out and "nothing has been changed" in out.lower()
-    # all four ports, with the two TCP scoped to their interfaces
-    assert "51900, 51901" in out                       # the two UDP (unscoped)
-    assert 'iifname "gw-pm" tcp dport 51902' in out    # control plane (mesh iface)
-    assert 'iifname "gw-door" tcp dport 51903' in out  # enrollment (door iface)
+    assert "51900, 51901" in out                        # the two underlay UDP ports
+    assert 'iifname "gw-*" accept' in out               # coarse admit — greasewood filters
+    # the overlay ports are greasewood's table's job now, not the firewall's
+    assert 'iifname "gw-pm" tcp dport 51902' not in out
+    assert 'iifname "gw-door" tcp dport 51903' not in out
+
+
+def test_firewall_enforce_off_recommends_the_four_ports(tmp_path, capsys, monkeypatch):
+    from greasewood import firewall
+    monkeypatch.setattr(firewall, "_load_ruleset", lambda: None)
+    p = tmp_path / "gw.toml"
+    p.write_text(f'''[node]
+hostname = "db01"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-pm"
+listen_port = 51900
+enforce_ports = false
+seeds = []
+root_url = "http://[fd8d::1]:51902"
+mesh_domain = "pm.internal"
+[ca]
+trusted_pubs = []
+''')
+    assert cli.cmd_firewall(types.SimpleNamespace(config=str(p))) == 0
+    out = capsys.readouterr().out
+    # enforcement off → the operator gates the overlay ports themselves
+    assert "51900, 51901" in out
+    assert 'iifname "gw-pm" tcp dport 51902' in out     # control plane
+    assert 'iifname "gw-door" tcp dport 51903' in out   # enrollment
+    assert 'iifname "gw-door" drop' in out              # door lockdown stays operator's job
