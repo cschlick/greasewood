@@ -2414,21 +2414,34 @@ def cmd_run(args) -> int:
                                  push_to=cfg.seeds, quiet_push=True):
             log.debug("published reachable set (%d live links)", len(reachable))
 
-    # Opt-in per-port enforcement of the grant table (--enforce-ports). Refuses
-    # LOUDLY up front if nftables is unusable — an operator who asked to enforce
-    # must never run with silently-absent enforcement (fail closed).
+    # Per-port enforcement of the grant table is ON by default (config
+    # [network] enforce_ports, default true; --no-enforce-ports overrides for
+    # this run). The default policy is fully open (* -> * : *), so a fresh mesh
+    # behaves like a flat mesh until grants tighten it. If enforcement is on and
+    # nftables is unusable, refuse LOUDLY — never run silently unenforced (fail
+    # closed); an nft-less host sets enforce_ports = false to opt out explicitly.
+    enforce = cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)
     port_enforcer = None
-    if getattr(args, "enforce_ports", False):
-        from .portfilter import PortFilter, NftUnavailable, ensure_available
+    if enforce:
+        from .portfilter import (PortFilter, NftUnavailable, ensure_available,
+                                 table_name)
+        from .config import membership_key
         try:
             ensure_available()
         except NftUnavailable as e:
-            sys.exit(f"gw run --enforce-ports: {e}")
-        port_enforcer = PortFilter(cfg.wg_interface, _control_port(cfg),
-                                   cfg.caps, grant_policy)
-        log.info("port enforcement ON (--enforce-ports): greasewood's own "
-                 "nftables table on %s, default-deny within the mesh",
+            sys.exit(f"port enforcement (on by default): {e}\n"
+                     f"To run this node WITHOUT enforcement, set "
+                     f"`enforce_ports = false` under [network] in {args.config} "
+                     f"(or pass --no-enforce-ports for a one-off).")
+        port_enforcer = PortFilter(
+            table_name(membership_key(cfg.mesh_domain)), cfg.wg_interface,
+            _control_port(cfg), cfg.caps, grant_policy)
+        log.info("port enforcement ON: greasewood's own nftables table on %s "
+                 "(default policy is fully open until grants tighten it)",
                  cfg.wg_interface)
+    else:
+        log.info("port enforcement OFF (enforce_ports=false): grants still "
+                 "control which tunnels exist; port scopes are advisory")
 
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
@@ -2993,13 +3006,13 @@ def cmd_purge(args) -> int:
     # Remove greasewood's own nftables table (port enforcement). It PERSISTS
     # across daemon stop by design (fail closed); purge is its explicit
     # teardown. Idempotent — a no-op if enforcement was never on.
-    from .portfilter import TABLE as _NFT_TABLE
-    chk = subprocess.run(["nft", "list", "table", "inet", _NFT_TABLE],
-                         capture_output=True)
+    from .portfilter import table_name as _nft_table
+    from .config import membership_key
+    _tbl = _nft_table(membership_key(cfg.mesh_domain))
+    chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
     if chk.returncode == 0:
-        subprocess.run(["nft", "delete", "table", "inet", _NFT_TABLE],
-                       capture_output=True)
-        removed.append(f"nftables table inet {_NFT_TABLE}")
+        subprocess.run(["nft", "delete", "table", "inet", _tbl], capture_output=True)
+        removed.append(f"nftables table inet {_tbl}")
 
     # Remove data directory
     if data_dir.exists():
@@ -3252,13 +3265,13 @@ def main(argv=None) -> int:
 
     # run
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
-    sp.add_argument("--enforce-ports", dest="enforce_ports", action="store_true",
-                    help="enforce the grant table's PORT scopes with nftables "
-                         "(off by default; grants already enforce which tunnels "
-                         "exist). Writes ONLY greasewood's own table, scoped to "
-                         "the mesh interface — never your host firewall. Refuses "
-                         "to start if nftables is unusable. Persists across "
-                         "restarts (fail closed); `gw purge` removes it.")
+    sp.add_argument("--no-enforce-ports", dest="no_enforce_ports",
+                    action="store_true",
+                    help="run WITHOUT nftables port enforcement (on by default). "
+                         "For a host with no usable nftables — grants still "
+                         "control which tunnels exist; port scopes go advisory. "
+                         "The persistent form is `enforce_ports = false` under "
+                         "[network] (systemd runs `gw run` with no flags).")
     sp.set_defaults(fn=cmd_run)
 
     # watch — live mesh view by default; --snapshot for a static one-shot

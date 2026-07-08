@@ -209,9 +209,10 @@ def render_grants(table: "GrantTable | None") -> str:
     """The compact arrow form for `gw policy show` (display-only — nothing
     parses this back)."""
     if table is None:
-        return ("no policy — flat mesh: every verified member tunnels with "
-                "every other (implicitly `* -> * : *`); apply a grant table "
-                "to derive the topology from roles")
+        return ("policy: default — everything open (implicitly `* -> * : *`); "
+                "every verified member tunnels with every other. Write "
+                "grants.toml + `gw policy apply` to tighten (the topology then "
+                "derives from roles).")
     if not table.grants:
         return (f"policy v{table.seq}: EMPTY — no grants; only anchor tunnels "
                 f"exist")

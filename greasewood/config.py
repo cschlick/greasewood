@@ -34,6 +34,12 @@ class Config:
     # TLS cert name (gw cert-request), so a node's address name == its cert SAN.
     hosts_sync: bool
     mesh_domain: str
+    # Enforce the grant table's port scopes with nftables (greasewood's own
+    # table, mesh interface only). ON by default; the default policy is fully
+    # open (* -> * : *), so a fresh mesh behaves like a flat mesh until you
+    # write grants. Set false ONLY on a host without usable nftables — the
+    # daemon otherwise refuses to start rather than run silently unenforced.
+    enforce_ports: bool
     # Extra service names this node publishes into the mesh's /etc/hosts, as
     # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
     # `gw cert-request` appends one automatically for a subdomain --san.
@@ -197,6 +203,7 @@ def load_config(path: Path) -> Config:
         root_url=net.get("root_url", ""),
 
         hosts_sync=bool(net.get("hosts_sync", True)),
+        enforce_ports=bool(net.get("enforce_ports", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
         aliases=list(net.get("aliases", [])),
         audit_log=audit_log,

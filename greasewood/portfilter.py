@@ -1,14 +1,16 @@
 """
-greasewood.portfilter — OPT-IN per-port enforcement of the grant table.
+greasewood.portfilter — per-port enforcement of the grant table (on by default).
 
 Grants already enforce tunnel EXISTENCE (no grant → no WireGuard peer → nothing
 to filter). This adds the finer layer: within the tunnels that exist, allow only
-the ports the grants name. It is off by default (`gw run --enforce-ports`), and
-it writes ONLY greasewood's own nftables table, scoped to the mesh interface —
-never the operator's rules, never a physical NIC.
+the ports the grants name. It is ON by default (the default policy is fully open,
+so a fresh mesh is flat until grants tighten it); `enforce_ports = false` opts a
+host out. It writes ONLY greasewood's own nftables table, scoped to the mesh
+interface — never the operator's rules, never a physical NIC.
 
 Design (the model settled in the roles/grants discussion):
-  - greasewood owns `table inet greasewood`; every rule matches
+  - greasewood owns `table inet greasewood_<mesh>` (per-membership,
+    so multi-mesh hosts don't collide); every rule matches
     `iifname "<mesh-iface>"`, so it is structurally incapable of touching
     eth0 / the underlay. The underlay firewall stays advisory forever.
   - Default-deny WITHIN the mesh: accept established/related (client replies),
@@ -40,8 +42,16 @@ from .policy import node_tags
 
 log = logging.getLogger(__name__)
 
-TABLE = "greasewood"          # our own table — never the operator's
 _CHAIN = "meshfilter"
+
+
+def table_name(key: str) -> str:
+    """greasewood's own nftables table for ONE membership. Per-mesh, so two
+    meshes on one host (multi-mesh) don't clobber each other's rules. nft
+    identifiers allow only [A-Za-z0-9_], so the key's hyphens/dots become
+    underscores: e.g. mesh key 'prod' → table inet greasewood_prod."""
+    safe = "".join(c if c.isalnum() else "_" for c in key)
+    return f"greasewood_{safe}"
 
 
 class NftUnavailable(RuntimeError):
@@ -52,21 +62,21 @@ class NftUnavailable(RuntimeError):
 
 def ensure_available() -> None:
     """Raise NftUnavailable unless nftables is usable. Called ONCE at daemon
-    start when --enforce-ports is set, before anything is touched — so an
-    operator who asked to enforce is told plainly if we can't, rather than
-    running with silently-absent enforcement."""
+    start when enforcement is on (the default), before anything is touched — so
+    the daemon refuses loudly rather than running with silently-absent
+    enforcement (fail closed)."""
     if shutil.which("nft") is None:
         raise NftUnavailable(
-            "nftables (nft) is not installed. Port enforcement needs it — "
-            "install nftables, or drop --enforce-ports (grants still control "
-            "which tunnels exist; ports stay advisory).")
+            "nftables (nft) is not installed. Port enforcement (on by default) "
+            "needs it — install nftables, or set enforce_ports = false to run "
+            "without it (grants still control which tunnels exist).")
     r = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True)
     if r.returncode != 0:
         raise NftUnavailable(
             "`nft list ruleset` failed (kernel nf_tables support or "
             f"permissions?): {r.stderr.strip() or r.returncode}. Port "
-            "enforcement needs a working nftables; drop --enforce-ports to run "
-            "without it.")
+            "enforcement needs a working nftables; set enforce_ports = false "
+            "to run without it.")
 
 
 def _port_allowances(records, local_caps: list, grants: "list | None") -> dict:
@@ -106,12 +116,25 @@ def _port_allowances(records, local_caps: list, grants: "list | None") -> dict:
     return allow
 
 
-def render_ruleset(iface: str, control_port: int, records,
+def _fully_open(grants: "list | None") -> bool:
+    """True when the policy opens the whole mesh: either no table (the default
+    policy is `* -> * : *`), or a table that contains an explicit `* -> * : *`
+    grant (which, under allow-only union, subsumes everything). Rendered as a
+    single `accept` — no per-port sets — so 'open' stays cheap regardless of
+    fleet size or how it's written."""
+    if grants is None:
+        return True
+    return any("*" in g["from"] and "*" in g["to"] and "*" in g["ports"]
+               for g in grants)
+
+
+def render_ruleset(table: str, iface: str, control_port: int, records,
                    local_caps: list, grants: "list | None") -> str:
-    """The full desired `table inet greasewood` as an `nft -f` document. With no
-    grant table (grants is None → flat mesh) the table admits ALL mesh traffic
-    — enforcement is meaningful only once a policy carves it up."""
-    allow = _port_allowances(records, local_caps, grants)
+    """The full desired `table inet greasewood_<mesh>` as an `nft -f` document. A fully
+    open policy (no table, or an explicit * -> * : *) admits all mesh traffic
+    with one accept; otherwise default-deny within the mesh + the granted flows.
+    Enforcement is always installed — 'open' is a policy state, not its absence."""
+    allow = {} if _fully_open(grants) else _port_allowances(records, local_caps, grants)
 
     sets, rules = [], []
     # Set + rule per port bucket. Deterministic ordering → stable text → the
@@ -130,11 +153,12 @@ def render_ruleset(iface: str, control_port: int, records,
         rules.append(f'        iifname "{iface}" {proto} dport {port} '
                      f'ip6 saddr @{name} accept')
 
-    # No policy → admit the whole overlay (enforcement is a no-op until a table
-    # exists). A policy with no rule for this node → default-deny mesh traffic.
-    mesh_default = 'accept' if grants is None else 'drop'
+    # Fully open → admit the whole overlay (one accept). Otherwise default-deny
+    # mesh traffic (a policy exists but grants nothing to this node ⇒ only the
+    # hardwired control/established/icmp allows apply).
+    mesh_default = 'accept' if _fully_open(grants) else 'drop'
 
-    body = [f"table inet {TABLE} {{"]
+    body = [f"table inet {table} {{"]
     body += sets
     body += [
         f"    chain {_CHAIN} {{",
@@ -160,8 +184,9 @@ class PortFilter:
     (re)installs greasewood's own nftables table iff the desired ruleset
     changed. Holds no lock — reconcile calls it single-threaded."""
 
-    def __init__(self, iface: str, control_port: int, local_caps: list,
-                 grant_policy) -> None:
+    def __init__(self, table: str, iface: str, control_port: int,
+                 local_caps: list, grant_policy) -> None:
+        self._table = table
         self._iface = iface
         self._control_port = control_port
         self._local_caps = local_caps
@@ -173,14 +198,15 @@ class PortFilter:
         return table.grants if table else None
 
     def apply(self, records) -> None:
-        desired = render_ruleset(self._iface, self._control_port, records,
-                                 self._local_caps, self._grants())
+        desired = render_ruleset(self._table, self._iface, self._control_port,
+                                 records, self._local_caps, self._grants())
         if desired == self._applied:
             return
         # Replace our table atomically: `delete table` (ignored if absent) +
         # the fresh definition in one `nft -f` transaction, so a peer never
         # sees a half-built ruleset.
-        script = f"table inet {TABLE}\ndelete table inet {TABLE}\n{desired}"
+        script = (f"table inet {self._table}\n"
+                  f"delete table inet {self._table}\n{desired}")
         from . import wg as wgmod
         from . import audit
         try:
@@ -197,7 +223,7 @@ class PortFilter:
         rules persist without us); only `gw purge` calls this."""
         from . import wg as wgmod
         try:
-            wgmod.nft_delete_table(TABLE)
+            wgmod.nft_delete_table(self._table)
             log.info("removed the greasewood nftables table")
         except Exception as e:
             log.warning("could not remove nftables table: %s", e)

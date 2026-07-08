@@ -7,7 +7,7 @@
 #  Semantics — allow-only, and the table DERIVES the topology:
 #    · a tunnel exists between two nodes iff some grant connects their roles
 #      (in either direction — tunnels are symmetric; direction matters to
-#      port filtering — see --enforce-ports below)
+#      port filtering — enforced by default, see below)
 #    · deleting a grant tears its tunnels down on the next sync + reconcile
 #    · a deny rule is NOT expressible — omit the grant instead
 #    · hardwired beneath the table, never editable here: every node <-> anchor
@@ -24,10 +24,11 @@
 #  With NO applied policy the mesh is flat — every verified member peers
 #  (implicitly `* -> * : *`). A fresh mesh needs no policy at all.
 #
-#  `ports` is enforced with nftables only under `gw run --enforce-ports`
-#  (opt-in, greasewood's own table on the mesh interface). Without it, grants
-#  still control which TUNNELS exist; the port scopes are documented by
-#  `gw policy show` but not filtered.
+#  `ports` is enforced with nftables BY DEFAULT (greasewood's own table on the
+#  mesh interface; the default policy is fully open, so a fresh mesh is flat
+#  until you write grants). A host without usable nftables sets
+#  `enforce_ports = false` under [network] to run unenforced — then grants
+#  still control which TUNNELS exist, but port scopes go advisory.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[grant]]

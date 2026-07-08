@@ -65,6 +65,14 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 hosts_sync = true
 mesh_domain = "myfleet.internal"
 
+# Enforce the grant table's PORT scopes with nftables (greasewood's own table,
+# mesh interface only — never your host firewall). ON by default; the default
+# policy is fully open (* -> * : *), so a fresh mesh is a flat mesh until you
+# write grants (see `gw policy` / grants.toml). Set false ONLY on a host with
+# no usable nftables — otherwise the daemon refuses to start rather than run
+# silently unenforced (fail closed). `gw purge` removes the table.
+enforce_ports = true
+
 # Extra service names this node publishes, as bare labels under its OWN mesh
 # name — each becomes "<label>.<hostname>.<mesh_domain>" in every node's
 # /etc/hosts, pointing at this node. `gw cert-request` appends one automatically
