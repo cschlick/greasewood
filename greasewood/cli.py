@@ -1630,6 +1630,15 @@ def cmd_set_caps(args) -> int:
     return 0
 
 
+def _request_fleet_renewal(cfg) -> "dt.datetime":
+    """Write the anchor's fleet-wide renew_after=now hint (served in GET
+    /directory). Shared by `gw renew-all` and `gw set-roles --now`. Returns the
+    timestamp written."""
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    (cfg.data_dir / "renew_after").write_text(now.isoformat())
+    return now
+
+
 def cmd_set_roles(args) -> int:
     cfg, ca = _load_anchor_ca(args, "set-roles")
     id_pub, name = _resolve_node(ca, cfg, args.node)
@@ -1640,7 +1649,18 @@ def cmd_set_roles(args) -> int:
     caps = kept + ["role:" + r for r in names]
     ca.set_caps(id_pub, caps)
     print(f"roles for {name} ({id_pub.hex()}) → {names}  (caps now {caps})")
-    print(_NEXT_RENEWAL_NOTE)
+    if getattr(args, "now", False):
+        # Expedite: the SAME hint `gw renew-all` writes. It's fleet-wide (a
+        # single renew_after level), so re-roling several nodes is better done
+        # as several `set-roles` then ONE `renew-all` — but for a single change
+        # this is the one-command path. The node adopts the new roles live.
+        now = _request_fleet_renewal(cfg)
+        print(f"--now: requested a fleet renewal (renew_after = "
+              f"{now:%Y-%m-%d %H:%M UTC}) — {name}'s daemon renews within a poll "
+              f"interval and adopts the new roles live, no restart. (Fleet-wide; "
+              f"for a batch, prefer several set-roles then one `gw renew-all`.)")
+    else:
+        print(_NEXT_RENEWAL_NOTE)
     return 0
 
 
@@ -2946,8 +2966,7 @@ def cmd_renew_all(args) -> int:
     if cfg.role != "anchor":
         sys.exit("gw renew-all must be run on the anchor (role = anchor)")
 
-    now = dt.datetime.now(_UTC).replace(microsecond=0)
-    (cfg.data_dir / "renew_after").write_text(now.isoformat())
+    now = _request_fleet_renewal(cfg)
     print(f"fleet renewal requested: renew_after = {now:%Y-%m-%d %H:%M UTC}")
     print("Cooperating nodes whose credential predates this will renew within a "
           "poll interval + jitter; offline nodes renew when they return.")
@@ -3563,6 +3582,12 @@ def main(argv=None) -> int:
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("roles", help="comma-separated roles, e.g. 'web,worker' "
                                   "(replaces role: tags; keeps tls; empty = mesh default)")
+    sp.add_argument("--now", action="store_true",
+                    help="apply immediately — also request a fleet renewal (as "
+                         "`gw renew-all` does) so the node adopts the new roles "
+                         "live, no restart. Omit and it takes effect at the node's "
+                         "next natural renewal (~half TTL). Fleet-wide, so for a "
+                         "batch prefer several set-roles then one renew-all.")
     sp.set_defaults(fn=cmd_set_roles)
 
     # policy — the grant table (roles → roles : ports; derives the topology)
