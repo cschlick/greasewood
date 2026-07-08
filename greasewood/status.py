@@ -585,13 +585,18 @@ class _WatchApp:
 
     def _render(self) -> None:
         cols, term_h = shutil.get_terminal_size((80, 24))
-        lines = self._compose(cols, term_h)
-        # Low-flicker redraw: home the cursor, rewrite each line clearing to EOL,
-        # then clear anything left below (a previous, taller frame).
-        sys.stdout.write("\x1b[H"
-                         + "\r\n".join(ln[:cols] + "\x1b[K" for ln in lines)
-                         + "\x1b[J")
+        sys.stdout.write(self._frame(self._compose(cols, term_h), cols))
         sys.stdout.flush()
+
+    @staticmethod
+    def _frame(lines: list, cols: int) -> str:
+        """Assemble the redraw string. Clear each line to EOL BEFORE writing it
+        (not after): nft output is tab-indented, and a tab moves the cursor over
+        columns without erasing them, so a trailing clear leaves stale content
+        in the indent. Tabs are expanded first so truncation counts real
+        columns. \\x1b[J at the end wipes anything below a now-shorter frame."""
+        body = "\r\n".join("\x1b[K" + ln.expandtabs()[:cols] for ln in lines)
+        return "\x1b[H" + body + "\x1b[J"
 
     def run(self, fd: int) -> None:
         last = -1e9
