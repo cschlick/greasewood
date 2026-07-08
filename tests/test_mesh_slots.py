@@ -452,6 +452,17 @@ def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
     from greasewood.policy import parse_grants_toml
     assert parse_grants_toml(grants.read_text()) == \
         [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+    # create SIGNS it into policy.json v1 (real signed policy from birth, not
+    # just a decorative file) — and it verifies under the mesh CA.
+    import json
+    from greasewood.wire import GrantTable
+    from greasewood.keys import CAKeys
+    pol = data_dir / "policy.json"
+    assert pol.exists()
+    table = GrantTable.from_dict(json.loads(pol.read_text()))
+    ca = CAKeys.load(data_dir / "ca.key")
+    table.verify([ca.ca_pub_bytes])             # must not raise
+    assert table.seq == 1 and table.grants == [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
     # idempotent: a hand-edited grants.toml survives a re-create
     grants.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["tcp/8000"]\n')
     cli.cmd_create(ns)
