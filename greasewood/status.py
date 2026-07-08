@@ -431,6 +431,7 @@ _KEY_ACTIONS = {
     b"b": "pgup",   b"\x1b[5~": "pgup",
     b"g": "top",    b"\x1b[H": "top",
     b"G": "bottom", b"\x1b[F": "bottom",
+    b"f": "toggle_nft",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -488,7 +489,12 @@ class _WatchApp:
         self._interval = interval
         self._off = 0                    # scroll offset into the peer rows
         self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
-        self._top: list = []             # pinned: header + enforcement + roster chrome
+        self._show_nft = True            # f toggles the nft table block
+        # Pinned-top pieces, kept separate so `f` collapses the nft block
+        # instantly without a re-fetch.
+        self._header: list = []          # role/addr/door/...
+        self._nft_lines: list = []       # the raw `nft list table` block
+        self._chrome: list = []          # roster title/column-header/separator
         self._rows: list = []            # scrollable: one line per peer
         self._up = 0                     # live-link count (for the footer)
 
@@ -536,10 +542,20 @@ class _WatchApp:
         # Roster chrome (title, column header, separator) pins with the header;
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
-        self._top = (_watch_header(self._cfg, directory, self._own_id, self._own_addr)
-                     + _nft_table_lines(self._cfg)
-                     + [""] + roster[:sep + 1])
+        self._header = _watch_header(self._cfg, directory, self._own_id, self._own_addr)
+        self._nft_lines = _nft_table_lines(self._cfg)
+        self._chrome = roster[:sep + 1]
         self._rows = roster[sep + 1:]
+
+    def _top_lines(self) -> list:
+        """The pinned block above the scrollable roster: header, the nft table
+        (or a one-line stand-in when collapsed with `f`), a blank, then the
+        roster's column header. Recomputed each render, so `f` toggles instantly."""
+        if self._show_nft or not self._nft_lines:
+            nft = self._nft_lines
+        else:
+            nft = [self._nft_lines[0] + "   (f to expand)"]   # keep the command line
+        return self._header + nft + [""] + self._chrome
 
     def _footer(self, view_h: int) -> str:
         now = dt.datetime.now(_UTC)
@@ -551,20 +567,21 @@ class _WatchApp:
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos} · "
-                f"↑↓/PgUp/PgDn/g/G scroll · q quit")
+                f"↑↓/PgUp/PgDn/g/G scroll · f firewall · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
         """The full frame as a list of exactly term_h lines: pinned top, the
         scrolled peer window (padded so the footer stays at the bottom), footer.
         Pure — no terminal I/O — so the scroll windowing is unit-testable."""
-        view_h = max(1, term_h - len(self._top) - 1)      # 1 row for the footer
+        top = self._top_lines()
+        view_h = max(1, term_h - len(top) - 1)            # 1 row for the footer
         self._off = _scroll_clamp(self._off, len(self._rows), view_h)
         visible = self._rows[self._off:self._off + view_h]
         body = visible + [""] * (view_h - len(visible))
-        return self._top + body + [self._footer(view_h)]
+        return top + body + [self._footer(view_h)]
 
     def _view_h(self, term_h: int) -> int:
-        return max(1, term_h - len(self._top) - 1)
+        return max(1, term_h - len(self._top_lines()) - 1)
 
     def _render(self) -> None:
         cols, term_h = shutil.get_terminal_size((80, 24))
@@ -586,7 +603,9 @@ class _WatchApp:
             action = _read_action(fd, min(0.25, self._interval))
             if action == "quit":
                 return
-            if action:
+            if action == "toggle_nft":
+                self._show_nft = not self._show_nft     # instant, next render shows it
+            elif action:
                 _, term_h = shutil.get_terminal_size((80, 24))
                 self._off = _scroll_key(action, self._off, len(self._rows),
                                         self._view_h(term_h))
