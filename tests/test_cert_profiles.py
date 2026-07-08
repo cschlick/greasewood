@@ -84,9 +84,20 @@ def test_resolve_owner_unknown_fails_loudly():
     assert "no such user" in str(e.value)
 
 
+def test_client_mtls_profile():
+    # the generic mTLS client template: key + cert (to present) + ca (to verify
+    # the server), and no reload (a client reads the cert on demand).
+    p = cli._load_cert_profile("client")
+    assert [f["role"] for f in p["files"]] == ["key", "cert", "ca"]
+    assert p["reload"] is None
+    key = next(f for f in p["files"] if f["role"] == "key")
+    assert key["mode"] == "0600"                       # client private key is 0600
+
+
 def test_load_shipped_profiles_valid():
     names = cli._shipped_profile_names()
-    assert {"postgres", "nginx", "haproxy", "redis", "nats", "minio", "mosquitto"} <= set(names)
+    assert {"postgres", "nginx", "haproxy", "redis", "nats", "minio",
+            "mosquitto", "client"} <= set(names)
     for name in names:
         p = cli._load_cert_profile(name)
         assert p["files"]
