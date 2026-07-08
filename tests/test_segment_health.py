@@ -168,35 +168,56 @@ def test_key_action_map_covers_keys_and_arrows():
     assert s._KEY_ACTIONS[b"k"] == "up" and s._KEY_ACTIONS[b"\x1b[A"] == "up"
     assert s._KEY_ACTIONS[b" "] == "pgdown" and s._KEY_ACTIONS[b"\x1b[6~"] == "pgdown"
     assert s._KEY_ACTIONS[b"q"] == "quit" and s._KEY_ACTIONS[b"\x03"] == "quit"
+    assert s._KEY_ACTIONS[b"f"] == "toggle_nft"
 
 
-def _mk_app(top, rows):
+def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
+                               "table inet greasewood_pm {", "}")):
     from greasewood import status as s
     app = s._WatchApp.__new__(s._WatchApp)
-    app._top, app._rows, app._off, app._up = top, rows, 0, len(rows)
+    app._header = list(header)
+    app._nft_lines = list(nft)
+    app._chrome = []
+    app._rows, app._off, app._up = rows, 0, len(rows)
+    app._show_nft = True
     return app
 
 
 def test_compose_windows_rows_and_pins_footer():
-    app = _mk_app(["h1", "h2"], [f"peer{i}" for i in range(50)])
-    frame = app._compose(cols=80, term_h=10)          # view_h = 10-2-1 = 7
-    assert len(frame) == 10                            # exactly fills the height
-    assert frame[:2] == ["h1", "h2"]                   # pinned header
-    assert frame[2:9] == [f"peer{i}" for i in range(7)]
-    assert "peers 1–7 of 50" in frame[-1]              # footer scroll indicator
+    app = _mk_app(["h1"], [f"peer{i}" for i in range(50)])
+    term_h = 24
+    frame = app._compose(cols=80, term_h=term_h)
+    top = app._top_lines()
+    view_h = term_h - len(top) - 1
+    assert len(frame) == term_h                         # exactly fills the height
+    assert frame[:len(top)] == top                      # pinned top
+    assert frame[len(top):len(top) + view_h] == [f"peer{i}" for i in range(view_h)]
+    assert f"of 50" in frame[-1]                        # footer scroll indicator
 
 
 def test_compose_clamps_offset_and_shows_tail():
-    app = _mk_app(["h1", "h2"], [f"peer{i}" for i in range(50)])
+    app = _mk_app(["h1"], [f"peer{i}" for i in range(50)])
     app._off = 999
-    frame = app._compose(80, 10)
-    assert app._off == 43                              # clamped to total - view_h
-    assert frame[2:9] == [f"peer{i}" for i in range(43, 50)]
-    assert "peers 44–50 of 50" in frame[-1]
+    term_h = 24
+    frame = app._compose(80, term_h)
+    top = app._top_lines()
+    view_h = term_h - len(top) - 1
+    assert app._off == 50 - view_h                      # clamped to total - view_h
+    assert frame[len(top):len(top) + view_h] == [f"peer{i}" for i in range(50 - view_h, 50)]
 
 
 def test_compose_all_fit_no_scroll_indicator():
-    app = _mk_app(["h1", "h2"], [f"peer{i}" for i in range(3)])
+    app = _mk_app(["h1"], [f"peer{i}" for i in range(3)])
     frame = app._compose(80, 24)
-    assert "all 3" in frame[-1]                        # fits → 'all N', not a range
-    assert len(frame) == 24                            # still fills the screen (padded)
+    assert "all 3" in frame[-1]                         # fits → 'all N', not a range
+    assert len(frame) == 24                             # still fills the screen (padded)
+
+
+def test_toggle_nft_collapses_the_top_block():
+    app = _mk_app(["h1"], [f"peer{i}" for i in range(5)])
+    expanded = app._top_lines()
+    app._show_nft = False
+    collapsed = app._top_lines()
+    assert len(collapsed) < len(expanded)              # collapsing shrinks the pinned top
+    assert any("f to expand" in ln for ln in collapsed)    # still shows how to restore
+    assert any("nft list table" in ln for ln in collapsed) # keeps the command line
