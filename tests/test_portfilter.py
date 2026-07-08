@@ -22,7 +22,7 @@ FLEET = [_rec(WEB1, ["web"]), _rec(WEB2, ["web"]),
 
 
 def _render(local_roles, grants):
-    return pf.render_ruleset("gw-mesh", 51902, FLEET,
+    return pf.render_ruleset("greasewood_test", "gw-mesh", 51902, FLEET,
                              [f"role:{r}" for r in local_roles], grants)
 
 
@@ -32,7 +32,7 @@ def _render(local_roles, grants):
 
 def test_only_greasewoods_own_table():
     out = _render(["api"], [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}])
-    assert "table inet greasewood {" in out
+    assert "table inet greasewood_test {" in out
     # never names the operator's tables/chains, never a physical iface
     assert "eth0" not in out
 
@@ -83,7 +83,7 @@ def test_wildcard_to_matches_every_node_as_destination():
     assert "p_tcp_9100" not in out
     # but with a metrics node present, it appears
     fleet = FLEET + [_rec("fd8d::9", ["metrics"])]
-    out2 = pf.render_ruleset("gw-mesh", 51902, fleet, ["role:db"],
+    out2 = pf.render_ruleset("greasewood_test", "gw-mesh", 51902, fleet, ["role:db"],
                              [{"from": ["metrics"], "to": ["*"], "ports": ["tcp/9100"]}])
     assert "set p_tcp_9100" in out2 and "fd8d::9" in out2
 
@@ -102,6 +102,15 @@ def test_no_policy_admits_the_whole_overlay():
     # flat mesh (grants=None) → enforcement is a no-op: mesh default is accept.
     out = _render(["api"], None)
     assert 'iifname "gw-mesh" accept' in out
+    assert 'iifname "gw-mesh" drop' not in out
+
+
+def test_explicit_wildcard_grant_renders_as_clean_open():
+    # `* -> * : *` written in grants.toml means the same as no policy — open —
+    # and renders as a single accept, NOT an all-addresses set (cheap at scale).
+    out = _render(["api"], [{"from": ["*"], "to": ["*"], "ports": ["*"]}])
+    assert 'iifname "gw-mesh" accept' in out
+    assert "p_all" not in out and "p_tcp" not in out   # no grant-derived sets
     assert 'iifname "gw-mesh" drop' not in out
 
 
@@ -128,7 +137,7 @@ def test_apply_skips_reload_when_unchanged(monkeypatch):
     gp = types.SimpleNamespace(
         table=types.SimpleNamespace(
             grants=[{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]))
-    enforcer = pf.PortFilter("gw-mesh", 51902, ["role:api"], gp)
+    enforcer = pf.PortFilter("greasewood_test", "gw-mesh", 51902, ["role:api"], gp)
     enforcer.apply(FLEET)
     enforcer.apply(FLEET)                      # identical → no second reload
     assert len(loads) == 1
@@ -156,3 +165,11 @@ def test_ensure_available_raises_when_ruleset_fails(monkeypatch):
                             a, 1, "", "Operation not permitted"))
     with pytest.raises(pf.NftUnavailable, match="failed"):
         pf.ensure_available()
+
+
+def test_table_name_is_per_mesh_and_nft_safe():
+    # per-membership so multi-mesh hosts don't clobber one shared table; and
+    # hyphens/dots in the key become underscores (nft identifier rules).
+    assert pf.table_name("prod") == "greasewood_prod"
+    assert pf.table_name("gw-a.b") == "greasewood_gw_a_b"
+    assert pf.table_name("prod") != pf.table_name("dev")

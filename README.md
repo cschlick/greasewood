@@ -784,27 +784,35 @@ Properties to rely on:
   its CA-signed credential — a node can neither talk its way into a role it
   wasn't issued nor be forced into a link it denies.
 
-**Port enforcement** (`gw run --enforce-ports`, opt-in). By default grants
-enforce tunnel *existence* only, and `gw policy show` documents the intended
-port scopes. Add `--enforce-ports` and the daemon also enforces the `ports`
-field: it maintains **greasewood's own** `table inet greasewood`, scoped to
-the mesh interface, that default-denies mesh traffic and admits only the
-granted flows (server-side inbound; a client's replies ride `ct established`,
-so the client/server asymmetry needs no rule). It writes **only** its own
-table on `gw-<mesh>` — never your host firewall, never a physical NIC — so it
-can only ever *tighten* mesh traffic. It **refuses to start** if nftables
-isn't usable (an operator who asked to enforce is never left silently
-unenforced), and the table **persists across daemon restarts** (fail closed);
-`gw purge` removes it. This presupposes you've admitted the overlay in your
-own firewall (`iifname "gw-<mesh>" accept`, or no host firewall) — `gw
-firewall` advises exactly that.
+**Port enforcement is on by default.** The daemon enforces each grant's
+`ports` with nftables: it maintains **greasewood's own** `table inet
+greasewood`, scoped to the mesh interface, that default-denies mesh traffic
+and admits only the granted flows (server-side inbound; a client's replies
+ride `ct established`, so the client/server asymmetry needs no rule). The
+**default policy is fully open** (`* -> * : *`), so a fresh mesh with no
+`grants.toml` behaves exactly like a flat mesh — enforcement is a policy
+*state*, always installed, not a mode you switch on. Writing grants tightens
+it.
+
+It writes **only** its own table on `gw-<mesh>` — never your host firewall,
+never a physical NIC — so it can only ever *tighten* mesh traffic, and it
+presupposes you've admitted the overlay in your own firewall (`iifname
+"gw-<mesh>" accept`, or no host firewall) — `gw firewall` advises exactly
+that. The table **persists across daemon restarts** (fail closed); `gw purge`
+removes it.
+
+Because enforcement is on by default, **nftables must be usable** — the
+daemon refuses to start rather than run silently unenforced. A host without
+nftables sets `enforce_ports = false` under `[network]` (or a one-off `gw run
+--no-enforce-ports`): grants still control which *tunnels* exist, but the
+port scopes go advisory.
 
 ## Command reference
 
 | Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
 | `create`        | yes   | One-shot anchor bootstrap: CA, door key, routing, self-cred. |
-| `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). `--enforce-ports` opts into nftables enforcement of grant port scopes (greasewood's own table on the mesh iface; see [Access control](#access-control-roles--grants)). |
+| `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). Port enforcement (grant port scopes, nftables) is on by default; `--no-enforce-ports` (or `enforce_ports=false`) disables it for an nft-less host. See [Access control](#access-control-roles--grants). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](#baked-images--autoscaling-the-standing-door) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |

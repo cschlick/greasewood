@@ -1,5 +1,5 @@
 """
-Integration: --enforce-ports actually filters on kernel nftables.
+Integration: default-on port enforcement actually filters on kernel nftables.
 
 The claim the unit tests can't make: on a real mesh with a real grant table and
 a real nftables ruleset, a GRANTED port passes and an UNGRANTED port on the SAME
@@ -56,7 +56,7 @@ def test_ports_are_filtered_within_a_granted_tunnel(gw_image, gw_network):
         web = bring_up_node(gw_image, gw_network, anchor, hostname="web1", roles="web")
         cids.append(web["cid"])
         api = bring_up_node(gw_image, gw_network, anchor, hostname="api1",
-                            roles="api", run_args=["--enforce-ports"])
+                            roles="api")   # enforcement is on by default
         cids.append(api["cid"])
 
         # grant web -> api : tcp/8000 ONLY (9999 is deliberately ungranted)
@@ -72,9 +72,9 @@ def test_ports_are_filtered_within_a_granted_tunnel(gw_image, gw_network):
         deadline = time.time() + 40
         got = False
         while time.time() < deadline:
-            r = pexec(api["cid"], "nft", "list", "table", "inet", "greasewood",
-                      check=False)
-            if r.returncode == 0 and "p_tcp_8000" in r.stdout:
+            r = pexec(api["cid"], "nft", "list", "ruleset", check=False)
+            if r.returncode == 0 and "table inet greasewood_" in r.stdout \
+                    and "p_tcp_8000" in r.stdout:
                 got = True
                 break
             time.sleep(3)
@@ -97,9 +97,9 @@ def test_ports_are_filtered_within_a_granted_tunnel(gw_image, gw_network):
         # fail-closed: stop the daemon; the table (and its drop) persists.
         pexec(api["cid"], "pkill", "-f", "[g]w.*run", check=False)
         time.sleep(3)
-        r = pexec(api["cid"], "nft", "list", "table", "inet", "greasewood",
-                  check=False)
-        assert r.returncode == 0 and "drop" in r.stdout, \
+        r = pexec(api["cid"], "nft", "list", "ruleset", check=False)
+        assert r.returncode == 0 and "table inet greasewood_" in r.stdout \
+            and "drop" in r.stdout, \
             "enforcement table must persist across daemon stop (fail closed)"
         still = pexec(web["cid"], "python3", "-c", _PROBE,
                       api["overlay"], "9999").stdout.strip()
