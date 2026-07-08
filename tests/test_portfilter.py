@@ -37,13 +37,32 @@ def test_only_greasewoods_own_table():
     assert "eth0" not in out
 
 
-def test_every_rule_scoped_to_the_mesh_interface():
+def test_every_rule_scoped_to_the_overlay_interfaces():
     out = _render(["api"], [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}])
-    # the guard + the accepts/drop that touch mesh traffic all name gw-mesh
-    assert 'iifname != "gw-mesh" accept' in out
+    # anything not on the overlay interfaces (mesh + door) leaves the chain
+    assert 'iifname != { "gw-mesh", "gw-door" } accept' in out
     assert 'iifname "gw-mesh" drop' in out
     # the granted accept is mesh-scoped too
     assert 'iifname "gw-mesh" tcp dport 8000 ip6 saddr @p_tcp_8000 accept' in out
+
+
+def test_door_is_locked_to_enrollment_only():
+    # greasewood's table owns gw-door: allow the enrollment exchange (51903),
+    # drop everything else on the door — so the operator's firewall needn't.
+    # Present regardless of the mesh grant policy (even fully open).
+    for grants in (None, [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]):
+        out = pf.render_ruleset("greasewood_test", "gw-mesh", 51902, FLEET,
+                                ["role:api"], grants)
+        assert 'iifname "gw-door" tcp dport 51903 accept' in out
+        assert 'iifname "gw-door" drop' in out
+
+
+def test_control_plane_is_scoped_to_mesh_not_door():
+    # the control plane rides the mesh overlay; scope it to gw-mesh so a door
+    # peer can't reach it (nothing binds it on the door IP anyway).
+    out = _render(["api"], None)
+    assert 'iifname "gw-mesh" tcp dport 51902 accept' in out
+    assert out.count("dport 51902") == 1          # the only 51902 rule is that scoped one
 
 
 def test_control_and_diagnostics_are_hardwired():

@@ -43,8 +43,18 @@ def _ruleset(*items):
 
 # --- required rule sets ---
 
-def test_anchor_rules_cover_control_and_door():
-    rules = fw.anchor_rules()
+def test_anchor_rules_enforce_on_are_underlay_udp_only():
+    # Enforcement on (default): greasewood's own table owns the overlay ports
+    # (control + enrollment), so the checkable firewall rules are just the two
+    # underlay UDP ports the operator must open.
+    ports = {(r.proto, r.port, r.iif) for r in fw.anchor_rules()}
+    assert ports == {("udp", 51900, None), ("udp", 51901, None)}
+
+
+def test_anchor_rules_enforce_off_cover_control_and_door():
+    # Enforcement off: greasewood installs no table, so the operator must gate
+    # the overlay ports and they ARE checked.
+    rules = fw.anchor_rules(enforce_ports=False)
     ports = {(r.proto, r.port, r.iif) for r in rules}
     assert ("udp", 51900, None) in ports
     assert ("udp", 51901, None) in ports
@@ -105,8 +115,8 @@ def test_iifname_match_satisfies():
 
 
 def test_anchor_rules_use_the_real_mesh_interface():
-    # The control-plane rule must be scoped to the actual gw-<name> interface,
-    # not the stale hardcoded "gw-mesh".
-    rules = fw.anchor_rules(51900, 51902, mesh_iface="gw-pm")
+    # The control-plane rule (enforcement OFF) must be scoped to the actual
+    # gw-<name> interface, not the stale hardcoded "gw-mesh".
+    rules = fw.anchor_rules(51900, 51902, mesh_iface="gw-pm", enforce_ports=False)
     control = [r for r in rules if r.proto == "tcp" and r.port == 51902]
     assert control and control[0].iif == "gw-pm"

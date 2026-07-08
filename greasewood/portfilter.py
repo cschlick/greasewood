@@ -38,6 +38,7 @@ import logging
 import shutil
 import subprocess
 
+from .door import DOOR_IFACE, ENROLL_PORT
 from .policy import node_tags
 
 log = logging.getLogger(__name__)
@@ -163,12 +164,19 @@ def render_ruleset(table: str, iface: str, control_port: int, records,
     body += [
         f"    chain {_CHAIN} {{",
         "        type filter hook input priority filter; policy accept;",
-        # Only mesh traffic is ours; everything else leaves this chain (accept
-        # is non-terminal across tables, so the operator's rules still decide).
-        f'        iifname != "{iface}" accept',
+        # Only the overlay interfaces are ours; everything else (physical NICs,
+        # lo, ...) leaves this chain untouched — accept is non-terminal across
+        # tables, so the operator's own firewall still decides it.
+        f'        iifname != {{ "{iface}", "{DOOR_IFACE}" }} accept',
         "        ct state established,related accept",   # replies to our outbound
-        "        meta l4proto ipv6-icmp accept",         # ping / diagnostics
-        f"        tcp dport {control_port} accept",       # control plane — hardwired
+        "        meta l4proto ipv6-icmp accept",         # ND / ping / PMTU
+        f'        iifname "{iface}" tcp dport {control_port} accept',   # control plane
+        # The enrollment door carries ONLY the enroll exchange, then is locked
+        # down — greasewood owns this so the operator's firewall needn't. Always
+        # present (harmless on a node, whose gw-door never comes up); keeps the
+        # door 51903-only independent of the mesh grant policy.
+        f'        iifname "{DOOR_IFACE}" tcp dport {ENROLL_PORT} accept',
+        f'        iifname "{DOOR_IFACE}" drop',
     ]
     body += rules
     body += [
