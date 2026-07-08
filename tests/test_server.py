@@ -676,3 +676,25 @@ def test_negative_content_length_rejected():
     import pytest
     with pytest.raises(ValueError, match="invalid request body length"):
         h._read_json()
+
+
+def test_addr_in_use_surfaces_clean_error_not_pool_attributeerror():
+    """Regression: when the control port is already bound, the real EADDRINUSE
+    must surface as a clear ControlPlaneAddrInUse — not the AttributeError from
+    server_close touching _pool before __init__ set it."""
+    import socket as _s
+    from greasewood import server
+    # Hold a port, then ask ControlServer to bind the same one.
+    held = _s.socket(_s.AF_INET6, _s.SOCK_STREAM)
+    held.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+    held.bind(("::1", 0))
+    port = held.getsockname()[1]
+    held.listen(1)
+    try:
+        with pytest.raises(server.ControlPlaneAddrInUse) as e:
+            server.ControlServer(f"[::1]:{port}", Directory(),
+                                 get_ca_pubs=list, get_revoked=set)
+        assert "already in use" in str(e.value) and str(port) in str(e.value)
+        assert "_pool" not in str(e.value)          # the masking bug is gone
+    finally:
+        held.close()

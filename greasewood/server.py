@@ -22,6 +22,7 @@ connection, not an intercepted one.
 from __future__ import annotations
 
 import concurrent.futures
+import errno
 import json
 import logging
 import socket
@@ -313,6 +314,10 @@ class _Handler(BaseHTTPRequestHandler):
         return cn, dns, ips
 
 
+class ControlPlaneAddrInUse(RuntimeError):
+    """The control-plane port is already bound (another anchor daemon?)."""
+
+
 class _IPv6Server(HTTPServer):
     """IPv6 control plane with a BOUNDED worker pool.
 
@@ -326,8 +331,12 @@ class _IPv6Server(HTTPServer):
     address_family = socket.AF_INET6
 
     def __init__(self, addr, handler, max_workers: int = 32) -> None:
-        super().__init__(addr, handler)
+        # Set BEFORE super().__init__: if the bind fails there (e.g. the port is
+        # already in use), TCPServer.__init__ calls self.server_close(), which
+        # touches _pool — an AttributeError there would bury the real bind error.
+        self._pool = None
         self._max_workers = max_workers
+        super().__init__(addr, handler)
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="gw-http")
         # In-flight admission bound == pool size: at most max_workers requests
@@ -356,7 +365,8 @@ class _IPv6Server(HTTPServer):
 
     def server_close(self) -> None:
         super().server_close()
-        self._pool.shutdown(wait=False)
+        if self._pool is not None:              # None if bind failed in __init__
+            self._pool.shutdown(wait=False)
 
     def handle_error(self, request, client_address) -> None:
         # A client that hangs up mid-response (or a connection dropped at
@@ -417,8 +427,23 @@ class ControlServer:
         for lst in listens:
             host, _, port_str = lst.rpartition(":")
             host = host.strip("[]")  # strip brackets from "[fd8d::1]"
-            self._servers.append(
-                _IPv6Server((host or "::", int(port_str)), Handler, max_workers))
+            try:
+                self._servers.append(
+                    _IPv6Server((host or "::", int(port_str)), Handler, max_workers))
+            except OSError as e:
+                for srv in self._servers:       # close what we already bound
+                    srv.server_close()
+                if e.errno == errno.EADDRINUSE:
+                    raise ControlPlaneAddrInUse(
+                        f"control-plane address [{host}]:{port_str} is already in "
+                        f"use — most likely another greasewood anchor daemon (a "
+                        f"stale one, or a second mesh: the control port defaults "
+                        f"to {port_str} on every anchor). Find it with: "
+                        f"sudo ss -tlnp 'sport = :{port_str}'  — then stop that "
+                        f"daemon (sudo systemctl stop greasewood@<name>) or give "
+                        f"this mesh a different control port ([anchor] "
+                        f"control_listen = ':<port>').") from e
+                raise
         # Primary server (callers/tests read its bound port).
         self._server = self._servers[0]
 

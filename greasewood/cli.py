@@ -2257,7 +2257,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     is a daemon thread that dies with the process, so it isn't returned)."""
     from .ca import CA
     from .keys import CAKeys
-    from .server import ControlServer
+    from .server import ControlServer, ControlPlaneAddrInUse
     from .enroll import DoorWatcher, EnrollContext
     from . import wg as wgmod
 
@@ -2309,11 +2309,14 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
             log.warning("policy.json unreadable, serving none: %s", e)
             return None
 
-    server = ControlServer(
-        listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
-        ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
-        mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
-        get_policy=read_policy)
+    try:
+        server = ControlServer(
+            listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
+            ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
+            mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
+            get_policy=read_policy)
+    except ControlPlaneAddrInUse as e:
+        sys.exit(f"anchor control plane can't start: {e}")
     server.start()
 
     door_watcher = DoorWatcher(
