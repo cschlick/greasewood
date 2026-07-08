@@ -248,6 +248,23 @@ def _group(entries):
         yield cur
 
 
+def _cycle_period(op) -> int:
+    """The smallest period p (1 ≤ p ≤ len/2) such that this operation is its
+    first p commands repeated end-to-end — or 0 if it isn't a clean cycle.
+
+    A crash-loop records the SAME short command sequence over and over under one
+    context (e.g. `startup: ensure interface` → Configure, Bring-up, Configure,
+    Bring-up, …). This detects that N-times repeat so the renderer can show the
+    cycle once as `×N` instead of a wall of identical lines. p=1 covers a run of
+    one identical command; p=2 covers the Configure/Bring-up pair; etc."""
+    n = len(op)
+    keys = [tuple(e.argv) for e in op]
+    for p in range(1, n // 2 + 1):
+        if n % p == 0 and all(keys[i] == keys[i - p] for i in range(p, n)):
+            return p
+    return 0
+
+
 def narrate(entries, *, color=False, raw=False, width=88):
     """Yield the narrated lines for a sequence of Entries."""
     c = _C(color)
@@ -259,6 +276,27 @@ def narrate(entries, *, color=False, raw=False, width=88):
         plen = 2 + len(tsx) + 2                       # "● " + ts + "  "
         prefix = f"{c.b}●{c.x} {c.b}{tsx}{c.x}  "
         yield from _hang(intro, prefix, plen, width)
+
+        # Collapse a repeated command cycle (a crash-loop's Configure/Bring-up
+        # over and over) into the cycle shown once with ×N — so 177 restarts read
+        # as two lines, not 354. Only when nothing failed (failures stay explicit)
+        # and the cycle actually repeats a few times.
+        period = _cycle_period(op) if not any(e.failed for e in op) else 0
+        reps = (len(op) // period) if period else 1
+        if period and reps >= 3:
+            for i in range(period):
+                e = op[i]
+                cyc_ms = sum(op[i + k * period].t_ms for k in range(reps))
+                body = _hang(describe(e.argv), f"    {c.g}✓{c.x} ", 6, width)
+                body[-1] = f"{body[-1]}  {c.d}×{reps} ({cyc_ms}ms){c.x}"
+                yield from body
+                if raw:
+                    yield f"        {c.d}$ {' '.join(e.argv)}{c.x}"
+            yield (f"    {c.d}└─ {len(op)} commands "
+                   f"({period}-command cycle ×{reps}), {total}ms{c.x}")
+            yield ""
+            continue
+
         for e in op:
             mark = f"{c.g}✓{c.x}" if not e.failed else f"{c.r}✗{c.x}"
             sentence = describe(e.argv)
