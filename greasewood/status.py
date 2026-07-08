@@ -353,7 +353,26 @@ class _LatencyProber:
         self._stop.set()
 
 
-def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
+def _watch_header(cfg, directory, own_id, own_addr) -> list:
+    """The header block shown at the top of BOTH `gw watch` (live) and
+    `gw watch --snapshot` — role/hostname/addr/sync freshness, the self/health
+    facts, and (on the anchor) the enrollment door's state. Shared so the two
+    views are identical above the roster."""
+    lines = [
+        f"role     : {cfg.role}",
+        f"hostname : {cfg.hostname}",
+        f"addr     : {own_addr or '(keys not generated)'}",
+    ]
+    fresh = _sync_freshness(cfg)
+    if fresh:
+        lines.append(f"synced   : {fresh}")
+    lines += _self_health_lines(cfg, directory, own_id)
+    if cfg.role == "anchor":                       # the door only exists here
+        lines += _door_status_lines(cfg)
+    return lines
+
+
+def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
     """Live, redraw-in-place `gw watch`: link state + per-second throughput
     (from the sample delta between frames) + an async latency column. Root +
     a terminal required; Ctrl-C exits."""
@@ -376,8 +395,8 @@ def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
     sys.stdout.write("\033[?25l")   # hide cursor
     try:
         while True:
-            records = sorted(Directory.load(cfg.dir_cache_path).all(),
-                             key=lambda r: r.hostname)
+            directory = Directory.load(cfg.dir_cache_path)
+            records = sorted(directory.all(), key=lambda r: r.hostname)
             try:
                 live = wgmod.get_peers(cfg.wg_interface) or {}
             except Exception:
@@ -413,14 +432,14 @@ def _watch_live(cfg, own_id, interval: float = 2.0) -> int:
                                  latency=prober.results, rates=rates,
                                  grants=_load_policy_grants(cfg))
             up = len(targets)
-            fresh = _sync_freshness(cfg)
-            frame = ["\033[H\033[J",
-                     f"gw watch · {cfg.hostname}.{cfg.mesh_domain} · "
-                     f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up"
-                     + (f" · {fresh}" if fresh else ""), ""]
+            # Same header block as --snapshot (role/addr/self-health/door),
+            # re-rendered each frame so door state + sync freshness stay live.
+            frame = ["\033[H\033[J"]
+            frame += _watch_header(cfg, directory, own_id, own_addr)
+            frame += [""]
             frame += body
-            frame += ["", "(latency pings fill in live · throughput is per-second "
-                      "· Ctrl-C to exit)"]
+            frame += ["", f"{now:%H:%M:%S}Z · {up} link{'' if up == 1 else 's'} up "
+                      f"· latency fills in live · throughput per-second · Ctrl-C to exit"]
             sys.stdout.write("\n".join(frame))
             sys.stdout.flush()
             time.sleep(interval)
@@ -638,24 +657,13 @@ def cmd_watch(args) -> int:
         # Redraw-in-place live view: link state + per-second throughput + an
         # async latency column (pings run only while you're watching). Needs
         # root for live WireGuard state — that's why the default wants sudo.
-        return _watch_live(cfg, own_id,
+        return _watch_live(cfg, own_id, own_addr,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
 
     directory = Directory.load(cfg.dir_cache_path)
 
-    print(f"role     : {cfg.role}")
-    print(f"hostname : {cfg.hostname}")
-    print(f"addr     : {own_addr or '(keys not generated)'}")
-    fresh = _sync_freshness(cfg)
-    if fresh:
-        print(f"synced   : {fresh}")
-    # Self/health — local facts about THIS node (fast, no root, no network).
-    for line in _self_health_lines(cfg, directory, own_id):
+    for line in _watch_header(cfg, directory, own_id, own_addr):
         print(line)
-    # The enrollment door only exists on the anchor — show its state there.
-    if cfg.role == "anchor":
-        for line in _door_status_lines(cfg):
-            print(line)
     print()
 
     now = dt.datetime.now(_UTC)

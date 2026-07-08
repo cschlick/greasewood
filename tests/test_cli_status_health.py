@@ -264,5 +264,5 @@ def test_watch_live_requires_root_and_tty(monkeypatch):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
     with pytest.raises(SystemExit) as e:
-        status._watch_live(types.SimpleNamespace(), "abc")
+        status._watch_live(types.SimpleNamespace(), "abc", "fd8d::1")
     assert "needs root" in str(e.value)
