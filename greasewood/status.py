@@ -408,7 +408,12 @@ def _nft_table_lines(cfg) -> list:
         return cmd + r.stdout.rstrip("\n").splitlines()
     if os.geteuid() != 0:
         return cmd + ["  (run as root to read the table)"]
-    return cmd + [f"  (no such table — {(r.stderr or '').strip() or 're-asserts within a cycle'})"]
+    # nft's "no such table" error is THREE lines (message + a command echo + a
+    # caret) — collapsing it to one keeps it from bleeding into the roster. The
+    # usual cause is the daemon not running yet (it installs the table each
+    # reconcile), so say that rather than echo nft's raw diagnostic.
+    return cmd + ["  (table not present — the daemon isn't running yet, or "
+                  "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
 # ---------------------------------------------------------------------------

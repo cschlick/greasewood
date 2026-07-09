@@ -124,11 +124,15 @@ def test_nft_table_lines_missing_table_as_root(monkeypatch):
     import subprocess
     from greasewood import status
     monkeypatch.setattr(status.os, "geteuid", lambda: 0)
+    # nft's real error is multi-line (message + command echo + a ^^^ caret) —
+    # it must collapse to ONE line so it can't bleed into the roster layout.
+    multiline = ("Error: No such file or directory\n"
+                 "list table inet greasewood_pm\n                ^^^^^^^^^^^^^")
     monkeypatch.setattr(status.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(
-                            a, 1, "", "Error: No such file or directory"))
-    out = "\n".join(status._nft_table_lines(_cfg()))
-    assert "no such table" in out.lower()
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", multiline))
+    lines = status._nft_table_lines(_cfg())
+    assert len(lines) == 2                       # command line + ONE note
+    assert "not present" in lines[1] and "^" not in lines[1]
 
 
 def test_nft_table_lines_nft_absent(monkeypatch):
