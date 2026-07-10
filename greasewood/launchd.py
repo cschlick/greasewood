@@ -102,12 +102,25 @@ def install(key: str, cfg_path, gw_exec: "str | None" = None) -> str:
         return "manual"
 
     # Re-bootstrap: bootout first (idempotent — fine if it wasn't loaded), so a
-    # reinstall or config change always picks up the fresh plist.
+    # reinstall or config change always picks up the fresh plist. bootout is
+    # ASYNCHRONOUS — bootstrapping the same label before the old job finishes
+    # unloading fails with "Bootstrap failed: 5: Input/output error", so wait
+    # for the label to actually disappear, then retry a couple of times in case
+    # it's still settling. (This bites exactly on a reinstall / re-join.)
     _launchctl("bootout", f"system/{label(key)}")
-    r = _launchctl("bootstrap", "system", str(plist_path(key)))
-    if r.returncode != 0:
-        log.warning("launchctl bootstrap failed: %s",
-                    (r.stderr or r.stdout or "").strip())
+    unload_deadline = time.monotonic() + 5.0
+    while (time.monotonic() < unload_deadline
+           and _launchctl("print", f"system/{label(key)}").returncode == 0):
+        time.sleep(0.3)
+    r = None
+    for attempt in range(4):
+        r = _launchctl("bootstrap", "system", str(plist_path(key)))
+        if r.returncode == 0:
+            break
+        time.sleep(1.0)                   # still unloading → back off and retry
+    if r is None or r.returncode != 0:
+        log.warning("launchctl bootstrap failed after retries: %s",
+                    (r.stderr or r.stdout or "").strip() if r else "no attempt")
         return "manual"
 
     # Settle: reach running, then STILL be running after the fast-crash window
