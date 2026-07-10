@@ -64,11 +64,28 @@ def available() -> bool:
     return gwplat.IS_MACOS and shutil.which("launchctl") is not None
 
 
-def render_plist(key: str, cfg_path, gw_exec: str) -> bytes:
+def _daemon_argv(cfg_path, gw_exec: "str | None" = None) -> list:
+    """ProgramArguments for the daemon. Prefer `<interpreter> -m greasewood`
+    over the `gw` console-script path: the interpreter that ran `gw join` is
+    where the package lives, and its absolute path survives a moved/regenerated
+    wrapper (a rebuilt venv, a `pip install --upgrade`), so the launchd job
+    can't dangle after a reinstall. Mirrors the systemd side — see
+    cli._service_exec. gw_exec overrides with an explicit path (tests); the gw
+    path is the fallback only when sys.executable is unset (frozen interpreter)."""
+    if gw_exec:
+        head = [gw_exec]
+    elif sys.executable:
+        head = [sys.executable, "-m", "greasewood"]
+    else:
+        head = [shutil.which("gw") or os.path.realpath(sys.argv[0])]
+    return head + ["-c", str(cfg_path), "run"]
+
+
+def render_plist(key: str, cfg_path, gw_exec: "str | None" = None) -> bytes:
     """The LaunchDaemon plist for one membership, as plist XML bytes."""
     return plistlib.dumps({
         "Label": label(key),
-        "ProgramArguments": [gw_exec, "-c", str(cfg_path), "run"],
+        "ProgramArguments": _daemon_argv(cfg_path, gw_exec),
         "RunAtLoad": True,                       # start at boot
         "KeepAlive": True,                       # always restart while loaded (see module docstring)
         "EnvironmentVariables": {"PATH": _PATH},
@@ -96,7 +113,8 @@ def install(key: str, cfg_path, gw_exec: "str | None" = None) -> str:
     here — caller prints the `gw run` line)."""
     if not available():
         return "manual"
-    gw_exec = gw_exec or shutil.which("gw") or os.path.realpath(sys.argv[0])
+    # gw_exec left as-is (None → render_plist bakes `<interpreter> -m greasewood`,
+    # which survives a moved wrapper — see _daemon_argv).
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
