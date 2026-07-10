@@ -3432,11 +3432,28 @@ def _systemd_available() -> bool:
     return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
 
 
+def _service_exec() -> str:
+    """The exec line the daemon service (systemd unit / launchd job) runs.
+
+    Prefer `<abs-interpreter> -m greasewood` over the `gw` console-script path.
+    The interpreter that ran `gw create` is where the package is installed, and
+    its absolute path survives the things that MOVE the wrapper — a venv rebuilt
+    at the same path, a pyenv version switch, a `pip install --upgrade` that
+    regenerates the console script — so the baked ExecStart can't dangle into a
+    203/EXEC (the failure that made a bare `pip install` unsafe for daemon use
+    and drove the fixed /opt/greasewood venv). `-m greasewood` finds the package
+    in that interpreter's own site-packages, so it needs no `gw` on PATH at all.
+    Falls back to the gw path only if sys.executable is unset (frozen/embedded)."""
+    if sys.executable:
+        return f"{sys.executable} -m greasewood"
+    return shutil.which("gw") or os.path.realpath(sys.argv[0])
+
+
 def _write_service_template(exec_path: "str | None" = None) -> "str | None":
     """Write the greasewood@ template unit (idempotent) and daemon-reload.
     Returns the systemctl path (None if this host has no systemd). Shared by
     create/join (auto by default) and re-used across memberships."""
-    gw_exec = exec_path or shutil.which("gw") or os.path.realpath(sys.argv[0])
+    gw_exec = exec_path or _service_exec()
     _UNIT_DIR.mkdir(parents=True, exist_ok=True)
     (_UNIT_DIR / "greasewood@.service").write_text(_SERVICE_UNIT.format(exec=gw_exec))
     systemctl = shutil.which("systemctl")
