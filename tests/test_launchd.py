@@ -25,19 +25,25 @@ def macos(monkeypatch, tmp_path):
 
 
 class _Ctl:
-    """Scripted launchctl: records calls; `print` answers with the configured
-    job state."""
+    """Scripted launchctl: records calls; `print` reports the job ABSENT until a
+    bootstrap has run (so the async-bootout unload-wait exits at once), then the
+    configured running state."""
     def __init__(self, running=True):
         self.calls = []
         self.running = running
+        self._up = False
 
     def __call__(self, cmd, capture_output=True, text=True):
         self.calls.append(list(cmd))
         verb = cmd[1]
+        if verb == "bootstrap":
+            self._up = True
+            return _subprocess.CompletedProcess(cmd, 0, "", "")
         if verb == "print":
+            if not self._up:
+                return _subprocess.CompletedProcess(cmd, 1, "", "not found")
             state = "state = running" if self.running else "state = not running"
-            return _subprocess.CompletedProcess(cmd, 0 if self.running else 0,
-                                                f"...\n\t{state}\n", "")
+            return _subprocess.CompletedProcess(cmd, 0, f"\t{state}\n", "")
         return _subprocess.CompletedProcess(cmd, 0, "", "")
 
 
@@ -161,3 +167,41 @@ root_url = ""
     assert cli.cmd_purge(args) == 0                 # no UnboundLocalError
     assert removed_jobs == ["pm"]                   # launchd job torn down
     assert not data_dir.exists() and not cfg.exists()
+
+
+class _CtlRetry:
+    """launchctl where bootstrap fails once with the async-bootout I/O error,
+    then succeeds. `print` reports the job absent until bootstrapped (so the
+    unload-wait exits immediately), running afterwards (so settle passes)."""
+    def __init__(self):
+        self.calls = []
+        self._attempts = 0
+        self._up = False
+
+    def __call__(self, cmd, capture_output=True, text=True):
+        self.calls.append(list(cmd))
+        verb = cmd[1]
+        if verb == "bootstrap":
+            self._attempts += 1
+            if self._attempts == 1:
+                return _subprocess.CompletedProcess(
+                    cmd, 5, "", "Bootstrap failed: 5: Input/output error")
+            self._up = True
+            return _subprocess.CompletedProcess(cmd, 0, "", "")
+        if verb == "print":
+            if self._up:
+                return _subprocess.CompletedProcess(cmd, 0, "\tstate = running\n", "")
+            return _subprocess.CompletedProcess(cmd, 1, "", "not found")
+        return _subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+def test_install_retries_bootstrap_after_async_bootout(macos, monkeypatch):
+    """Regression: bootout is async; bootstrapping the same label too soon fails
+    with 'Bootstrap failed: 5'. install() must retry, not give up (seen on a
+    real Mac during a re-join)."""
+    ctl = _CtlRetry()
+    monkeypatch.setattr(launchd.subprocess, "run", ctl)
+    monkeypatch.setattr(launchd.time, "sleep", lambda s: None)
+    state = launchd.install("pm", "/etc/greasewood_pm.toml", gw_exec="/x/gw")
+    assert state == "active"
+    assert len([c for c in ctl.calls if c[1] == "bootstrap"]) == 2   # retried once
