@@ -46,19 +46,37 @@ sudo gw create devmesh        # this VM as the anchor…
 sudo gw join <token>
 ```
 
-Your Mac home directory is mounted read-only inside the VM at the same path, so
-you can **edit the code on the Mac and run it in the VM** — point `install.sh` at
-your checkout instead of a fresh clone:
+### The dev pipeline (editable — updates every commit, no tags)
+
+For iterating, install **editable** so the running code tracks your checkout:
 
 ```bash
-limactl shell gw
-sudo /Users/<you>/software/greasewood/install.sh   # installs from the mounted checkout
+sudo ./install.sh --dev        # pip install -e: /opt/greasewood points AT this tree
 ```
 
-(Re-run `install.sh` after each change to reinstall; then
-`sudo systemctl restart 'greasewood@*'` to pick it up. For fast iteration, prefer
-running the daemon by hand — `sudo gw -c /etc/greasewood_devmesh.toml run` — and
-just restart it.)
+From then on, updating to the latest commit is just a pull and a restart — no
+reinstall, no version tag:
+
+```bash
+git pull
+sudo systemctl restart 'greasewood@*'      # or restart your `gw run`
+```
+
+The daemon runs `<interpreter> -m greasewood`, which executes the working tree
+directly, so a `git pull` *is* the update. Re-run `install.sh --dev` only when
+dependencies change (rare — greasewood has one). For the tightest loop, run the
+daemon by hand instead of via systemd: `sudo gw -c /etc/greasewood_devmesh.toml
+run`, then Ctrl-C / edit / re-run.
+
+Two caveats for `--dev`:
+- **Clone inside the VM.** An editable install writes `*.egg-info` into the
+  checkout, and Lima mounts your Mac home *read-only* — so `--dev` against the
+  mounted path fails. Clone in the VM (as above), or make the mount writable
+  (`limactl edit gw` → `mounts: [{ location: "~", writable: true }]`) and then
+  point `install.sh --dev` at the mounted checkout to edit on the Mac.
+- **`gw --version` stays frozen** at the pyproject version — it reads packaged
+  metadata, set at install time, not the source. The *code* is live; only that
+  version string lags until you bump it and reinstall.
 
 `multipass` (`brew install multipass`) or a UTM/QEMU VM work the same way; Lima is
 just the quickest to a shell.

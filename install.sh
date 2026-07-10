@@ -40,6 +40,24 @@ say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# --dev: editable install (pip install -e), for development. site-packages
+# points at this checkout, so `git pull` + a daemon restart runs the new commit
+# with NO reinstall and no version tag — re-run install.sh --dev only if the
+# dependencies change. (Needs a WRITABLE checkout: pip writes *.egg-info into it.
+# On a Lima read-only home mount, clone inside the VM instead.)
+DEV=0
+for arg in "$@"; do
+    case "$arg" in
+        --dev|-e|--editable) DEV=1 ;;
+        -h|--help)
+            printf 'usage: sudo ./install.sh [--dev]\n\n'
+            printf '  --dev   editable install: the running code tracks this checkout, so\n'
+            printf "          'git pull' + a daemon restart picks up every commit, no reinstall.\n"
+            exit 0 ;;
+        *) die "unknown option '$arg' (see --help)" ;;
+    esac
+done
+
 # Homebrew (macOS) installs Python/wg under prefixes that aren't on root's PATH
 # by default — surface them so the tool discovery below finds them under sudo.
 [ "$OS" = "Darwin" ] && export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -125,8 +143,13 @@ say "building venv at $VENV"
 mkdir -p "$(dirname "$VENV")"
 "$PY" -m venv "$VENV"                 # idempotent: reuses an existing venv
 "$VENV/bin/pip" install --quiet --upgrade pip
-say "installing greasewood from $REPO_DIR"
-"$VENV/bin/pip" install --quiet --upgrade "$REPO_DIR"
+if [ "$DEV" -eq 1 ]; then
+    say "installing greasewood (editable/dev) from $REPO_DIR"
+    "$VENV/bin/pip" install --quiet --upgrade -e "$REPO_DIR"
+else
+    say "installing greasewood from $REPO_DIR"
+    "$VENV/bin/pip" install --quiet --upgrade "$REPO_DIR"
+fi
 
 # --- the stable symlink ----------------------------------------------------
 ln -sfn "$VENV/bin/gw" "$BIN_LINK"
@@ -154,4 +177,10 @@ if [ "$OS" = "Linux" ]; then
     echo "  sudo systemctl restart 'greasewood@*'"
 else
     echo "  sudo launchctl kickstart -k system/com.greasewood.<name>"
+fi
+if [ "$DEV" -eq 1 ]; then
+    echo
+    echo "dev (editable) install: the code tracks $REPO_DIR live. To run a new"
+    echo "commit, 'git pull' there and restart the daemon — NO reinstall. Re-run"
+    echo "install.sh --dev only when dependencies change."
 fi
