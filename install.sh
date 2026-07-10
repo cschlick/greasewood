@@ -183,4 +183,19 @@ if [ "$DEV" -eq 1 ]; then
     echo "dev (editable) install: the code tracks $REPO_DIR live. To run a new"
     echo "commit, 'git pull' there and restart the daemon — NO reinstall. Re-run"
     echo "install.sh --dev only when dependencies change."
+    # An editable install under a home dir is INVISIBLE to the hardened systemd
+    # unit (ProtectHome=yes), so the SERVICE crashes with 'No module named
+    # greasewood' even though interactive `gw` works. Warn + give the one-liner.
+    case ":$OS:$REPO_DIR" in
+        :Linux:/home/*|:Linux:/root/*)
+            echo
+            warn "$REPO_DIR is under a home dir, which the systemd unit hides"
+            warn "(ProtectHome=yes) — so 'systemctl start greasewood@<mesh>' will fail"
+            warn "with 'No module named greasewood'. Run 'sudo gw run' in the"
+            warn "foreground, OR let the service read your checkout:"
+            echo "    d=/etc/systemd/system/greasewood@<mesh>.service.d; sudo mkdir -p \$d"
+            echo "    printf '[Service]\\nProtectHome=read-only\\n' | sudo tee \$d/dev.conf"
+            echo "    sudo systemctl daemon-reload && sudo systemctl restart greasewood@<mesh>"
+            ;;
+    esac
 fi
