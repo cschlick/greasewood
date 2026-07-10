@@ -242,6 +242,29 @@ class TestReconcileTrustGate:
         import base64
         assert set(fake.peers) == {base64.b64encode(good.wg_pub_bytes).decode()}
 
+    def test_anchor_admits_expired_but_not_revoked_for_recert(self, monkeypatch):
+        """The ANCHOR (role:*) admits an expired-but-not-revoked node so it can
+        renew over the anchor's tunnel — expiry means 'must re-check-in', not
+        'dead'. A revoked node stays out even for the anchor, and a regular node
+        (previous test) still rejects the expired peer."""
+        import base64
+        ca, local, good, directory, revoked = self._mesh()   # 'stale' expired, 'bad' revoked
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+
+        trusted, _ = reconcile_once(
+            "gw-test", directory, local.id_pub_bytes, ["role:*"],   # local IS the anchor
+            [ca.ca_pub_bytes], revoked,
+        )
+        names = {r.hostname for r in trusted}
+        assert "stale" in names          # expired but NOT revoked → anchor admits it
+        assert "bad" not in names        # revoked → rejected even by the anchor
+        assert "good" in names
+        # the expired node is actually installed as a peer, so a tunnel can form
+        # for it to renew over
+        stale_key = next(r for r in directory.all() if r.hostname == "stale")
+        assert base64.b64encode(stale_key.cred.wg_pub).decode() in fake.peers
+
     def test_hosts_sync_receives_trusted_records_only(self, monkeypatch):
         """The ReconcileLoop's /etc/hosts block must be built from the same
         fully-verified set as the WG peer list — a revoked or expired node's
