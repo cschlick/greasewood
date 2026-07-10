@@ -458,3 +458,46 @@ class TestHostileInputRejectedCleanly:
             d = dict(req, **{bad_field: bad_value})
             with pytest.raises(ValueError, match=msg):
                 CertRequest.from_dict(d)
+
+
+# ---------------------------------------------------------------------------
+# allow_expired — the anchor's recertification path (expired ≠ dead)
+# ---------------------------------------------------------------------------
+
+def test_expired_cred_rejected_by_default_but_admitted_with_allow_expired():
+    ca = CAKeys.generate()
+    node = NodeKeys.generate()
+    cred = make_cred(node, ca, ttl_seconds=-60)      # already expired
+    # default: peers reject an expired credential
+    with pytest.raises(ValueError, match="expired"):
+        cred.verify([ca.ca_pub_bytes])
+    # anchor recert path: expiry waived, CA signature still required
+    cred.verify([ca.ca_pub_bytes], allow_expired=True)   # no raise
+
+
+def test_allow_expired_never_waives_the_ca_signature():
+    ca = CAKeys.generate()
+    other = CAKeys.generate()
+    node = NodeKeys.generate()
+    cred = make_cred(node, ca, ttl_seconds=-60)
+    # a bad/untrusted CA signature is rejected even under allow_expired
+    with pytest.raises(ValueError, match="no trusted CA signature"):
+        cred.verify([other.ca_pub_bytes], allow_expired=True)
+
+
+def test_record_allow_expired_still_enforces_revocation():
+    """The security invariant: allow_expired relaxes ONLY expiry. A revoked node
+    is rejected even when expiry is waived — revocation is the real kill switch."""
+    ca = CAKeys.generate()
+    node = NodeKeys.generate()
+    cred = make_cred(node, ca, ttl_seconds=-60)       # expired
+    rec = make_record(node, cred)
+    revoked = {node.id_pub_bytes.hex()}
+    # expired + revoked, expiry waived → STILL rejected (revoked)
+    with pytest.raises(ValueError, match="revoked"):
+        rec.verify([ca.ca_pub_bytes], revoked, allow_expired=True)
+    # expired + NOT revoked, expiry waived → admitted (the recert case)
+    rec.verify([ca.ca_pub_bytes], set(), allow_expired=True)
+    # expired + not revoked, expiry NOT waived → rejected (a regular peer)
+    with pytest.raises(ValueError, match="expired"):
+        rec.verify([ca.ca_pub_bytes], set())
