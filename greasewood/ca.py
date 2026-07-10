@@ -44,6 +44,18 @@ _UTC = dt.timezone.utc
 CapPolicy = Callable[[list[str]], list[str]]
 
 
+def _parse_ts(raw: "str | None") -> "dt.datetime | None":
+    """Parse an ISO timestamp from a registry record, tolerating a missing or
+    malformed value (legacy records have none). Always tz-aware (UTC)."""
+    if not raw:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=_UTC)
+
+
 class CA:
     def __init__(
         self,
@@ -108,7 +120,7 @@ class CA:
                 exp=now + self._ttl,
             )
             signed = cred.sign(self._keys.ca_priv)
-            self._save_node_caps(id_pub, hostname, caps)
+            self._save_node_caps(id_pub, hostname, caps, exp=signed.exp, iat=now)
         log.info("issued credential for %s caps=%s exp=%s", hostname, caps, signed.exp)
         return signed
 
@@ -194,22 +206,31 @@ class CA:
 
     def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
         """(hostname, caps) for an enrolled node, or None if unknown."""
+        d = self._read_node(id_pub)
+        if d is None:
+            return None
+        return d.get("hostname", ""), d.get("caps", [])
+
+    def _read_node(self, id_pub: bytes) -> "dict | None":
+        """The full registry record ({hostname, caps, iat, exp}), or None."""
         p = self._node_path(id_pub)
         if not p.exists():
             return None
-        d = json.loads(p.read_text())
-        return d.get("hostname", ""), d.get("caps", [])
+        return json.loads(p.read_text())
 
     def set_caps(self, id_pub: bytes, caps: list[str]) -> None:
         """Rewrite a known node's caps in the registry. Takes effect at the
         node's NEXT renewal — `renew` re-issues from the registry, so the node
         picks up the change with no re-join. Raises ValueError if unknown."""
         with self._lock:
-            info = self.node_info(id_pub)
-            if info is None:
+            rec = self._read_node(id_pub)
+            if rec is None:
                 raise UnknownNodeError("unknown node — enroll it first")
-            hostname, _ = info
-            self._save_node_caps(id_pub, hostname, caps)
+            # Preserve the last-issued exp/iat: a caps edit is not a renewal, so
+            # it must not reset the drop clock (issuance is what refreshes it).
+            self._save_node_caps(id_pub, rec.get("hostname", ""), caps,
+                                 exp=_parse_ts(rec.get("exp")),
+                                 iat=_parse_ts(rec.get("iat")))
 
     # --- revoke list ---
 
@@ -256,10 +277,58 @@ class CA:
     def _node_path(self, id_pub: bytes) -> Path:
         return self._data_dir / "nodes" / f"{id_pub.hex()}.json"
 
-    def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str]) -> None:
+    def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str],
+                        exp: "dt.datetime | None" = None,
+                        iat: "dt.datetime | None" = None) -> None:
         p = self._node_path(id_pub)
         p.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(p, json.dumps({"hostname": hostname, "caps": caps}, indent=2))
+        rec = {"hostname": hostname, "caps": caps}
+        # iat/exp track the LAST-ISSUED credential, so drop_stale() knows how
+        # long a node has been gone. Legacy records (pre-drop) have neither;
+        # they're grandfathered until their next renewal writes them.
+        if iat is not None:
+            rec["iat"] = iat.replace(microsecond=0).isoformat()
+        if exp is not None:
+            rec["exp"] = exp.replace(microsecond=0).isoformat()
+        atomic_write(p, json.dumps(rec, indent=2))
+
+    def drop_stale(self, grace: dt.timedelta,
+                   now: "dt.datetime | None" = None) -> list[tuple[str, str]]:
+        """The AUTHORIZATION drop: forget every enrolled node whose last-issued
+        credential expired more than `grace` ago. Since renew() re-issues from
+        the registry, a forgotten node can no longer renew — it must re-enroll
+        through the door (a true re-join, not a reconnect). This bounds the
+        indefinite recert of expired-but-not-revoked nodes so an abandoned fleet
+        (destroyed cloud instances left to expire) is garbage-collected with no
+        manual `gw revoke`. Records without an exp (legacy) are left alone — a
+        renewal will stamp one. Returns the (id_hex, hostname) pairs dropped."""
+        now = now or dt.datetime.now(_UTC)
+        dropped: list[tuple[str, str]] = []
+        nodes_dir = self._data_dir / "nodes"
+        try:
+            entries = [n for n in os.listdir(nodes_dir) if n.endswith(".json")]
+        except FileNotFoundError:
+            return dropped
+        with self._lock:
+            for name in entries:
+                try:
+                    rec = json.loads((nodes_dir / name).read_text())
+                except (OSError, ValueError):
+                    continue
+                exp = _parse_ts(rec.get("exp"))
+                if exp is None or now < exp + grace:
+                    continue
+                id_hex = name[:-len(".json")]
+                try:
+                    self.forget_node(bytes.fromhex(id_hex))
+                except ValueError:
+                    continue
+                dropped.append((id_hex, rec.get("hostname", "")))
+        for id_hex, hostname in dropped:
+            log.info("dropped abandoned node %s [%s] — expired > %s ago; a return "
+                     "requires re-enrollment (renew will no longer recertify it)",
+                     hostname, id_hex[:16], grace)
+        return dropped
 
     def hostname_owner(self, hostname: str) -> str | None:
         """id_pub hex of the node already using this (sanitized) hostname among

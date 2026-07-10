@@ -79,6 +79,18 @@ def test_new_node_defaults_explicit(tmp_path):
     assert cfg.default_caps == []
 
 
+def test_drop_grace_default_and_override(tmp_path):
+    """drop_grace bounds how long the anchor keeps recertifying an expired node;
+    defaults to 7d and is overridable in [anchor]."""
+    p = _write(tmp_path, '[node]\nhostname = "n1"\n')
+    assert load_config(p).drop_grace == dt.timedelta(days=7)   # default
+
+    p = _write(tmp_path,
+               '[node]\nhostname = "anchor"\nrole = "anchor"\n'
+               '[anchor]\ndrop_grace = "48h"\n')
+    assert load_config(p).drop_grace == dt.timedelta(hours=48)
+
+
 def test_bad_overlay_prefix_fails_loudly(tmp_path):
     """Regression: a malformed overlay_prefix was silently swallowed, quietly
     addressing the node under the DEFAULT /64 instead of the fleet's."""
