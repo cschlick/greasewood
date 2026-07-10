@@ -215,12 +215,23 @@ def reconcile_once(
     context: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
+    # The ANCHOR (reach-all, role:*) admits expired-but-not-revoked nodes so they
+    # can renew over its tunnel — expiry means "re-check-in with the anchor", not
+    # "dead" (revocation is the kill switch). Regular nodes NEVER waive expiry, so
+    # a stale node stays out of the mesh until the anchor recertifies it.
+    is_anchor = "*" in _roles(local_caps)
+
     for record in directory.all():
         try:
-            record.verify(ca_pubs, revoked)
+            record.verify(ca_pubs, revoked, allow_expired=is_anchor)
         except ValueError as e:
             log.debug("skip %s: %s", record.hostname, e)
             continue
+        if is_anchor and record.id_pub != local_id_pub \
+                and dt.datetime.now(dt.timezone.utc) >= record.cred.exp:
+            log.info("anchor admitting expired node %s [%s] for recertification "
+                     "(not revoked) — it can renew over this tunnel",
+                     record.hostname, record.cred.addr)
         trusted.append(record)
 
         if record.id_pub == local_id_pub:

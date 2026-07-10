@@ -126,13 +126,21 @@ class Credential:
         sig = ca_priv.sign(_canonical(self._body_dict()))
         return replace(self, ca_sig=sig)
 
-    def verify(self, ca_pubs: list[bytes]) -> None:
+    def verify(self, ca_pubs: list[bytes], allow_expired: bool = False) -> None:
         """
         Verify CA signature against the trusted set and check expiry.
         ca_pubs is a list of raw 32-byte Ed25519 public keys.
         The set (not a single key) is what lets you re-root: trust old + new
         CA during a migration overlap.
         Raises ValueError on any failure.
+
+        `allow_expired` skips ONLY the expiry check (the CA signature is always
+        required). It exists for the ANCHOR's recertification path: expiry means
+        "this node must re-check-in with the anchor", not "permanently dead", so
+        the anchor admits an expired-but-otherwise-valid node long enough to
+        renew it. Revocation — the actual kill switch — is enforced separately
+        (see NodeRecord.verify), and peers never pass allow_expired, so a stale
+        node stays out of the mesh until it recertifies.
         """
         body = _canonical(self._body_dict())
         for raw_pub in ca_pubs:
@@ -141,8 +149,8 @@ class Credential:
                 pub.verify(self.ca_sig, body)
             except InvalidSignature:
                 continue
-            # Signature valid — now check expiry.
-            if dt.datetime.now(_UTC) >= self.exp:
+            # Signature valid — now check expiry (unless the anchor is recertifying).
+            if not allow_expired and dt.datetime.now(_UTC) >= self.exp:
                 raise ValueError(f"credential expired at {self.exp}")
             return
         raise ValueError("no trusted CA signature found")
@@ -253,19 +261,25 @@ class NodeRecord:
         if self.id_pub != self.cred.id_pub:
             raise ValueError("id_pub in record does not match id_pub in credential")
 
-    def verify(self, ca_pubs: list[bytes], revoked: set[str]) -> None:
+    def verify(self, ca_pubs: list[bytes], revoked: set[str],
+               allow_expired: bool = False) -> None:
         """
         Full record verification — steps 1–5 of the reconcile loop (§7).
         Step 6 (authorization policy) is done by the caller with local caps.
         Raises ValueError on any failure.
+
+        `allow_expired` relaxes ONLY the expiry check (the anchor's recert path);
+        the CA signature, structural checks, and REVOCATION are always enforced.
+        So an expired node can be admitted by the anchor to renew, but a revoked
+        one never is.
         """
-        # Steps 1+2: CA signature + expiry
-        self.cred.verify(ca_pubs)
+        # Steps 1+2: CA signature + expiry (expiry waived only for anchor recert)
+        self.cred.verify(ca_pubs, allow_expired=allow_expired)
 
         # Steps 3+4 + id_pub/cred consistency
         self.verify_structural()
 
-        # Step 5: not on revoke list
+        # Step 5: not on revoke list — the kill switch, never waived
         if self.id_pub.hex() in revoked:
             raise ValueError("node is revoked")
 

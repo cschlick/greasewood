@@ -180,7 +180,13 @@ class RenewalLoop(Loop):
                     log.info("credential renewed + republished, expires %s", new_cred.exp)
                     break
                 except Exception as e:
-                    backoff = 30 * (2 ** attempt)
+                    # Cap the backoff at 2min so a node that's been unreachable
+                    # (e.g. asleep past its TTL) recovers within minutes once the
+                    # anchor is reachable again — the anchor admits it as an
+                    # expired-but-not-revoked peer, and this loop must retry
+                    # promptly to renew over the freshly-formed tunnel, not sit on
+                    # an ever-growing backoff.
+                    backoff = min(30 * (2 ** attempt), 120)
                     log.warning(
                         "renewal attempt %d failed (%s); retry in %ds", attempt + 1, e, backoff
                     )
