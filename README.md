@@ -228,7 +228,8 @@ transport (the way a Go implementation such as `wireguard-go` does) or its own
 supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
 (see [Auditable](#auditable)). Other platforms would need a different data-plane
 backend and a different supervisor, and are out of scope: greasewood is,
-deliberately, a Linux tool.
+deliberately, a Linux tool. (Hacking on it from a Mac? Run it in a Linux VM or
+containers — see [docs/dev-on-macos.md](docs/dev-on-macos.md).)
 
 ## Auditable
 
