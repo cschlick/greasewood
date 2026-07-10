@@ -397,7 +397,12 @@ def _nft_table_lines(cfg) -> list:
         return cmd + r.stdout.rstrip("\n").splitlines()
     if os.geteuid() != 0:
         return cmd + ["  (run as root to read the table)"]
-    return cmd + [f"  (no such table — {(r.stderr or '').strip() or 're-asserts within a cycle'})"]
+    # nft's "no such table" error is THREE lines (message + a command echo + a
+    # caret) — collapsing it to one keeps it from bleeding into the roster. The
+    # usual cause is the daemon not running yet (it installs the table each
+    # reconcile), so say that rather than echo nft's raw diagnostic.
+    return cmd + ["  (table not present — the daemon isn't running yet, or "
+                  "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
 # ---------------------------------------------------------------------------
@@ -1069,7 +1074,12 @@ def _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec) -> list:
     from .hosts import sanitize
 
     def find(name):
+        # Accept the full mesh name too (the roster prints bastion.pm.internal,
+        # so that's what people copy into diagnose) — strip the domain suffix.
         want = sanitize(name)
+        dom = sanitize("x." + cfg.mesh_domain)[1:]     # ".pm.internal", sanitized
+        if want.endswith(dom):
+            want = want[:-len(dom)]
         return next((r for r in directory.all() if sanitize(r.hostname) == want), None)
 
     requested = [n for n in (getattr(args, "nodes", None) or []) if n]
