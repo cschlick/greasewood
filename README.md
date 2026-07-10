@@ -226,11 +226,9 @@ crashes; a bare `gw run` works for dev). It relies on the
 kernel's WireGuard and on systemd rather than shipping its own userspace
 transport (the way a Go implementation such as `wireguard-go` does) or its own
 supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
-(see [Auditable](#auditable)). A macOS/Windows port would mean a different
-data-plane backend and is out of scope — but [PORTING.md](PORTING.md) sketches
-what a macOS port would actually cost (spoiler: the audit trail is the *cheapest*
-part to carry across, and staying "greasy" — root + subprocess, `brew`-installed,
-not a Network Extension — is the only version consistent with the project).
+(see [Auditable](#auditable)). Other platforms would need a different data-plane
+backend and a different supervisor, and are out of scope: greasewood is,
+deliberately, a Linux tool.
 
 ## Auditable
 
@@ -286,14 +284,13 @@ story — every change greasewood ever made to your kernel's network state.**
 
 ## Install
 
-Requires Python 3.11+ and the WireGuard userspace tools (`wireguard-tools`/`wg`).
-On Linux that's it (the kernel WireGuard module is built into 5.6+, autoloaded on
-first use); on macOS the tunnel runs on `wireguard-go` instead of a kernel module.
+Requires Python 3.11+, the WireGuard userspace tools (`wireguard-tools`/`wg`),
+and `iproute2` (`ip`). The kernel WireGuard module is built into Linux 5.6+ and
+autoloads on first use.
 
 greasewood isn't on PyPI yet, so install from git or a checkout (once it's
 published, `pipx install greasewood` will work). Two ways to install on a host
-that will run the daemon; both are fully supported, including the managed
-service.
+that will run the daemon; both set up the managed systemd service.
 
 **With the bundled installer** — one idempotent script that also installs the
 WireGuard deps and pins a fixed venv at `/opt/greasewood`; re-run any time to
@@ -306,29 +303,25 @@ sudo ./install.sh
 ```
 
 **With pipx** — lighter, no clone. The daemon service launches as `<interpreter>
--m greasewood`, so it stays valid wherever pipx put the package. Install the
-WireGuard tools separately (pipx installs only the Python package):
+-m greasewood`, so it stays valid wherever pipx put the package (install the
+WireGuard tools separately with your distro's package manager):
 
 ```bash
 sudo pipx install --global "git+https://gitlab.com/cschlick/greasewood.git"
-# macOS: append the macOS branch → ...greasewood.git@macos
-# WireGuard tools:  Debian/Ubuntu → sudo apt install wireguard-tools
-#                   macOS         → brew install wireguard-go wireguard-tools
+sudo apt install wireguard-tools        # Debian/Ubuntu; use your distro's pkg mgr
 ```
 
 `--global` puts `gw` on root's `PATH` so `sudo gw …` resolves. `pipx upgrade`
-rebuilds the same venv in place, so upgrades don't disturb the service. (macOS
-support currently lives on the `macos` branch; the default branch is Linux.)
+rebuilds the same venv in place, so upgrades don't disturb the service.
 
 Either way you get the `gw` command, and `gw create`/`join` install + enable the
-managed service (systemd on Linux, launchd on macOS). Most subcommands need
-sudo/root (they create WireGuard interfaces and edit routing); `gw watch` does
-not. For a plain library/dev use, `pip install .` (add `'.[test]'` for pytest)
-from a checkout is all you need.
+systemd service. Most subcommands need sudo/root (they create WireGuard
+interfaces and edit routing); `gw watch` does not. For a plain library/dev use,
+`pip install .` (add `'.[test]'` for pytest) from a checkout is all you need.
 
 After install the workflow is just setup/join → the daemon runs as a managed
-service (systemd on Linux, launchd on macOS), which `gw create`/`gw join` set up
-for you — see [Running as a service](#running-as-a-service). The Quickstart below
+systemd service that `gw create`/`gw join` set up for you — see [Running as a
+service](#running-as-a-service). The Quickstart below
 runs it by hand with `gw run` to show the moving parts.
 
 ## Quickstart
