@@ -37,13 +37,16 @@ def _record_run(calls):
 def test_write_service_template_is_the_hardened_template(units, monkeypatch):
     monkeypatch.setattr(_shutil, "which",
                         _which({"systemctl": "/bin/systemctl", "gw": "/bin/gw"}))
+    # The daemon launches as `<abs-interpreter> -m greasewood`, NOT the `gw`
+    # wrapper path — that's what survives a moved/regenerated console script.
+    monkeypatch.setattr(cli.sys, "executable", "/opt/py/bin/python3")
     calls = []
     monkeypatch.setattr(_subprocess, "run", _record_run(calls))
     systemctl = cli._write_service_template()
     assert systemctl == "/bin/systemctl"
     assert ["/bin/systemctl", "daemon-reload"] in calls        # reloaded
     unit = (units / "greasewood@.service").read_text()
-    assert "ExecStart=/bin/gw -c /etc/greasewood_%i.toml run" in unit
+    assert "ExecStart=/opt/py/bin/python3 -m greasewood -c /etc/greasewood_%i.toml run" in unit
     assert "ConditionPathExists=/etc/greasewood_%i.toml" in unit
     # The hardening block a daemon RCE shouldn't escape.
     for directive in ("NoNewPrivileges=yes",
@@ -55,6 +58,19 @@ def test_write_service_template_is_the_hardened_template(units, monkeypatch):
               if ln.strip() and not ln.lstrip().startswith("#")]
     assert "ProtectSystem=yes" in active                       # not strict/full
     assert not any(d.startswith("ProtectKernelModules") for d in active)
+
+
+def test_service_exec_prefers_interpreter_module_form(monkeypatch):
+    """Stable launch: the concrete interpreter + `-m greasewood`, not `gw`."""
+    monkeypatch.setattr(cli.sys, "executable", "/venv/bin/python3")
+    assert cli._service_exec() == "/venv/bin/python3 -m greasewood"
+
+
+def test_service_exec_falls_back_to_gw_when_no_interpreter(monkeypatch):
+    """Frozen/embedded interpreter (sys.executable unset) → the gw path."""
+    monkeypatch.setattr(cli.sys, "executable", "")
+    monkeypatch.setattr(_shutil, "which", _which({"gw": "/usr/local/bin/gw"}))
+    assert cli._service_exec() == "/usr/local/bin/gw"
 
 
 def test_write_service_template_no_systemctl(units, monkeypatch):
