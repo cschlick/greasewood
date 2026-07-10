@@ -21,6 +21,9 @@ def macos(monkeypatch, tmp_path):
     monkeypatch.setattr(launchd, "LOG_DIR", tmp_path / "log")
     monkeypatch.setattr(launchd.shutil, "which",
                         lambda n: "/bin/launchctl" if n == "launchctl" else None)
+    # os.chown(plist, 0, 0) needs root on a real Mac; no-op it here (a dedicated
+    # test overrides this with a recorder to check the root:wheel enforcement).
+    monkeypatch.setattr(launchd.os, "chown", lambda *a, **k: None)
     return tmp_path
 
 
@@ -58,8 +61,11 @@ def test_plist_contents():
     assert data["ProgramArguments"] == \
         ["/usr/local/bin/gw", "-c", "/etc/greasewood_pm.toml", "run"]
     assert data["RunAtLoad"] is True
-    # restart on crash, NOT on clean exit (≙ systemd Restart=on-failure)
-    assert data["KeepAlive"] == {"SuccessfulExit": False}
+    # always restart while loaded — `gw run` exits 0 on SIGTERM, and launchd
+    # can't tell an operator stop from a stray signal, so a conditional
+    # KeepAlive would leave the mesh down after any clean SIGTERM (intentional
+    # stops go through bootout, which unloads the job entirely).
+    assert data["KeepAlive"] is True
     # launchd strips env; wireguard-go/wg live under the Homebrew prefixes
     path = data["EnvironmentVariables"]["PATH"]
     assert "/opt/homebrew/bin" in path and "/usr/local/bin" in path
@@ -86,10 +92,26 @@ def test_install_writes_plist_and_bootstraps(macos, monkeypatch):
     data = plistlib.loads(plist.read_bytes())
     assert data["Label"] == "com.greasewood.pm"
     verbs = [c[1] for c in ctl.calls]
-    # bootout (idempotent refresh) BEFORE bootstrap, then settle via print
-    assert verbs.index("bootout") < verbs.index("bootstrap")
+    # bootout (idempotent refresh) BEFORE bootstrap, then an explicit kickstart
+    # to deterministically start the loaded job, then settle via print.
+    assert verbs.index("bootout") < verbs.index("bootstrap") < verbs.index("kickstart")
     boot = next(c for c in ctl.calls if c[1] == "bootstrap")
     assert boot == ["launchctl", "bootstrap", "system", str(plist)]
+    ks = next(c for c in ctl.calls if c[1] == "kickstart")
+    assert ks == ["launchctl", "kickstart", "-k", "system/com.greasewood.pm"]
+
+
+def test_install_forces_root_wheel_ownership(macos, monkeypatch):
+    """The plist MUST land root:wheel — a wrong group makes launchd silently
+    refuse to auto-load it at boot (the job then needs a manual bootstrap)."""
+    ctl = _Ctl(running=True)
+    monkeypatch.setattr(launchd.subprocess, "run", ctl)
+    monkeypatch.setattr(launchd.time, "sleep", lambda s: None)
+    chowns = []
+    monkeypatch.setattr(launchd.os, "chown",
+                        lambda p, u, g: chowns.append((str(p), u, g)))
+    launchd.install("pm", "/etc/x.toml", gw_exec="/x/gw")
+    assert chowns == [(str(launchd.plist_path("pm")), 0, 0)]   # root (0), wheel (0)
 
 
 def test_install_reports_failed_when_job_never_runs(macos, monkeypatch):

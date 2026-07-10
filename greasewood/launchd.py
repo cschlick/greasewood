@@ -7,9 +7,15 @@ has launchd: one plist per membership at
 domain, runs as root at boot — the daemon needs root for utun/routes, same as
 Linux). create/join install it, purge removes it; no separate command.
 
-Semantics matched to the systemd unit:
-  - starts at boot (RunAtLoad) and restarts on crash but NOT on clean exit
-    (KeepAlive.SuccessfulExit=false ≙ Restart=on-failure),
+Semantics (a laptop that sleeps/roams needs to run whenever its job is loaded,
+so this is deliberately stronger than the Linux unit's Restart=on-failure):
+  - starts at boot (RunAtLoad) AND restarts on ANY exit while loaded
+    (KeepAlive=true). `gw run` returns 0 on SIGTERM, and launchd's KeepAlive —
+    unlike systemd — can't tell an operator stop from a stray signal, so
+    SuccessfulExit=false would leave the mesh down after any clean SIGTERM that
+    isn't a full reboot. The only intentional stop is bootout/remove, which
+    UNLOADS the job (KeepAlive doesn't apply to an unloaded job); crash-loops
+    are bounded by ThrottleInterval.
   - an explicit PATH including the Homebrew prefixes — launchd jobs get a
     minimal environment, and wireguard-go/wg live under /opt/homebrew (arm) or
     /usr/local (intel),
@@ -64,7 +70,7 @@ def render_plist(key: str, cfg_path, gw_exec: str) -> bytes:
         "Label": label(key),
         "ProgramArguments": [gw_exec, "-c", str(cfg_path), "run"],
         "RunAtLoad": True,                       # start at boot
-        "KeepAlive": {"SuccessfulExit": False},  # restart on crash, not clean exit
+        "KeepAlive": True,                       # always restart while loaded (see module docstring)
         "EnvironmentVariables": {"PATH": _PATH},
         "StandardOutPath": str(LOG_DIR / f"{key}.log"),
         "StandardErrorPath": str(LOG_DIR / f"{key}.log"),
@@ -96,7 +102,13 @@ def install(key: str, cfg_path, gw_exec: "str | None" = None) -> str:
         LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
         p = plist_path(key)
         p.write_bytes(render_plist(key, cfg_path, gw_exec))
-        p.chmod(0o644)                    # launchd requires root:wheel 0644
+        # launchd requires root:wheel 0644 — and if the GROUP is anything else
+        # (e.g. staff, when written outside a gid-0 context) launchd SILENTLY
+        # refuses to auto-load the plist at boot, so the job never comes up on
+        # its own and needs a manual bootstrap. chmod alone doesn't fix the
+        # group; force owner root (0) + group wheel (gid 0) explicitly.
+        p.chmod(0o644)
+        os.chown(p, 0, 0)
     except OSError as e:
         log.warning("could not write %s: %s", plist_path(key), e)
         return "manual"
@@ -122,6 +134,13 @@ def install(key: str, cfg_path, gw_exec: "str | None" = None) -> str:
         log.warning("launchctl bootstrap failed after retries: %s",
                     (r.stderr or r.stdout or "").strip() if r else "no attempt")
         return "manual"
+
+    # bootstrap LOADS the job; RunAtLoad is supposed to start it, but at
+    # bootstrap time that's racy — an explicit kickstart is the deterministic
+    # start (this is the bootstrap+kickstart combo that reliably works by hand).
+    # -k kills any half-started instance first, so it's idempotent whether
+    # RunAtLoad already fired or not.
+    _launchctl("kickstart", "-k", f"system/{label(key)}")
 
     # Settle: reach running, then STILL be running after the fast-crash window
     # (mirrors the systemd path — a job that execs and dies "started" too).
