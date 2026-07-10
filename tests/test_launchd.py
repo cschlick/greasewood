@@ -72,6 +72,15 @@ def test_plist_contents():
     assert data["StandardOutPath"].endswith("pm.log")
 
 
+def test_plist_defaults_to_interpreter_module_form(monkeypatch):
+    """With no explicit exec, the job launches as `<interpreter> -m greasewood`
+    (stable across a moved/regenerated `gw` wrapper), not the gw path."""
+    monkeypatch.setattr(launchd.sys, "executable", "/opt/py/bin/python3")
+    data = plistlib.loads(launchd.render_plist("pm", "/etc/greasewood_pm.toml"))
+    assert data["ProgramArguments"] == \
+        ["/opt/py/bin/python3", "-m", "greasewood", "-c", "/etc/greasewood_pm.toml", "run"]
+
+
 def test_label_and_path_naming():
     assert launchd.label("pm") == "com.greasewood.pm"
     assert launchd.plist_path("pm").name == "com.greasewood.pm.plist"
