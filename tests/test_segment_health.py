@@ -184,6 +184,7 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._chrome = []
     app._rows, app._off, app._up = rows, 0, len(rows)
     app._show_nft = True
+    app._hidden = 0
     return app
 
 
@@ -301,3 +302,20 @@ def test_diagnose_find_accepts_mesh_names(monkeypatch):
     # reach into the picker: full-name lookup must resolve, not sys.exit
     picks = status._resolve_diag_columns(args, cfg, directory, me.id_pub, me)
     assert any(lbl == "bastion" for lbl, r, _ in picks if r is not None)
+
+
+def test_live_and_hidden_filters_expired():
+    """gw watch shows only the live mesh: expired records are split out (hidden)
+    unless --all, and the count is reported for the footer."""
+    import datetime as dt
+    from greasewood import status
+    now = dt.datetime.now(dt.timezone.utc)
+    live = _rec("live", ["1:51900"])                 # exp = now + 1h (see _rec)
+    expired = _rec("gone", ["2:51900"])
+    expired.cred.exp = now - dt.timedelta(minutes=1)  # force expiry
+
+    shown, hidden = status._live_and_hidden([live, expired], now, show_all=False)
+    assert [r.cred.hostname for r in shown] == ["live"] and hidden == 1
+
+    shown_all, hidden_all = status._live_and_hidden([live, expired], now, show_all=True)
+    assert len(shown_all) == 2 and hidden_all == 0    # --all shows everything
