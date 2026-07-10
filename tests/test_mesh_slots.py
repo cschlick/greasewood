@@ -344,13 +344,13 @@ def test_free_port_avoids_live_interface_orphan(monkeypatch, tmp_path):
     assert cli._free_listen_port(etc=tmp_path) == 51910
 
 
-def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
+def test_ensure_interface_port_in_use_is_actionable(monkeypatch, tmp_path):
     """An EADDRINUSE at `ip link set up` (another wg iface on our port) raises
     PortInUse with the culprit + fix — not a raw CalledProcessError."""
     import subprocess
     from greasewood import wg as wgmod
 
-    def fake_run(*args, check=True):
+    def fake_run(*args, check=True, input=None):
         cmd = list(args)
         if cmd[:3] == ["ip", "link", "set"] and cmd[-1] == "up":
             return subprocess.CompletedProcess(
@@ -360,9 +360,12 @@ def test_ensure_interface_port_in_use_is_actionable(monkeypatch):
     monkeypatch.setattr(wgmod, "_wg_iface_on_port",
                         lambda port, exclude="": "gw-old")
 
+    keyfile = tmp_path / "wg.key"          # ensure_interface now reads the key itself
+    keyfile.write_text("cHJpdmtleQ==\n")   # (piped to `wg set … private-key /dev/stdin`)
+
     import pytest
     with pytest.raises(wgmod.PortInUse) as e:
-        wgmod.ensure_interface("gw-pm", "fd8d::1", 51900, __import__("pathlib").Path("/x"))
+        wgmod.ensure_interface("gw-pm", "fd8d::1", 51900, keyfile)
     msg = str(e.value)
     assert "UDP port 51900 is already used by WireGuard interface 'gw-old'" in msg
     assert "ip link del gw-old" in msg and "--listen-port" in msg
