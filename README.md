@@ -286,27 +286,39 @@ story — every change greasewood ever made to your kernel's network state.**
 
 ## Install
 
-Requires Linux with the WireGuard kernel module (built into 5.6+), the
-`wireguard-tools` (`wg`) and `iproute2` (`ip`) packages, and Python 3.11+.
+Requires Python 3.11+ and the WireGuard userspace tools (`wireguard-tools`/`wg`).
+On Linux that's it (the kernel WireGuard module is built into 5.6+, autoloaded on
+first use); on macOS the tunnel runs on `wireguard-go` instead of a kernel module.
 
-```bash
-pip install greasewood
-```
-
-Or from source:
+**On a host that will run the daemon** (Linux or macOS), use the installer — one
+idempotent script, re-runnable to upgrade:
 
 ```bash
 git clone https://gitlab.com/cschlick/greasewood.git
 cd greasewood
-pip install .              # add '.[test]' to also get pytest
+sudo ./install.sh
 ```
 
-Either installs the `gw` command. Most subcommands need sudo/root (they create
+It installs the runtime deps (`wireguard-tools`, plus `wireguard-go` on macOS),
+builds a self-contained venv at `/opt/greasewood`, and symlinks `/usr/local/bin/gw`
+at it. That fixed path is deliberate: `gw create`/`join` bake it into the service
+they install, so re-running `install.sh` upgrades in place without the service's
+`ExecStart` ever drifting. Existing meshes and configs are left untouched.
+
+**As a plain library / for development**, a bare pip install is fine (no service,
+no fixed path):
+
+```bash
+pip install greasewood         # or, from a source checkout: pip install '.[test]'
+```
+
+Either way you get the `gw` command. Most subcommands need sudo/root (they create
 WireGuard interfaces and edit routing); `gw watch` does not.
 
-The Quickstart below runs the daemon by hand with `gw run`. For real use, run it
-as a managed systemd service instead — see [Running as a
-service](#running-as-a-service); then the workflow is just install → setup/join.
+After install the workflow is just setup/join → the daemon runs as a managed
+service (systemd on Linux, launchd on macOS), which `gw create`/`gw join` set up
+for you — see [Running as a service](#running-as-a-service). The Quickstart below
+runs it by hand with `gw run` to show the moving parts.
 
 ## Quickstart
 
