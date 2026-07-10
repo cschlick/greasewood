@@ -17,11 +17,9 @@ rename_interface and the door isolation routing.
 """
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import subprocess
-import tempfile
 import time
 
 from . import audit
@@ -33,13 +31,18 @@ log = logging.getLogger(__name__)
 
 
 def _run(*args: str, check: bool = True,
-         env: "dict | None" = None) -> subprocess.CompletedProcess:
+         env: "dict | None" = None,
+         input: "str | None" = None) -> subprocess.CompletedProcess:
     # Every ip/wg mutation greasewood makes passes through here, so this is the
     # one place that records the data-plane command trail (greasewood.audit).
+    # `env` overrides the child environment (macOS wireguard-go needs
+    # WG_TUN_NAME_FILE); `input` feeds stdin (used to hand `wg` a key via
+    # /dev/stdin — see _wg_set). Neither reaches the audit trail, so a key is
+    # never recorded.
     t0 = time.monotonic()
     try:
         r = subprocess.run(list(args), capture_output=True, text=True, check=check,
-                           env=env)
+                           env=env, input=input)
         audit.record_command(args, r.returncode, int((time.monotonic() - t0) * 1000),
                              r.stdout, r.stderr)
         return r
@@ -182,6 +185,19 @@ def _route_del(dev: str, addr: str) -> None:
     _run("ip", "-6", "route", "del", f"{addr}/128", "dev", dev, check=False)
 
 
+def _wg_set(*args: str, key: str) -> None:
+    """`wg set …` where a private-key/preshared-key path is given as the literal
+    "/dev/stdin", with the key fed on stdin. greasewood (an unconfined Python
+    process) reads the key and hands it to `wg` over stdin, so `wg` never needs
+    read access to a key FILE. Recent AppArmor profiles for `wg` (Ubuntu 24.04+)
+    confine it to a small whitelist and DENY reading keys from /tmp — and would
+    deny /var/lib/greasewood_* too — which broke enrollment and interface
+    bring-up; /dev/stdin sidesteps the path check entirely. One key per call
+    (stdin is consumed once), so private-key and preshared-key go in separate
+    `wg set` invocations. (Works with wireguard-go's `wg` on macOS too.)"""
+    _run("wg", "set", *args, input=key.strip() + "\n")
+
+
 def ensure_interface(
     iface: str,
     overlay_addr: str,
@@ -198,9 +214,12 @@ def ensure_interface(
 
     # Set private key + listen port (idempotent). On macOS the userspace bind
     # happens HERE (wg set listen-port), so this is where EADDRINUSE surfaces;
-    # on Linux the kernel binds at link-up below.
-    r = _run("wg", "set", dev, "private-key", str(wg_key_path),
-             "listen-port", str(listen_port), check=False)
+    # on Linux the kernel binds at link-up below. The key is fed on stdin via
+    # /dev/stdin, never as a file path wg must open (see _wg_set) — check=False
+    # + input, since we need the return code for the EADDRINUSE branch.
+    r = _run("wg", "set", dev, "private-key", "/dev/stdin",
+             "listen-port", str(listen_port), check=False,
+             input=Path(wg_key_path).read_text().strip() + "\n")
     if r.returncode != 0:
         if "in use" in (r.stderr or "").lower():
             _raise_port_in_use(iface, listen_port, exclude=dev)
@@ -525,15 +544,16 @@ def ensure_anchor_door_interface(
     destroy_interface(DOOR_IFACE)
 
     dev = _create_wg_iface(DOOR_IFACE)
-    _run("wg", "set", dev,
-         "private-key", str(door_key_path),
-         "listen-port", str(door_port))
+    _wg_set(dev,
+            "private-key", "/dev/stdin",
+            "listen-port", str(door_port),
+            key=Path(door_key_path).read_text())
 
-    with _temp_key_file(psk_b64) as psk_path:
-        _run("wg", "set", dev,
-             "peer", guest_pub_b64,
-             "preshared-key", psk_path,
-             "allowed-ips", f"{GUEST_DOOR_IP}/128")
+    _wg_set(dev,
+            "peer", guest_pub_b64,
+            "preshared-key", "/dev/stdin",
+            "allowed-ips", f"{GUEST_DOOR_IP}/128",
+            key=psk_b64)
 
     _add_overlay_addr(dev, ANCHOR_DOOR_IP)
     _link_up(dev)
@@ -560,37 +580,22 @@ def ensure_node_door_interface(
     dev = _create_wg_iface(DOOR_IFACE)
 
     guest_priv_b64 = base64.b64encode(guest_priv_bytes).decode()
-    with _temp_key_file(guest_priv_b64) as key_path, _temp_key_file(psk_b64) as psk_path:
-        _run("wg", "set", dev,
-             "private-key", key_path,
-             "listen-port", str(door_port))
-        _run("wg", "set", dev,
-             "peer", anchor_door_pub_b64,
-             "preshared-key", psk_path,
-             "endpoint", format_endpoint(anchor_host, door_port),
-             "allowed-ips", f"{ANCHOR_DOOR_IP}/128",
-             "persistent-keepalive", "5")
+    _wg_set(dev,
+            "private-key", "/dev/stdin",
+            "listen-port", str(door_port),
+            key=guest_priv_b64)
+    _wg_set(dev,
+            "peer", anchor_door_pub_b64,
+            "preshared-key", "/dev/stdin",
+            "endpoint", format_endpoint(anchor_host, door_port),
+            "allowed-ips", f"{ANCHOR_DOOR_IP}/128",
+            "persistent-keepalive", "5",
+            key=psk_b64)
 
     _add_overlay_addr(dev, GUEST_DOOR_IP)
     _link_up(dev)
     _route_replace(dev, ANCHOR_DOOR_IP)
     log.info("node door interface %s up → [%s]:%d", DOOR_IFACE, anchor_host, door_port)
-
-
-@contextlib.contextmanager
-def _temp_key_file(b64_key: str):
-    """Write a base64 WireGuard key to a mode-0600 temp file, yield its path."""
-    fd, path = tempfile.mkstemp()
-    try:
-        os.write(fd, b64_key.encode() + b"\n")
-        os.close(fd)
-        os.chmod(path, 0o600)
-        yield path
-    finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
 
 
 def get_peers(iface: str) -> "dict[str, LivePeer] | None":
