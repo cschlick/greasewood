@@ -2371,6 +2371,13 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
         door_port=cfg.door_port)
     door_watcher.start()
     log.info("door watcher started")
+
+    # Garbage-collect abandoned nodes: the CA stops recertifying (and the
+    # directory sheds) any node that's been expired longer than drop_grace, so a
+    # churned cloud fleet left to expire is forgotten without manual `gw revoke`.
+    from .sweep import StaleSweep
+    StaleSweep(ca, directory, cfg.drop_grace, cfg.dir_cache_path).start()
+    log.info("stale-node sweep started (drop_grace=%s)", cfg.drop_grace)
     return get_revoked, door_watcher
 
 
@@ -3529,6 +3536,9 @@ def main(argv=None) -> int:
                          "per-group connectivity health")
     sp.add_argument("--interval", type=float, default=2.0, metavar="SECS",
                     help="live refresh interval (default 2s; min 1s)")
+    sp.add_argument("--all", action="store_true",
+                    help="also show expired nodes (hidden by default — the roster "
+                         "shows only the live mesh)")
     sp.set_defaults(fn=cmd_watch)
 
     # config — machine-readable resolved facts, for scripting

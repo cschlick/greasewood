@@ -83,10 +83,18 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert "name" in out and "roles" in out                       # left (mesh) columns
     assert "this node" in out and "peer?" in out                     # the split; non-root right side
     assert "run 'sudo gw watch'" in out                             # hint to see live links
-    assert "12 record(s) in local directory cache" in out            # self + 11
+    # Default view is the LIVE mesh only: 12 records, 'legacy' expired → hidden.
+    assert "11 live · 1 expired hidden (gw watch --all to show)" in out
     assert "prod,web" in out                                          # multi-role bridge
     assert "*" in out                                                 # reach-all role
-    assert "EXPIRED" in out and "<1h!" in out                         # expired + expiring exp cells
+    assert "<1h!" in out and "legacy" not in out                      # db2 shown (live), legacy hidden
+    assert "EXPIRED" not in out                                       # no expired cell in the default view
+
+    # --all reveals the expired node (with its EXPIRED exp cell) and drops the count line.
+    cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), all=True))
+    out_all = capsys.readouterr().out
+    assert "legacy" in out_all and "EXPIRED" in out_all
+    assert "12 record(s) in local directory cache" in out_all
 
 
 def test_nodes_by_role(tmp_path, capsys):

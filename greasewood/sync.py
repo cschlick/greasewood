@@ -177,6 +177,16 @@ class SyncLoop(Loop):
         on_disk = _Dir.load(self._cache_path)
         self._directory.merge(on_disk.all())
 
+        # Shed records that have been expired past the fleet drop deadline —
+        # merge() already refuses stale INCOMING records; this drops resident
+        # ones that aged out while cached, so a churned fleet's dead nodes leave
+        # every node's view without any delete-propagation protocol. Persist it
+        # even when the anchor is unreachable (nothing new merges, but the local
+        # roster still converges), so this runs before the seed loop's return.
+        pruned = self._directory.prune_stale()
+        if pruned:
+            self._directory.save(self._cache_path)
+
         for seed in self._get_seeds():
             try:
                 (records, renew_after, anchor_now, anchor_domain,
