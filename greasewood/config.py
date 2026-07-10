@@ -65,6 +65,11 @@ class Config:
     renew_before: dt.timedelta
     door_window: dt.timedelta
     tls_cert_ttl: dt.timedelta
+    # How long past expiry the anchor keeps recertifying an expired-but-not-
+    # revoked node before dropping it from the CA registry — after which a return
+    # needs a full re-enrollment, not just a renewal. Bounds the registry so an
+    # abandoned fleet is garbage-collected without manual revocation.
+    drop_grace: dt.timedelta
     door_port: int
     # Defaults granted to NEW nodes at `gw invite` when the operator doesn't pass
     # --roles / --caps. Read fresh at each invite, so editing them changes what
@@ -157,6 +162,10 @@ control_listen = ":{anchor["control_port"]}"
 credential_ttl = "{anchor["credential_ttl"]}"
 renew_before = "12h"
 door_window = "15m"
+# Past this much time expired, an un-revoked node is dropped from the CA and
+# must re-enroll (not just renew). Raise it for a fleet of long-dormant hosts;
+# lower it for high-churn ephemeral instances left to expire.
+drop_grace = "7d"
 door_port = {anchor["door_port"]}
 # Defaults granted to new nodes at `gw invite` (when --segments/--caps are
 # omitted). Edit anytime — the next invite reads them fresh, no restart.
@@ -217,6 +226,7 @@ def load_config(path: Path) -> Config:
         renew_before=_duration(anchor, "renew_before", "12h"),
         door_window=_duration(anchor, "door_window", "15m"),
         tls_cert_ttl=_duration(anchor, "tls_cert_ttl", "7d"),
+        drop_grace=_duration(anchor, "drop_grace", "7d"),
         door_port=int(anchor.get("door_port", 51901)),
         default_roles=list(anchor.get("default_roles", ["mesh"])),
         default_caps=list(anchor.get("default_caps", ["tls"])),

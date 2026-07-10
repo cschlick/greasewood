@@ -122,6 +122,18 @@ def _load_policy_grants(cfg) -> "list | None":
         return None
 
 
+def _live_and_hidden(records, now, show_all):
+    """`gw watch` shows only the LIVE mesh: records whose credential hasn't
+    expired (now < cred.exp) — the same predicate peers use to accept a node, so
+    the roster matches who's actually in the mesh. Expired records (a node that
+    lapsed but may still recertify, or one aging toward its true drop) are hidden
+    unless --all. Returns (shown, hidden_count)."""
+    if show_all:
+        return records, 0
+    live = [r for r in records if now < r.cred.exp]
+    return live, len(records) - len(live)
+
+
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                   latency=None, rates=None, grants=None) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
@@ -500,12 +512,14 @@ class _WatchApp:
     here without reworking the render path. Data refreshes every `interval`;
     scrolling responds immediately in between."""
 
-    def __init__(self, cfg, own_id, own_addr, prober, interval: float) -> None:
+    def __init__(self, cfg, own_id, own_addr, prober, interval: float,
+                 show_all: bool = False) -> None:
         self._cfg = cfg
         self._own_id = own_id
         self._own_addr = own_addr
         self._prober = prober
         self._interval = interval
+        self._show_all = show_all        # --all: include expired records
         self._off = 0                    # scroll offset into the peer rows
         self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
         self._show_nft = True            # f toggles the nft table block
@@ -516,6 +530,7 @@ class _WatchApp:
         self._chrome: list = []          # roster title/column-header/separator
         self._rows: list = []            # scrollable: one line per peer
         self._up = 0                     # live-link count (for the footer)
+        self._hidden = 0                 # expired records hidden (for the footer)
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -524,12 +539,13 @@ class _WatchApp:
         from .directory import Directory
         from . import wg as wgmod
         directory = Directory.load(self._cfg.dir_cache_path)
+        now = dt.datetime.now(_UTC)
         records = sorted(directory.all(), key=lambda r: r.hostname)
+        records, self._hidden = _live_and_hidden(records, now, self._show_all)
         try:
             live = wgmod.get_peers(self._cfg.wg_interface) or {}
         except Exception:
             live = {}
-        now = dt.datetime.now(_UTC)
         now_epoch = int(now.timestamp())
         mono = time.monotonic()
 
@@ -584,8 +600,9 @@ class _WatchApp:
         else:
             off = _scroll_clamp(self._off, total, view_h)
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
+        hidden = f" · {self._hidden} expired hidden" if self._hidden else ""
         return (f"{now:%H:%M:%S}Z · {self._up} link"
-                f"{'' if self._up == 1 else 's'} up · {pos} · "
+                f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
                 f"↑↓/PgUp/PgDn/g/G scroll · f firewall · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
@@ -635,7 +652,8 @@ class _WatchApp:
                                         self._view_h(term_h))
 
 
-def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
+def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
+                show_all: bool = False) -> int:
     """Live, scrollable `gw watch`: link state + per-second throughput + an
     async latency column, in a viewport that scrolls when there are more peers
     than screen rows. See _WatchApp. Root + a terminal required."""
@@ -650,7 +668,7 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0) -> int:
                  "for a no-root static view)")
     prober = _LatencyProber()
     prober.start()
-    app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval))
+    app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval), show_all)
     try:
         with _cbreak_terminal() as fd:
             app.run(fd)
@@ -883,7 +901,8 @@ def cmd_watch(args) -> int:
         # async latency column (pings run only while you're watching). Needs
         # root for live WireGuard state — that's why the default wants sudo.
         return _watch_live(cfg, own_id, own_addr,
-                            interval=max(1.0, getattr(args, "interval", 2.0) or 2.0))
+                            interval=max(1.0, getattr(args, "interval", 2.0) or 2.0),
+                            show_all=getattr(args, "all", False))
 
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
@@ -895,10 +914,19 @@ def cmd_watch(args) -> int:
     print()
 
     now = dt.datetime.now(_UTC)
-    records = sorted(directory.all(), key=lambda r: r.hostname)
+    all_records = sorted(directory.all(), key=lambda r: r.hostname)
 
-    if not records:
+    if not all_records:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
+        return 0
+
+    # Live mesh only, unless --all: expired records are hidden (a lapsed node is
+    # not in the mesh — peers have evicted it — so it doesn't belong in the view).
+    show_all = getattr(args, "all", False)
+    records, hidden = _live_and_hidden(all_records, now, show_all)
+    if not records:
+        print(f"no live nodes — {hidden} expired record(s) hidden "
+              f"(gw watch --all to show them)")
         return 0
 
     # Live data-plane state for the right-hand "this node" columns — only as
@@ -943,7 +971,10 @@ def cmd_watch(args) -> int:
                           grants=grants)
         print()
 
-    print(f"{len(records)} record(s) in local directory cache")
+    if hidden:
+        print(f"{len(records)} live · {hidden} expired hidden (gw watch --all to show)")
+    else:
+        print(f"{len(records)} record(s) in local directory cache")
     return 0
 
 
