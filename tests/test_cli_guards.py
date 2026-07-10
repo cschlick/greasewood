@@ -242,3 +242,27 @@ def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
     msg = str(e.value)
     assert "isn't answering on loopback" in msg
     assert "token could never be redeemed" in msg
+
+
+# ---------------------------------------------------------------------------
+# Linux-only release guard: PyPI is public, so a Mac user will pip-install and
+# run a command — it must exit with a clear pointer, not fail deep in ip/wg.
+# ---------------------------------------------------------------------------
+
+def test_non_linux_exits_with_macos_branch_pointer(monkeypatch):
+    import platform
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["watch", "--snapshot"])
+    msg = str(e.value)
+    assert "Linux-only" in msg and "macos branch" in msg and "@macos" in msg
+
+
+def test_version_still_works_on_non_linux(monkeypatch):
+    # --version is an argparse action that exits during parse_args, BEFORE the
+    # guard — so it works everywhere (a Mac user can still see what they got).
+    import platform
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
