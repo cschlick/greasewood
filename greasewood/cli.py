@@ -3536,7 +3536,9 @@ def main(argv=None) -> int:
                         "when the host is on several meshes)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=f"greasewood {_version()}")
-    gwplat.require_supported()            # Linux or macOS; anything else exits clearly
+    # OS support is checked below via _require_supported_os() (after parse_args,
+    # so --version/-h work everywhere); on this branch it defers to
+    # greasewood.platform.require_supported() → Linux + macOS.
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # create
