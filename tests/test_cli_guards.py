@@ -250,6 +250,11 @@ def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_non_linux_exits_with_macos_branch_pointer(monkeypatch):
+    try:
+        import greasewood.platform  # noqa: F401
+        pytest.skip("cross-platform (macos) line supports Darwin — see test_macos_port")
+    except ImportError:
+        pass                          # Linux-only line: the guard is active
     import platform
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     with pytest.raises(SystemExit) as e:
