@@ -31,9 +31,14 @@ that shares your Mac home dir):
 
 ```bash
 brew install lima
-limactl start --name gw template://ubuntu-24.04    # Ubuntu VM with systemd
-limactl shell gw                                   # a shell inside it
+limactl start --name=gw --yes template:default     # Ubuntu VM with systemd
+limactl shell gw                                    # a shell inside it
 ```
+
+(`--yes` skips Lima's interactive "Proceed / Exit" prompt — without it, and with
+older `template://…` syntax, `limactl` drops into a menu. `start` both creates
+and starts, so no separate `limactl create` is needed. If your Lima rejects
+`--yes`, use `--tty=false`.)
 
 Then, inside the VM, install and use greasewood exactly as on any Linux host:
 
