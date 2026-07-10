@@ -290,8 +290,23 @@ Requires Python 3.11+ and the WireGuard userspace tools (`wireguard-tools`/`wg`)
 On Linux that's it (the kernel WireGuard module is built into 5.6+, autoloaded on
 first use); on macOS the tunnel runs on `wireguard-go` instead of a kernel module.
 
-**On a host that will run the daemon** (Linux or macOS), use the installer — one
-idempotent script, re-runnable to upgrade:
+Two ways to install on a host that will run the daemon; both are fully
+supported, including the managed service.
+
+**With pip / pipx** — the daemon service launches as `<interpreter> -m
+greasewood`, so it stays valid wherever pip put the package (no fixed path
+needed). `pipx` is the clean way to get an isolated install with `gw` on `PATH`:
+
+```bash
+sudo pipx install --global greasewood   # gw on root's PATH, so `sudo gw …` works
+# then install the WireGuard tools yourself: e.g.
+#   Debian/Ubuntu:  sudo apt install wireguard-tools
+#   macOS:          brew install wireguard-go wireguard-tools
+```
+
+**With the bundled installer** — one idempotent script that also handles the
+WireGuard deps and pins a fixed venv at `/opt/greasewood`; re-run any time to
+upgrade in place:
 
 ```bash
 git clone https://gitlab.com/cschlick/greasewood.git
@@ -299,21 +314,11 @@ cd greasewood
 sudo ./install.sh
 ```
 
-It installs the runtime deps (`wireguard-tools`, plus `wireguard-go` on macOS),
-builds a self-contained venv at `/opt/greasewood`, and symlinks `/usr/local/bin/gw`
-at it. That fixed path is deliberate: `gw create`/`join` bake it into the service
-they install, so re-running `install.sh` upgrades in place without the service's
-`ExecStart` ever drifting. Existing meshes and configs are left untouched.
-
-**As a plain library / for development**, a bare pip install is fine (no service,
-no fixed path):
-
-```bash
-pip install greasewood         # or, from a source checkout: pip install '.[test]'
-```
-
-Either way you get the `gw` command. Most subcommands need sudo/root (they create
-WireGuard interfaces and edit routing); `gw watch` does not.
+Either way you get the `gw` command, and `gw create`/`join` install + enable the
+managed service (systemd on Linux, launchd on macOS). Most subcommands need
+sudo/root (they create WireGuard interfaces and edit routing); `gw watch` does
+not. For a plain library/dev install, `pip install greasewood` (or `pip install
+'.[test]'` from a checkout) is all you need.
 
 After install the workflow is just setup/join → the daemon runs as a managed
 service (systemd on Linux, launchd on macOS), which `gw create`/`gw join` set up
