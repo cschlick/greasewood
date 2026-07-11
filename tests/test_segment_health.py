@@ -176,10 +176,14 @@ def test_key_action_map_covers_keys_and_arrows():
 
 
 def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
-                               "table inet greasewood_pm {", "}")):
+                               "table inet greasewood_pm {", "}"),
+            fw=("main firewall : udp/51900 + gw-* overlay allowed ✓",
+                "  $ sudo nft list ruleset | grep -E '51900|gw-'",
+                "    udp dport 51900 accept")):
     from greasewood import status as s
     app = s._WatchApp.__new__(s._WatchApp)
     app._header = list(header)
+    app._fw_lines = list(fw)
     app._nft_lines = list(nft)
     app._chrome = []
     app._rows, app._off, app._up = rows, 0, len(rows)

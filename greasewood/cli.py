@@ -13,8 +13,9 @@ no SSH, no HTTP on the underlay:
     gw join <token>       # enroll over the door, then:
     gw run                # join the mesh
 
-Everything else groups around that: observe (watch, diagnose, narrate, config,
-firewall), administer nodes on the anchor (invite/close-door, revoke, set-caps,
+Everything else groups around that: observe (watch — which now also shows the
+host-firewall port check — diagnose, narrate, config), administer nodes on the
+anchor (invite/close-door, revoke, set-caps,
 set-roles, renew-all), maintain this node (renew, rename-node, rename-mesh,
 purge), TLS service certs (cert-request/-profiles/-status/-remove), and anchor
 lifecycle (anchor-promote, anchor-backup, anchor-restore).
@@ -173,51 +174,47 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 
 def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
                          mesh_iface: str = "gw-mesh", header: bool = True,
-                         enforce_ports: bool = True) -> None:
+                         enforce_ports: bool = True, role: str = "anchor") -> None:
     """
-    Print (never apply) the recommended firewall posture. greasewood binds its
-    control/enroll planes only to the overlay + loopback, so nothing it runs is
-    exposed on the underlay regardless of firewall. On a default-drop host you
-    still allow the few things below to *reach* those sockets.
-
-    Recommended: apply the SAME rules on EVERY node, not just the current anchor.
-    Since any node can be promoted to anchor (gw anchor-promote), a uniform ruleset
-    means an anchor handover needs no firewall change anywhere. A rule allowing a
-    port nothing is bound to is harmless — the kernel just refuses the
-    connection until that node actually becomes an anchor and binds it.
+    Print (never apply) the recommended firewall posture for THIS node's role.
+    greasewood binds its control/enroll planes only to the overlay + loopback, so
+    nothing it runs is exposed on the underlay regardless of firewall. On a
+    default-drop host you still allow the few things below to *reach* those
+    sockets. Role-specific: a plain node needs only its mesh UDP port + the coarse
+    overlay admit; the enrollment door (port + iface) is the ANCHOR's alone.
     """
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
+    is_anchor = role == "anchor"
+    who = "an anchor" if is_anchor else "a node"
     if header:
-        print("Firewall (greasewood never edits it). Recommended posture — the SAME")
-        print("rules on every node, so any node can become the anchor with no firewall")
-        print("change. On a default-drop host, allow (nftables):")
+        print(f"Firewall (greasewood never edits it). Recommended posture for {who}.")
+        print("On a default-drop host, allow (nftables):")
     else:
-        print("Recommended posture — the SAME rules on every node (anchor or not), so")
-        print("promoting a node to anchor needs no firewall change. On a default-drop")
-        print("input chain (nftables):")
-    print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept   # WireGuard (underlay)")
-    print(f"  iifname \"lo\" accept                    # this host talks to itself")
+        print(f"Recommended posture for {who}. On a default-drop input chain (nftables):")
+    if is_anchor:
+        print(f"  udp dport {{ {listen_port}, {DOOR_PORT} }} accept   # WireGuard (underlay: mesh + door)")
+    else:
+        print(f"  udp dport {listen_port} accept              # WireGuard (underlay: mesh)")
+    print("  iifname \"lo\" accept                    # this host talks to itself")
     if enforce_ports:
         # Enforcement on (default): greasewood's own nftables table filters the
         # overlay interfaces (control plane, enrollment + door lockdown, and the
         # grant-derived ports). The firewall just admits the overlay so that
         # table can act — it can only tighten what you admit, never open it.
-        print(f"  iifname \"gw-*\" accept                  # admit the overlay; greasewood's")
-        print(f"                                         # nftables table filters the ports on it")
-    else:
-        # Enforcement off: greasewood installs no table. These rules replace what
-        # its table would have done for the overlay — but they need nftables
-        # too, so they only help if you turned enforcement off deliberately
-        # WHILE having nftables. If enforcement is off because this host has no
-        # nftables, you can't add them either: the door port lockdown is simply
-        # unavailable, and the door rests on WireGuard keys + blackhole routing
-        # (mesh stays isolated; the anchor's own ::-bound services, e.g. SSH,
-        # are reachable by an invitee during a window). If you HAVE nftables,
-        # prefer leaving enforce_ports on and greasewood applies all of this.
+        print("  iifname \"gw-*\" accept                  # admit the overlay; greasewood's")
+        print("                                         # nftables table filters the ports on it")
+    elif is_anchor:
+        # Enforcement off on an anchor: greasewood installs no table, so YOU gate
+        # its overlay ports. (These need nftables too; if you have it, prefer
+        # leaving enforce_ports on and greasewood applies all of this.)
         print("  # (these need nftables; if you have it, prefer enforce_ports = true)")
-        print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept   # control plane (when anchor)")
-        print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept   # enrollment (when anchor)")
+        print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept   # control plane")
+        print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept   # enrollment")
         print(f"  iifname \"{DOOR_IFACE}\" drop                    # door carries ONLY enrollment")
+    else:
+        # Enforcement off on a plain node: no greasewood overlay service to gate,
+        # just admit the overlay coarsely (no table to filter it).
+        print(f"  iifname \"{mesh_iface}\" accept          # admit the overlay (no table filters it)")
 
 
 # ---------------------------------------------------------------------------
@@ -1619,7 +1616,7 @@ def cmd_join(args) -> int:
               "it yourself or write your own unit)")
     print()
     from . import firewall as _fw
-    _print_firewall_help(listen_port, mesh_iface=interface)
+    _print_firewall_help(listen_port, mesh_iface=interface, role="node")
     print()
     _fw.check(_fw.node_rules(listen_port), log)
     return 0
@@ -2747,7 +2744,7 @@ def cmd_run(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# narrate / config / firewall — the thin read-only commands (the heavyweight
+# narrate / config — the thin read-only commands (the heavyweight
 # presentation — watch, diagnose, the roster — lives in status.py)
 # ---------------------------------------------------------------------------
 
@@ -2840,38 +2837,6 @@ def cmd_config(args) -> int:
     for k, v in facts.items():
         print(f"{k}\t{v}")
     return 0
-
-
-def cmd_firewall(args) -> int:
-    """Print the recommended firewall ruleset for this mesh — a SUGGESTION only.
-    greasewood NEVER touches your firewall; this command changes nothing. The
-    same ruleset is recommended on every node (anchor or not), so promoting a
-    node to anchor needs no firewall change. With root it also checks the live
-    nftables ruleset and flags anything that looks blocked."""
-    from .config import load_config
-    from . import firewall as _fw
-    cfg = load_config(Path(args.config))
-    control_port = _control_port(cfg)
-
-    bar = "─" * 72
-    print(bar)
-    print("  greasewood NEVER modifies your firewall.")
-    print("  This is a SUGGESTION — nothing has been changed. Apply it yourself.")
-    print(bar)
-    print()
-    _print_firewall_help(cfg.listen_port, control_port, cfg.wg_interface,
-                         header=False, enforce_ports=cfg.enforce_ports)
-    print()
-    print("The two UDP ports ride the underlay (WireGuard listens there) — always")
-    print("your firewall's job. The overlay interfaces (gw-* incl. the door) are")
-    print("filtered by greasewood's own nftables table when enforcement is on, so")
-    print("you only admit them; with enforcement off you gate those ports yourself.")
-    print()
-    # Advisory check of the LIVE ruleset (read-only; needs root to see it).
-    _fw.check(_fw.anchor_rules(cfg.listen_port, control_port, cfg.wg_interface,
-                               enforce_ports=cfg.enforce_ports), log)
-    return 0
-
 
 
 # ---------------------------------------------------------------------------
@@ -3500,7 +3465,7 @@ def main(argv=None) -> int:
             "  sudo gw purge           -- remove this mesh's local state\n"
             "\n"
             "no sudo needed (read-only):\n"
-            "  gw watch --snapshot · config · firewall · cert-status · cert-profiles\n"
+            "  gw watch --snapshot · config · cert-status · cert-profiles\n"
             "  gw diagnose   (add sudo for live link state + firewall inference)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3674,12 +3639,8 @@ def main(argv=None) -> int:
                          "omit to list all as key<TAB>value")
     sp.set_defaults(fn=cmd_config)
 
-    # firewall — print the recommended posture (a suggestion; nothing changes)
-    sp = sub.add_parser("firewall",
-                        help="print the recommended firewall ruleset (a SUGGESTION "
-                             "— greasewood never changes your firewall). With sudo "
-                             "also flags anything that looks blocked.")
-    sp.set_defaults(fn=cmd_firewall)
+    # (No `firewall` subcommand — the host-firewall port check lives in gw watch
+    #  now, and create/join still print the recommended rules at setup.)
 
     # diagnose
     sp = sub.add_parser(

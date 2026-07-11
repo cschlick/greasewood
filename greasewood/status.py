@@ -481,6 +481,92 @@ def _nft_table_lines(cfg) -> list:
                   "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
+def _cfg_control_port(cfg) -> int:
+    """The anchor control port from cfg.control_listen (':51902' → 51902)."""
+    try:
+        return int(getattr(cfg, "control_listen", ":51902").rsplit(":", 1)[1])
+    except (ValueError, IndexError, AttributeError):
+        return 51902
+
+
+def _main_firewall_lines(cfg) -> list:
+    """The operator's OWN firewall vs the greasewood underlay port(s), surfaced
+    in `gw watch` so a blocked port is visible at a glance — greasewood NEVER
+    edits these rules. Line 0 is the verdict (the only line kept when the section
+    is collapsed with `f`); the rest is the raw command + the matching lines.
+
+    Omitted entirely when nft isn't installed — that host isn't firewalling with
+    nftables, so there's nothing to check. Per role: a plain node needs only the
+    mesh WireGuard UDP port; an anchor also needs the enrollment-door port. LOUD
+    when a default-drop firewall doesn't accept a needed port (the daemon is then
+    likely unreachable inbound). We check the UNDERLAY ports, which never appear
+    in greasewood's own overlay table — so the grep shows the host firewall only."""
+    from . import firewall as fw
+    if shutil.which("nft") is None:
+        return []
+
+    iface = cfg.wg_interface
+    if getattr(cfg, "role", "node") == "anchor":
+        rules = fw.anchor_rules(cfg.listen_port, _cfg_control_port(cfg),
+                                iface, getattr(cfg, "enforce_ports", True))
+    else:
+        rules = fw.node_rules(cfg.listen_port)
+    ports = sorted({r.port for r in rules})
+    # The mesh needs BOTH: the underlay UDP port(s), AND the overlay coarsely
+    # admitted (`iifname "gw-*" accept`) so greasewood's own table can filter it
+    # — a default-drop host drops gw-* before our table ever sees it.
+    portlist = ", ".join(f"{r.proto}/{r.port}" for r in rules)
+    need = f"{portlist} + gw-* overlay"
+    cmd = ("  $ sudo nft list ruleset | grep -E '"
+           + "|".join(str(p) for p in ports) + "|gw-'")
+
+    ruleset = fw._load_ruleset()
+    if ruleset is None:
+        return [f"main firewall : need {need} reachable "
+                "(run `sudo gw watch` to read the ruleset)", cmd]
+
+    try:
+        raw = [ln.strip() for ln in subprocess.run(
+                   ["nft", "list", "ruleset"], capture_output=True, text=True
+               ).stdout.splitlines()
+               if any(str(p) in ln for p in ports) or "gw-" in ln]
+    except FileNotFoundError:
+        raw = []
+
+    drop = fw.default_drop(ruleset)
+    if not drop:
+        # An accept policy admits everything — ports and overlay both fine.
+        lines = [f"main firewall : input policy ACCEPT — {need} not blocked ✓", cmd]
+        return lines + (["    " + ln for ln in raw] or ["    (no matching rule)"])
+
+    missing = [r for r in rules
+               if r.port in {m.port for m in fw.missing_rules(ruleset, rules)}]
+    overlay_ok = fw.admits_iface(ruleset, iface)
+
+    # LOUD when blocked — and the complaint carries the exact nft rule(s) to fix
+    # it, since that's the whole point of surfacing this.
+    fixes = [f"{r.nft_match()} accept   # {r.why}" for r in missing]
+    if not overlay_ok:
+        fixes.append('iifname "gw-*" accept   # admit the overlay so greasewood '
+                     "can filter it")
+
+    if not missing and overlay_ok:
+        verdict = f"main firewall : {need} allowed ✓ (default-drop + accept)"
+    else:
+        blocked = [f"{r.proto}/{r.port}" for r in missing]
+        if not overlay_ok:
+            blocked.append("gw-* overlay")
+        verdict = (f"main firewall : ⚠ {', '.join(blocked)} BLOCKED by default-drop "
+                   "— daemon likely UNREACHABLE inbound")
+
+    lines = [verdict, cmd]
+    lines += ["    " + ln for ln in raw] or ["    (no matching rule)"]
+    if fixes:
+        lines.append("  add these to your nftables config (greasewood never will):")
+        lines += ["      " + f for f in fixes]
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # gw watch — interactive live view (scrollable; groundwork for a TUI)
 # ---------------------------------------------------------------------------
@@ -597,10 +683,11 @@ class _WatchApp:
         self._show_total = show_total    # t toggles rate ↔ cumulative traffic
         self._off = 0                    # scroll offset into the peer rows
         self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
-        self._show_nft = True            # f toggles the nft table block
-        # Pinned-top pieces, kept separate so `f` collapses the nft block
+        self._show_nft = True            # f toggles the firewall area (both blocks)
+        # Pinned-top pieces, kept separate so `f` collapses the firewall area
         # instantly without a re-fetch.
         self._header: list = []          # role/addr/door/...
+        self._fw_lines: list = []        # host-firewall port check (line 0 = verdict)
         self._nft_lines: list = []       # the raw `nft list table` block
         self._chrome: list = []          # roster title/column-header/separator
         self._rows: list = []            # scrollable: one line per peer
@@ -653,19 +740,25 @@ class _WatchApp:
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
         self._header = _watch_header(self._cfg, directory, self._own_id, self._own_addr)
+        self._fw_lines = _main_firewall_lines(self._cfg)
         self._nft_lines = _nft_table_lines(self._cfg)
         self._chrome = roster[:sep + 1]
         self._rows = roster[sep + 1:]
 
     def _top_lines(self) -> list:
-        """The pinned block above the scrollable roster: header, the nft table
-        (or a one-line stand-in when collapsed with `f`), a blank, then the
-        roster's column header. Recomputed each render, so `f` toggles instantly."""
-        if self._show_nft or not self._nft_lines:
-            nft = self._nft_lines
+        """The pinned block above the scrollable roster: header, the firewall
+        area (the host-firewall port check + greasewood's own table), a blank,
+        then the roster's column header. `f` collapses the firewall area to each
+        block's line 0 — the host-firewall VERDICT (so a blocked port stays loud
+        even collapsed) and the gw-table command. Recomputed each render, so `f`
+        toggles instantly."""
+        fw, nft = self._fw_lines, self._nft_lines
+        if self._show_nft:
+            area = fw + ([""] if fw and nft else []) + nft
         else:
-            nft = [self._nft_lines[0] + "   (f to expand)"]   # keep the command line
-        return self._header + nft + [""] + self._chrome
+            area = ([fw[0] + "   (f to expand)"] if fw else []) \
+                 + ([nft[0] + "   (f to expand)"] if nft else [])
+        return self._header + area + [""] + self._chrome
 
     def _footer(self, view_h: int) -> str:
         now = dt.datetime.now(_UTC)
@@ -1008,7 +1101,9 @@ def cmd_watch(args) -> int:
 
     for line in _watch_header(cfg, directory, own_id, own_addr):
         print(line)
-    for line in _nft_table_lines(cfg):             # the greasewood nftables table, verbatim
+    for line in _main_firewall_lines(cfg):         # host firewall vs the mesh port(s)
+        print(line)
+    for line in _nft_table_lines(cfg):             # greasewood's own nftables table, verbatim
         print(line)
     print()
 

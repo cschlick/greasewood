@@ -60,13 +60,12 @@ def test_config_unknown_key_errors(tmp_path):
     assert "unknown config key 'nope'" in str(e.value)
 
 
-def test_firewall_enforce_on_recommends_two_udp_plus_coarse_admit(tmp_path, capsys, monkeypatch):
-    from greasewood import firewall
-    monkeypatch.setattr(firewall, "_load_ruleset", lambda: None)   # no live nft
-    cfg = _cfg(tmp_path)                                # enforce_ports defaults on
-    assert cli.cmd_firewall(types.SimpleNamespace(config=str(cfg))) == 0
+# The `gw firewall` subcommand is gone; the recommended-posture printer it used
+# lives on (create/join print it at setup), and the host-firewall port CHECK
+# moved to gw watch (see test_watch_main_firewall.py).
+def test_firewall_help_enforce_on_recommends_two_udp_plus_coarse_admit(capsys):
+    cli._print_firewall_help(51900, 51902, "gw-pm", enforce_ports=True)
     out = capsys.readouterr().out
-    assert "NEVER modifies your firewall" in out and "nothing has been changed" in out.lower()
     assert "51900, 51901" in out                        # the two underlay UDP ports
     assert 'iifname "gw-*" accept' in out               # coarse admit — greasewood filters
     # the overlay ports are greasewood's table's job now, not the firewall's
@@ -74,25 +73,18 @@ def test_firewall_enforce_on_recommends_two_udp_plus_coarse_admit(tmp_path, caps
     assert 'iifname "gw-door" tcp dport 51903' not in out
 
 
-def test_firewall_enforce_off_recommends_the_four_ports(tmp_path, capsys, monkeypatch):
-    from greasewood import firewall
-    monkeypatch.setattr(firewall, "_load_ruleset", lambda: None)
-    p = tmp_path / "gw.toml"
-    p.write_text(f'''[node]
-hostname = "db01"
-data_dir = "{tmp_path}"
-role = "node"
-[network]
-interface = "gw-pm"
-listen_port = 51900
-enforce_ports = false
-seeds = []
-root_url = "http://[fd8d::1]:51902"
-mesh_domain = "pm.internal"
-[ca]
-trusted_pubs = []
-''')
-    assert cli.cmd_firewall(types.SimpleNamespace(config=str(p))) == 0
+def test_firewall_help_node_role_omits_the_anchor_only_door_port(capsys):
+    # A plain node needs just its mesh UDP port + the coarse overlay admit; the
+    # enrollment door (51901) is the anchor's alone.
+    cli._print_firewall_help(51900, mesh_iface="gw-pm", role="node")
+    out = capsys.readouterr().out
+    assert "udp dport 51900 accept" in out
+    assert "51901" not in out                          # NOT the door port
+    assert 'iifname "gw-*" accept' in out              # coarse overlay admit
+
+
+def test_firewall_help_enforce_off_recommends_the_four_ports(capsys):
+    cli._print_firewall_help(51900, 51902, "gw-pm", enforce_ports=False)
     out = capsys.readouterr().out
     # enforcement off → the operator gates the overlay ports themselves
     assert "51900, 51901" in out
