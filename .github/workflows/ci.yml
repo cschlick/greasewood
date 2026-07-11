@@ -79,15 +79,16 @@ jobs:
       GW_CONTAINER_ENGINE: docker
     steps:
       - uses: actions/checkout@v5
-      - name: host prereqs (WireGuard module + Docker IPv6)
+      - name: host prereqs (WireGuard module + IPv6)
         run: |
           sudo modprobe wireguard \
             || { echo "::error::no WireGuard kernel module on this runner"; exit 1; }
           lsmod | grep -q wireguard && echo "wireguard module loaded"
-          # Docker needs IPv6 enabled to build the ULA underlay network.
-          echo '{"ipv6": true, "fixed-cidr-v6": "fd00:d0ck::/64"}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
+          # Docker 27+ (on ubuntu-24.04 runners) creates `--ipv6` networks with
+          # ip6tables on by default — the conftest's `network create --ipv6 --subnet`
+          # ULA underlay works without touching the daemon config. Show the version.
+          docker version --format 'docker {{.Server.Version}}'
       - name: python deps (venv — 24.04 is externally-managed)
         run: |
           python3 -m venv /tmp/venv
