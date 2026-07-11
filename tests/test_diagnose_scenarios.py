@@ -136,3 +136,39 @@ def test_diagnose_outbound_only_no_direction(tmp_path, monkeypatch, capsys):
     print(out)
     assert "no dialable direction" in out
     assert "outbound-only" in out
+
+
+def test_diagnose_flags_cgnat_endpoint(tmp_path, monkeypatch, capsys):
+    """A peer advertising a CGNAT (100.64/10) endpoint is listed but not actually
+    dialable — diagnose names it instead of letting it read as reachable."""
+    peer = NodeKeys.generate()
+    _run(tmp_path, monkeypatch, title="self ↔ cgnat-peer",
+         nodes=["cgnatpeer"], endpoints=["[2606:4700::1111]:51900"],   # self: real GUA
+         records=[_rec(peer, _cred(peer, CA, "cgnatpeer"),
+                       endpoints=["100.64.3.7:51900"])],                # peer: CGNAT
+         live_peers={})
+    out = capsys.readouterr().out
+    print(out)
+    assert "CGNAT" in out and "not globally reachable" in out
+    assert "dial 100.64.3.7  ⚠ CGNAT" in out         # the directional dial line, flagged
+
+
+def test_endpoint_scope_note_classifies():
+    f = status._endpoint_scope_note
+    assert "CGNAT" in f("-", "100.64.3.7")           # carrier-grade NAT
+    assert f("-", "8.8.8.8") == ""                   # real public v4
+    assert f("2606:4700::1111", "-") == ""           # real GUA v6
+    assert f("fd00::1", "-") == "not globally reachable"     # ULA
+    assert f("-", "192.168.1.9") == "not globally reachable" # RFC1918
+    assert f("-", "-") == ""                          # outbound-only (reported elsewhere)
+    assert f("-", "not-an-ip.example") == ""          # hostname → don't guess
+    assert f("2606:4700::1111", "100.64.3.7") == ""   # dialable via the GUA → no warning
+
+
+def test_globally_reachable_v4_excludes_cgnat():
+    import ipaddress
+    g = cli._globally_reachable_v4
+    assert g(ipaddress.IPv4Address("8.8.8.8")) is True
+    assert g(ipaddress.IPv4Address("100.64.1.1")) is False   # CGNAT — the bug this fixes
+    assert g(ipaddress.IPv4Address("192.168.1.5")) is False
+    assert g(ipaddress.IPv4Address("10.0.0.1")) is False
