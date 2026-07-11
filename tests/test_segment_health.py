@@ -197,7 +197,10 @@ def test_compose_windows_rows_and_pins_footer():
     view_h = term_h - len(top) - 1
     assert len(frame) == term_h                         # exactly fills the height
     assert frame[:len(top)] == top                      # pinned top
-    assert frame[len(top):len(top) + view_h] == [f"peer{i}" for i in range(view_h)]
+    body = frame[len(top):len(top) + view_h]
+    assert all(body[i].startswith(f"peer{i}") for i in range(view_h))   # rows, in order
+    assert all(ln[-1] in ("░", "█") for ln in body)     # scrollbar rail on every row
+    assert body[0][-1] == "█"                            # thumb at the top (off=0)
     assert f"of 50" in frame[-1]                        # footer scroll indicator
 
 
@@ -209,7 +212,9 @@ def test_compose_clamps_offset_and_shows_tail():
     top = app._top_lines()
     view_h = term_h - len(top) - 1
     assert app._off == 50 - view_h                      # clamped to total - view_h
-    assert frame[len(top):len(top) + view_h] == [f"peer{i}" for i in range(50 - view_h, 50)]
+    body = frame[len(top):len(top) + view_h]
+    assert all(body[i].startswith(f"peer{50 - view_h + i}") for i in range(view_h))
+    assert body[-1][-1] == "█"                           # thumb at the bottom (scrolled to end)
 
 
 def test_compose_all_fit_no_scroll_indicator():
@@ -217,6 +222,9 @@ def test_compose_all_fit_no_scroll_indicator():
     frame = app._compose(80, 24)
     assert "all 3" in frame[-1]                         # fits → 'all N', not a range
     assert len(frame) == 24                             # still fills the screen (padded)
+    top = app._top_lines()
+    body = frame[len(top):len(top) + 3]                 # the 3 peer rows
+    assert all("░" not in ln and "█" not in ln for ln in body)   # no scrollbar when it fits
 
 
 def test_toggle_nft_collapses_the_top_block():
@@ -345,3 +353,18 @@ def test_roster_live_rate_vs_cumulative_total():
     total_view = "\n".join(status._roster_lines(**common, show_total=True))
     assert "traffic" in total_view                                # header flips
     assert "↓4.0M ↑1.0M" in total_view and "B/s" not in total_view  # cumulative, no rate
+
+
+def test_scrollbar_column_geometry():
+    from greasewood import status as s
+    # 100 rows, 10 on screen → thumb ~1 row; tracks the offset top→bottom.
+    top = s._scrollbar_column(0, 100, 10)
+    assert len(top) == 10 and top[0] == "█" and top.count("█") >= 1 and top[-1] == "░"
+    mid = s._scrollbar_column(45, 100, 10)
+    assert mid[0] == "░" and mid[-1] == "░" and "█" in mid          # thumb in the middle
+    bot = s._scrollbar_column(90, 100, 10)                          # clamped-to-end offset
+    assert bot[-1] == "█" and bot[0] == "░"
+    # bigger thumb when more of the content is visible (20 of 40 → half the bar)
+    assert s._scrollbar_column(0, 40, 20).count("█") == 10
+    # everything fits → blank rail, no thumb
+    assert s._scrollbar_column(0, 5, 10) == [" "] * 10
