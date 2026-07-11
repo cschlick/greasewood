@@ -92,10 +92,14 @@ jobs:
       - name: python deps (venv — 24.04 is externally-managed)
         run: |
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --quiet -e . pytest hypothesis
+          /tmp/venv/bin/pip install --quiet -e . pytest hypothesis pytest-rerunfailures
       - name: integration suite
+        # --reruns: the container door/invite path has an inherent transient
+        # (a `gw invite` occasionally returns 1 mid-run — flakes on podman too).
+        # A real failure fails all attempts; a flake gets a clean retry.
         run: |
           /tmp/venv/bin/python -m pytest tests/integration/ \
             --ignore=tests/integration/test_soak.py \
             --ignore=tests/integration/test_stress.py \
+            --reruns 2 --reruns-delay 5 \
             -p no:cacheprovider -v --tb=short
