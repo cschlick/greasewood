@@ -3118,20 +3118,28 @@ def cmd_anchor_backup(args) -> int:
     if "ca.key" not in files:
         sys.exit(f"CA key not found at {cfg.ca_key_file} — nothing to back up")
 
-    out = Path(args.out) if args.out else \
-        cfg.data_dir / f"greasewood-anchor-backup-{cfg.hostname}.gwbk"
-    passphrase = _backup_passphrase(confirm=True)
+    to_stdout = args.out == "-"                # `-` → stream the blob (for a pipe)
+    passphrase = _backup_passphrase(confirm=not to_stdout)
     # This passphrase is the ONLY thing protecting the CA key (and anchor id_priv)
-    # at rest — a weak one undoes the whole backup. Warn, but don't block.
-    if len(passphrase) < 12:
+    # at rest — a weak one undoes the whole backup. Warn, but don't block. (For a
+    # stream the passphrase is an ephemeral env value, so skip the length nag.)
+    if not to_stdout and len(passphrase) < 12:
         print(f"⚠ warning: backup passphrase is short ({len(passphrase)} chars). "
               "This one secret guards your entire fleet's root key — use a long, "
               "high-entropy passphrase (a diceware phrase is ideal).")
     blob = bak.pack(files, passphrase)
 
+    node_count = sum(1 for n in files if n.startswith("nodes/"))
+    if to_stdout:
+        sys.stdout.buffer.write(blob)          # binary to stdout; notes to stderr
+        sys.stdout.buffer.flush()
+        print(f"streamed anchor backup ({node_count} node(s))", file=sys.stderr)
+        return 0
+
+    out = Path(args.out) if args.out else \
+        cfg.data_dir / f"greasewood-anchor-backup-{cfg.hostname}.gwbk"
     from .keys import atomic_write
     atomic_write(Path(out), blob)          # 0600, atomic: the fleet's root key
-    node_count = sum(1 for n in files if n.startswith("nodes/"))
     print(f"wrote encrypted anchor backup → {out}")
     print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
     print("Store it OFFLINE. Anyone with this file AND the passphrase can "
@@ -3145,7 +3153,8 @@ def cmd_anchor_restore(args) -> int:
     _require_root("anchor-restore")
     from . import backup as bak
 
-    blob = Path(args.archive).read_bytes()
+    blob = sys.stdin.buffer.read() if args.archive == "-" \
+        else Path(args.archive).read_bytes()   # `-` → read the blob from a pipe
     data_dir = Path(args.data_dir).expanduser()
 
     # Guard against clobbering a live anchor's CA key by accident.
@@ -3166,6 +3175,128 @@ def cmd_anchor_restore(args) -> int:
     print("Next: write /etc/greasewood.toml pointing ca_key_file at "
           f"{data_dir / 'ca.key'} (role = anchor), then `sudo gw run`. Because the "
           "CA key is unchanged, existing nodes keep trusting it — no re-root.")
+    return 0
+
+
+def _do_handoff(unit, *, stop_local, start_remote, remote_active, start_local) -> bool:
+    """The atomic core of an anchor transfer: stop the local anchor, start the
+    remote one, verify it came up. If it DIDN'T, restart the local anchor (roll
+    back) — there is only ever one live anchor, and a failed transfer must leave
+    the ORIGINAL running. Pure orchestration over injected steps, so the ordering
+    and the rollback are unit-testable. Returns True iff the remote took over."""
+    stop_local(unit)
+    if start_remote(unit) and remote_active(unit):
+        return True
+    start_local(unit)                 # rollback: the original anchor is back up
+    return False
+
+
+def cmd_anchor_transfer(args) -> int:
+    """[sudo, anchor] Hand the anchor role to another host over SSH — SAME CA, no
+    re-root. The target ASSUMES this anchor's identity (CA + registry + overlay
+    address), so the fleet reconnects to it automatically; this host is stopped as
+    part of the handoff (there is only ever ONE live anchor).
+
+    SSH is the transport by design: the encrypted state rides YOUR channel, so
+    the CA never touches the greasewood wire. Give a plain SSH destination — SSH
+    over the underlay sidesteps mesh port enforcement. Requires greasewood on the
+    target, systemd on both, and passwordless sudo to the target."""
+    import secrets
+    import shlex
+    import time
+    from .config import load_config, membership_key
+
+    _require_root("anchor-transfer", "it moves the CA key and stops the local anchor")
+    cfg = load_config(Path(args.config))
+    if cfg.role != "anchor":
+        sys.exit("anchor-transfer must be run on the anchor (role = anchor)")
+    if cfg.ca_key_file is None:
+        sys.exit("anchor-transfer requires ca_key_file in [anchor]")
+    if not _systemd_available():
+        sys.exit("anchor-transfer orchestrates the handoff via systemd, not running "
+                 "here. Do it by hand:\n"
+                 "  gw anchor-backup - | ssh <dest> sudo gw anchor-restore - --data-dir <dir>\n"
+                 "  copy your config over, stop the daemon here, start it there.")
+
+    dest = args.dest
+    key = membership_key(cfg.mesh_domain)
+    unit = f"greasewood@{key}"
+    cfg_path = Path(args.config)
+    remote_cfg = f"/etc/greasewood_{key}.toml"
+    remote_data = f"/var/lib/greasewood_{key}"
+    ssh = ["ssh"] + shlex.split(args.ssh_opts or "") + [dest]
+
+    def rssh(remote, **kw):
+        return subprocess.run(ssh + [remote], **kw)
+
+    # --- preflight (change nothing until every check passes) ---
+    if rssh("true", capture_output=True).returncode != 0:
+        sys.exit(f"cannot SSH to {dest} — check the address and your key/agent.")
+    if rssh("command -v gw >/dev/null 2>&1", capture_output=True).returncode != 0:
+        sys.exit(f"greasewood (gw) is not installed on {dest} — install it there first.")
+    if (rssh(f"sudo test -e {remote_data}/ca.key", capture_output=True).returncode == 0
+            and not args.force):
+        sys.exit(f"{dest} already holds an anchor at {remote_data}/ca.key. "
+                 "Pass --force to overwrite it.")
+
+    if not args.yes:
+        print(f"Transfer this anchor to {dest}:")
+        print("  • copy the encrypted CA + registry + config over SSH")
+        print(f"  • STOP the anchor here ({unit}), START it on {dest}")
+        print(f"  • {dest} takes this anchor's identity — the fleet reconnects, no re-root")
+        print("  • this host becomes a stopped standby")
+        if input("Proceed? [y/N] ").strip().lower() != "y":
+            sys.exit("aborted — nothing changed.")
+
+    # --- move state + config (SSH is the secure channel; CA never on the mesh) ---
+    pw = secrets.token_urlsafe(32)           # ephemeral: guards the blob in flight
+    print(f"→ transferring encrypted state to {dest} …")
+    backup = subprocess.Popen(
+        [sys.executable, "-m", "greasewood", "-c", str(cfg_path), "anchor-backup", "-"],
+        stdout=subprocess.PIPE, env={**os.environ, "GW_BACKUP_PASSPHRASE": pw})
+    restore = subprocess.run(
+        ssh + [f"sudo env GW_BACKUP_PASSPHRASE={shlex.quote(pw)} gw anchor-restore - "
+               f"--data-dir {remote_data} --force"],
+        stdin=backup.stdout, capture_output=True, text=True)
+    backup.stdout.close()
+    backup.wait()
+    if backup.returncode or restore.returncode:
+        sys.exit(f"state transfer failed (nothing changed here):\n{restore.stderr.strip()}")
+    with open(cfg_path, "rb") as f:          # the config too (B assumes this identity)
+        cp = subprocess.run(ssh + [f"sudo tee {remote_cfg} >/dev/null"],
+                            stdin=f, capture_output=True, text=True)
+    if cp.returncode:
+        sys.exit(f"could not copy the config to {dest} (nothing changed here):\n"
+                 f"{cp.stderr.strip()}")
+
+    # --- HANDOFF: stop here → start there → verify, roll back on failure ---
+    print(f"→ handing off: stop {unit} here, start it on {dest} …")
+
+    def remote_active(u):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if rssh(f"systemctl is-active --quiet {u}", capture_output=True).returncode == 0:
+                return True
+            time.sleep(1)
+        return False
+
+    ok = _do_handoff(
+        unit,
+        stop_local=lambda u: subprocess.run(["systemctl", "stop", u]),
+        start_remote=lambda u: rssh(f"sudo systemctl enable --now {u}",
+                                    capture_output=True).returncode == 0,
+        remote_active=remote_active,
+        start_local=lambda u: subprocess.run(["systemctl", "start", u]),
+    )
+    if not ok:
+        sys.exit(f"⚠ {dest} did not come up as the anchor — ROLLED BACK; this anchor "
+                 "is running again. Check the target (journalctl -eu " + unit + ") "
+                 "and retry.")
+
+    subprocess.run(["systemctl", "disable", unit], capture_output=True)  # no auto-restart
+    print(f"✓ anchor transferred to {dest} — same CA, the fleet reconnects, no re-root.")
+    print(f"  This host is stopped and won't auto-start. Decommission when ready: "
+          "sudo gw purge")
     return 0
 
 
@@ -3884,19 +4015,34 @@ def main(argv=None) -> int:
                              "or $GW_BACKUP_PASSPHRASE)")
     sp.add_argument("--out", default=None, metavar="PATH",
                     help="output file (default: <data_dir>/greasewood-anchor-backup-"
-                         "<hostname>.gwbk)")
+                         "<hostname>.gwbk); '-' streams the blob to stdout (for a pipe)")
     sp.set_defaults(fn=cmd_anchor_backup)
 
     # anchor-restore
     sp = sub.add_parser("anchor-restore",
                         help="[sudo] restore an anchor backup into a data dir (stand "
                              "up a replacement anchor on the same CA key — not a re-root)")
-    sp.add_argument("archive", help="the .gwbk backup file")
+    sp.add_argument("archive", help="the .gwbk backup file, or '-' to read from stdin")
     sp.add_argument("--data-dir", default="/var/lib/greasewood",
                     help="where to restore (default: /var/lib/greasewood)")
     sp.add_argument("--force", action="store_true",
                     help="overwrite an existing ca.key in the target dir")
     sp.set_defaults(fn=cmd_anchor_restore)
+
+    # anchor-transfer
+    sp = sub.add_parser("anchor-transfer",
+                        help="[sudo, anchor] hand the anchor role to another host over "
+                             "SSH — same CA, no re-root; stops this anchor as part of "
+                             "the handoff. The target assumes this anchor's identity.")
+    sp.add_argument("dest", metavar="[user@]host",
+                    help="SSH destination of the target (a plain underlay address is "
+                         "best — SSH over the underlay sidesteps mesh port enforcement)")
+    sp.add_argument("--ssh-opts", default=None,
+                    help="extra options passed to ssh (e.g. '-p 2222 -i key')")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite an existing anchor on the target")
+    sp.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
+    sp.set_defaults(fn=cmd_anchor_transfer)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
