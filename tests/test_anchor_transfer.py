@@ -80,3 +80,27 @@ def test_transfer_refuses_without_systemd(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_systemd_available", lambda: False)
     with pytest.raises(SystemExit, match="systemd"):
         cli.cmd_anchor_transfer(_args(_cfg(tmp_path)))
+
+
+def test_dest_overlay_guard_classifies():
+    cfg = types.SimpleNamespace(mesh_domain="pm.internal",
+                                overlay_prefix="fd8d:e5c1:db1a:7::")
+    # OVERLAY (refuse): mesh-domain name, or an IPv6 in the mesh's overlay /64
+    assert cli._dest_is_overlay("db1.pm.internal", cfg)
+    assert cli._dest_is_overlay("root@db1.pm.internal", cfg)
+    assert cli._dest_is_overlay("fd8d:e5c1:db1a:7::5", cfg)
+    assert cli._dest_is_overlay("[fd8d:e5c1:db1a:7::5]", cfg)
+    # UNDERLAY (allow): real address / external name / a DIFFERENT ULA (underlay)
+    assert not cli._dest_is_overlay("10.0.0.9", cfg)
+    assert not cli._dest_is_overlay("newbox.example.com", cfg)
+    assert not cli._dest_is_overlay("fd52:ba5e::5", cfg)     # different ULA = underlay
+    assert not cli._dest_is_overlay("user@2001:db8::1", cfg)
+
+
+def test_transfer_refuses_an_overlay_dest(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "_systemd_available", lambda: True)
+    args = _args(_cfg(tmp_path))
+    args.dest = "anchor.pm.internal"                          # an overlay name
+    with pytest.raises(SystemExit, match="OVERLAY"):
+        cli.cmd_anchor_transfer(args)

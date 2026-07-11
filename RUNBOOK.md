@@ -293,9 +293,17 @@ sudo gw anchor-transfer newbox.example.com
 
 **SSH is the transport by design.** The encrypted state rides *your* channel, so
 the CA never touches the greasewood wire — the "no CA over the mesh" property
-holds. Give a plain **underlay** address: SSH over the underlay sidesteps the
-mesh's own port enforcement (over the overlay, SSH/22 would be dropped on a
-tightened mesh unless granted).
+holds.
+
+**Use the target's UNDERLAY (out-of-band) address — not its overlay/mesh
+address.** The target assumes this anchor's overlay *identity and address*, so
+the handoff can't ride the overlay it's changing: the address would move out from
+under the SSH connection mid-transfer, and both hosts would briefly claim it (the
+command refuses an obviously-overlay destination). This is the right posture for
+a root-of-trust move anyway — you want an out-of-band channel that doesn't depend
+on the mesh you're reconfiguring. **If you run overlay-only SSH** (the ideal
+posture — only the WireGuard port open on the underlay), open underlay SSH to the
+target for the rare transfer window, then close it again.
 
 What it does, in order (nothing changes until every preflight passes):
 1. checks the target is SSH-reachable, has `gw` installed, and holds no anchor;
