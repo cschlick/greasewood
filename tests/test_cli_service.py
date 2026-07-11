@@ -106,6 +106,7 @@ def test_membership_service_manual_without_template(units, monkeypatch):
 
 
 def test_guidance_default_installs_and_reports(units, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_systemd_available", lambda: True)   # hermetic vs the host
     monkeypatch.setattr(cli, "_write_service_template", lambda *a: "/bin/systemctl")
     monkeypatch.setattr(cli, "_membership_service", lambda key: "active")
     cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
@@ -114,6 +115,7 @@ def test_guidance_default_installs_and_reports(units, monkeypatch, capsys):
 
 
 def test_guidance_reports_crash(units, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_systemd_available", lambda: True)   # hermetic vs the host
     monkeypatch.setattr(cli, "_write_service_template", lambda *a: "/bin/systemctl")
     monkeypatch.setattr(cli, "_membership_service", lambda key: "failed")
     cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
