@@ -13,7 +13,7 @@ import time
 import pytest
 
 from .conftest import _ENROLL_LOCK, _extract_token, overlay_addr_from_id_pub
-from .helpers import container_ipv6, pexec, podman, wait_for_ping
+from .helpers import container_ipv6, pexec, podman, wait_for_ping, wait_for_control_plane
 
 pytestmark = pytest.mark.integration
 
@@ -35,6 +35,12 @@ def _bring_up_anchor(cid, ipv6, hostname, prefix, mesh_name=None):
     overlay = overlay_addr_from_id_pub(
         pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip(), prefix)
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
+    # Wait for the control plane before returning — the caller invites right
+    # after, and gw invite needs the daemon answering on loopback. (The gw_anchor
+    # fixture and make_anchor both do this; this helper was missing it, so a
+    # slower/loaded runner would race the bind and the invite would fail.)
+    assert wait_for_control_plane(cid, timeout=20), \
+        "anchor daemon control plane did not come up"
     return overlay
 
 
