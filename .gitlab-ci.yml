@@ -17,3 +17,49 @@ variables:
   SECRET_DETECTION_ENABLED: 'true'
 secret_detection:
   stage: secret-detection
+
+# ---------------------------------------------------------------------------
+# Cross-distro install + unit tests.
+#
+# For each distro image: run install.sh (the REAL per-distro dependency +
+# venv + symlink path — package managers, python3-venv, wireguard-tools) then
+# the unit suite against the resulting /opt/greasewood venv. This is the layer
+# where packaging bugs live (e.g. the python3-venv ensurepip detection).
+#
+# SCOPE: containers share the HOST kernel and its LSM policy, so this does NOT
+# faithfully test kernel WireGuard or AppArmor/SELinux confinement (the class
+# of bug behind the wg /dev/stdin fix) — that needs real per-distro VMs, a
+# separate tier (Vagrant/libvirt, or reuse pmdeploy to spin up cloud VMs and
+# run tests/integration). Fedora/Rocky also bring SELinux, untested here.
+# ---------------------------------------------------------------------------
+.distro-test:
+  stage: test
+  image: $DISTRO
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+  rules:                                   # heavy — MRs + the two branch heads
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "macos"'
+  before_script:
+    - sh scripts/ci-distro-bootstrap.sh    # python3 >= 3.11 + git (NOT wg/venv)
+  script:
+    - ./install.sh                         # container runs as root → no sudo
+    - gw --version
+    - /opt/greasewood/bin/pip install --quiet pytest hypothesis
+    - /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -q
+
+distro-test:
+  extends: .distro-test
+  parallel:
+    matrix:
+      - DISTRO: [debian:12, debian:13, ubuntu:22.04, ubuntu:24.04,
+                 fedora:41, archlinux:latest]
+
+distro-test-experimental:
+  extends: .distro-test
+  allow_failure: true                      # surface gaps without blocking the pipeline
+  parallel:
+    matrix:
+      # rocky/opensuse: less-exercised pkg paths (dnf python3.12, zypper).
+      # alpine: install.sh has no apk branch yet → expected to fail until added.
+      - DISTRO: [rockylinux:9, opensuse/tumbleweed, alpine:latest]
