@@ -356,6 +356,55 @@ def _advertised_endpoints(explicit: "str | None", listen_port: int,
     return eps
 
 
+def _enforce_ports_default() -> bool:
+    """The enforce_ports value to write into a fresh config (create/join): on
+    iff nftables is usable on this host right now. An nft-less host is written
+    `enforce_ports = false` explicitly, so its daemon never trips the startup
+    guard — the restart-loop this avoids."""
+    from .portfilter import nft_usable
+    if nft_usable():
+        return True
+    log.warning("nftables not usable here — writing enforce_ports = false "
+                "(port scopes advisory; grants still gate which tunnels exist). "
+                "Install nftables and set enforce_ports = true to enforce ports.")
+    return False
+
+
+def _make_port_enforcer(cfg, args, grant_policy):
+    """Decide port enforcement for `gw run`: return a PortFilter (enforcing) or
+    None (unenforced). `gw create`/`gw join` write [network] enforce_ports
+    explicitly (on iff nftables was usable then); --no-enforce-ports overrides
+    for this run.
+
+    Crucially this NEVER raises or exits on a missing/broken nftables — it
+    degrades to None with a loud error. Exiting here would be a systemd restart
+    loop that never resolves (exactly the bug an nft-less host hit). The default
+    policy is fully open, so an unenforced node still peers normally; grants
+    still gate which tunnels exist, only per-port scopes drop to advisory."""
+    if not (cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)):
+        log.info("port enforcement OFF (enforce_ports=false): grants still "
+                 "control which tunnels exist; port scopes are advisory")
+        return None
+    from .portfilter import (PortFilter, NftUnavailable, ensure_available,
+                             table_name)
+    from .config import membership_key
+    try:
+        ensure_available()
+    except NftUnavailable as e:
+        log.error("port enforcement requested (enforce_ports=true) but "
+                  "nftables is unusable: %s", e)
+        log.error("running WITHOUT port enforcement to avoid a crash loop — "
+                  "install nftables, or set `enforce_ports = false` under "
+                  "[network] in %s to make this the intended state.",
+                  getattr(args, "config", "the config"))
+        return None
+    log.info("port enforcement ON: greasewood's own nftables table on %s "
+             "(default policy is fully open until grants tighten it)",
+             cfg.wg_interface)
+    return PortFilter(table_name(membership_key(cfg.mesh_domain)),
+                      cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy)
+
+
 def cmd_create(args) -> int:
     _require_root("create")
     from .hosts import valid_label as _vl
@@ -448,7 +497,7 @@ def cmd_create(args) -> int:
         overlay_prefix=overlay_prefix, seeds=[],
         root_url=f"http://[::1]:{control_port}",
         hosts_sync=getattr(args, "hosts_sync", True), mesh_domain=mesh_domain,
-        trusted_pubs=[ca_pub_hex],
+        trusted_pubs=[ca_pub_hex], enforce_ports=_enforce_ports_default(),
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
                 "door_port": args.door_port}))
@@ -1505,7 +1554,8 @@ def cmd_join(args) -> int:
         overlay_prefix=overlay_prefix,
         seeds=[anchor_overlay_url] if anchor_overlay_url else [],
         root_url=anchor_overlay_url or "", hosts_sync=hosts_sync,
-        mesh_domain=mesh_domain, trusted_pubs=[ca_pub_hex]))
+        mesh_domain=mesh_domain, trusted_pubs=[ca_pub_hex],
+        enforce_ports=_enforce_ports_default()))
     log.info("wrote config → %s", cfg_path)
 
     print(f"\nNode enrolled successfully.")
@@ -1783,6 +1833,7 @@ def cmd_anchor_promote(args) -> int:
         listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
         seeds=cfg.seeds, root_url=cfg.root_url, hosts_sync=cfg.hosts_sync,
         mesh_domain=cfg.mesh_domain, trusted_pubs=trusted,
+        enforce_ports=cfg.enforce_ports,      # preserve the operator's choice
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
                 "door_port": cfg.door_port}))
@@ -2501,34 +2552,7 @@ def cmd_run(args) -> int:
                                  push_to=cfg.seeds, quiet_push=True):
             log.debug("published reachable set (%d live links)", len(reachable))
 
-    # Per-port enforcement of the grant table is ON by default (config
-    # [network] enforce_ports, default true; --no-enforce-ports overrides for
-    # this run). The default policy is fully open (* -> * : *), so a fresh mesh
-    # behaves like a flat mesh until grants tighten it. If enforcement is on and
-    # nftables is unusable, refuse LOUDLY — never run silently unenforced (fail
-    # closed); an nft-less host sets enforce_ports = false to opt out explicitly.
-    enforce = cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)
-    port_enforcer = None
-    if enforce:
-        from .portfilter import (PortFilter, NftUnavailable, ensure_available,
-                                 table_name)
-        from .config import membership_key
-        try:
-            ensure_available()
-        except NftUnavailable as e:
-            sys.exit(f"port enforcement (on by default): {e}\n"
-                     f"To run this node WITHOUT enforcement, set "
-                     f"`enforce_ports = false` under [network] in {args.config} "
-                     f"(or pass --no-enforce-ports for a one-off).")
-        port_enforcer = PortFilter(
-            table_name(membership_key(cfg.mesh_domain)), cfg.wg_interface,
-            _control_port(cfg), cfg.caps, grant_policy)
-        log.info("port enforcement ON: greasewood's own nftables table on %s "
-                 "(default policy is fully open until grants tighten it)",
-                 cfg.wg_interface)
-    else:
-        log.info("port enforcement OFF (enforce_ports=false): grants still "
-                 "control which tunnels exist; port scopes are advisory")
+    port_enforcer = _make_port_enforcer(cfg, args, grant_policy)
 
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
