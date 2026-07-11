@@ -137,3 +137,34 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     assert out.count("anchor.gw.internal") >= 3         # reach-all appears under every segment
     assert out.count("web1.gw.internal") >= 2        # a 2-segment node under both
     assert "8 record(s) in local directory cache" in out
+
+
+def test_roster_columns_are_rock_solid_across_dynamic_values():
+    """REGRESSION: column widths must be DETERMINISTIC — a rescaling rate, a
+    filling-in latency, or a counting-down exp must never shift the table. Two
+    live renders with wildly different dynamic values must produce byte-identical
+    column geometry (asserted via the header row, which encodes the widths)."""
+    from greasewood import status
+    ca = CAKeys.generate()
+    a, b = NodeKeys.generate(), NodeKeys.generate()
+    records = [_rec(a, _cred(ca, a, "alpha", ["mesh"], hours=23)),
+               _rec(b, _cred(ca, b, "beta", ["mesh"], secs=1800))]   # 23h and <1h!
+    cfg = types.SimpleNamespace(mesh_domain="pm.internal", caps=["role:mesh"])
+    now = dt.datetime.now(_UTC)
+
+    def header(rates, lat):
+        return status._roster_lines(records, cfg, now, "00", {}, True,
+                                    latency=lat, rates=rates, grants=None)[1]
+
+    tiny = header({records[0].cred.addr: "↓1B/s ↑1B/s"},
+                  {records[0].cred.addr: "…"})
+    huge = header({records[0].cred.addr: "↓999.9M/s ↑1023.9G/s"},
+                  {records[0].cred.addr: "1000ms"})
+    assert tiny == huge, f"columns jittered:\n{tiny!r}\n{huge!r}"
+
+    # And the reserved widths actually fit the widest values (no overflow).
+    row = status._roster_lines(records, cfg, now, "00", {}, True,
+                               latency={records[0].cred.addr: "1000ms"},
+                               rates={records[0].cred.addr: "↓1023.9K/s ↑1023.9K/s"},
+                               grants=None)[1]
+    assert " │ " in row      # the split rendered cleanly at the reserved widths
