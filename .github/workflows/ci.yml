@@ -41,7 +41,7 @@ jobs:
           - opensuse/tumbleweed
           - alpine:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: install.sh + unit suite
         run: |
           docker run --rm -v "$PWD:/src:ro" "${{ matrix.distro }}" sh -c '
