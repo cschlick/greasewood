@@ -85,16 +85,24 @@ PY
 
 # --- runtime dependencies (idempotent: only act on what's missing) ---------
 install_deps_linux() {
-    local need_wg=1 need_venv=1
+    local need_wg=1 need_venv=1 pyver
+    pyver=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
     command -v wg >/dev/null 2>&1 && need_wg=0
-    # Debian ships python3 without ensurepip/venv — probe it explicitly.
-    "$PY" -m venv --help >/dev/null 2>&1 && need_venv=0
+    # Probe ENSUREPIP, not `venv --help`: on Debian `python3 -m venv --help`
+    # works without the python3-venv package, but actually CREATING a venv then
+    # fails ("ensurepip is not available"). ensurepip is what venv needs to
+    # bootstrap pip, and what python3-venv provides — so it's the honest check.
+    "$PY" -c "import ensurepip" >/dev/null 2>&1 && need_venv=0
     [ "$need_wg" -eq 0 ] && [ "$need_venv" -eq 0 ] && { say "runtime deps present (wg, venv)"; return; }
 
     say "installing runtime deps (wireguard-tools, nftables, python venv)"
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
         apt-get install -y wireguard-tools nftables python3-venv
+        # $PY may be a NON-default interpreter (find_python prefers python3.13…)
+        # whose venv/ensurepip lives in a version-specific package that
+        # python3-venv doesn't pull. Best-effort — the name may not exist.
+        apt-get install -y "python${pyver}-venv" 2>/dev/null || true
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y wireguard-tools nftables
     elif command -v yum >/dev/null 2>&1; then
@@ -108,6 +116,9 @@ install_deps_linux() {
         warn "python3 with venv) yourself, then re-run."
     fi
     command -v wg >/dev/null 2>&1 || die "'wg' still not found after dep install — install wireguard-tools manually"
+    "$PY" -c "import ensurepip" >/dev/null 2>&1 || die \
+        "python venv still unavailable for $PY after install — install the venv
+   package for it (python3-venv, or python${pyver}-venv on Debian) and re-run."
 }
 
 install_deps_macos() {
