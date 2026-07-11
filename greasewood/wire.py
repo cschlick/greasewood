@@ -8,8 +8,8 @@ Credential (CA-signed, §5.1):
   The only thing the CA ever signs. Short-lived (~24h). Slow path.
 
 NodeRecord (self-signed by id_priv, §5.2):
-  id_pub, seq, endpoints, cred (+ optional aliases/reachable, + the vestigial
-  inbound) → sig covers all of these; hostname lives inside cred.
+  id_pub, seq, endpoints, cred (+ optional aliases/reachable) → sig covers all
+  of these; hostname lives inside cred.
   Carries the full credential so any reader can verify without talking to the CA.
   Fast path — a node re-signs when its endpoints/links change, no CA involvement.
 
@@ -184,13 +184,6 @@ class NodeRecord:
     seq: int             # monotonic; merge takes highest per id_pub
     endpoints: list[str] # ["[v6addr]:port", ...]
     cred: Credential
-    # VESTIGIAL — always "yes"; nothing reads or sets it. It MUST stay in the
-    # signed body: it was there historically, so removing it changes _body_dict
-    # and every record signed before the change fails its self-signature — a
-    # live mesh partitions until every node re-signs. Only drop it as a
-    # deliberate fleet migration (accept-both verify → re-sign all → remove),
-    # never as a casual cleanup.
-    inbound: str = "yes"
     aliases: list[str] = field(default_factory=list)
     # Overlay addresses this node currently has a LIVE link to (recent handshake,
     # not backed off). Self-observed, rate-limited, optional (omitted from the
@@ -211,7 +204,6 @@ class NodeRecord:
             "cred": self.cred.to_dict(),
             "endpoints": self.endpoints,
             "id_pub": _b64e(self.id_pub),
-            "inbound": self.inbound,       # vestigial, but load-bearing for the signature
             "seq": self.seq,
         }
         # Extra service names the node publishes, as bare labels under its OWN
@@ -297,7 +289,6 @@ class NodeRecord:
             id_pub=_b64d(d["id_pub"]),
             seq=d["seq"],
             endpoints=_str_list(d["endpoints"], "endpoints"),
-            inbound=d.get("inbound", "yes"),  # vestigial; kept for signature stability
             cred=Credential.from_dict(d["cred"]),
             aliases=_str_list(d.get("aliases", []), "aliases"),
             reachable=_str_list(d.get("reachable", []), "reachable"),
