@@ -334,7 +334,7 @@ class ReconcileLoop(Loop):
         interval: float = 5.0,
         policy: Policy = default_policy,
         hosts_domain: str | None = None,
-        local_families: "set[int] | None" = None,
+        get_local_families: "Callable[[], set[int] | None] | None" = None,
         ensure_iface: "Callable[[], None] | None" = None,
         data_dir: "Path | None" = None,
         on_reachable: "Callable[[list[str]], None] | None" = None,
@@ -360,9 +360,13 @@ class ReconcileLoop(Loop):
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
-        # Underlay families this node can originate on, for peer-endpoint
-        # selection (v4/v6). None → pick the first advertised endpoint.
-        self._local_families = local_families
+        # Which underlay families this node can originate on (v4/v6), for
+        # peer-endpoint selection. Resolved EACH CYCLE (like the CA/revoke
+        # callables below), NOT captured once: a laptop that loses IPv6 mid-run
+        # (moved to a v4-only network) must re-detect and fall back to a peer's
+        # v4 endpoint without a restart — otherwise it keeps dialing the now-dead
+        # v6 and is stranded. None callable / None result → keep all endpoints.
+        self._get_local_families = get_local_families
         # Both callables, resolved each cycle. The trusted-CA set is static in
         # practice (from config), but the revoke list changes at runtime when
         # the operator runs `gw revoke` — capturing it once would mean an anchor
@@ -436,7 +440,7 @@ class ReconcileLoop(Loop):
                 self._get_ca_pubs(),
                 self._get_revoked(),
                 self._policy,
-                self._local_families,
+                self._get_local_families() if self._get_local_families else None,
                 endpoint_tracker=self._endpoint_tracker,
             )
         except Exception as e:

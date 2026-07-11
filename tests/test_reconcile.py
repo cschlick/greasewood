@@ -551,6 +551,27 @@ class TestLoopResilience:
         loop._tick()
         assert published == [["fd8d::1"]]     # the success path actually ran
 
+    def test_local_families_reresolved_each_cycle(self, monkeypatch):
+        """REGRESSION: a node that loses IPv6 mid-run (v4-only network) must
+        re-detect its families each cycle and fall back to peers' v4 endpoints —
+        NOT stay stranded dialing a dead v6. The loop must call get_local_families
+        every tick, not capture it once."""
+        from greasewood.reconcile import ReconcileLoop
+        monkeypatch.setattr(reconcile.wgmod, "interface_exists",
+                            lambda iface: True, raising=False)
+        seen = []
+        monkeypatch.setattr(reconcile, "reconcile_once",
+                            lambda *a, **k: (seen.append(a[7]), ([], []))[1])
+        fams = {"v": {4, 6}}                   # start dual-stack
+        loop = ReconcileLoop(iface="gw-x", directory=Directory(),
+                             local_id_pub=b"x" * 32, local_caps=[],
+                             get_ca_pubs=lambda: [], get_revoked=lambda: set(),
+                             get_local_families=lambda: fams["v"])
+        loop._tick()
+        fams["v"] = {4}                        # IPv6 goes away between ticks
+        loop._tick()
+        assert seen == [{4, 6}, {4}]           # each cycle used the CURRENT families
+
 
 class TestUnreadableLiveState:
     """A transient `wg show dump` failure (get_peers → None) must NOT be acted on
