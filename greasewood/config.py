@@ -40,6 +40,11 @@ class Config:
     # write grants. Set false ONLY on a host without usable nftables — the
     # daemon otherwise refuses to start rather than run silently unenforced.
     enforce_ports: bool
+    # Re-detect this node's advertised underlay endpoint(s) periodically and
+    # re-advertise when they change (e.g. an IPv6 prefix renumbering swaps the
+    # stable GUA). false pins them — set when the operator gave an explicit
+    # --endpoint, which auto-detection must never override.
+    endpoint_auto: bool
     # Extra service names this node publishes into the mesh's /etc/hosts, as
     # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
     # `gw cert-request` appends one automatically for a subdomain --san.
@@ -130,6 +135,7 @@ def render_config(*, hostname: str, data_dir, role: str, caps: list,
                   listen_port: int, overlay_prefix: str, seeds: list,
                   root_url: str, hosts_sync: bool, mesh_domain: str,
                   trusted_pubs: list, enforce_ports: bool = True,
+                  endpoint_auto: bool = True,
                   anchor: "dict | None" = None) -> str:
     """The ONE writer of /etc/greasewood_<name>.toml — create, join, and
     anchor-promote all render through it, so a config field is added in exactly
@@ -142,6 +148,9 @@ hostname = "{hostname}"
 data_dir = "{data_dir}"
 role = "{role}"
 caps = {json.dumps(list(caps))}{endpoint_line}
+# Re-detect the advertised endpoint(s) each cycle and re-advertise on change
+# (e.g. an IPv6 prefix renumbering). false = pinned (an explicit --endpoint).
+endpoint_auto = {"true" if endpoint_auto else "false"}
 
 [network]
 interface = "{interface}"
@@ -208,6 +217,7 @@ def load_config(path: Path) -> Config:
         # grants reference roles like this one.
         caps=node.get("caps", ["role:mesh"]),
         endpoints=node.get("endpoints", []),
+        endpoint_auto=bool(node.get("endpoint_auto", True)),
 
         wg_interface=net.get("interface", "gw-mesh"),
         listen_port=int(net.get("listen_port", 51900)),

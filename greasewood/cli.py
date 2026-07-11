@@ -536,6 +536,7 @@ def cmd_create(args) -> int:
         root_url=f"http://[::1]:{control_port}",
         hosts_sync=getattr(args, "hosts_sync", True), mesh_domain=mesh_domain,
         trusted_pubs=[ca_pub_hex], enforce_ports=_enforce_ports_default(),
+        endpoint_auto=(args.endpoint is None),   # pinned iff --endpoint was given
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
                 "door_port": args.door_port}))
@@ -1593,7 +1594,8 @@ def cmd_join(args) -> int:
         seeds=[anchor_overlay_url] if anchor_overlay_url else [],
         root_url=anchor_overlay_url or "", hosts_sync=hosts_sync,
         mesh_domain=mesh_domain, trusted_pubs=[ca_pub_hex],
-        enforce_ports=_enforce_ports_default()))
+        enforce_ports=_enforce_ports_default(),
+        endpoint_auto=(args.endpoint is None)))   # pinned iff --endpoint was given
     log.info("wrote config → %s", cfg_path)
 
     print(f"\nNode enrolled successfully.")
@@ -1871,7 +1873,8 @@ def cmd_anchor_promote(args) -> int:
         listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
         seeds=cfg.seeds, root_url=cfg.root_url, hosts_sync=cfg.hosts_sync,
         mesh_domain=cfg.mesh_domain, trusted_pubs=trusted,
-        enforce_ports=cfg.enforce_ports,      # preserve the operator's choice
+        enforce_ports=cfg.enforce_ports,          # preserve the operator's choices
+        endpoint_auto=cfg.endpoint_auto,
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
                 "door_port": cfg.door_port}))
@@ -2690,6 +2693,26 @@ def cmd_run(args) -> int:
         cert_renewal.start()
         log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
 
+    # Advertised-endpoint auto-refresh: re-detect our public endpoint(s) and
+    # re-advertise on a REAL change (an IPv6 prefix renumbering swaps the stable
+    # GUA; a v6→v4 move). Detection prefers the stable address, so privacy-
+    # extension rotation never trips it and steady state is a no-op. Opt-out with
+    # [node] endpoint_auto=false — set when the operator pinned an --endpoint.
+    endpoint_loop = None
+    if cfg.endpoint_auto:
+        from .endpoints import EndpointLoop
+        def _current_endpoints():
+            own = directory.get(keys.id_pub_hex)
+            return list(own.endpoints) if own else list(eff_endpoints)
+        endpoint_loop = EndpointLoop(
+            detect=lambda: _advertised_endpoints(None, cfg.listen_port),
+            current=_current_endpoints,
+            republish=lambda eps: _republish_own_record(
+                cfg, keys, directory, endpoints=eps, push_to=cfg.seeds),
+        )
+        endpoint_loop.start()
+        log.info("endpoint auto-refresh on (re-advertise on address change)")
+
     # Startup fully succeeded (interface up, control plane up, loops running) —
     # forget any death breadcrumb from a prior failed boot so `gw watch` stops
     # reporting a stale fatal reason.
@@ -2715,6 +2738,8 @@ def cmd_run(args) -> int:
         renewal.stop()
     if cert_renewal:
         cert_renewal.stop()
+    if endpoint_loop:
+        endpoint_loop.stop()
     if door_watcher:
         door_watcher.stop()
     log.info("shutdown complete")

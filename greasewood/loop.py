@@ -1,8 +1,9 @@
 """
 greasewood.loop — the ONE shape for the daemon's background loops.
 
-The daemon runs five: reconcile, directory sync, credential renewal, TLS-cert
-renewal, and the door watcher. Loop owns the lifecycle they all share — a
+The daemon runs several: reconcile, directory sync, credential renewal, TLS-cert
+renewal, endpoint auto-refresh, and the door watcher. Loop owns the lifecycle
+they all share — a
 stop event, start() returning the thread, and a run() that ticks on an
 interval with a catch-all — so "how do background loops behave" is a one-file
 answer, and no loop can silently die on an exception escaping its tick (a
