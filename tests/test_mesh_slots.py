@@ -142,7 +142,7 @@ def test_token_carries_mesh_domain_roundtrip():
     from greasewood.door import encode_token, decode_token
     tok = encode_token(b"\x01" * 32, b"\x02" * 32, "203.0.113.9", b"\x03" * 32,
                        51901, mesh_domain="prod-fleet.internal")
-    *_, domain = decode_token(tok)
+    *_, domain, _menu = decode_token(tok)
     assert domain == "prod-fleet.internal"
 
 
