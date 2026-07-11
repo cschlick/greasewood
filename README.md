@@ -906,6 +906,7 @@ port scopes go advisory.
 | `renew-all`        | no    | On the anchor: request a fleet-wide renewal (advertise `renew_after=now`; cooperating nodes renew, jittered so the anchor's rate stays ~constant with mesh size). |
 | `anchor-backup`       | no    | On the anchor: write one passphrase-encrypted archive of the CA key, node registry, revoke list, door key, and anchor identity. Store it offline. |
 | `anchor-restore`      | yes   | Restore a `anchor-backup` archive onto a replacement host (same CA key → a restore, not a re-root). |
+| `anchor-transfer <host>` | yes | On the anchor: hand the anchor role to another host **over SSH** (same CA → no re-root; the CA never touches the mesh). Streams the encrypted state, copies the config, then stops here / starts there / verifies — rolling back if the target doesn't come up. See the [RUNBOOK SOP](RUNBOOK.md). |
 | `purge`            | yes   | Remove all greasewood state from this machine.            |
 
 Global flags: `-c/--config FILE` (default: discovered — with one mesh on the host every command finds its config unaided; with several, gw lists them and asks for `-c`) and

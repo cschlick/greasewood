@@ -181,9 +181,14 @@ changes — but the door key is otherwise disposable.
 
 ## SOP: move the CA to a new key (re-root)
 
-Moving the anchor/CA is a **re-root**: get the fleet to trust a new CA key,
-re-issue every node under it, drop the old key. `trusted_pubs` is a *set*, so you
-trust both during an overlap window and it's non-disruptive.
+> **Just moving the anchor to another box?** If you're keeping the *same* CA (a
+> hardware refresh / migration, not a key rotation), you want a **transfer**, not
+> a re-root — one command, no fleet trust change: see *transfer the anchor to
+> another host* below. Re-root (here) is for changing the CA **key itself**.
+
+A re-root (new CA **key**): get the fleet to trust a new CA key, re-issue every
+node under it, drop the old key. `trusted_pubs` is a *set*, so you trust both
+during an overlap window and it's non-disruptive.
 
 ### Graceful migration (old CA still available) — anchor A → anchor B
 
@@ -273,6 +278,41 @@ Notes: new join tokens carry the new name immediately, so nodes enrolled
 mid-rename land on the new domain directly. `--interface` is the one artifact
 that can collide after the 15-char kernel truncation for very long names —
 `rename-mesh` refuses loudly and tells you to pass an explicit interface if so.
+
+## SOP: transfer the anchor to another host (planned) — `gw anchor-transfer`
+
+Moving a *healthy* anchor to a new box (hardware refresh, migration) is a
+**same-CA transfer, not a re-root** — the target ASSUMES this anchor's identity
+(CA + registry + overlay address), so the fleet reconnects to it automatically
+with no `trusted_pubs`/`root_url` change. One command orchestrates it over SSH:
+
+```
+sudo gw anchor-transfer newbox.example.com
+# or: sudo gw anchor-transfer user@10.0.0.9 --ssh-opts '-p 2222 -i ~/.ssh/id'
+```
+
+**SSH is the transport by design.** The encrypted state rides *your* channel, so
+the CA never touches the greasewood wire — the "no CA over the mesh" property
+holds. Give a plain **underlay** address: SSH over the underlay sidesteps the
+mesh's own port enforcement (over the overlay, SSH/22 would be dropped on a
+tightened mesh unless granted).
+
+What it does, in order (nothing changes until every preflight passes):
+1. checks the target is SSH-reachable, has `gw` installed, and holds no anchor;
+2. streams the encrypted backup (`anchor-backup - | ssh … anchor-restore -`) and
+   copies your config over;
+3. **hands off** — stops the anchor here, starts it on the target, verifies it
+   came up. If it doesn't, it **rolls back** (restarts the local anchor), so a
+   failed transfer never leaves you anchorless. There is only ever one live anchor.
+
+On success this host is **stopped and disabled** (won't auto-start as a second
+anchor); decommission it with `sudo gw purge`, or keep it as a cold standby.
+
+Requirements: greasewood installed on the target, **systemd on both**, and
+**passwordless sudo** to the target. No systemd? Do it by hand — the command
+prints the manual pipe (`anchor-backup - | ssh … anchor-restore -`, copy the
+config, stop here, start there). The same DNS-name advice as the destroyed-anchor
+SOP below applies if the target lands on a new IP.
 
 ## SOP: anchor host destroyed (disk gone)
 
