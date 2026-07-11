@@ -3178,6 +3178,28 @@ def cmd_anchor_restore(args) -> int:
     return 0
 
 
+def _dest_is_overlay(dest: str, cfg) -> bool:
+    """Best-effort: does this SSH destination point INTO the mesh overlay? The
+    transfer must ride the underlay (out-of-band) — an overlay dest is a footgun
+    (the target assumes this anchor's overlay address mid-handoff). Catches a name
+    in the mesh domain and an IPv6 literal inside the mesh's overlay /64; anything
+    it can't classify is treated as underlay (allow) rather than block a legit
+    transfer. NOT a security check — a guardrail against an obvious mistake."""
+    import ipaddress
+    host = dest.rsplit("@", 1)[-1]                 # drop user@
+    if host.endswith("." + cfg.mesh_domain) or host == cfg.mesh_domain:
+        return True
+    lit = host                                     # try to read a bare IP literal
+    if host.startswith("[") and "]" in host:       # [v6] or [v6]:port
+        lit = host[1:host.index("]")]
+    lit = lit.split("%")[0]                         # drop a zone id
+    try:
+        addr = ipaddress.ip_address(lit)
+        return addr in ipaddress.ip_network(f"{cfg.overlay_prefix}/64", strict=False)
+    except ValueError:
+        return False                               # a name / host:port → assume underlay
+
+
 def _do_handoff(unit, *, stop_local, start_remote, remote_active, start_local) -> bool:
     """The atomic core of an anchor transfer: stop the local anchor, start the
     remote one, verify it came up. If it DIDN'T, restart the local anchor (roll
@@ -3198,9 +3220,15 @@ def cmd_anchor_transfer(args) -> int:
     part of the handoff (there is only ever ONE live anchor).
 
     SSH is the transport by design: the encrypted state rides YOUR channel, so
-    the CA never touches the greasewood wire. Give a plain SSH destination — SSH
-    over the underlay sidesteps mesh port enforcement. Requires greasewood on the
-    target, systemd on both, and passwordless sudo to the target."""
+    the CA never touches the greasewood wire.
+
+    REQUIRES an UNDERLAY (out-of-band) SSH path to the target — NOT the overlay.
+    The target assumes this anchor's overlay identity/address, so the handoff
+    can't ride the overlay it's changing (the address moves out from under the
+    SSH mid-transfer, and both hosts would briefly claim it). If you run
+    overlay-only SSH, open underlay SSH to the target for the (rare) transfer
+    window — a root-of-trust move wants an out-of-band channel anyway. Also needs
+    greasewood + systemd on the target and passwordless sudo to it."""
     import secrets
     import shlex
     import time
@@ -3212,6 +3240,12 @@ def cmd_anchor_transfer(args) -> int:
         sys.exit("anchor-transfer must be run on the anchor (role = anchor)")
     if cfg.ca_key_file is None:
         sys.exit("anchor-transfer requires ca_key_file in [anchor]")
+    if _dest_is_overlay(args.dest, cfg):
+        sys.exit(f"{args.dest!r} looks like an OVERLAY address — anchor-transfer "
+                 "needs an UNDERLAY (out-of-band) SSH path. The target takes over "
+                 "this anchor's overlay address, so the handoff can't ride the "
+                 "overlay it's changing. Use the target's real (underlay) address; "
+                 "open underlay SSH to it for the transfer if you have to.")
     if not _systemd_available():
         sys.exit("anchor-transfer orchestrates the handoff via systemd, not running "
                  "here. Do it by hand:\n"
@@ -4035,8 +4069,11 @@ def main(argv=None) -> int:
                              "SSH — same CA, no re-root; stops this anchor as part of "
                              "the handoff. The target assumes this anchor's identity.")
     sp.add_argument("dest", metavar="[user@]host",
-                    help="SSH destination of the target (a plain underlay address is "
-                         "best — SSH over the underlay sidesteps mesh port enforcement)")
+                    help="UNDERLAY (out-of-band) SSH destination of the target — its "
+                         "real address, NOT its overlay/mesh address. The target "
+                         "takes over this anchor's overlay identity, so the handoff "
+                         "can't ride the overlay; open underlay SSH for the transfer "
+                         "if you normally run overlay-only.")
     sp.add_argument("--ssh-opts", default=None,
                     help="extra options passed to ssh (e.g. '-p 2222 -i key')")
     sp.add_argument("--force", action="store_true",
