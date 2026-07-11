@@ -80,6 +80,18 @@ def ensure_available() -> None:
             "to run without it.")
 
 
+def nft_usable() -> bool:
+    """Boolean form of ensure_available(): True iff nftables is usable here.
+    Used at create/join time to pick the enforce_ports default written into the
+    config — an nft-less host is written `enforce_ports = false` so its daemon
+    never trips the startup guard (and never lands in a restart loop)."""
+    try:
+        ensure_available()
+        return True
+    except NftUnavailable:
+        return False
+
+
 def _port_allowances(records, local_caps: list, grants: "list | None") -> dict:
     """For THIS node (server side), map each allowed inbound flow to the set of
     source overlay addresses permitted to use it:
