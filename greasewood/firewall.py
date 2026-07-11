@@ -141,6 +141,53 @@ def missing_rules(ruleset: dict, rules: list[Rule]) -> list[Rule]:
     return missing
 
 
+def _iif_matches(right, iface: str) -> bool:
+    """Does an nftables iifname right-hand side admit `iface`? Handles an exact
+    name, a glob ('gw-*'), and a set of either."""
+    import fnmatch
+
+    def one(v) -> bool:
+        return isinstance(v, str) and (v == iface or ("*" in v and fnmatch.fnmatch(iface, v)))
+    if isinstance(right, dict) and "set" in right:
+        return any(one(el) for el in right.get("set", []))
+    return one(right)
+
+
+def admits_iface(ruleset: dict, iface: str) -> bool:
+    """True if the OPERATOR's firewall coarsely admits traffic arriving on
+    `iface` — an `iifname "gw-*" accept` with no port narrowing — so greasewood's
+    own overlay table can then filter it. A default-drop input chain drops the
+    overlay before our table sees it otherwise.
+
+    CRUCIAL: greasewood's OWN table is skipped. Under a fully-open policy it also
+    holds an `iifname "gw-<mesh>" accept`, but that lives in a SEPARATE base
+    chain — it does not override the operator's default-drop chain (nftables
+    accepts a packet only if NO chain drops it), so counting it would be a false
+    all-clear. Port-narrowed accepts and `iifname != {...}` (op '!=') don't count."""
+    for item in ruleset.get("nftables", []):
+        rule = item.get("rule")
+        if not rule or str(rule.get("table", "")).startswith("greasewood_"):
+            continue
+        exprs = rule.get("expr", [])
+        if not any(isinstance(e, dict) and "accept" in e for e in exprs):
+            continue
+        iif_ok = has_dport = False
+        for e in exprs:
+            m = e.get("match") if isinstance(e, dict) else None
+            if not m or m.get("op", "==") != "==":
+                continue
+            left = m.get("left", {})
+            meta = left.get("meta") if isinstance(left, dict) else None
+            payload = left.get("payload") if isinstance(left, dict) else None
+            if meta and meta.get("key") == "iifname" and _iif_matches(m.get("right"), iface):
+                iif_ok = True
+            if payload and payload.get("field") == "dport":
+                has_dport = True
+        if iif_ok and not has_dport:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Advisory check (read-only) used by the CLI
 # ---------------------------------------------------------------------------

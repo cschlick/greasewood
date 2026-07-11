@@ -120,3 +120,47 @@ def test_anchor_rules_use_the_real_mesh_interface():
     rules = fw.anchor_rules(51900, 51902, mesh_iface="gw-pm", enforce_ports=False)
     control = [r for r in rules if r.proto == "tcp" and r.port == 51902]
     assert control and control[0].iif == "gw-pm"
+
+
+# --- admits_iface: the coarse overlay-admit check for gw watch ---
+
+def _iif_admit(right, table="filter"):
+    """A COARSE `iifname <right> accept` (no dport) in the given table."""
+    return {"rule": {"family": "inet", "table": table, "chain": "input", "expr": [
+        {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": right}},
+        {"accept": None}]}}
+
+
+def test_admits_iface_matches_glob_exact_and_set():
+    assert fw.admits_iface(_ruleset(_iif_admit("gw-*")), "gw-pm")       # glob
+    assert fw.admits_iface(_ruleset(_iif_admit("gw-pm")), "gw-pm")      # exact
+    assert fw.admits_iface(_ruleset(_iif_admit({"set": ["gw-pm", "gw-door"]})), "gw-pm")
+    assert not fw.admits_iface(_ruleset(_iif_admit("eth0")), "gw-pm")   # unrelated iface
+
+
+def test_admits_iface_ignores_port_narrowed_accept():
+    # A control-plane accept (iifname gw-mesh tcp dport 51902) is NOT the coarse
+    # overlay admit — it only lets that one port through.
+    rs = _ruleset(_accept_rule("tcp", 51902, iif="gw-*"))
+    assert not fw.admits_iface(rs, "gw-pm")
+
+
+def test_admits_iface_ignores_iifname_negation():
+    # greasewood's own `iifname != {gw-pm,gw-door} accept` (leave non-overlay
+    # alone) must NOT read as admitting the overlay.
+    neg = {"rule": {"table": "filter", "expr": [
+        {"match": {"op": "!=", "left": {"meta": {"key": "iifname"}},
+                   "right": {"set": ["gw-pm", "gw-door"]}}},
+        {"accept": None}]}}
+    assert not fw.admits_iface(_ruleset(neg), "gw-pm")
+
+
+def test_admits_iface_skips_greasewoods_own_table():
+    # CRITICAL: under a fully-open policy greasewood's OWN table holds
+    # `iifname "gw-pm" accept`, but it's a SEPARATE base chain that does NOT
+    # override the operator's default-drop chain. Counting it would be a false
+    # all-clear — so admits_iface must ignore the greasewood_* table.
+    own = _iif_admit("gw-pm", table="greasewood_pm")
+    assert not fw.admits_iface(_ruleset(own), "gw-pm")
+    # ...but the SAME rule in the operator's own table does admit it.
+    assert fw.admits_iface(_ruleset(_iif_admit("gw-pm", table="filter")), "gw-pm")
