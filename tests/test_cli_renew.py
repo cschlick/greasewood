@@ -36,7 +36,6 @@ def test_renew_bumps_record_and_adopts_caps(tmp_path, monkeypatch, capsys):
 hostname = "n1"
 data_dir = "{tmp_path}"
 role = "node"
-inbound = "yes"
 caps = ["segment:mesh"]
 [network]
 interface = "gw-mesh"
@@ -51,7 +50,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     d = Directory()
     d.put(NodeRecord(
         id_pub=me.id_pub_bytes, seq=3, endpoints=["203.0.113.5:51900"],
-        inbound="yes", cred=_cred(ca, me, ["segment:mesh"]),
+        cred=_cred(ca, me, ["segment:mesh"]),
     ).sign(me.id_priv))
     d.save(cfg.dir_cache_path)
 

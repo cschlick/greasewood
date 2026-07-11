@@ -184,7 +184,7 @@ def test_join_derives_paths_with_no_flags(tmp_path, monkeypatch):
                          generate_seed(), 51901, mesh_domain="zzz.internal")
     ns = types.SimpleNamespace(token=token, config=None, data_dir=None,
                                listen_port=None, interface=None, hostname="n1",
-                               inbound=None, endpoint="[fd00::1]:51900",
+                               endpoint="[fd00::1]:51900",
                                hosts_sync=None)
     with pytest.raises(Sentinel):
         cli.cmd_join(ns)
@@ -322,7 +322,7 @@ def test_join_refuses_same_name_different_mesh(tmp_path, monkeypatch):
                          generate_seed(), 51901, mesh_domain="prod.internal")
     ns = types.SimpleNamespace(token=token, config=None, data_dir=None,
                                listen_port=None, interface=None, hostname="n1",
-                               inbound=None, endpoint="[fd00::1]:51900",
+                               endpoint="[fd00::1]:51900",
                                hosts_sync=None)
     with pytest.raises(SystemExit) as e:
         cli.cmd_join(ns)
