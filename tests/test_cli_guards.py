@@ -24,7 +24,7 @@ def _as_user(monkeypatch):
 
 
 @pytest.mark.parametrize("cmd", ["run", "create", "join", "invite", "purge",
-                                 "anchor-promote", "set-inbound"])
+                                 "anchor-promote"])
 def test_privileged_commands_exit_cleanly_without_root(cmd, monkeypatch):
     _as_user(monkeypatch)
     with pytest.raises(SystemExit) as e:

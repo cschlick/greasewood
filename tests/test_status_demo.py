@@ -34,7 +34,7 @@ def _cred(ca, node, hostname, segs, *, hours=24, secs=None):
 
 def _rec(node, cred, endpoints=()):
     return NodeRecord(id_pub=node.id_pub_bytes, seq=1, endpoints=list(endpoints),
-                      inbound="yes", cred=cred).sign(node.id_priv)
+                      cred=cred).sign(node.id_priv)
 
 
 def test_nodes_full_directory(tmp_path, capsys):

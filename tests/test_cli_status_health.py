@@ -128,7 +128,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
         cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
                           hostname=name, caps=[f"role:{s}" for s in segs],
                           iat=now, exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
-        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
                           cred=cred).sign(k.id_priv)
 
     linked, other, silent = NodeKeys.generate(), NodeKeys.generate(), NodeKeys.generate()
@@ -199,7 +199,7 @@ def test_roster_live_mode_columns(tmp_path):
         cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
                           hostname=name, caps=["segment:mesh"], iat=now,
                           exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
-        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+        return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
                           cred=cred).sign(k.id_priv)
     records = [rec(keys, "me"), rec(linked, "db01"), rec(pending, "web1")]
     cfg = types.SimpleNamespace(caps=["segment:mesh"], mesh_domain="gw.internal")

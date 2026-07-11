@@ -39,13 +39,11 @@ def make_record(
     cred: Credential,
     seq: int = 1,
     endpoints: list[str] | None = None,
-    inbound: str = "yes",
 ) -> NodeRecord:
     r = NodeRecord(
         id_pub=node.id_pub_bytes,
         seq=seq,
         endpoints=endpoints or ["[2001:db8::1]:51820"],
-        inbound=inbound,
         cred=cred,
     )
     return r.sign(node.id_priv)
@@ -166,7 +164,6 @@ class TestNodeRecord:
             id_pub=node_a.id_pub_bytes,
             seq=1,
             endpoints=["[2001:db8::1]:51820"],
-            inbound="yes",
             cred=cred,  # cred belongs to node_b
         ).sign(node_a.id_priv)
         # Should fail at step 4 (addr) or the id_pub cross-check
@@ -313,7 +310,7 @@ class TestVerifyStructuralErrors:
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         rec = NodeRecord(
-            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[],
             cred=cred,
         ).sign(node.id_priv)
         with pytest.raises(ValueError, match="not a valid IPv6"):
@@ -332,7 +329,7 @@ class TestVerifyStructuralErrors:
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(ca.ca_priv)
         rec = NodeRecord(
-            id_pub=a.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            id_pub=a.id_pub_bytes, seq=1, endpoints=[],
             cred=cred,
         ).sign(a.id_priv)
         with pytest.raises(ValueError, match="does not match"):
@@ -388,7 +385,7 @@ class TestNodeRecordAliases:
     def test_roundtrip_preserves_aliases(self):
         ca, node = CAKeys.generate(), NodeKeys.generate()
         rec = make_record(node, make_cred(node, ca), ).__class__(
-            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[],
             cred=make_cred(node, ca), aliases=["pg", "metrics"],
         ).sign(node.id_priv)
         back = NodeRecord.from_dict(rec.to_dict())
@@ -403,7 +400,7 @@ class TestNodeRecordAliases:
     def test_tampered_aliases_break_self_sig(self):
         ca, node = CAKeys.generate(), NodeKeys.generate()
         rec = NodeRecord(
-            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[],
             cred=make_cred(node, ca), aliases=["pg"],
         ).sign(node.id_priv)
         d = rec.to_dict()

@@ -62,7 +62,7 @@ def test_credential_roundtrip(cred):
 @given(st.builds(
     NodeRecord,
     id_pub=bytes32, seq=st.integers(min_value=0, max_value=2**53),
-    endpoints=st.lists(short_text, max_size=4), inbound=short_text,
+    endpoints=st.lists(short_text, max_size=4),
     cred=credentials(), sig=sig64,
 ))
 def test_node_record_roundtrip(rec):
@@ -146,7 +146,7 @@ def _record(node_idx: int, seq: int) -> NodeRecord:
             iat=now, exp=now + dt.timedelta(hours=1),
         ).sign(_CA.ca_priv)
         _RECORD_CACHE[key] = NodeRecord(
-            id_pub=node.id_pub_bytes, seq=seq, endpoints=[], inbound="yes",
+            id_pub=node.id_pub_bytes, seq=seq, endpoints=[],
             cred=cred,
         ).sign(node.id_priv)
     return _RECORD_CACHE[key]

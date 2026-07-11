@@ -32,7 +32,7 @@ def _cred(node, ca, hostname, caps=("role:mesh",), ttl=3600):
 
 def _record(node, cred):
     return NodeRecord(
-        id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+        id_pub=node.id_pub_bytes, seq=1, endpoints=[],
         cred=cred,
     ).sign(node.id_priv)
 

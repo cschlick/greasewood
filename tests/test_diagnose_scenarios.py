@@ -35,9 +35,9 @@ def _cred(node, ca, hostname, caps=("segment:mesh",), ttl=3600):
     ).sign(ca.ca_priv)
 
 
-def _rec(node, cred, endpoints=(), inbound="yes"):
+def _rec(node, cred, endpoints=()):
     return NodeRecord(id_pub=node.id_pub_bytes, seq=1, endpoints=list(endpoints),
-                      inbound=inbound, cred=cred).sign(node.id_priv)
+                      cred=cred).sign(node.id_priv)
 
 
 def _live(node, endpoint="", handshake_ago=None):
@@ -48,14 +48,13 @@ def _live(node, endpoint="", handshake_ago=None):
 
 
 def _run(tmp_path, monkeypatch, *, title, nodes, records, live_peers,
-         inbound="yes", endpoints=(), self_fw="OPEN"):
+         endpoints=(), self_fw="OPEN"):
     NodeKeys.load_or_generate(tmp_path)
     eps = f"\nendpoints = {list(endpoints)}" if endpoints else ""
     (tmp_path / "gw.toml").write_text(f"""[node]
 hostname = "self"
 data_dir = "{tmp_path}"
 role = "node"
-inbound = "{inbound}"
 caps = ["segment:mesh"]{eps}
 [network]
 interface = "gw-mesh"
@@ -102,7 +101,7 @@ def test_diagnose_no_handshake_localizes_to_upstream(tmp_path, monkeypatch, caps
     peer has no handshake → point at an upstream router/NAT, not this host."""
     gamma = NodeKeys.generate()
     _run(tmp_path, monkeypatch, title="self ↔ gamma (no handshake)",
-         nodes=["gamma"], inbound="yes", endpoints=["[2001:db8::1]:51900"],
+         nodes=["gamma"], endpoints=["[2001:db8::1]:51900"],
          records=[_rec(gamma, _cred(gamma, CA, "gamma"),
                        endpoints=["203.0.113.9:51900"])],
          live_peers={}, self_fw="OPEN")
@@ -117,7 +116,7 @@ def test_diagnose_self_firewall_closed(tmp_path, monkeypatch, capsys):
     """If this host's own firewall blocks the port, say THAT (not upstream)."""
     gamma = NodeKeys.generate()
     _run(tmp_path, monkeypatch, title="self ↔ gamma (our fw closed)",
-         nodes=["gamma"], inbound="yes", endpoints=["[2001:db8::1]:51900"],
+         nodes=["gamma"], endpoints=["[2001:db8::1]:51900"],
          records=[_rec(gamma, _cred(gamma, CA, "gamma"),
                        endpoints=["203.0.113.9:51900"])],
          live_peers={}, self_fw="CLOSED — blocked!")
@@ -130,8 +129,8 @@ def test_diagnose_outbound_only_no_direction(tmp_path, monkeypatch, capsys):
     """Both sides outbound-only → no dialable direction, link can't form."""
     peer = NodeKeys.generate()
     _run(tmp_path, monkeypatch, title="self(outbound-only) ↔ peer(outbound-only)",
-         nodes=["peer"], inbound="no",
-         records=[_rec(peer, _cred(peer, CA, "peer"), inbound="no")],
+         nodes=["peer"],       # neither side advertises an endpoint → outbound-only
+         records=[_rec(peer, _cred(peer, CA, "peer"))],
          live_peers={})
     out = capsys.readouterr().out
     print(out)

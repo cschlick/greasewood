@@ -179,7 +179,6 @@ def _make_record(node: NodeKeys, cred: Credential, seq: int = 1,
         id_pub=node.id_pub_bytes,
         seq=seq,
         endpoints=["[2001:db8::1]:51900"] if endpoints is None else endpoints,
-        inbound="yes",
         cred=cred,
     ).sign(node.id_priv)
 

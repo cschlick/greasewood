@@ -97,7 +97,6 @@ def _linked_peer_diagnose(tmp_path, monkeypatch):
 hostname = "self"
 data_dir = "{tmp_path}"
 role = "node"
-inbound = "yes"
 caps = ["segment:mesh"]
 [network]
 interface = "gw-mesh"
@@ -113,7 +112,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
         iat=now, exp=now + dt.timedelta(hours=1),
     ).sign(ca.ca_priv)
     rec = NodeRecord(id_pub=peer.id_pub_bytes, seq=1,
-                     endpoints=["203.0.113.7:51900"], inbound="yes",
+                     endpoints=["203.0.113.7:51900"],
                      cred=cred).sign(peer.id_priv)
 
     from greasewood.config import load_config
