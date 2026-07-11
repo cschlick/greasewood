@@ -46,20 +46,25 @@ secret_detection:
     - ./install.sh                         # container runs as root → no sudo
     - gw --version
     - /opt/greasewood/bin/pip install --quiet pytest hypothesis
-    - /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -q
+    # The unit suite exercises NON-root behaviour (permission denials, sudo
+    # hints), so run it as an unprivileged user — the container's default root
+    # would bypass those checks and diverge from how the suite is developed.
+    - adduser -D -s /bin/sh tester 2>/dev/null || useradd -m -s /bin/sh tester
+    - chmod -R a+rX "$CI_PROJECT_DIR" /opt/greasewood
+    - su tester -c "cd '$CI_PROJECT_DIR' && /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -p no:cacheprovider -q"
 
 distro-test:
   extends: .distro-test
   parallel:
     matrix:
       - DISTRO: [debian:12, debian:13, ubuntu:22.04, ubuntu:24.04,
-                 fedora:41, archlinux:latest]
+                 fedora:41, archlinux:latest, alpine:latest]
 
 distro-test-experimental:
   extends: .distro-test
   allow_failure: true                      # surface gaps without blocking the pipeline
   parallel:
     matrix:
-      # rocky/opensuse: less-exercised pkg paths (dnf python3.12, zypper).
-      # alpine: install.sh has no apk branch yet → expected to fail until added.
-      - DISTRO: [rockylinux:9, opensuse/tumbleweed, alpine:latest]
+      # less-exercised pkg paths (dnf python3.12 on RHEL 9, zypper) — promote to
+      # the required matrix above once CI confirms them green.
+      - DISTRO: [rockylinux:9, opensuse/tumbleweed]
