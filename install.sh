@@ -102,6 +102,11 @@ install_deps_linux() {
         pacman -Sy --noconfirm wireguard-tools nftables
     elif command -v zypper >/dev/null 2>&1; then
         zypper --non-interactive install wireguard-tools nftables
+    elif command -v apk >/dev/null 2>&1; then
+        # Alpine: python3 ships a working venv/ensurepip (no split package like
+        # Debian's python3-venv), so just the tools. Note: install.sh needs bash
+        # to run at all (Alpine base has none) — `apk add bash` first.
+        apk add --no-cache wireguard-tools nftables
     else
         warn "no known package manager — install 'wireguard-tools' (and a"
         warn "python3 with venv) yourself, then re-run."

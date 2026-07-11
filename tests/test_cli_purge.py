@@ -33,6 +33,10 @@ def _isolate_system(monkeypatch, tmp_path):
     (units / "greasewood@.service").write_text("template")
     monkeypatch.setattr(cli, "_UNIT_DIR", units)
     monkeypatch.setattr(cli, "_memberships", lambda etc=None: [])
+    # Pretend systemctl is present regardless of the host (these tests cover the
+    # systemd-managed purge path; a container without systemd would skip it).
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/bin/systemctl" if name == "systemctl" else None)
     return units
 
 
