@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cross-distro install + unit tests. For each distro image: run install.sh
+  # (the real per-distro dependency + venv + symlink path — package managers,
+  # python3-venv/ensurepip, wireguard-tools, iproute2) then the full unit suite
+  # against the resulting /opt/greasewood venv. This is the packaging surface,
+  # which is where distro-fragility lives.
+  #
+  # We run the container via `docker run` on ubuntu-latest rather than GitHub's
+  # `container:` — the latter mounts a glibc `node` for JS actions that can't
+  # exec on Alpine (musl), so checkout/actions break there. `docker run` keeps
+  # checkout on the host and the distro work fully inside the image.
+  #
+  # SCOPE: containers share the host kernel + LSM policy, so this does NOT cover
+  # kernel WireGuard or AppArmor/SELinux confinement (the wg /dev/stdin class) —
+  # that needs a real per-distro VM tier. Ubuntu 22.04 is absent: it ships
+  # Python 3.10, below greasewood's >= 3.11 floor (24.04 has 3.12).
+  distro-test:
+    name: ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - debian:12
+          - debian:13
+          - ubuntu:24.04
+          - fedora:41
+          - quay.io/rockylinux/rockylinux:9
+          - archlinux:latest
+          - opensuse/tumbleweed
+          - alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh + unit suite
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "${{ matrix.distro }}" sh -c '
+            set -e
+            cp -r /src /build && cd /build
+            sh scripts/ci-distro-bootstrap.sh          # python3 >= 3.11 + git (NOT wg/venv/ip)
+            ./install.sh                               # container runs as root
+            gw --version
+            /opt/greasewood/bin/pip install --quiet pytest hypothesis
+            # the unit suite exercises NON-root behaviour (permission denials,
+            # sudo hints); run it unprivileged, not as the container root.
+            useradd -m -s /bin/sh tester 2>/dev/null || adduser -D -s /bin/sh tester
+            chmod -R a+rX /build /opt/greasewood
+            su tester -c "cd /build && /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -p no:cacheprovider -q"
+          '
