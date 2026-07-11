@@ -580,3 +580,22 @@ def test_reconcile_set_local_caps_updates_peering_view():
     loop._local_caps = ["role:mesh"]
     loop.set_local_caps(["role:web", "role:db", "tls"])
     assert loop._local_caps == ["role:web", "role:db", "tls"]
+
+
+# --- daemon death breadcrumb ----------------------------------------------
+
+def test_daemon_fatal_round_trips_and_clears(tmp_path):
+    # The startup-fatal breadcrumb: write the reason, read it back, clear it.
+    assert reconcile.read_daemon_fatal(tmp_path) is None      # nothing yet
+    reconcile.write_daemon_fatal(tmp_path, "port 51900 in use")
+    got = reconcile.read_daemon_fatal(tmp_path)
+    assert got["reason"] == "port 51900 in use" and "ts" in got
+    reconcile.clear_daemon_fatal(tmp_path)
+    assert reconcile.read_daemon_fatal(tmp_path) is None       # forgotten on success
+
+
+def test_read_daemon_fatal_tolerates_garbage(tmp_path):
+    # A corrupt/truncated breadcrumb must degrade to None, never raise into watch.
+    reconcile.daemon_fatal_path(tmp_path).write_text("{not json")
+    assert reconcile.read_daemon_fatal(tmp_path) is None
+    reconcile.clear_daemon_fatal(tmp_path)   # idempotent even when absent already

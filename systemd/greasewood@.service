@@ -5,6 +5,13 @@ After=network-online.target
 Wants=network-online.target
 # Only run once this membership is configured (create / join writes it).
 ConditionPathExists=/etc/greasewood_%i.toml
+# Bound the restart loop. Without this, RestartSec=5 never fills systemd's
+# default 10s start-limit window (restarts are 5s apart), so a daemon that can't
+# start loops FOREVER, invisibly. 5 failures within 2min instead trips the limit
+# → the unit enters a visible `failed` state (systemctl status, and gw watch's
+# daemon heartbeat goes stale) instead of thrashing silently.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
