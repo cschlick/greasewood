@@ -57,9 +57,10 @@ distro-test:
   extends: .distro-test
   parallel:
     matrix:
-      # All validated locally (podman) end-to-end — install.sh → gw --version →
-      # full unit suite (574 green) — across apt/dnf/pacman/zypper/apk, glibc +
-      # musl, and Python 3.11–3.14.
-      - DISTRO: [debian:12, debian:13, ubuntu:22.04, ubuntu:24.04,
+      # Validated end-to-end (install.sh → gw --version → full unit suite, 574
+      # green) across apt/dnf/pacman/zypper/apk, glibc + musl, Python 3.11–3.14.
+      # Ubuntu 22.04 is deliberately absent — it ships Python 3.10, below
+      # greasewood's 3.11 floor (24.04 has 3.12).
+      - DISTRO: [debian:12, debian:13, ubuntu:24.04,
                  fedora:41, rockylinux:9, archlinux:latest,
                  opensuse/tumbleweed, alpine:latest]
