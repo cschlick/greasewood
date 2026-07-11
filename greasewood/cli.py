@@ -3687,6 +3687,9 @@ def main(argv=None) -> int:
     sp.add_argument("--all", action="store_true",
                     help="also show expired nodes (hidden by default — the roster "
                          "shows only the live mesh)")
+    sp.add_argument("--total", action="store_true",
+                    help="live view shows cumulative traffic instead of per-second "
+                         "rate (toggle with 't' while watching)")
     sp.set_defaults(fn=cmd_watch)
 
     # config — machine-readable resolved facts, for scripting
