@@ -2601,7 +2601,7 @@ def cmd_run(args) -> int:
         get_revoked=get_revoked,
         policy=grant_policy,
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
-        local_families=_local_families(),
+        get_local_families=_local_families,   # re-detected each cycle (v6→v4 mid-run)
         ensure_iface=_ensure_mesh_iface,
         data_dir=cfg.data_dir,
         on_reachable=_publish_reachable,
