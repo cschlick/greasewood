@@ -44,16 +44,22 @@ jobs:
       - uses: actions/checkout@v5
       - name: install.sh + unit suite
         run: |
-          docker run --rm -v "$PWD:/src:ro" "${{ matrix.distro }}" sh -c '
-            set -e
-            cp -r /src /build && cd /build
-            sh scripts/ci-distro-bootstrap.sh          # python3 >= 3.11 + git (NOT wg/venv/ip)
-            ./install.sh                               # container runs as root
-            gw --version
-            /opt/greasewood/bin/pip install --quiet pytest hypothesis
-            # the unit suite exercises NON-root behaviour (permission denials,
-            # sudo hints); run it unprivileged, not as the container root.
-            useradd -m -s /bin/sh tester 2>/dev/null || adduser -D -s /bin/sh tester
-            chmod -R a+rX /build /opt/greasewood
-            su tester -c "cd /build && /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -p no:cacheprovider -q"
-          '
+          attempt() {
+            docker run --rm -v "$PWD:/src:ro" "${{ matrix.distro }}" sh -c '
+              set -e
+              cp -r /src /build && cd /build
+              sh scripts/ci-distro-bootstrap.sh          # python3 >= 3.11 + git (NOT wg/venv/ip)
+              ./install.sh                               # container runs as root
+              gw --version
+              /opt/greasewood/bin/pip install --quiet pytest hypothesis
+              # the unit suite exercises NON-root behaviour (permission denials,
+              # sudo hints); run it unprivileged, not as the container root.
+              useradd -m -s /bin/sh tester 2>/dev/null || adduser -D -s /bin/sh tester
+              chmod -R a+rX /build /opt/greasewood
+              su tester -c "cd /build && /opt/greasewood/bin/python -m pytest tests/ --ignore=tests/integration -p no:cacheprovider -q"
+            '
+          }
+          # One retry: distro mirrors (notably Rocky/dnf) flake transiently. A real
+          # bug fails both attempts; a flake gets a clean second pull. The warning
+          # keeps flakes visible instead of silently swallowed.
+          attempt || { echo "::warning::${{ matrix.distro }}: first attempt failed — retrying (likely a transient mirror flake)"; sleep 5; attempt; }
