@@ -111,7 +111,7 @@ def test_decode_token_never_raises_non_valueerror(text):
 )
 def test_token_roundtrip(anchor_pub, ca_pub, seed, host, port):
     tok = door.encode_token(anchor_pub, ca_pub, host, seed, door_port=port)
-    got_anchor, got_ca, got_host, got_seed, got_port, _dom = door.decode_token(tok)
+    got_anchor, got_ca, got_host, got_seed, got_port, _dom, _menu = door.decode_token(tok)
     assert (got_anchor, got_ca, got_host, got_seed, got_port) == \
         (anchor_pub, ca_pub, host, seed, port)
 

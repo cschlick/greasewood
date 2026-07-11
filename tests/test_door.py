@@ -76,7 +76,7 @@ _SEED = bytes([0xAB] * 32)
 
 def test_token_roundtrip():
     token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED, door_port=51999)
-    anchor_door_pub, ca_pub, host, seed, door_port, _dom = decode_token(token)
+    anchor_door_pub, ca_pub, host, seed, door_port, _dom, _menu = decode_token(token)
     assert anchor_door_pub == _ANCHOR_DOOR_PUB
     assert ca_pub == _CA_PUB
     assert host == _ANCHOR_HOST
@@ -86,7 +86,7 @@ def test_token_roundtrip():
 
 def test_token_default_door_port():
     token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, _ANCHOR_HOST, _SEED)
-    *_, door_port, _dom = decode_token(token)
+    *_, door_port, _dom, _menu = decode_token(token)
     assert door_port == 51901  # DOOR_PORT default
 
 
@@ -116,7 +116,7 @@ def test_token_truncated():
 def test_token_different_hosts():
     for host in ["192.0.2.1", "example.com", "2001:db8::cafe"]:
         token = encode_token(_ANCHOR_DOOR_PUB, _CA_PUB, host, _SEED)
-        _, _, decoded_host, _, _, _ = decode_token(token)
+        _, _, decoded_host, _, _, _, _ = decode_token(token)
         assert decoded_host == host
 
 

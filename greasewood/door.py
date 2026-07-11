@@ -156,6 +156,7 @@ def encode_token(
     seed: bytes,
     door_port: int = DOOR_PORT,
     mesh_domain: str = "",
+    self_roles: "list | tuple" = (),
 ) -> str:
     """Encode a join token. Carries the anchor's door UDP port so a brand-new node
     (which has only the token) can reach the door wherever the anchor configured it.
@@ -164,16 +165,23 @@ def encode_token(
     domain everywhere), and check it against existing memberships BEFORE the
     door dance — so a domain collision refuses without burning the invite.
 
+    self_roles is the role MENU (from `gw invite --self-roles`): the roles a
+    joiner may self-select from. It's a client-side hint for `gw join` — the
+    anchor's door window is authoritative and re-checks — so tampering it only
+    misleads the tamperer.
+
     Layout: anchor_door_pub[32] ca_pub[32] door_port[2 BE] host_len[1] host
-            seed[32] domain_len[1] domain
+            seed[32] domain_len[1] domain menu_len[1] menu
     """
     host_bytes = anchor_host.encode()
     domain_bytes = (mesh_domain or "").encode()
+    menu_bytes = ",".join(self_roles).encode()
     payload = (
         anchor_door_pub_bytes + ca_pub_bytes
         + struct.pack(">H", door_port)
         + bytes([len(host_bytes)]) + host_bytes + seed
         + bytes([len(domain_bytes)]) + domain_bytes
+        + bytes([len(menu_bytes)]) + menu_bytes
     )
     return TOKEN_PREFIX + base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
 
@@ -188,6 +196,7 @@ class DecodedToken(NamedTuple):
     seed: bytes              # 32-byte shared secret → door PSK + guest key (HKDF)
     door_port: int           # UDP port the anchor's door listens on
     mesh_domain: str         # the mesh's name domain (adopted by the joiner)
+    self_roles: list         # role menu a joiner may self-select from ([] = none)
 
 
 def decode_token(token: str) -> "DecodedToken":
@@ -216,8 +225,18 @@ def decode_token(token: str) -> "DecodedToken":
         raise ValueError("token payload truncated (domain)")
     mesh_domain = payload[dlen_at + 1:dlen_at + 1 + domain_len].decode()
 
+    # menu (allowed self-roles) — an optional trailing field; [] when absent
+    # (a token minted without --self-roles, or by an older anchor).
+    self_roles: list = []
+    mlen_at = dlen_at + 1 + domain_len
+    if len(payload) > mlen_at:
+        menu_len = payload[mlen_at]
+        if len(payload) >= mlen_at + 1 + menu_len:
+            menu = payload[mlen_at + 1:mlen_at + 1 + menu_len].decode()
+            self_roles = [r for r in menu.split(",") if r]
+
     return DecodedToken(anchor_door_pub, ca_pub, anchor_host, seed,
-                        door_port, mesh_domain)
+                        door_port, mesh_domain, self_roles)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +280,8 @@ class Window:
     standing: bool
     expires: "dt.datetime | None"    # None for a standing window
     expires_str: "str | None"        # raw string — a window's session identity
-    caps: list
+    caps: list                       # the BASE grant (fixed roles + abilities)
+    allowed_roles: list              # role menu joiners may self-select from ([] = none)
     hostname: "str | None"           # pinned at invite, or None
     guest_pub: "str | None"          # standing only: door re-erection material
     psk: "str | None"
@@ -287,6 +307,7 @@ def parse_window(data: dict) -> "Window | None":
     return Window(standing=standing, expires=expires,
                   expires_str=data.get("expires"),
                   caps=list(data.get("caps") or ["role:mesh"]),
+                  allowed_roles=list(data.get("allowed_roles") or []),
                   hostname=data.get("hostname"),
                   guest_pub=data.get("guest_pub"), psk=data.get("psk"))
 
@@ -333,6 +354,7 @@ def _write_door_status(data_dir: Path, data: dict) -> None:
 
 
 def mark_door_opened(data_dir: Path, expires_iso: "str | None", *, caps=None,
+                     allowed_roles=None,
                      pinned_hostname=None, max_attempts: int = 3,
                      standing: bool = False) -> None:
     """Record that an enrollment window just opened (resets per-window counters).
@@ -344,6 +366,7 @@ def mark_door_opened(data_dir: Path, expires_iso: "str | None", *, caps=None,
         "expires": expires_iso,
         "max_attempts": max_attempts,
         "caps": list(caps or []),
+        "allowed_roles": list(allowed_roles or []),
         "pinned_hostname": pinned_hostname,
         "attempts": [],          # failed attempts this window: {ts, ip, reason}
         "enrolled": None,        # {ts, ip, hostname} of the LAST success

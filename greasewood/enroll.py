@@ -91,6 +91,7 @@ class EnrollServer:
         timeout_secs: float = 900.0,
         max_attempts: int = 3,
         caps: "list[str] | None" = None,
+        allowed_roles: "list[str] | None" = None,
         pinned_hostname: "str | None" = None,
         standing: bool = False,
     ) -> None:
@@ -116,9 +117,14 @@ class EnrollServer:
         self._on_done = on_done
         self._timeout = timeout_secs
         self._max_attempts = max_attempts
-        # Caps the anchor authorized for this window (from `gw invite`).
-        # The joiner does NOT choose these — the window is authoritative.
+        # Caps the anchor authorized for this window (from `gw invite`) — the
+        # BASE grant. The joiner does NOT choose these — the window is authoritative.
         self._caps = list(caps) if caps else ["role:mesh"]
+        # The role MENU (from `gw invite --self-roles`): roles the joiner MAY
+        # self-select from, added on top of the base. [] = classic invite where
+        # any role in the request is ignored. The window is authoritative; the
+        # joiner can only ever land within this set (subset-checked at enroll).
+        self._allowed_roles = list(allowed_roles) if allowed_roles else []
         # If set (`gw invite --hostname`), the anchor pins the name: the joiner's
         # requested hostname is ignored and it can't rename later.
         self._pinned_hostname = pinned_hostname
@@ -248,10 +254,12 @@ class EnrollServer:
         the credential → best-effort second leg (the joiner's first record).
         Returns True if enrollment succeeded (the window should close), False
         on a refusal (the joiner may retry while attempts remain)."""
-        id_pub_bytes, wg_pub_bytes, hostname = self._validate_request(_recv_msg(conn))
+        id_pub_bytes, wg_pub_bytes, hostname, requested_roles = \
+            self._validate_request(_recv_msg(conn))
 
         cred = self._issue_and_install(conn, peer_ip, attempts_left,
-                                       id_pub_bytes, wg_pub_bytes, hostname)
+                                       id_pub_bytes, wg_pub_bytes, hostname,
+                                       requested_roles)
         if cred is None:
             return False        # refused — a clean reply was already sent
 
@@ -261,7 +269,7 @@ class EnrollServer:
         # itself succeeded — the second-leg record publish is best-effort.
         return True
 
-    def _validate_request(self, req: dict) -> "tuple[bytes, bytes, str]":
+    def _validate_request(self, req: dict) -> "tuple[bytes, bytes, str, list]":
         """Decode + validate the enroll request. Raises ValueError on a
         malformed one (the accept loop counts it as a failed attempt)."""
         import base64
@@ -278,14 +286,19 @@ class EnrollServer:
             raise ValueError("id_pub must be 32 bytes")
         if len(wg_pub_bytes) != 32:
             raise ValueError("wg_pub must be 32 bytes")
+        # Roles the joiner PROPOSES (`gw join --roles`). Only meaningful for a
+        # menu invite; authorized against the window's menu at issue time, never
+        # trusted as-is. Malformed → treated as none.
+        raw_roles = req.get("roles") or []
+        requested_roles = [str(r) for r in raw_roles] if isinstance(raw_roles, list) else []
         # Hostname: if the anchor pinned one at invite, it wins and the joiner's
         # requested name is ignored; otherwise the joiner names itself.
         hostname = self._pinned_hostname or str(req["hostname"])
-        return id_pub_bytes, wg_pub_bytes, hostname
+        return id_pub_bytes, wg_pub_bytes, hostname, requested_roles
 
     def _issue_and_install(self, conn, peer_ip: str, attempts_left: int,
                            id_pub_bytes: bytes, wg_pub_bytes: bytes,
-                           hostname: str):
+                           hostname: str, requested_roles: "list | None" = None):
         """Issue the CA credential and install the WireGuard peer — the two
         steps that can refuse. On either refusal, reply cleanly (never a raw
         traceback), roll back what this attempt created, and return None.
@@ -294,10 +307,28 @@ class EnrollServer:
         from .keys import derive_addr
         import base64
 
-        # Caps are decided by the anchor at `gw invite` and carried in the
-        # door window — NOT self-asserted by the joiner. Any caps in the request
-        # are ignored; the window's caps are authoritative.
+        # Caps = the window's BASE grant (anchor-decided at `gw invite`), PLUS,
+        # only for a menu invite, the roles the joiner self-selected FROM the
+        # window's menu. Without a menu the request's roles are ignored (the
+        # window is authoritative). The joiner can never land outside the menu:
+        # a request for a role the invite doesn't offer is REFUSED (not silently
+        # dropped), and the anchor still CA-signs the result, so this is a bounded
+        # self-selection, not self-assertion.
         caps = list(self._caps)
+        if self._allowed_roles:
+            picked = [r for r in (requested_roles or []) if r]
+            outside = [r for r in picked if r not in self._allowed_roles]
+            if outside:
+                reason = (f"role(s) {', '.join(outside)} not offered by this "
+                          f"invite; allowed: {', '.join(self._allowed_roles)}")
+                log.warning("enrollment refused: %s", reason)
+                self._status(door.mark_door_attempt, peer_ip, reason)
+                _send_msg(conn, {"v": 1, "ok": False, "error": "role not offered",
+                                 "reason": reason,
+                                 "attempts_remaining": attempts_left - 1})
+                return None
+            caps += [f"role:{r}" for r in picked]
+            caps = list(dict.fromkeys(caps))          # de-dup, order-preserving
 
         # Issue CA-signed credential. A ValueError here is a refusal (revoked
         # id, or hostname already taken) — report it cleanly to the joiner
@@ -524,7 +555,8 @@ class DoorWatcher(Loop):
             remaining = (None if standing else
                          (win.expires - dt.datetime.now(_UTC)).total_seconds())
             expires_str = win.expires_str   # a window's session identity (on_done)
-            window_caps = win.caps          # authorized at `gw invite`
+            window_caps = win.caps          # BASE grant authorized at `gw invite`
+            window_menu = win.allowed_roles  # role menu joiners may self-select
             window_hostname = win.hostname  # pinned at invite, or None
 
             def on_done():
@@ -556,11 +588,13 @@ class DoorWatcher(Loop):
                 self._ctx, on_done,
                 timeout_secs=remaining,
                 caps=window_caps,
+                allowed_roles=window_menu,
                 pinned_hostname=window_hostname,
                 standing=standing,
             )
             try:
                 door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,
+                                      allowed_roles=window_menu,
                                       pinned_hostname=window_hostname,
                                       standing=standing)
             except Exception as e:  # noqa: BLE001
