@@ -273,6 +273,30 @@ def test_reconcile_freshness_states(tmp_path):
     assert "⚠" in out and "stalled or stopped" in out
 
 
+def test_reconcile_freshness_surfaces_startup_fatal_reason(tmp_path):
+    # A daemon that died at startup left a breadcrumb; watch shows WHY it's down
+    # (the visible end of the restart-loop fix), not just "never reconciled".
+    from greasewood import status, reconcile
+    cfg = types.SimpleNamespace(role="node", data_dir=tmp_path,
+                                mesh_domain="pm.internal")
+    reconcile.write_daemon_fatal(tmp_path, "wireguard port 51900 already in use")
+    out = status._reconcile_freshness(cfg)
+    assert "daemon FAILED to start" in out and "51900 already in use" in out
+
+
+def test_reconcile_freshness_prefers_liveness_over_stale_breadcrumb(tmp_path):
+    # If the daemon is reconciling NOW, a leftover breadcrumb must not shadow the
+    # healthy signal (a start clears it, but be robust to a race).
+    import datetime as _dt
+    from greasewood import status, reconcile
+    cfg = types.SimpleNamespace(role="node", data_dir=tmp_path,
+                                mesh_domain="pm.internal")
+    reconcile.write_daemon_fatal(tmp_path, "stale reason")
+    reconcile.stamp_reconcile_path(tmp_path).write_text(
+        _dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
+    assert status._reconcile_freshness(cfg).startswith("reconciled ")
+
+
 def test_reconcile_freshness_shown_for_anchor_in_header(tmp_path, monkeypatch):
     # the anchor has no sync line (it's the source), so the reconcile heartbeat
     # is its only freshness signal — it must appear in the watch header.

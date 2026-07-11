@@ -510,3 +510,43 @@ def read_last_reconcile(data_dir) -> "str | None":
         return stamp_reconcile_path(data_dir).read_text().strip()
     except (FileNotFoundError, OSError):
         return None
+
+
+# --- daemon death breadcrumb ----------------------------------------------
+# Counterpart to the liveness heartbeat above: when `gw run` dies on an
+# unrecoverable STARTUP condition (port in use, control plane can't bind, bad
+# anchor config), it drops the reason here before exiting. `gw watch` then shows
+# WHY the daemon is down instead of a bare "not running" — the fix for a
+# near-invisible systemd restart loop. Cleared once a start fully succeeds.
+
+def daemon_fatal_path(data_dir) -> "Path":
+    return Path(data_dir) / "daemon_fatal.json"
+
+
+def write_daemon_fatal(data_dir, reason: str) -> None:
+    """Record why the daemon is refusing to start (ISO ts + reason)."""
+    try:
+        daemon_fatal_path(data_dir).write_text(json.dumps({
+            "ts": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+            "reason": reason,
+        }))
+    except OSError:
+        pass
+
+
+def read_daemon_fatal(data_dir) -> "dict | None":
+    """The last startup-fatal breadcrumb ({ts, reason}), or None if the daemon
+    isn't recording one (never failed, or a later start cleared it)."""
+    try:
+        d = json.loads(daemon_fatal_path(data_dir).read_text())
+        return d if isinstance(d, dict) and "reason" in d else None
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
+def clear_daemon_fatal(data_dir) -> None:
+    """Startup fully succeeded — forget any prior death breadcrumb."""
+    try:
+        daemon_fatal_path(data_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
