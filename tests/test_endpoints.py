@@ -63,3 +63,45 @@ def test_token_carries_multiple_anchor_hosts():
     dpub, cpub, host, dseed, dport, _dom = decode_token(tok)
     assert host.split(",") == ["fd8d:e5c1:db1a:7::1", "203.0.113.5"]
     assert dport == 51901 and dseed == seed and dpub == anchor_door_pub
+
+
+# --- EndpointLoop: periodic re-detect + re-advertise-on-change --------------
+
+from greasewood.endpoints import EndpointLoop
+
+
+def _run_loop(detected, current):
+    pub = []
+    EndpointLoop(detect=lambda: detected, current=lambda: current,
+                 republish=pub.append)._tick()
+    return pub
+
+
+def test_endpoint_loop_readvertises_on_a_real_change():
+    # prefix renumber: the stable GUA moved → re-advertise the new one.
+    assert _run_loop(["[2606:4700::9]:51900"], ["[2606:4700::1]:51900"]) \
+        == [["[2606:4700::9]:51900"]]
+
+
+def test_endpoint_loop_noop_when_unchanged():
+    # steady state (incl. privacy-extension rotation, which never changes the
+    # STABLE address detection selects) → no publish, no seq churn.
+    assert _run_loop(["[a::1]:51900"], ["[a::1]:51900"]) == []
+
+
+def test_endpoint_loop_does_not_wipe_on_empty_detection():
+    # [] = nothing detected / transient `ip` failure. Must NOT drop a working
+    # advertisement (live sessions survive on roaming; a wipe re-signs for nothing).
+    assert _run_loop([], ["[a::1]:51900"]) == []
+
+
+def test_endpoint_loop_order_insensitive():
+    # dual-stack, same members different order → unchanged.
+    assert _run_loop(["[a::1]:51900", "1.2.3.4:51900"],
+                     ["1.2.3.4:51900", "[a::1]:51900"]) == []
+
+
+def test_endpoint_loop_partial_change_readvertises_full_set():
+    # v4 dropped (v6-only now) → re-advertise the reduced set.
+    assert _run_loop(["[a::1]:51900"], ["[a::1]:51900", "1.2.3.4:51900"]) \
+        == [["[a::1]:51900"]]
