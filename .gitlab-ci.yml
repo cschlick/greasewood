@@ -37,9 +37,9 @@ secret_detection:
   image: $DISTRO
   variables:
     DEBIAN_FRONTEND: noninteractive
-  rules:                                   # heavy — MRs + the two branch heads
+  rules:                                   # heavy — run on MRs + main only
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "macos"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
   before_script:
     - sh scripts/ci-distro-bootstrap.sh    # python3 >= 3.11 + git (NOT wg/venv)
   script:
