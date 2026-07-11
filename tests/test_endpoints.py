@@ -60,7 +60,7 @@ def test_token_carries_multiple_anchor_hosts():
     ca_pub = b"\x02" * 32
     hosts = "fd8d:e5c1:db1a:7::1,203.0.113.5"
     tok = encode_token(anchor_door_pub, ca_pub, hosts, seed, 51901)
-    dpub, cpub, host, dseed, dport, _dom = decode_token(tok)
+    dpub, cpub, host, dseed, dport, _dom, _menu = decode_token(tok)
     assert host.split(",") == ["fd8d:e5c1:db1a:7::1", "203.0.113.5"]
     assert dport == 51901 and dseed == seed and dpub == anchor_door_pub
 

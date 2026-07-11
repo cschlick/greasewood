@@ -719,8 +719,23 @@ def cmd_invite(args) -> int:
     # nodes ([anchor] default_roles / default_caps, read fresh each invite — so
     # editing them changes what future enrollments get). --roles/--caps
     # override for this one token.
+    # Role MENU (--self-roles): the joiner self-selects a subset of these at
+    # `gw join --roles`, letting ONE standing invite provision many classes. The
+    # anchor still CA-signs the result, and the joiner can never land outside the
+    # menu (subset-checked at enroll) — bounded self-selection, not self-assertion.
+    # A menu invite's BASE carries no default role: the joiner opts into a class
+    # (explicit beats implicit for provisioning); --roles still adds a fixed base.
+    # NEVER offer '*' (reach-all) as self-serve — that's the anchor's role.
+    allowed_roles = ([r.strip() for r in args.self_roles.split(",") if r.strip()]
+                     if getattr(args, "self_roles", None) else [])
+    if "*" in allowed_roles:
+        sys.exit("--self-roles must not include '*' (reach-all): never let a "
+                 "joiner self-assign the anchor's role. List concrete classes "
+                 "(e.g. --self-roles web,db,cache).")
     if args.roles is not None:
         roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+    elif allowed_roles:
+        roles = []                                 # menu invite → no default role
     else:
         roles = list(cfg.default_roles)
     caps = ["role:" + r for r in roles]
@@ -748,7 +763,8 @@ def cmd_invite(args) -> int:
             )
         caps.append("hostname-pinned")
     caps = list(dict.fromkeys(caps))          # de-dup, order-preserving
-    log.info("this token grants caps=%s%s", caps,
+    log.info("this token grants caps=%s%s%s", caps,
+             f"; self-select roles from {allowed_roles}" if allowed_roles else "",
              f"; hostname pinned to {pinned_hostname!r}" if pinned_hostname else "")
 
     seed = generate_seed()
@@ -768,7 +784,8 @@ def cmd_invite(args) -> int:
     # Write window file so the running gw-run daemon starts the enroll server.
     window_path = data_dir / "door_window.json"
     token = encode_token(anchor_door_pub, ca_keys.ca_pub_bytes, endpoint, seed,
-                         cfg.door_port, mesh_domain=cfg.mesh_domain)
+                         cfg.door_port, mesh_domain=cfg.mesh_domain,
+                         self_roles=allowed_roles)
 
     if getattr(args, "standing", False):
         # STANDING door: no expiry; serves any number of enrollments until
@@ -785,6 +802,7 @@ def cmd_invite(args) -> int:
             "v": 1,
             "standing": True,
             "caps": caps,
+            "allowed_roles": allowed_roles,   # menu: roles a joiner may self-select
             "hostname": None,          # standing doors can't pin one name
             "guest_pub": params.guest_pub_b64,
             "psk": params.psk_b64,
@@ -799,6 +817,7 @@ def cmd_invite(args) -> int:
             "v": 1,
             "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "caps": caps,
+            "allowed_roles": allowed_roles,   # menu: roles a joiner may self-select
             "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
         }))
 
@@ -1183,7 +1202,8 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
 
 def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
                       anchor_door_pub_b64: str, params, door_port,
-                      ca_pub_bytes: bytes, already_enrolled: bool):
+                      ca_pub_bytes: bytes, already_enrolled: bool,
+                      requested_roles: "list | tuple" = ()):
     """The door dance: bring up the transient gw-door interface, connect to the
     anchor's enroll daemon through it, exchange request → credential, and
     verify the credential against the token's CA. Every failure exits with an
@@ -1228,12 +1248,15 @@ def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
     # Both legs (cred fetch + record push) share this socket.
     conn.settimeout(30)
 
-    # Send enroll request
+    # Send enroll request. `roles` is the joiner's self-selection for a menu
+    # invite (`gw join --roles`); the anchor authorizes it against the window's
+    # menu and ignores it entirely for a classic invite — never trusted as-is.
     req = {
         "v": 1,
         "id_pub": node_keys.id_pub_hex,
         "wg_pub": node_keys.wg_pub_b64,
         "hostname": hostname,
+        "roles": list(requested_roles),
     }
     from .door import recv_msg as _recv_framed, send_msg as _send_framed
 
@@ -1379,10 +1402,28 @@ def cmd_join(args) -> int:
     # Decoded FIRST because the CA pub routes the join (see below).
     try:
         (anchor_door_pub_bytes, ca_pub_bytes, anchor_host, seed, door_port,
-         token_domain) = decode_token(token)
+         token_domain, token_menu) = decode_token(token)
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
     ca_pub_hex = ca_pub_bytes.hex()
+
+    # Roles the joiner self-selects (menu invite). Validate against the token's
+    # menu client-side for a friendly early error — the anchor re-checks and is
+    # authoritative. With a menu + no --roles, nudge the operator to pick.
+    requested_roles = ([r.strip() for r in args.roles.split(",") if r.strip()]
+                       if getattr(args, "roles", None) else [])
+    if token_menu:
+        if not requested_roles:
+            log.info("this invite lets you self-select a role: %s "
+                     "(pass --roles <name>); joining with none.", ", ".join(token_menu))
+        else:
+            bad = [r for r in requested_roles if r not in token_menu]
+            if bad:
+                sys.exit(f"role(s) {', '.join(bad)} not offered by this invite; "
+                         f"choose from: {', '.join(token_menu)}")
+    elif requested_roles:
+        log.warning("--roles %s ignored: this invite doesn't offer self-selected "
+                    "roles (the anchor sets them).", ",".join(requested_roles))
 
     # -c/--data-dir default to None (derived below from the token's mesh name);
     # the auto/explicit block after this always leaves both set.
@@ -1465,7 +1506,8 @@ def cmd_join(args) -> int:
 
     conn, resp, cred = _enroll_over_door(
         data_dir, node_keys, hostname, anchor_host, anchor_door_pub_b64,
-        params, door_port, ca_pub_bytes, already_enrolled)
+        params, door_port, ca_pub_bytes, already_enrolled,
+        requested_roles=requested_roles)
 
     # The anchor decided our name + caps; adopt them from the issued credential
     # (the authoritative record of what we were granted) so config matches. For
@@ -3535,6 +3577,13 @@ def main(argv=None) -> int:
                     help="ability caps granted to the invited node (comma-sep), "
                          "e.g. 'tls'. Omitted → the anchor's [anchor] default_caps "
                          "(ships as 'tls'). Roles are set with --roles.")
+    sp.add_argument("--self-roles", default=None, metavar="R1,R2",
+                    help="role MENU the joiner may self-select from at `gw join "
+                         "--roles` (comma-sep) — one standing invite provisions many "
+                         "classes. The anchor still signs, and the joiner can never "
+                         "land outside this set. Sets no default role (the joiner "
+                         "opts in). NEVER include '*' (reach-all). Combine with "
+                         "--roles to also grant a fixed base role.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay address, v6 or v4, to embed in the token (auto-detected if omitted)")
     sp.add_argument("--standing", action="store_true",
@@ -3568,6 +3617,11 @@ def main(argv=None) -> int:
     sp.add_argument("--hostname", default=None,
                     help="this node's hostname in the mesh "
                          "(default: keep existing, else the machine's hostname)")
+    sp.add_argument("--roles", default=None, metavar="R1,R2",
+                    help="role(s) to self-select (comma-sep) when the invite offers "
+                         "a menu (`gw invite --self-roles`). Must be within the "
+                         "menu; the anchor authorizes and signs. Ignored (with a "
+                         "warning) for a classic invite, where the anchor sets roles.")
     sp.add_argument("--data-dir", dest="data_dir", default=None,
                     help="state directory (default: /var/lib/greasewood_<name>)")
     sp.add_argument("--listen-port", dest="listen_port", type=int, default=None,
