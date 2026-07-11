@@ -135,7 +135,7 @@ def _live_and_hidden(records, now, show_all):
 
 
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
-                  latency=None, rates=None, grants=None) -> list:
+                  latency=None, rates=None, grants=None, show_total=False) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
     every node — name, addr, reachable, roles, credential); RIGHT is THIS
     node's view. Without root the right side is just the policy 'would I peer'
@@ -167,8 +167,11 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
             if lp is None:
                 return ("not installed", "", "")
             if _handshake_fresh(lp, now_epoch):
+                # middle column: cumulative traffic (steady) or per-second rate.
+                middle = (f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}"
+                          if show_total else (rates or {}).get(r.cred.addr, ""))
                 return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)}",
-                        (rates or {}).get(r.cred.addr, ""),
+                        middle,
                         latency.get(r.cred.addr, "…"))   # … = ping in flight
             return ("○ no handshake", "", "—")
         if not have_live:                       # policy only (no root)
@@ -186,7 +189,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
 
     left_hdr = ("name", "addr", "in", "roles", "exp")
     if is_live:
-        right_hdr = ("link", "rate", "latency")
+        right_hdr = ("link", "traffic" if show_total else "rate", "latency")
     elif have_live:
         right_hdr = ("link", "traffic")
     else:
@@ -452,6 +455,7 @@ _KEY_ACTIONS = {
     b"g": "top",    b"\x1b[H": "top",
     b"G": "bottom", b"\x1b[F": "bottom",
     b"f": "toggle_nft",
+    b"t": "toggle_total",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -502,13 +506,14 @@ class _WatchApp:
     scrolling responds immediately in between."""
 
     def __init__(self, cfg, own_id, own_addr, prober, interval: float,
-                 show_all: bool = False) -> None:
+                 show_all: bool = False, show_total: bool = False) -> None:
         self._cfg = cfg
         self._own_id = own_id
         self._own_addr = own_addr
         self._prober = prober
         self._interval = interval
         self._show_all = show_all        # --all: include expired records
+        self._show_total = show_total    # t toggles rate ↔ cumulative traffic
         self._off = 0                    # scroll offset into the peer rows
         self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
         self._show_nft = True            # f toggles the nft table block
@@ -562,7 +567,7 @@ class _WatchApp:
         grants = _load_policy_grants(self._cfg)
         roster = _roster_lines(records, self._cfg, now, self._own_id, live, True,
                                latency=self._prober.results, rates=rates,
-                               grants=grants)
+                               grants=grants, show_total=self._show_total)
         # Roster chrome (title, column header, separator) pins with the header;
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
@@ -590,9 +595,10 @@ class _WatchApp:
             off = _scroll_clamp(self._off, total, view_h)
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
         hidden = f" · {self._hidden} expired hidden" if self._hidden else ""
+        tkey = "t rate" if self._show_total else "t total"
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
-                f"↑↓/PgUp/PgDn/g/G scroll · f firewall · q quit")
+                f"↑↓/PgUp/PgDn/g/G scroll · f firewall · {tkey} · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
         """The full frame as a list of exactly term_h lines: pinned top, the
@@ -635,6 +641,11 @@ class _WatchApp:
                 return
             if action == "toggle_nft":
                 self._show_nft = not self._show_nft     # instant, next render shows it
+            elif action == "toggle_total":
+                # rate↔cumulative lives in the peer ROWS (built in _fetch), so
+                # rebuild them now for instant feedback rather than waiting a tick.
+                self._show_total = not self._show_total
+                self._fetch()
             elif action:
                 _, term_h = shutil.get_terminal_size((80, 24))
                 self._off = _scroll_key(action, self._off, len(self._rows),
@@ -642,7 +653,7 @@ class _WatchApp:
 
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
-                show_all: bool = False) -> int:
+                show_all: bool = False, show_total: bool = False) -> int:
     """Live, scrollable `gw watch`: link state + per-second throughput + an
     async latency column, in a viewport that scrolls when there are more peers
     than screen rows. See _WatchApp. Root + a terminal required."""
@@ -657,7 +668,8 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
                  "for a no-root static view)")
     prober = _LatencyProber()
     prober.start()
-    app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval), show_all)
+    app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval),
+                    show_all, show_total)
     try:
         with _cbreak_terminal() as fd:
             app.run(fd)
@@ -891,7 +903,8 @@ def cmd_watch(args) -> int:
         # root for live WireGuard state — that's why the default wants sudo.
         return _watch_live(cfg, own_id, own_addr,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0),
-                            show_all=getattr(args, "all", False))
+                            show_all=getattr(args, "all", False),
+                            show_total=getattr(args, "total", False))
 
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
