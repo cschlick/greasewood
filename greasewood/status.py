@@ -162,6 +162,20 @@ def _live_and_hidden(records, now, show_all):
     return live, len(records) - len(live)
 
 
+# Reserved widths for the roster cells whose render CHANGES WIDTH over time —
+# so a rescaling rate/traffic, a filling-in latency, a counting-down exp, or a
+# flipping link state never shifts the table. Sizing these to the live value
+# (the old behavior) jittered the whole layout every refresh. Each is the widest
+# string its formatter can produce; a value is always <= it, so the column is
+# rock-solid. (Static columns — name/addr/roles — still size to the fleet: they
+# only reflow when membership actually changes, which is a real event.)
+_W_EXP     = len("EXPIRED")                   # widest exp token
+_W_LINK    = len("● up, 999d ago")            # widest link string
+_W_LAT     = len("1000ms")                    # ping -W1 deadline caps RTT ~1s
+_W_TRAFFIC = len("↓1023.9G ↑1023.9G")         # widest cumulative ↓rx ↑tx
+_W_RATE    = len("↓1023.9K/s ↑1023.9K/s")     # widest per-second ↓ ↑
+
+
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                   latency=None, rates=None, grants=None, show_total=False) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
@@ -233,10 +247,25 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         right_rows.append(_right(r, r.id_pub.hex() == own_id,
                                  peers_allowed(cfg.caps, r.cred.caps, grants), lp))
 
-    def _col_width(header, i, rows):
-        return max(len(header), *(len(row[i]) for row in rows)) if rows else len(header)
-    left_widths = [_col_width(left_hdr[i], i, left_rows) for i in range(len(left_hdr))]
-    right_widths = [_col_width(right_hdr[i], i, right_rows) for i in range(len(right_hdr))]
+    # A per-column reserved floor for the width-changing cells (0 = size to
+    # data). left: only `exp` is dynamic. right depends on mode.
+    left_reserve = (0, 0, 0, _W_EXP)              # name, addr, roles, exp
+    if is_live:
+        right_reserve = (_W_LINK, _W_TRAFFIC if show_total else _W_RATE, _W_LAT)
+    elif have_live:
+        right_reserve = (_W_LINK, _W_TRAFFIC)
+    else:
+        right_reserve = (0,)                      # peer? — small + static
+
+    def _col_width(header, i, rows, reserve):
+        # max with the live values too, so an under-estimate degrades to today's
+        # reflow rather than overflowing a column (alignment stays intact).
+        cur = max((len(row[i]) for row in rows), default=0)
+        return max(len(header), cur, reserve)
+    left_widths = [_col_width(left_hdr[i], i, left_rows, left_reserve[i])
+                   for i in range(len(left_hdr))]
+    right_widths = [_col_width(right_hdr[i], i, right_rows, right_reserve[i])
+                    for i in range(len(right_hdr))]
 
     def _fmt_left(cells):   # name right-justified, the rest left-justified
         return " ".join([f"{cells[0]:>{left_widths[0]}}"]
