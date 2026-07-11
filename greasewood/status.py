@@ -137,7 +137,7 @@ def _live_and_hidden(records, now, show_all):
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                   latency=None, rates=None, grants=None, show_total=False) -> list:
     """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
-    every node — name, addr, reachable, roles, credential); RIGHT is THIS
+    every node — name, addr, roles, credential); RIGHT is THIS
     node's view. Without root the right side is just the policy 'would I peer'
     answer. With root it's the live link + cumulative traffic. In LIVE mode
     (latency dict supplied) the right side is link + per-second RATE + a latency
@@ -187,7 +187,7 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                     f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
         return ("○ no handshake", "")
 
-    left_hdr = ("name", "addr", "in", "roles", "exp")
+    left_hdr = ("name", "addr", "roles", "exp")
     if is_live:
         right_hdr = ("link", "traffic" if show_total else "rate", "latency")
     elif have_live:
@@ -199,7 +199,6 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     for r in records:
         left_rows.append((
             mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            "yes" if r.endpoints else "no",
             ",".join(_record_roles(r)) or "-", _exp(r),
         ))
         lp = (live_peers or {}).get(_wg_key(r))
