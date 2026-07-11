@@ -7,7 +7,7 @@ import datetime as dt
 
 import pytest
 
-from greasewood.config import _parse_duration, load_config
+from greasewood.config import _parse_duration, load_config, render_config
 
 
 def test_parse_duration_units():
@@ -66,6 +66,29 @@ def test_new_node_defaults_fallback(tmp_path):
     cfg = load_config(p)
     assert cfg.default_roles == ["mesh"]
     assert cfg.default_caps == ["tls"]
+
+
+def _render(**kw):
+    base = dict(hostname="n1", data_dir="/var/lib/gw", role="node", caps=[],
+                interface="gw-x", listen_port=51900, overlay_prefix="fd::",
+                seeds=[], root_url="", hosts_sync=True, mesh_domain="x.internal",
+                trusted_pubs=[])
+    base.update(kw)
+    return render_config(**base)
+
+
+def test_render_config_writes_enforce_ports_explicitly(tmp_path):
+    # create/join write the key explicitly (chosen from nftables presence), so
+    # the operator always sees it and an nft-less host is unambiguously off.
+    assert "enforce_ports = false" in _render(enforce_ports=False)
+    assert "enforce_ports = true" in _render(enforce_ports=True)
+
+
+def test_render_config_enforce_ports_round_trips(tmp_path):
+    p = _write(tmp_path, _render(enforce_ports=False))
+    assert load_config(p).enforce_ports is False
+    p = _write(tmp_path, _render(enforce_ports=True))
+    assert load_config(p).enforce_ports is True
 
 
 def test_new_node_defaults_explicit(tmp_path):

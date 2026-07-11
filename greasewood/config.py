@@ -129,7 +129,8 @@ def render_config(*, hostname: str, data_dir, role: str, caps: list,
                   endpoints: "list | None" = None, interface: str,
                   listen_port: int, overlay_prefix: str, seeds: list,
                   root_url: str, hosts_sync: bool, mesh_domain: str,
-                  trusted_pubs: list, anchor: "dict | None" = None) -> str:
+                  trusted_pubs: list, enforce_ports: bool = True,
+                  anchor: "dict | None" = None) -> str:
     """The ONE writer of /etc/greasewood_<name>.toml — create, join, and
     anchor-promote all render through it, so a config field is added in exactly
     two places: the Config dataclass above (the reader) and this template (the
@@ -149,6 +150,10 @@ overlay_prefix = "{overlay_prefix}"
 seeds = {json.dumps(list(seeds))}
 root_url = {json.dumps(root_url or "")}
 hosts_sync = {"true" if hosts_sync else "false"}
+# Per-port enforcement of the grant table via greasewood's own nftables table.
+# Chosen at create/join from whether nftables was usable then: false on a host
+# without it (grants still gate which tunnels exist; port scopes stay advisory).
+enforce_ports = {"true" if enforce_ports else "false"}
 mesh_domain = "{mesh_domain}"
 
 [ca]

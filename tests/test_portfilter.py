@@ -187,6 +187,21 @@ def test_ensure_available_raises_when_ruleset_fails(monkeypatch):
         pf.ensure_available()
 
 
+def test_nft_usable_false_without_nft(monkeypatch):
+    # nft_usable() is the boolean the config default keys off: no nft → False,
+    # so create/join write enforce_ports = false (and never a restart loop).
+    monkeypatch.setattr("greasewood.portfilter.shutil.which", lambda n: None)
+    assert pf.nft_usable() is False
+
+
+def test_nft_usable_true_when_available(monkeypatch):
+    import subprocess
+    monkeypatch.setattr("greasewood.portfilter.shutil.which", lambda n: "/usr/sbin/nft")
+    monkeypatch.setattr("greasewood.portfilter.subprocess.run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    assert pf.nft_usable() is True
+
+
 def test_table_name_is_per_mesh_and_nft_safe():
     # per-membership so multi-mesh hosts don't clobber one shared table; and
     # hyphens/dots in the key become underscores (nft identifier rules).
