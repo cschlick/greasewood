@@ -79,6 +79,7 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     print(out)   # visible under `pytest -s`
 
     assert "role     : node" in out and "hostname : api1" in out     # self header
+    assert "logs     : journalctl -eu greasewood@gw" in out           # how to read the daemon log
     assert "│ self" in out                                            # self marked in the 'this node' column
     assert "name" in out and "roles" in out                       # left (mesh) columns
     assert "this node" in out and "peer?" in out                     # the split; non-root right side
