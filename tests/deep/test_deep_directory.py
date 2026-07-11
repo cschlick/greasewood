@@ -45,7 +45,7 @@ POOL = [_identity(f"node{i}") for i in range(5)]
 def _record(idx: int, seq: int, endpoints: list) -> NodeRecord:
     k, cred = POOL[idx]
     return NodeRecord(id_pub=k.id_pub_bytes, seq=seq, endpoints=endpoints,
-                      inbound="yes", cred=cred).sign(k.id_priv)
+                      cred=cred).sign(k.id_priv)
 
 
 class DirectoryMachine(RuleBasedStateMachine):
@@ -80,7 +80,7 @@ class DirectoryMachine(RuleBasedStateMachine):
     def tampered_record_never_enters(self, idx, seq):
         rec = _record(idx, seq, [])
         d = rec.to_dict()
-        d["inbound"] = "no" if d.get("inbound") != "no" else "yes"  # break self-sig
+        d["endpoints"] = list(d["endpoints"]) + ["[2001:db8::dead]:51820"]  # break self-sig
         forged = NodeRecord.from_dict(d)
         assert self.d.merge([forged]) == 0
         got = self.d.get(rec.id_pub.hex())

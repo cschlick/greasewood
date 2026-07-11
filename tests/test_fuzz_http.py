@@ -60,7 +60,7 @@ def fuzz_server(tmp_path_factory):
                     ["segment:mesh", "tls"])
     baselines = {
         "/publish": NodeRecord(
-            id_pub=node.id_pub_bytes, seq=1, endpoints=[], inbound="yes",
+            id_pub=node.id_pub_bytes, seq=1, endpoints=[],
             cred=cred,
         ).sign(node.id_priv).to_dict(),
         "/renew": RenewRequest(

@@ -94,7 +94,7 @@ def test_node_record_tamper_fails_structural(seq, endpoints, hostname, data):
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     cred = _cred(hostname, ["segment:mesh"], now, now + dt.timedelta(hours=24))
     rec = NodeRecord(id_pub=NODE.id_pub_bytes, seq=seq, endpoints=endpoints,
-                     inbound="yes", cred=cred).sign(NODE.id_priv)
+                     cred=cred).sign(NODE.id_priv)
     NodeRecord.from_dict(rec.to_dict()).verify_structural()   # baseline holds
 
     d = rec.to_dict()
