@@ -455,6 +455,26 @@ def _scroll_key(action: str, off: int, total: int, view_h: int) -> int:
     return _scroll_clamp(off, total, view_h)
 
 
+_BAR_TRACK, _BAR_THUMB = "░", "█"
+
+
+def _scrollbar_column(off: int, total: int, view_h: int) -> list:
+    """A `view_h`-tall vertical scrollbar as a list of glyphs (one per visible
+    row): a track with a thumb whose SIZE reflects how much of the content is on
+    screen (view_h/total) and whose POSITION reflects the scroll offset. Pure, so
+    the geometry is testable without a terminal. Blank when everything fits."""
+    if view_h <= 0:
+        return []
+    if total <= view_h:
+        return [" "] * view_h                          # all visible → no bar
+    thumb = min(view_h, max(1, round(view_h * view_h / total)))
+    max_off = total - view_h
+    pos = round(off * (view_h - thumb) / max_off) if max_off else 0
+    pos = max(0, min(pos, view_h - thumb))
+    return [_BAR_THUMB if pos <= i < pos + thumb else _BAR_TRACK
+            for i in range(view_h)]
+
+
 # Keypress bytes → action. Single keys plus the common escape sequences (arrows,
 # PgUp/PgDn, Home/End). This table is the seam where future interactive ops
 # (sort, filter, select a peer and act on it) attach.
@@ -620,6 +640,13 @@ class _WatchApp:
         self._off = _scroll_clamp(self._off, len(self._rows), view_h)
         visible = self._rows[self._off:self._off + view_h]
         body = visible + [""] * (view_h - len(visible))
+        # When the peer list overflows the viewport, pin a 1-col scrollbar rail
+        # to the right edge of the scrollable rows (only that region scrolls, so
+        # only it gets a bar). Pad/truncate each row to cols-1, then the glyph.
+        if len(self._rows) > view_h and cols > 1:
+            bar = _scrollbar_column(self._off, len(self._rows), view_h)
+            w = cols - 1
+            body = [f"{ln:<{w}.{w}}{bar[i]}" for i, ln in enumerate(body)]
         return top + body + [self._footer(view_h)]
 
     def _view_h(self, term_h: int) -> int:
