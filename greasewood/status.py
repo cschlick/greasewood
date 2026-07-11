@@ -718,14 +718,23 @@ def _reconcile_freshness(cfg) -> "str | None":
     this is its only freshness signal). None if the marker isn't there yet."""
     from . import reconcile as rmod
     last = rmod.read_last_reconcile(cfg.data_dir)
+    if last is not None:
+        last_dt = _parse_iso(last)
+        age = (dt.datetime.now(_UTC) - last_dt).total_seconds() if last_dt else 0.0
+        if age <= 30:                 # reconcile runs every ~5s → alive right now
+            return f"reconciled {_fmt_ago(last)}"
+    # Not fresh (or never reconciled). If the daemon died on an unrecoverable
+    # STARTUP condition it left a breadcrumb — show WHY it's down, not just that
+    # it is. This is the visible end of the restart-loop fix: the reason lands
+    # right here in the header the operator already reads.
+    fatal = rmod.read_daemon_fatal(cfg.data_dir)
+    if fatal:
+        return (f"⚠ daemon FAILED to start: {fatal['reason']} "
+                f"({_fmt_ago(fatal['ts'])}) — see logs below")
     if last is None:
         return "never reconciled — is the daemon running? (sudo gw run)"
-    last_dt = _parse_iso(last)
-    age = (dt.datetime.now(_UTC) - last_dt).total_seconds() if last_dt else 0.0
-    if age > 30:                      # reconcile runs every ~5s; 30s = wedged/stopped
-        return (f"⚠ last reconcile {_fmt_ago(last)} — daemon stalled or stopped? "
-                f"(should be seconds)")
-    return f"reconciled {_fmt_ago(last)}"
+    return (f"⚠ last reconcile {_fmt_ago(last)} — daemon stalled or stopped? "
+            f"(should be seconds)")
 
 
 def _sync_freshness(cfg) -> "str | None":

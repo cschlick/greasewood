@@ -72,6 +72,13 @@ After=network-online.target
 Wants=network-online.target
 # Only run once this membership is configured (create / join writes it).
 ConditionPathExists=/etc/greasewood_%i.toml
+# Bound the restart loop. Without this, RestartSec=5 never fills systemd's
+# default 10s start-limit window (restarts are 5s apart), so a daemon that can't
+# start loops FOREVER, invisibly. 5 failures within 2min instead trips the limit
+# → the unit enters a visible `failed` state (systemctl status, and gw watch's
+# daemon heartbeat goes stale) instead of thrashing silently.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -368,6 +375,25 @@ def _enforce_ports_default() -> bool:
                 "(port scopes advisory; grants still gate which tunnels exist). "
                 "Install nftables and set enforce_ports = true to enforce ports.")
     return False
+
+
+def _daemon_fatal(cfg, msg: str):
+    """Exit the daemon on an unrecoverable STARTUP condition — but VISIBLY.
+    Under the systemd unit's Restart=on-failure, a bare sys.exit is about the
+    most invisible failure possible: a silent 5s restart loop. This makes it
+    loud on both channels the operator actually watches:
+      - CRITICAL to the journal (`logs :` in the watch header points here);
+      - a breadcrumb `gw watch` surfaces as the daemon's death reason, so you
+        don't have to already know to read journalctl.
+    The unit also bounds the loop (StartLimit) so it lands in a `failed` state
+    rather than thrashing forever. Then exit non-zero (systemd sees the failure)."""
+    from . import reconcile as rmod
+    log.critical("FATAL: cannot start daemon: %s", msg)
+    try:
+        rmod.write_daemon_fatal(cfg.data_dir, msg)
+    except Exception as e:                       # never mask the real cause
+        log.warning("could not write daemon-fatal breadcrumb: %s", e)
+    sys.exit(msg)
 
 
 def _make_port_enforcer(cfg, args, grant_policy):
@@ -2356,7 +2382,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     from . import wg as wgmod
 
     if not cfg.ca_key_file:
-        sys.exit("anchor role requires ca_key_file in [anchor]")
+        _daemon_fatal(cfg, "anchor role requires ca_key_file in [anchor]")
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
     ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
     get_revoked = ca.load_revoked_set
@@ -2410,7 +2436,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
             mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
             get_policy=read_policy)
     except ControlPlaneAddrInUse as e:
-        sys.exit(f"anchor control plane can't start: {e}")
+        _daemon_fatal(cfg, f"anchor control plane can't start: {e}")
     server.start()
 
     door_watcher = DoorWatcher(
@@ -2487,10 +2513,10 @@ def cmd_run(args) -> int:
                 cfg.wg_interface, keys.addr, cfg.listen_port, cfg.wg_key_path
             )
         except wgmod.PortInUse as e:
-            # A fatal, operator-fixable startup condition — exit cleanly with the
-            # actionable message instead of a traceback that crash-loops under
-            # the systemd unit's Restart=on-failure.
-            sys.exit(str(e))
+            # A fatal, operator-fixable startup condition — exit VISIBLY (journal
+            # + a breadcrumb gw watch shows) rather than a silent crash-loop
+            # under the systemd unit's Restart=on-failure.
+            _daemon_fatal(cfg, str(e))
 
     sync: SyncLoop | None = None
     renewal: RenewalLoop | None = None
@@ -2651,6 +2677,12 @@ def cmd_run(args) -> int:
                                        cfg.data_dir, mesh_domain=cfg.mesh_domain)
         cert_renewal.start()
         log.info("TLS cert auto-renewal started (%d managed cert(s))", len(_managed))
+
+    # Startup fully succeeded (interface up, control plane up, loops running) —
+    # forget any death breadcrumb from a prior failed boot so `gw watch` stops
+    # reporting a stale fatal reason.
+    from . import reconcile as _rmod
+    _rmod.clear_daemon_fatal(cfg.data_dir)
 
     # Block until SIGTERM / SIGINT
     stop_flag = threading.Event()
