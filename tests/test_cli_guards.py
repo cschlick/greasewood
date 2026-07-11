@@ -245,22 +245,16 @@ def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Linux-only release guard: PyPI is public, so a Mac user will pip-install and
-# run a command — it must exit with a clear pointer, not fail deep in ip/wg.
+# Linux-only guard: PyPI is public, so a non-Linux user will pip-install and run
+# a command — it must exit cleanly, not fail deep in an ip/wg call.
 # ---------------------------------------------------------------------------
 
-def test_non_linux_exits_with_macos_branch_pointer(monkeypatch):
-    try:
-        import greasewood.platform  # noqa: F401
-        pytest.skip("cross-platform (macos) line supports Darwin — see test_macos_port")
-    except ImportError:
-        pass                          # Linux-only line: the guard is active
+def test_non_linux_exits_cleanly(monkeypatch):
     import platform
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     with pytest.raises(SystemExit) as e:
         cli.main(["watch", "--snapshot"])
-    msg = str(e.value)
-    assert "Linux-only" in msg and "macos branch" in msg and "@macos" in msg
+    assert "Linux-only" in str(e.value)
 
 
 def test_version_still_works_on_non_linux(monkeypatch):

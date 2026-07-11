@@ -3329,7 +3329,7 @@ def _systemd_available() -> bool:
 
 
 def _service_exec() -> str:
-    """The exec line the daemon service (systemd unit / launchd job) runs.
+    """The exec line the daemon service (the systemd unit) runs.
 
     Prefer `<abs-interpreter> -m greasewood` over the `gw` console-script path.
     The interpreter that ran `gw create` is where the package is installed, and
@@ -3384,27 +3384,13 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
 # ---------------------------------------------------------------------------
 
 def _require_supported_os() -> None:
-    """Reject an unsupported OS with a clear message instead of failing deep in
-    an ip/wg call. This build's supported set is branch-defined and detected at
-    runtime: the `greasewood.platform` module exists only on the cross-platform
-    (macOS) line — when it's importable, defer to its check (Linux + macOS);
-    when it's absent, this is the Linux-only release, so anything but Linux exits
-    with a pointer to the macos branch (PyPI is public — a Mac user WILL
-    pip-install and run a command). Keeping the decision here, keyed on that
-    import, means the same source is correct on both branches with no per-branch
-    edit to reconcile on merge."""
-    try:
-        from .platform import require_supported
-    except ImportError:
-        import platform as _plat
-        if _plat.system() != "Linux":
-            sys.exit(
-                f"greasewood is Linux-only in this release (this is {_plat.system()}).\n"
-                f"macOS support is experimental and lives on the macos branch:\n"
-                f"  pipx install --global "
-                f"'git+https://gitlab.com/cschlick/greasewood.git@macos'")
-        return
-    require_supported()   # macos line: Linux + macOS both fine
+    """Exit cleanly on a non-Linux host instead of failing deep in an ip/wg call.
+    greasewood is Linux-only (in-kernel WireGuard, nftables, ip, systemd); PyPI
+    is public, so a non-Linux user could pip-install and run a command. --version
+    and -h are handled by parse_args before this, so they work everywhere."""
+    import platform as _plat
+    if _plat.system() != "Linux":
+        sys.exit(f"greasewood is a Linux-only tool (this host is {_plat.system()}).")
 
 
 def main(argv=None) -> int:
