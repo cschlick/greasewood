@@ -274,12 +274,24 @@ def _detect_public_ipv6() -> str | None:
     return (stable or temporary or any_gua or [None])[0]
 
 
+_CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # RFC 6598 carrier-grade NAT
+
+
+def _globally_reachable_v4(addr: "ipaddress.IPv4Address") -> bool:
+    """Is this v4 something a peer could actually dial? `is_global` excludes
+    RFC1918 / loopback / link-local; the explicit CGNAT (100.64.0.0/10) test is
+    the belt-and-suspenders: carrier-NAT space is NOT `is_private`, and its
+    `is_global` was only corrected in CPython 3.11.9 / 3.12.4 — so on an older
+    interpreter in the distro matrix `is_global` alone would wrongly pass it."""
+    return addr.is_global and addr not in _CGNAT4
+
+
 def _detect_public_ipv4() -> str | None:
-    """Best-effort public IPv4 on this machine — a global, non-private, non-
-    loopback v4 on an interface. Behind 1:1 NAT (e.g. EC2, where the interface
-    holds only a private v4) this returns None, so inbound v4 nodes should pass
-    `--endpoint <public-v4>` explicitly. Only the underlay may be v4; the overlay
-    stays IPv6."""
+    """Best-effort public IPv4 on this machine — a globally-reachable v4 on an
+    interface. Behind 1:1 NAT (e.g. EC2, where the interface holds only a private
+    v4) OR carrier-grade NAT (a 100.64/10 address) this returns None, so those
+    nodes advertise nothing (correctly outbound-only) unless the operator passes
+    `--endpoint <public-v4>`. Only the underlay may be v4; the overlay stays IPv6."""
     try:
         r = subprocess.run(
             ["ip", "-4", "-o", "addr", "show", "scope", "global"],
@@ -295,7 +307,7 @@ def _detect_public_ipv4() -> str | None:
             addr = ipaddress.IPv4Address(parts[3].split("/")[0])
         except ValueError:
             continue
-        if not (addr.is_private or addr.is_loopback or addr.is_link_local):
+        if _globally_reachable_v4(addr):
             return str(addr)
     return None
 

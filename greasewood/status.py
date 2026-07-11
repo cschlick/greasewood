@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime as dt
+import ipaddress
 import itertools
 import json
 import logging
@@ -52,6 +53,33 @@ def _underlay_addrs(endpoints: list[str]) -> tuple[str, str]:
         elif ep:                               # host:port (v4)
             v4 = ep.rsplit(":", 1)[0]
     return v6, v4
+
+
+_CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # RFC 6598 carrier-grade NAT
+
+
+def _endpoint_scope_note(v6: str, v4: str) -> str:
+    """A warning if EVERY advertised underlay host is non-globally-reachable.
+    Advertising a CGNAT or private address doesn't make a node dialable — a real
+    source of "it's listed, why won't it connect?" confusion. '' when at least
+    one host is plausibly reachable (or unparseable — a hostname; don't guess),
+    or when none is advertised (outbound-only, reported elsewhere). The explicit
+    CGNAT test is version-independent: 100.64/10 is not is_private, and its
+    is_global was only corrected in CPython 3.11.9 / 3.12.4."""
+    note = ""
+    for h in (v6, v4):
+        if h == "-":
+            continue
+        try:
+            addr = ipaddress.ip_address(h)
+        except ValueError:
+            return ""                              # a hostname → can't classify
+        if addr.is_global and not (addr.version == 4 and addr in _CGNAT4):
+            return ""                              # a reachable endpoint exists
+        note = note or ("CGNAT (100.64/10, not globally reachable)"
+                        if addr.version == 4 and addr in _CGNAT4
+                        else "not globally reachable")
+    return note
 
 
 def _record_roles(r) -> list[str]:
@@ -1147,6 +1175,7 @@ class _DiagnoseColumn:
     credential: str = ""                   # human verdict, e.g. "valid · 23h"
     has_endpoint: bool = False             # dialable iff it advertises an endpoint
     endpoint: str = "—"                    # the endpoint to dial, or "—"
+    scope_note: str = ""                   # set iff the endpoint isn't globally reachable
     handshake_age: "int | None" = None     # secs since last handshake, or None
     firewall: str = ""                     # this-host verdict / inferred / "???"
 
@@ -1258,6 +1287,7 @@ def _build_diag_facts(columns, cfg, own_addr, ca_pubs, revoked,
             credential=credential_verdict(rec),
             has_endpoint=has_endpoint,
             endpoint=v6 if v6 != "-" else (v4 if v4 != "-" else "—"),
+            scope_note=_endpoint_scope_note(v6, v4),
             handshake_age=age, firewall=firewall))
     return facts
 
@@ -1286,8 +1316,9 @@ def _print_diag_table(facts, port) -> None:
     rows = [("overlay", [col.addr for col in facts]),
             ("underlay v6", [col.underlay_v6 for col in facts]),
             ("underlay v4", [col.underlay_v4 for col in facts]),
-            ("reachable", ["yes (advertises endpoint)" if col.has_endpoint
-                           else "no (outbound-only)" for col in facts]),
+            ("reachable", ["no (outbound-only)" if not col.has_endpoint
+                           else f"yes, but {col.scope_note}" if col.scope_note
+                           else "yes (advertises endpoint)" for col in facts]),
             ("roles", [col.roles or "-" for col in facts]),
             ("credential", [col.credential for col in facts]),
             (f"firewall udp/{port}", [col.firewall for col in facts])]
@@ -1324,10 +1355,18 @@ def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
 
     a_dials_b = col_b.has_endpoint     # a can dial b iff b listens with an endpoint
     b_dials_a = col_a.has_endpoint
-    print(f"    {col_a.label} → {col_b.label}: " + (f"dial {col_b.endpoint}" if a_dials_b
-          else f"can't — {col_b.label} is outbound-only / advertises no endpoint"))
-    print(f"    {col_b.label} → {col_a.label}: " + (f"dial {col_a.endpoint}" if b_dials_a
-          else f"can't — {col_a.label} is outbound-only / advertises no endpoint"))
+
+    def _dir(src, dst):
+        if not dst.has_endpoint:
+            return f"can't — {dst.label} is outbound-only / advertises no endpoint"
+        # State the address class as a fact, no inference: a non-global endpoint
+        # is reachable only from its own network (a same-LAN peer still can), so
+        # don't claim it "won't work" — just name it so the operator can judge.
+        if dst.scope_note:
+            return f"dial {dst.endpoint}  ⚠ {dst.scope_note}"
+        return f"dial {dst.endpoint}"
+    print(f"    {col_a.label} → {col_b.label}: {_dir(col_a, col_b)}")
+    print(f"    {col_b.label} → {col_a.label}: {_dir(col_b, col_a)}")
     if not (a_dials_b or b_dials_a):
         print("    ✗ no dialable direction — the link can't form "
               "(both outbound-only)")
