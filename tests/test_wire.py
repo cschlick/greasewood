@@ -498,3 +498,17 @@ def test_record_allow_expired_still_enforces_revocation():
     # expired + not revoked, expiry NOT waived → rejected (a regular peer)
     with pytest.raises(ValueError, match="expired"):
         rec.verify([ca.ca_pub_bytes], set())
+
+
+def test_inbound_stays_in_the_signed_body():
+    """REGRESSION: `inbound` is vestigial but MUST remain in the signed body.
+    Removing it changed _body_dict, so every record signed before the change
+    failed its self-signature — a live mesh went dark (empty roster, dropped
+    tunnels) until every node re-signed. It reappears in to_dict(), and a record
+    that carries it round-trips and verifies."""
+    ca = CAKeys.generate()
+    node = NodeKeys.generate()
+    rec = make_record(node, make_cred(node, ca)).sign(node.id_priv)
+    d = rec.to_dict()
+    assert "inbound" in d, "inbound dropped from the wire form → breaks old records"
+    NodeRecord.from_dict(d).verify_structural()        # round-trips + self-sig holds
