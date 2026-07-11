@@ -91,6 +91,14 @@ def test_render_config_enforce_ports_round_trips(tmp_path):
     assert load_config(p).enforce_ports is True
 
 
+def test_endpoint_auto_round_trips_and_defaults_true(tmp_path):
+    # Explicit both ways (create/join write it; false when --endpoint was given).
+    assert load_config(_write(tmp_path, _render(endpoint_auto=False))).endpoint_auto is False
+    assert load_config(_write(tmp_path, _render(endpoint_auto=True))).endpoint_auto is True
+    # Absent (old/minimal config) → default on: an auto-detected node self-heals.
+    assert load_config(_write(tmp_path, '[node]\nhostname = "n1"\n')).endpoint_auto is True
+
+
 def test_new_node_defaults_explicit(tmp_path):
     # The anchor operator can change what new nodes get (e.g. tls off, rename the
     # default segment) — read fresh at each invite.
