@@ -63,3 +63,38 @@ jobs:
           # bug fails both attempts; a flake gets a clean second pull. The warning
           # keeps flakes visible instead of silently swallowed.
           attempt || { echo "::warning::${{ matrix.distro }}: first attempt failed — retrying (likely a transient mirror flake)"; sleep 5; attempt; }
+
+  # End-to-end: real WireGuard tunnels between containers on an IPv6 ULA underlay
+  # — the mesh actually forms, credentials verify, the door enrolls, ports
+  # enforce (and, in test_no_nftables, degrade). Heavy + privileged (WG kernel
+  # module + IPv6 container networking), so it's a separate job from the fast
+  # distro matrix. Runs under Docker (rootful + preinstalled on the runner) via
+  # GW_CONTAINER_ENGINE. The soak/stress LOAD tests are excluded — duration
+  # tests, a poor fit for per-push CI; run those on demand.
+  integration:
+    name: integration (docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GW_CONTAINER_ENGINE: docker
+    steps:
+      - uses: actions/checkout@v5
+      - name: host prereqs (WireGuard module + Docker IPv6)
+        run: |
+          sudo modprobe wireguard \
+            || { echo "::error::no WireGuard kernel module on this runner"; exit 1; }
+          lsmod | grep -q wireguard && echo "wireguard module loaded"
+          # Docker needs IPv6 enabled to build the ULA underlay network.
+          echo '{"ipv6": true, "fixed-cidr-v6": "fd00:d0ck::/64"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
+      - name: python deps (venv — 24.04 is externally-managed)
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet -e . pytest hypothesis
+      - name: integration suite
+        run: |
+          /tmp/venv/bin/python -m pytest tests/integration/ \
+            --ignore=tests/integration/test_soak.py \
+            --ignore=tests/integration/test_stress.py \
+            -p no:cacheprovider -v --tb=short

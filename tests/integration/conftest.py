@@ -46,9 +46,11 @@ _NETWORK_SUBNET = "fd52:ba5e::/64"
 
 @pytest.fixture(scope="session")
 def gw_image():
-    """Build the greasewood container image once per session."""
+    """Build the greasewood container image once per session (via the configured
+    engine — podman by default, docker when GW_CONTAINER_ENGINE=docker)."""
+    from .helpers import ENGINE
     subprocess.run(
-        ["podman", "build", "-t", IMAGE_TAG, str(PROJECT_ROOT)],
+        [ENGINE, "build", "-t", IMAGE_TAG, str(PROJECT_ROOT)],
         check=True,
     )
     return IMAGE_TAG

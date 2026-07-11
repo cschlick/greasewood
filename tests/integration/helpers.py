@@ -1,16 +1,23 @@
 """
-Shared helpers for integration tests — thin wrappers around podman CLI.
+Shared helpers for integration tests — thin wrappers around the container CLI.
+
+The engine is `podman` by default; set GW_CONTAINER_ENGINE=docker to run the
+suite under Docker (e.g. on a CI runner where Docker is the rootful, preinstalled
+engine). The inspect JSON + run/exec/network flags used here are common to both.
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
+
+ENGINE = os.environ.get("GW_CONTAINER_ENGINE", "podman")
 
 
 def podman(*args: str, check: bool = True, input: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["podman"] + list(args),
+        [ENGINE] + list(args),
         capture_output=True, text=True,
         check=check, input=input,
     )
