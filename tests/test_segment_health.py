@@ -185,6 +185,7 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._rows, app._off, app._up = rows, 0, len(rows)
     app._show_nft = True
     app._hidden = 0
+    app._show_total = False
     return app
 
 
@@ -319,3 +320,28 @@ def test_live_and_hidden_filters_expired():
 
     shown_all, hidden_all = status._live_and_hidden([live, expired], now, show_all=True)
     assert len(shown_all) == 2 and hidden_all == 0    # --all shows everything
+
+
+def test_roster_live_rate_vs_cumulative_total():
+    """The live view's middle column is per-second rate by default, or cumulative
+    traffic with show_total (the `t` toggle / --total) — steady, not jittering."""
+    import types as _t
+    from greasewood import status
+    now = dt.datetime.now(_UTC)
+    r = _rec("db01", ["1:51900"])
+    wg_key = status._wg_key(r)
+    lp = _t.SimpleNamespace(latest_handshake=int(now.timestamp()) - 5,
+                            rx_bytes=4_200_000, tx_bytes=1_050_000,
+                            allowed_ips=r.cred.addr + "/128", keepalive=25)
+    cfg = _t.SimpleNamespace(mesh_domain="pm.internal", caps=["role:db"])
+    rates = {r.cred.addr: "↓46B/s ↑46B/s"}
+    common = dict(records=[r], cfg=cfg, now=now, own_id="deadbeef",
+                  live_peers={wg_key: lp}, is_root=True,
+                  latency={r.cred.addr: "38ms"}, rates=rates)
+
+    rate_view = "\n".join(status._roster_lines(**common, show_total=False))
+    assert "rate" in rate_view and "46B/s" in rate_view          # header + rate value
+
+    total_view = "\n".join(status._roster_lines(**common, show_total=True))
+    assert "traffic" in total_view                                # header flips
+    assert "↓4.0M ↑1.0M" in total_view and "B/s" not in total_view  # cumulative, no rate
