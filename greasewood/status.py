@@ -178,21 +178,35 @@ _W_RATE    = len("↓1023.9K/s ↑1023.9K/s")     # widest per-second ↓ ↑
 
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                   latency=None, rates=None, grants=None, show_total=False) -> list:
-    """The split roster as a list of lines: LEFT is the mesh (fleet-wide, same on
-    every node — name, addr, roles, credential); RIGHT is THIS
-    node's view. Without root the right side is just the policy 'would I peer'
-    answer. With root it's the live link + cumulative traffic. In LIVE mode
-    (latency dict supplied) the right side is link + per-second RATE + a latency
-    column that fills in asynchronously (blank until each peer's ping returns)."""
-    from .hosts import mesh_name
-    from .policy import peers_allowed
-
-    have_live = live_peers is not None
-    is_live = latency is not None
+    """Thin wrapper: build the per-node model (the same dicts `--json` emits) from
+    the records, then render. Kept so the live view and existing callers/tests
+    pass records; the actual rendering lives in _render_roster, which only ever
+    touches the JSON-native model — so the text roster and --json cannot diverge."""
+    own_rec = next((r for r in records if r.id_pub.hex() == own_id), None)
+    own_caps = list(own_rec.cred.caps) if own_rec else list(cfg.caps)
     now_epoch = int(now.timestamp())
+    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants)
+             for r in records]
+    return _render_roster(nodes, cfg, live_peers is not None, is_root,
+                          latency=latency, rates=rates, show_total=show_total)
 
-    def _exp(r):
-        left = (r.cred.exp - now).total_seconds()
+
+def _render_roster(nodes, cfg, have_live, is_root,
+                   latency=None, rates=None, show_total=False) -> list:
+    """The split roster as a list of lines, rendered PURELY from the per-node
+    model dicts (`_node_view` / the `--json` `nodes`): LEFT is the mesh
+    (fleet-wide — name, addr, roles, credential); RIGHT is THIS node's view.
+    Without live data (no root) the right side is just the policy 'would I peer'
+    answer; with it, the live link + cumulative traffic; in LIVE mode (latency
+    supplied) link + per-second RATE + an async latency column. It reaches for no
+    NodeRecord — every value it shows came through the model, so a column can't
+    exist that the JSON doesn't."""
+    from .hosts import mesh_name
+
+    is_live = latency is not None
+
+    def _exp(n):
+        left = n["ttl_remaining_s"]
         if left < 0:
             return "EXPIRED"
         if left < 3600:
@@ -200,21 +214,24 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         h = int(left // 3600)
         return f"{h // 24}d" if h >= 48 else f"{h}h"
 
-    def _right(r, is_self, peers, lp):
+    def _right(n):
+        is_self, peers, live = n["is_self"], n["peer_expected"], n.get("live")
+        installed = bool(live and live.get("installed"))
+        up = bool(live and live.get("up"))
         if is_live:                             # link · rate · latency
             if is_self:
-                return ("(self)", "", latency.get(r.cred.addr, "…"))
+                return ("(self)", "", latency.get(n["addr"], "…"))
             if not peers:
                 return ("— not a peer", "", "")
-            if lp is None:
+            if not installed:
                 return ("not installed", "", "")
-            if _handshake_fresh(lp, now_epoch):
+            if up:
                 # middle column: cumulative traffic (steady) or per-second rate.
-                middle = (f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}"
-                          if show_total else (rates or {}).get(r.cred.addr, ""))
-                return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)}",
+                middle = (f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}"
+                          if show_total else (rates or {}).get(n["addr"], ""))
+                return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])}",
                         middle,
-                        latency.get(r.cred.addr, "…"))   # … = ping in flight
+                        latency.get(n["addr"], "…"))   # … = ping in flight
             return ("○ no handshake", "", "—")
         if not have_live:                       # policy only (no root)
             return ("self" if is_self else ("yes" if peers else "no"),)
@@ -222,11 +239,11 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
             return ("(self)", "")
         if not peers:
             return ("— not a peer", "")
-        if lp is None:
+        if not installed:
             return ("not installed", "")
-        if _handshake_fresh(lp, now_epoch):
-            return (f"● up, {_fmt_handshake_age(now_epoch - lp.latest_handshake)} ago",
-                    f"↓{_fmt_bytes(lp.rx_bytes)} ↑{_fmt_bytes(lp.tx_bytes)}")
+        if up:
+            return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])} ago",
+                    f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}")
         return ("○ no handshake", "")
 
     left_hdr = ("name", "addr", "roles", "exp")
@@ -238,14 +255,12 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
         right_hdr = ("peer?",)
 
     left_rows, right_rows = [], []
-    for r in records:
+    for n in nodes:
         left_rows.append((
-            mesh_name(r.hostname, cfg.mesh_domain), r.cred.addr,
-            ",".join(_record_roles(r)) or "-", _exp(r),
+            mesh_name(n["hostname"], cfg.mesh_domain), n["addr"],
+            ",".join(n["roles"]) or "-", _exp(n),
         ))
-        lp = (live_peers or {}).get(_wg_key(r))
-        right_rows.append(_right(r, r.id_pub.hex() == own_id,
-                                 peers_allowed(cfg.caps, r.cred.caps, grants), lp))
+        right_rows.append(_right(n))
 
     # A per-column reserved floor for the width-changing cells (0 = size to
     # data). left: only `exp` is dynamic. right depends on mode.
@@ -285,13 +300,6 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
                 else "no live WireGuard state — is the daemon running?")
         out.append(f"({note})")
     return out
-
-
-def _print_node_table(records, cfg, now, own_id, live_peers, is_root,
-                      grants=None) -> None:
-    for line in _roster_lines(records, cfg, now, own_id, live_peers, is_root,
-                              grants=grants):
-        print(line)
 
 
 def _segment_analysis(members, grants=None):
@@ -1073,6 +1081,48 @@ def _iso_z(t) -> "str | None":
     return t.astimezone(_UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> dict:
+    """One directory record as the JSON-native per-node dict — the SINGLE model
+    both `--json` and the text roster render from, so a per-node column can't
+    exist in one without the other. Everything the roster shows is derived HERE
+    (roles, expiry countdown, the policy peering verdict, live link stats), so
+    the renderer only ever formats these primitives — never reaches back into a
+    NodeRecord. `live` is present only when wg state was readable (root)."""
+    from .policy import peers_allowed
+    caps = list(r.cred.caps)
+    entry = {
+        "id": r.id_pub.hex(),
+        "hostname": r.hostname,
+        "addr": r.cred.addr,
+        "roles": [c[len("role:"):] for c in caps if c.startswith("role:")],
+        "caps": [c for c in caps if not c.startswith("role:")],
+        "endpoints": list(r.endpoints),
+        "iat": _iso_z(r.cred.iat),
+        "exp": _iso_z(r.cred.exp),
+        "expired": now >= r.cred.exp,
+        "ttl_remaining_s": int((r.cred.exp - now).total_seconds()),
+        "is_self": r.id_pub.hex() == own_id,
+        "peer_expected": peers_allowed(own_caps, caps, grants),
+        "reachable": sorted(r.reachable) if r.reachable else [],
+    }
+    if live_peers is not None:
+        lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
+        if lp:
+            entry["live"] = {
+                "installed": True,
+                "up": _handshake_fresh(lp, now_epoch),
+                "last_handshake": (_iso_z(dt.datetime.fromtimestamp(
+                    lp.latest_handshake, _UTC)) if lp.latest_handshake else None),
+                "handshake_age_s": ((now_epoch - lp.latest_handshake)
+                                    if lp.latest_handshake else None),
+                "rx_bytes": lp.rx_bytes,
+                "tx_bytes": lp.tx_bytes,
+            }
+        else:
+            entry["live"] = {"installed": False}
+    return entry
+
+
 def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
     """Structured, machine-readable state for `gw watch --snapshot --json`.
 
@@ -1107,7 +1157,7 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
     own_rec = next((r for r in records if r.id_pub.hex() == own_id), None)
     own_caps = list(own_rec.cred.caps) if own_rec else list(cfg.caps)
 
-    # Live data plane (root only, wg readable) — else the entry omits `live`.
+    # Live data plane (root only, wg readable) — else each entry omits `live`.
     live_peers = None
     if os.geteuid() == 0:
         try:
@@ -1116,43 +1166,10 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
         except Exception:
             live_peers = None
 
-    nodes, live_n, expired_n = [], 0, 0
-    for r in records:
-        caps = list(r.cred.caps)
-        expired = now >= r.cred.exp
-        expired_n += expired
-        live_n += not expired
-        entry = {
-            "id": r.id_pub.hex(),
-            "hostname": r.hostname,
-            "addr": r.cred.addr,
-            "roles": [c[len("role:"):] for c in caps if c.startswith("role:")],
-            "caps": [c for c in caps if not c.startswith("role:")],
-            "endpoints": list(r.endpoints),
-            "iat": _iso_z(r.cred.iat),
-            "exp": _iso_z(r.cred.exp),
-            "expired": expired,
-            "ttl_remaining_s": int((r.cred.exp - now).total_seconds()),
-            "is_self": r.id_pub.hex() == own_id,
-            "peer_expected": peers_allowed(own_caps, caps, grants),
-            "reachable": sorted(r.reachable) if r.reachable else [],
-        }
-        if live_peers is not None:
-            lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
-            if lp:
-                entry["live"] = {
-                    "installed": True,
-                    "up": _handshake_fresh(lp, now_epoch),
-                    "last_handshake": (_iso_z(dt.datetime.fromtimestamp(
-                        lp.latest_handshake, _UTC)) if lp.latest_handshake else None),
-                    "handshake_age_s": ((now_epoch - lp.latest_handshake)
-                                        if lp.latest_handshake else None),
-                    "rx_bytes": lp.rx_bytes,
-                    "tx_bytes": lp.tx_bytes,
-                }
-            else:
-                entry["live"] = {"installed": False}
-        nodes.append(entry)
+    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants)
+             for r in records]
+    live_n = sum(1 for n in nodes if not n["expired"])
+    expired_n = len(nodes) - live_n
 
     last_recon = rmod.read_last_reconcile(cfg.data_dir)
     recon_dt = _parse_iso(last_recon) if last_recon else None
@@ -1189,6 +1206,7 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
             "last": _iso_z(sync_dt),
             "age_s": round((now - sync_dt).total_seconds(), 1) if sync_dt else None,
         },
+        "has_live_data": live_peers is not None,
         "counts": {"total": len(nodes), "live": live_n, "expired": expired_n},
         "nodes": nodes,
     }
@@ -1261,17 +1279,20 @@ def cmd_watch(args) -> int:
               f"(gw watch --all to show them)")
         return 0
 
-    # Live data-plane state for the right-hand "this node" columns — only as
-    # root (wg show needs it). None → the roster shows the policy 'peer?' answer
-    # and a hint to re-run with sudo.
     is_root = os.geteuid() == 0
-    live_peers = None
-    if is_root:
-        try:
-            from . import wg as wgmod
-            live_peers = wgmod.get_peers(cfg.wg_interface) or {}
-        except Exception:
-            live_peers = None
+
+    # DOGFOOD: the roster is rendered from the EXACT snapshot `gw watch --json`
+    # emits, round-tripped through serialization — so the human view can only
+    # ever show what the machine contract carries (drop or rename a field and it
+    # breaks BOTH, not just the JSON). `nodes` is that model; the header/firewall
+    # /nft chrome above and the segment-health below stay on records (they aren't
+    # per-node columns, and raw nft dumps don't belong in a machine contract).
+    snap = json.loads(json.dumps(_watch_snapshot_dict(cfg, own_id, own_addr)))
+    has_live = snap["has_live_data"]
+    node_by_id = {n["id"]: n for n in snap["nodes"]}
+
+    def _nodes_for(recs):                        # the model rows for these records
+        return [node_by_id[r.id_pub.hex()] for r in recs if r.id_pub.hex() in node_by_id]
 
     if getattr(args, "by_role", False):
         # One table per named role. A node appears under every role it holds,
@@ -1285,8 +1306,8 @@ def cmd_watch(args) -> int:
                        if tag in _record_roles(r) or "*" in _record_roles(r)]
             shown.update(r.id_pub.hex() for r in members)
             print(f"role: {tag}  ({len(members)} node{'' if len(members) == 1 else 's'})")
-            _print_node_table(members, cfg, now, own_id, live_peers, is_root,
-                              grants=grants)
+            for line in _render_roster(_nodes_for(members), cfg, has_live, is_root):
+                print(line)
             _print_segment_health(members, cfg, grants)
             print()
         # Anything not shown above — nodes with no role. They still peer on a
@@ -1295,12 +1316,12 @@ def cmd_watch(args) -> int:
         if leftover:
             print(f"(no role)  ({len(leftover)} node{'' if len(leftover) == 1 else 's'}) "
                   f"— hold no role: tag; under a grant table they reach only the anchor")
-            _print_node_table(leftover, cfg, now, own_id, live_peers, is_root,
-                              grants=grants)
+            for line in _render_roster(_nodes_for(leftover), cfg, has_live, is_root):
+                print(line)
             print()
     else:
-        _print_node_table(records, cfg, now, own_id, live_peers, is_root,
-                          grants=grants)
+        for line in _render_roster(_nodes_for(records), cfg, has_live, is_root):
+            print(line)
         print()
 
     if hidden:
