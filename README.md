@@ -11,7 +11,7 @@ past the point of practical, and wanted the smallest possible mesh upgrade.
 - **[Direct-or-fail.](#direct-or-fail)** No routing, no relays. A link comes up
   directly or it honestly fails.
 - **[IPv6 only overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
-  IPv4 or IPv6. No NAT traversal.
+  IPv4 or IPv6.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
 - **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
