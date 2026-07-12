@@ -1,95 +1,58 @@
 # Greasewood
 
-A minimal, self-hosted WireGuard mesh overlay — by far the greasiest of them all.
+A minimal, self-hosted WireGuard mesh overlay — one that is particularly greasy.
 
 Its one priority is being **easy to reason about**. It was built by someone who
 lovingly maintained a fleet of hand-written WireGuard/networkd text files far
-past the point of practical, and wanted the smallest possible thing that turns
-those files into a real mesh.
-
-Many of its features are also limitations, chosen for simplicity. Let me show you
-its features!
+past the point of practical, and wanted the smallest possible mesh upgrade.
 
 - **[Private.](#membership)** Membership is gated by a certificate authority;
   revoke a node by not renewing it.
-- **[Self-contained.](#the-anchor)** The anchor is just a normal node with a CA — no
-  coordination service, no SaaS.
 - **[Direct-or-fail.](#direct-or-fail)** No routing, no relays. A link comes up
   directly or it honestly fails.
-- **[IPv6 overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
+- **[IPv6 only overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
   IPv4 or IPv6. No NAT traversal.
-- **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
-  address is a hash of its identity key.
-- **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
-  talks to whom.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
+- **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
+  talks to whom.
+- **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
+  address is a hash of its identity key.
+- **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables. Uses
+  the stock `wg`/`ip` tools over subprocess. Greasy.
 - **[Service TLS.](#tls-certificates-for-services)** The same CA issues auto-renewing
   x509 certs for your services (Postgres, nginx, …) — with profiles that place them where each wants them.
 - **[Offline-tolerant.](#offline-tolerance)** The anchor can be down for a credential
   lifetime — nodes run from cache.
-- **[Hands-off.](#firewall)** Never touches your firewall — it prints the rules,
-  you apply them.
-- **[Linux-only.](#linux-only)** Built on the Linux kernel's own WireGuard and
-  networking — not a portable userspace/Go stack. Best run as a systemd service.
-- **[Auditable.](#auditable)** Pure Python, one dependency, driving it all through
-  the stock `wg`/`ip` tools over subprocess — and logging **every one of those
-  commands**, with context, to a durable trail. Greasy.
+- **[Hands-off.](#firewall)** Never automatically configures your main firewall.
+  Port access control for the overlay lives on a dedicated table
+- **[Auditable.](#auditable)** Pure Python, one dependency. Fanatical logging.
+- **[Self-contained.](#the-anchor)** The coordination anchor is just a normal functioning node.
+  Any node can become the coordination anchor.
 
-> Status: early but functional. The full path — enrollment, directory, the
-> reconcile loop, door-based join, credential renewal, expiry-driven revocation,
-> access policy, TLS service certs, and name resolution — works end to end
-> and is covered by unit + container integration tests. It's a personal project,
-> so expect rough edges.
-
-## How it compares
+## Prior art
 
 The nearest full-featured projects are **Tailscale**, **Nebula**, and
-**innernet**. Next to greasewood they're all bigger systems that do more — and
-the "more" is consistent:
-
-- **More infrastructure to get peers connected.** Relays and hole-punching
-  (Tailscale), lighthouses and hole-punching (Nebula), a coordination server
-  (innernet) — plus an always-on control plane or registry. greasewood does none
-  of it: the anchor is a normal node that can be *offline* for a credential
-  lifetime, and links are **direct-or-fail** — no traversal, no relays.
-- **They assign addresses.** A control plane hands them out, or they're baked
-  into the cert. greasewood **derives** the address from the identity key — no
-  allocator.
-- **Broader reach.** All three run beyond Linux. greasewood is **Linux-only**,
-  with an **IPv6-only overlay** (the underlay may be v4 or v6).
-
-That's the whole trade — and it's why the feature list above doubles as a list of
-limitations. Everything greasewood *won't* do — traverse NAT, assign addresses,
-route, run on Windows, keep a service always on — is a capability those projects
-add and greasewood drops on purpose, for simplicity. **The limitations are the
-features.** Reach for one of the others when you want "just works
-anywhere"; reach for greasewood when your network is already sane and you'd rather
-own and audit every piece.
+**innernet**. Next to greasewood they're all bigger systems that do more: routing,
+NAT traversal, multi-platform, etc. Greasewood aims to be a minimal alternative.
 
 ## Membership
 
-Membership is a **CA-signed credential with an expiry** — there is no membership
-list to push around and no CRL. Two keys and two signed objects carry it:
+Membership is a **CA-signed credential with an expiry**
 
 **Two keys per node**, deliberately split:
 
 - `id_priv` / `id_pub` (Ed25519) — durable identity. It derives the node's
-  overlay address and authorizes credential renewal. Used rarely; guard it hard
-  (a leak is catastrophic).
-- `wg_priv` / `wg_pub` (X25519) — the hot WireGuard tunnel key. It lives
-  unattended on disk so the node survives reboots, and it's self-limiting: a leak
-  expires with the credential.
+  overlay address and authorizes credential renewal. 
+- `wg_priv` / `wg_pub` (X25519) — your normal wireguard keys.
 
 **Two signed objects:**
 
 - **Credential** — signed by the CA. Binds `id_pub`, `wg_pub`, overlay address,
-  hostname, capabilities, and an expiry. Slow-moving (default 24h TTL). The
-  hostname lives here (not in the record), so a node can't self-assert a name the
-  CA didn't grant — the name is CA-attested end to end.
+  hostname, capabilities, and an expiry. Slow-moving (default 24h TTL).
 - **NodeRecord** — signed by the node's own `id_priv`. Carries the credential
-  plus fast-moving facts (endpoints, a sequence number); its `hostname` is read
-  from the credential. This is what gets published through the directory.
+  plus fast-moving facts (endpoints, a sequence number) Its `hostname` is read
+  from the credential. This is what gets published to other nodes through a directory.
 
 **Revocation is expiry-based (no CRL).** `gw revoke <id>` on the anchor takes effect
 there immediately — the anchor re-reads its revoke list each reconcile cycle,
@@ -97,15 +60,15 @@ dropping the node from its own interface within seconds, and refuses the node's
 renewals from then on. It does **not** reach the rest of the fleet instantly:
 other nodes keep trusting the node's credential until it expires. But since the
 node can no longer renew, that credential lapses within at most one
-`credential_ttl`, at which point every node rejects it — the fleet-wide eviction.
+`credential_ttl`, at which point every node rejects it.
 Shorten `credential_ttl` for a tighter bound.
 
 ## The anchor
 
 The anchor is **just a normal mesh node** that additionally holds the CA key and
-runs a small HTTP **control plane** — `GET /directory`, `POST /publish`, `POST
+runs a small HTTP **control plane**: `GET /directory`, `POST /publish`, `POST
 /renew`, `GET /health` — bound to its overlay address (reachable only through the
-mesh, never the underlay). There is no separate coordination service, no SaaS,
+mesh, never the underlay). There is no separate coordination service, no relays, no SaaS,
 nothing always-on in the data path. Nodes poll `/directory`, merge records by
 highest sequence number, and cache them locally.
 
@@ -116,48 +79,32 @@ the fleet. See [Moving the anchor](#moving-the-anchor-re-root).
 ## Direct-or-fail
 
 There is no routing, no multi-hop, no relays, and no NAT traversal. Two nodes
-either form a **direct** WireGuard tunnel or the link honestly fails — it never
+either form a **direct** WireGuard tunnel or the link fails. It never
 silently falls back to relaying through a third party, so there's no hidden path
 to reason about.
 
-The only thing that touches the data plane is the **reconcile loop**: every few
-seconds each node walks the directory and, per peer, runs seven checks — verify
+The only logic that modifies a normal wireguard configuration is the **reconcile loop**: 
+every few seconds each node walks the directory and, per peer, runs seven checks: verify
 the CA signature, check expiry, verify the self-signature, verify the address
 derives from `id_pub`, check the revoke list, check the authorization policy —
 then installs or removes that peer with `wg set`. Membership changes,
 revocations, key rotations, and access policy all reduce to "add or remove a
 peer," computed locally with no coordinator. A link forms as long as at least one
-side is reachable (see [Reachability](#reachability)); two unreachable
+side is reachable (see [Reachability](#reachability)) two unreachable
 nodes can't pair.
 
 ## IPv6 overlay
 
-The **overlay is IPv6-only** — every node's mesh address is a hash of its
-identity key under the ULA prefix, and all in-tunnel traffic is IPv6. That's a
-deliberate identity choice, and it stays.
+The **overlay is IPv6-only**. Every node's mesh address is a hash of its
+identity key under a ULA prefix, and all in-tunnel traffic is IPv6. 
 
 The **underlay** (the real network each WireGuard endpoint lives on) can be
 **IPv4 or IPv6**. A node advertises whatever public endpoint(s) it has, and each
-node dials a peer over a family they share — so greasewood runs on v4-only cloud
-VMs (EC2, Vultr — both IPv4-by-default) just as well as on IPv6 GUAs. The overlay
-is v6 either way; only the transport underneath differs. (Managing backend cloud
-instances was the motivating use, which is exactly why the v4 underlay matters.)
-
-Still deliberately absent — **no NAT traversal, no routing, no relays**. The
-direct-or-fail model assumes the network already permits a direct connection (no
-STUN, no hole-punching). A NAT'd node simply advertises no reachable endpoint: it dials out to
-reachable peers and the anchor, but two unreachable nodes can't pair — and a v4-only
-node and a v6-only node share no underlay family, so they can't pair either
-(direct-or-fail across address families).
-
-Inbound v4 nodes behind 1:1 NAT (e.g. EC2, whose interface holds only a private
-v4) can't autodetect their public address — pass `--endpoint <public-v4>:<port>`
-at `create`/`join`. Outbound-only (NAT'd) nodes need nothing: they advertise
-no endpoint and dial out.
+node dials a peer over a family they share.
 
 A dual-stack peer advertises **both** its v6 and v4 endpoints (v6 first). If the
 preferred one produces no handshake for ~20s, the reconcile loop rotates to the
-next advertised endpoint and keeps round-robining until one connects — so a peer
+next advertised endpoint and keeps round-robining until one connects. So a peer
 reachable on v4 but with a broken v6 path still links, with no manual
 intervention. This is still direct-or-fail: only endpoints the *peer* advertised
 are ever tried, never a relay.
@@ -176,43 +123,11 @@ can recompute its address and check it matches. The address *certifies itself*
 against the key — no allocator, and no authority needs to vouch that "this
 address belongs to this node."
 
-No encoding step is needed to fit the hash into an address: an IPv6 address is
-just 128 bits, so the low 64 (the interface identifier) can be *any* value — the
-first 8 bytes of the digest drop straight in, and the familiar `xxxx:xxxx:…`
-colon-hex is only how those bytes are printed. (Those 64 bits of entropy are also
-where the ~2⁶⁴ collision figure below comes from.)
-
-**Why it can't be spoofed.** To be accepted at an address you present a signed
-record, and every verifier (any potential peer, and the anchor) runs two independent
-checks: `address == hash(id_pub)`
-(the address is the legitimate derivation of the key), and the record is
-**self-signed by `id_priv`** (you actually hold that key). To steal node `db`'s
-address `X = hash(db_id_pub)` you would need an `id_pub` that hashes to `X` — a
-~2⁶⁴ preimage search (brute-forcing a key that hashes to that exact address) —
-*and* you'd still need db's `id_priv` to sign as db. Two
-independent locks. Notably, **not even the CA can reassign an address**: an
-address is `hash(your key)` by construction, so the CA can't hand db's address to
-a different key. The CA vouches for *membership*; the address vouches for itself.
-
-**How the alternatives get spoofed.** Everywhere else the address is a *number
-assigned by an authority* — a control server (Tailscale, innernet) or written
-into a signed cert (Nebula) — with no cryptographic tie to the key. That binding
-is only as strong as the authority: compromise or trick the assigner into
-remapping db's address to your key, poison the distributed mapping, or (in a flat
-network) just forge the source IP. In greasewood there's no mapping to poison and
-no authority to subvert for the address — it's derived, not granted.
-
-The cost, to keep it honest: the address is an opaque hash (no human- or
-policy-legible structure — which is why [access control](#access-control-roles--grants)
-is tag-based, not CIDR), and the 64-bit host portion makes a *deliberate*
-collision ~2⁶⁴ work rather than impossible. Both are deliberate trades for "the
-address is the identity, and nobody assigns it."
-
 ## Offline tolerance
 
 Every node caches the directory on disk and keeps its tunnels running from that
 cache, so the **anchor can be down for up to one credential lifetime** and existing
-node↔node links are unaffected — the anchor is never in the data path. Only new
+node↔node links are unaffected. The anchor is never in the data path. Only new
 enrollments and credential renewals need a reachable anchor. Restore or replace the
 anchor within that window (see [Moving the anchor](#moving-the-anchor-re-root) and the
 [RUNBOOK](RUNBOOK.md)) and nothing ever drops.
@@ -228,22 +143,21 @@ transport (the way a Go implementation such as `wireguard-go` does) or its own
 supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
 (see [Auditable](#auditable)). Other platforms would need a different data-plane
 backend and a different supervisor, and are out of scope: greasewood is,
-deliberately, a Linux tool. (Hacking on it from a Mac? Run it in a Linux VM or
-containers — see [docs/dev-on-macos.md](docs/dev-on-macos.md).)
+deliberately, a Linux tool.
 
 ## Auditable
 
 The entire thing is **pure Python (3.11+), one dependency (`cryptography`), one
 binary (`gw`)**, and it manages the data plane by shelling out to `wg`/`ip` via
-subprocess. That's greasy. The clean way would be
-netlink bindings — but it's a deliberate trade: you can read the exact `wg set
+subprocess. That's gre-eee-easy. The clean way would be
+netlink bindings. It's a deliberate trade: you can read the exact `wg set
 peer …` commands, run them by hand, and compare them against what `wg show`
 reports.
 
 That trade pays off in the **command trail**. Because every data-plane change is
-a subprocess, greasewood records *every `ip`/`wg` command it issues* — always
-(not behind a verbose flag), with the exit code, how long it took, and **why it
-ran** — to a durable, rotating `<data_dir>/audit.log` (0600), and to the journal.
+a subprocess, greasewood records *every `ip`/`wg` command it issues* — always, 
+with the exit code, how long it took, and **why it
+ran** — to a durable, rotating `<data_dir>/audit.log` and to the journal.
 One greppable [logfmt](https://brandur.org/logfmt) line per command:
 
 ```
@@ -252,19 +166,8 @@ ts=2026-07-02T10:15:03Z INFO greasewood.audit: cmd rc=0 t=12ms \
   argv="wg set gw-myfleet peer <pub> allowed-ips fd8d:e5c1:db1a:7::a1/128 endpoint [203.0.113.7]:51900 ..."
 ```
 
-So months later you can answer "when did db01 get added, why, and did it
-succeed?" by grepping one file — `grep db01 audit.log`. Failures are logged at
-ERROR with the command's stderr. It's safe to record verbatim because the argv
-only ever contains **public** keys and key-file *paths* — the `wg` tool reads
-private keys from files, so no secret is ever on a command line. Point it
-elsewhere with `[network] audit_log = "/var/log/greasewood/audit.log"`, or
-`audit_log = ""` to disable. (State *queries* — `wg show`, `ip … show`, which run
-every reconcile cycle — go to debug, so the durable trail is only commands that
-*changed* something.)
-
-Above the per-command lines, the same file carries a **domain-event trail** — one
-line per *mesh state transition*, the so-what a point-in-time view can't show
-because it's a change, not a state. `grep event= audit.log`:
+In addition to the per-command lines, the same file carries a **domain-event trail** one
+line per *mesh state transition* `grep event= audit.log`:
 
 ```
 ts=2026-07-02T22:12:03Z INFO greasewood.audit: event=policy prev=4 seq=5 grants=3
@@ -272,12 +175,12 @@ ts=2026-07-02T22:12:08Z INFO greasewood.audit: event=topology added=2 removed=1 
 ```
 
 So the narrative reads at a glance: policy v4→v5 was adopted, and the next
-reconcile settled the topology (+2/−1, 7 peers) — with the per-peer `+peer`/
+reconcile settled the topology (+2/−1, 7 peers) with the per-peer `+peer`/
 `-peer` commands right below carrying the who and why. A topology line appears
 only when membership actually changes (a re-verified endpoint isn't a
 transition), so steady state stays silent.
 
-And you don't have to read raw commands: **`gw narrate` translates the trail into
+And you don't have to read raw logs: **`gw narrate` translates the trail into
 plain English** — grouping the commands of each operation and explaining what
 each did and why:
 
@@ -295,8 +198,8 @@ $ gw narrate --since 2h
 
 Filter it (`--peer db01`, `--failures`, `--grep`, `--stats`), point it at any
 log file or `-` for stdin, or `--raw` to see the argv alongside. This is the
-sharpest edge of the auditability claim: **you can reconstruct — and read as a
-story — every change greasewood ever made to your kernel's network state.**
+core of the auditability claim: **you can reconstruct and read as a
+narrative every change greasewood ever made to your kernel's network state.**
 
 ## Install
 
@@ -352,78 +255,73 @@ runs it by hand with `gw run` to show the moving parts.
 On the machine that will hold the CA and serve enrollment:
 
 ```bash
-sudo gw create myfleet          # names live under *.myfleet.internal
-sudo gw run
+sudo gw create mymesh          # names live under *.mymesh.internal
 ```
 
 `create` generates the CA, the persistent door key, the policy routing for
 the enrollment door, and the anchor's own credential, then writes
-`/etc/greasewood_myfleet.toml`. `gw run` starts the daemon: it brings up the `gw-myfleet`
+`/etc/greasewood_mymesh.toml`. By default `create` also starts the daemon: it brings up the `gw-mymesh`
 WireGuard interface, serves the control plane, and watches for door windows.
 
-The anchor takes this machine's hostname like any other node — it isn't named
-anything special. You tell which node is the anchor from `role: anchor` in
+The anchor takes this machine's hostname like any other node. 
+You tell which node is the anchor from `role: anchor` in
 `gw watch`, not from its name. (Pass `--hostname <name>` to override the default.)
 
 ### 2. Enroll a node
 
-Enrollment uses a transient WireGuard "door" — no SSH, no HTTP exposed on the
-underlay. On the anchor, open a window and create a single-use token:
+Enrollment uses a transient WireGuard "door". This provides a mechanism to allow new nodes
+onto the mesh that is much lower trust than, for example, relying on ssh. Also since wireguard doesn't
+respond to connections without a recognized credential, it is a much cleaner external profile than, for
+example, running an http server for configuration on the underlay. To add a new node to the mesh, create an 
+invite token on the anchor:
 
 ```bash
-TOKEN=$(sudo gw invite)
-echo "$TOKEN"
+sudo gw invite # prints token
 ```
 
 Deliver that token to the new machine (any channel) and redeem it:
 
 ```bash
-sudo gw join "$TOKEN" --hostname node01
-sudo gw run
+sudo gw join <token>
 ```
 
 `join` derives a throwaway guest key from the token, stands up a temporary
 `gw-door` tunnel to the anchor, receives a CA-signed credential over it, tears the
-door down, and writes the node's config. `gw run` then brings the node into the
-mesh; within a couple of reconcile cycles every node has a direct tunnel to it.
+door down, and writes the node's config, then the anchor brings the node into the
+mesh.
 
 **Why a door — why can't the token just contain everything to peer over
 your mesh interface?** Because WireGuard peering is *mutual*: to bring up a tunnel to the
 anchor over any interface, the anchor must already have **your** public key in its peer
-list. At invite time your real keys don't exist yet — they're generated locally
-at `join`, and private keys never travel — so the anchor cannot pre-authorize your
-real identity key. Handing you the anchor's mesh-interface details in the token gets you
-nowhere: the anchor would drop your handshake, never having heard of your key.
+list. At invite time your real keys don't exist yet (they're generated locally
+at `join`, and private keys never travel) so the anchor cannot pre-authorize your
+real identity key. 
 
 What the token *can* do is carry a 32-byte seed that **both sides expand (HKDF)
 into the same throwaway door keypair + PSK**. The anchor derives that throwaway
 pubkey from the seed it minted and pre-installs it as a peer; you derive the
 matching private key — so now a tunnel can actually form. But it forms under a
-**disposable, credential-less key, not your identity** — and a non-member key
-like that has no business on the live overlay. That's why the door is a
-*separate* interface, not the mesh one:
+**disposable, credential-less key, not your identity**. That's why the door is a
+*separate* interface:
 
 - it runs on its own **dedicated door subnet** (`fd8d:…:d::/64`) — not a
-  throwaway address squatting on the real overlay, which would break the
-  self-certifying `address = hash(identity)` invariant;
+  throwaway address squatting on the real overlay (which would break the
+  self-certifying `address = hash(identity)`)
 - it reaches **only the enroll daemon** (not the directory/control plane, not
-  other peers) — a token-holder can do exactly one thing: request a credential;
+  other peers) A token-holder can do exactly one thing: request a credential;
 - it's **torn down** the moment your credential is issued.
 
-You bring up the mesh interface, with your *real* key and its self-certifying address, only
-once you hold that credential — and from then on every peer learns your key and
-address from the directory as usual. Running the throwaway peering over the mesh interface
+So the door bootstraps joining the mesh with your real identity. You bring up the 
+mesh interface, with your *real* key and its self-certifying address, only
+once you hold that credential. Running the throwaway peering over the mesh interface
 instead would drop a credential-less stranger onto the live mesh with a fake
-address and expose the whole control plane to a mere token-holder — which is
-exactly what the door exists to prevent.
+address and expose the whole control plane. The door is a temporary quarantine.
 
 ### 3. Check it
 
 ```bash
-gw watch --snapshot        # local node + directory view (fleet-wide link state)
-gw watch --snapshot --json # the same state as machine-readable JSON (for monitors/jq)
-sudo gw diagnose db01 web1 # pairwise: can db01 and web1 form a tunnel?
-sudo wg show gw-myfleet    # live WireGuard peers
+sudo gw watch              # a live ( or --snapshot) view of the mesh peers
+sudo wg show gw-mymesh     # wg show works normally, showing each tunnel
 ```
 
 `gw diagnose` is the tool to reach for when a peer won't connect. It's
@@ -439,22 +337,7 @@ sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
 
 The comparison table shows each node's addresses, reachability, roles,
-credential, and firewall for the mesh UDP port. Since diagnose runs on one node,
-**only this host's firewall is directly known** — a peer's is *inferred `OPEN`*
-whenever a handshake has been observed (packets flowing prove its whole inbound
-path: host firewall, any router/NAT, and daemon), and shown `???` otherwise.
-The per-pair verdict reads out who can dial whom and the live status, and when a
-pair involves this host and there's no handshake it localizes the block — e.g.
-"our host firewall is open, so a peer that still can't reach us points at an
-upstream router/NAT not forwarding the port." See [RUNBOOK.md](RUNBOOK.md) for
-the full verdict table.
-
-A `LINKED` pair involving this host also gets a **path-MTU probe** — a
-don't-fragment ping at the tunnel's interface MTU. WireGuard-over-cloud MTU
-blackholes are nasty: small traffic and SSH work, but TLS handshakes and large
-transfers hang because full-size tunnel packets exceed the underlay path MTU. If
-the small ping passes but the full-size one is dropped, diagnose flags it and
-suggests lowering the tunnel MTU.
+credential, and firewall for the mesh UDP port. 
 
 ## Running as a service
 
@@ -464,24 +347,24 @@ every mesh as its own instance `greasewood@<name>` (survives reboots, restarts
 on failure, logs to the journal), so the whole workflow is just:
 
 ```bash
-sudo gw create myfleet                # anchor  → greasewood@myfleet installed + running
+sudo gw create mymesh                 # anchor  → greasewood@myfleet installed + running
 sudo gw join "$TOKEN" --hostname n01  # node → greasewood@<mesh> installed + running
-journalctl -u greasewood@myfleet -f   # watch a mesh's daemon
+journalctl -u greasewood@mymesh  -f   # watch a mesh's daemon
 systemctl status 'greasewood@*'       # all of them
 ```
 
 There is no separate install/uninstall step: the service lifecycle rides on the
 mesh lifecycle. **`gw purge`** removes a mesh's instance (and the shared
-template when it's the last mesh) — a from-scratch reset in one command.
+template when it's the last mesh) providing a from-scratch reset in one command.
 
 - **Not on systemd, or want to run it yourself?** Pass `--no-service` to
   `create`/`join`; they print the `sudo gw -c <config> run` line instead and
   touch nothing under `/etc/systemd`. (A non-systemd host auto-falls-back to
   this even without the flag.)
 - Instances run `gw run` as root (they manage WireGuard interfaces and
-  routing). Don't also run `gw run` by hand while an instance is up — both
+  routing). Don't also run `gw run` by hand while an instance is up,  both
   would fight over the interface.
-- A **config-changing re-join** (new anchor, new caps) isn't auto-detected — the
+- A **config-changing re-join** (new anchor, etc) isn't auto-detected — the
   daemon reads its config at startup, so run `sudo systemctl restart greasewood@<name>`
   afterward.
 
@@ -524,72 +407,37 @@ cannot request admission; you (or an orchestrator acting on the anchor) decide t
 admit a machine, run `gw invite`, and deliver the token out of band. The node
 only redeems what it was handed. The door is **single-slot by construction**:
 each invite opens one enrollment window, and the anchor closes it the instant that
-node finishes joining — so provisioning is one node at a time.
+node finishes joining. To persist a door over multiple joins (reuse a token, useful for 
+provisioning many instances at once), use the `--standing` flag:
 
-**The usual way is copy-paste.** On the anchor:
+On the anchor:
 
 ```bash
 sudo gw invite            # prints a one-time token
+sudo gw invite --standing # prints a multi-use token
 ```
 
-Copy the token, open a terminal on the new node, and run:
+Joining is the same either way
 
 ```bash
 sudo gw join <token>
-sudo gw run
 ```
-
-For several machines just repeat — invite, paste, join — one at a time. There's
-only **one door open at a time**: each `gw invite` replaces the previous window,
-so a token you generated but haven't used yet stops working the moment you
-generate another. (If you do overwrite an unused token, `gw invite` warns you —
-on stderr, so the new token still prints cleanly to stdout and `TOKEN=$(gw
-invite)` keeps working.)
-
-On the anchor, **`gw watch` shows what the door is doing** — open (with the
-minutes until it closes, the caps it grants, any failed attempts and their
-source IPs, and attempts remaining) or closed (how long ago and why: enrolled,
-expired, or too many failed attempts). Handy for watching an enrollment or
-spotting someone knocking on the door with a bad token.
-
-**To automate over SSH**, two flags make the token pipeable: `gw invite -q`
-prints only the token, and `gw join -` reads it from stdin (so it stays out of
-the node's `ps`, and it tolerates raw `gw invite` output). Wiring those into a
-loop is left to you — just two things to respect:
-
-- Keep it **sequential** — invite, wait for that join to finish, then the next
-  invite. The door serves one node at a time on the wire, so issuing in parallel
-  buys nothing.
-- If you pipe the token over SSH stdin, `sudo` can't also prompt for a password
-  on that channel, so that form needs passwordless privilege **scoped to join**
-  (`<user> ALL=(root) NOPASSWD: /usr/local/bin/gw join *`). Never grant blanket
-  `NOPASSWD: gw` — that's effectively passwordless
-  root.
 
 ## Firewall
 
-**greasewood never modfies your firewall ever.** Its control
+**greasewood never modfies your external (underlay) firewall** Its control
 plane (`51902/tcp`) and enrollment RPC (`51903/tcp`) bind only to the node's
-overlay address and loopback — *never* the underlay — so nothing it runs is
+overlay address and loopback *never* the underlay, so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
-the underlay is WireGuard itself (UDP), which you open like for any VPN.
+the underlay is WireGuard itself (UDP), which you open yourself like for any VPN.
 
-greasewood uses **four ports**, one contiguous block — two pairs of *(WireGuard
-transport, TCP service)*, one pair for the mesh and one for the enrollment
-**door**:
+greasewood uses **four ports**, one contiguous block — two WireGuard udp ports
+on the underlay, and two TCP service ports on the overlay.
 
 |         | UDP — WireGuard transport | TCP — service inside the tunnel |
 |---------|---------------------------|---------------------------------|
 | **mesh** | `51900` — overlay data plane | `51902` — control plane |
 | **door** | `51901` — ephemeral join tunnel | `51903` — enroll exchange |
-
-Within each pair, WireGuard (UDP) is the encrypted pipe and the TCP port is the
-service reachable *inside* it. The **door** is a whole second pair because a
-joining node has no credential yet, so it can't speak over the mesh (WireGuard
-cryptokey routing only accepts pinned keys); the door is a separate tunnel keyed
-by a **pre-shared key from the invite token**, letting a stranger-with-an-invite
-enroll without ever touching the trusted mesh interface. Only the two **UDP**
-ports ever face the underlay; both TCP services live inside their tunnels.
 
 `create` and `join` **check** the local nftables ruleset and
 loudly warn if a needed port looks blocked by a default-drop policy, printing the
@@ -627,167 +475,38 @@ iifname "lo" accept
 iifname "gw-*" accept
 ```
 
-That coarse `iifname "gw-*" accept` is required (greasewood's table can only
-*tighten* what your firewall admits, never open it), and it's the only overlay
-rule you write — greasewood's table then scopes the control plane to `gw-<mesh>`,
+That coarse `iifname "gw-*" accept` is required in a default drop context to allow
+traffic to reach greasewood's overlay table (greasewood's table can only
+*tighten* what your firewall admits, never open it). Greasewood's table then scopes the control plane to `gw-<mesh>`,
 locks `gw-door` to enrollment only, and applies the grant table's port scopes.
 
-Note there's nothing to configure for the door on a host with **no firewall**:
-enforcement is on by default, and greasewood's own table locks `gw-door` down
-regardless of whether you've set up a host firewall. The door is protected out
-of the box.
-
 **If you turn enforcement off** (`enforce_ports = false`), greasewood installs no
-table, and the overlay port rules become yours:
+table. It's purpose is to enforce access control to ports on this machine from a central location
+(the anchor), which requires cooperation from to enforce. It is opt-in. 
 
-```
-udp dport { 51900, 51901 } accept
-iifname "lo" accept
-iifname "gw-myfleet" tcp dport 51902 accept
-iifname "gw-door"    tcp dport 51903 accept
-iifname "gw-door"    drop
-```
-
-But note the catch: those rules need nftables too. `enforce_ports = false` only
-makes sense in two cases. If you *have* nftables but want greasewood to touch no
-table at all, write them yourself as above. If you turned enforcement off because
-the host has **no usable nftables**, then you can't add them either — the door
-port lockdown is simply unavailable there, and the door rests on its other two
-layers (WireGuard keys + blackhole routing). Those keep the *mesh* isolated, but
-the anchor's own `::`-bound services (e.g. SSH) are reachable by an invitee
-during a window. The remedy isn't a firewall rule — it's installing nftables and
-leaving enforcement on.
-
-The four ports sit in one contiguous block, **51900–51903**, deliberately clear
-of the WireGuard default (51820) and Docker Swarm / Serf (7946) so greasewood
-doesn't squat a port something else likely wants. All are configurable: mesh
-`[network] listen_port`, control `[anchor] control_listen`, door `[anchor] door_port`
-(or `create --listen-port/--control-port/--door-port`). The door port rides
-in join tokens and the control port in the enrollment response, so nodes pick up
-non-default values automatically — no client config. (The internal enrollment
-port lives inside the door tunnel and can't collide, so it isn't a knob.)
-
-### Worked example: a default-drop host
-
-A complete, loadable ruleset for an anchor host running `policy drop`. It's safe
-verbatim on plain nodes too — the `gw-door` rules never match where no door
-exists, and `51902` only matters where an anchor listens (greasewood's rules are
-the same on every node by design):
-
-```nft
-#!/usr/sbin/nft -f
-table inet gw_anchor {
-    chain input {
-        type filter hook input priority filter; policy drop;
-
-        ct state established,related accept
-        ct state invalid drop
-        iifname "lo" accept                     # control plane also binds ::1
-
-        # --- underlay: the only internet-facing surface, both UDP.
-        # Non-peers get silence from WireGuard itself; the door port is
-        # inert unless a window / standing door is open (anchor only).
-        udp dport 51900 accept comment "greasewood mesh WG"
-        udp dport 51901 accept comment "greasewood door WG (anchor only)"
-
-        # --- tunnel-internal services (TCP), scoped to their interface.
-        # 51902 is reachable only as a verified mesh peer; 51903 only
-        # through a token's door tunnel.
-        iifname "gw-myfleet" tcp dport 51902 accept comment "control plane"
-        iifname "gw-door" tcp dport 51903 accept comment "enroll server"
-
-        # --- your own management access — adjust to taste ------------------
-        tcp dport 22 accept                     # don't lock yourself out
-        ip6 nexthdr ipv6-icmp accept            # ND/PMTU — required for v6 at all
-        ip protocol icmp accept
-    }
-}
-```
-
-The `iifname` scoping is belt-and-braces rather than load-bearing: `51902`
-binds only overlay+loopback and `51903` binds only the door IP, so they're
-unreachable from the underlay even without these rules — the scoped accepts
-just make the firewall *state* the architecture.
-
-### Worked example: anchor (or node) behind a NAT router
-
-On the **router**, only the two WireGuard UDP ports ever get forwarded —
-`51900` always, `51901` only if the *anchor* is the machine behind this router.
-Never forward `51902/51903`: they aren't on the underlay at all.
-
-```nft
-#!/usr/sbin/nft -f
-define GW_HOST   = 192.168.1.50        # LAN address of the greasewood machine
-define WAN_IF    = "eth0"              # router's upstream interface
-
-table ip gw_forward {
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        iifname $WAN_IF udp dport 51900 dnat to $GW_HOST comment "greasewood mesh WG"
-        iifname $WAN_IF udp dport 51901 dnat to $GW_HOST comment "greasewood door WG (anchor only — delete on a plain node)"
-    }
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-        # If your forward policy is drop (it should be), allow the DNATed flows:
-        ip daddr $GW_HOST udp dport 51900 accept comment "greasewood mesh WG"
-        ip daddr $GW_HOST udp dport 51901 accept comment "greasewood door WG (anchor only)"
-        ip saddr $GW_HOST ct state established,related accept
-    }
-}
-```
-
-Behind NAT, advertise the **router's** public identity, not the LAN address:
-`gw join <token> --endpoint <router-public>:51900` on a node, and
-`gw invite --endpoint <router-public-or-dns>` on an anchor. With routable IPv6
-behind the router there's no DNAT — just accept the same two UDP ports in the
-router's v6 forward chain. A node that advertises no endpoint needs **nothing**
-forwarded: it dials out and keepalives hold the mapping open. And the machine
-behind the router pairs this with the host ruleset above.
-
-Your base default-drop ruleset should also include `ct state established,related
-accept`. It's what lets an **outbound-only** node work:
-such a node opens *no* greasewood inbound ports — it dials peers and the anchor,
-and the replies come back through `established,related`.
-
-**Recommended posture: apply the same ruleset on *every* node, not just the
-current anchor.** Any node can be promoted to anchor ([Moving the
-anchor](#moving-the-anchor-re-root)), so a uniform ruleset means an anchor handover
-needs **no firewall change anywhere**. Opening `51902`/`51903` on a node that
-isn't an anchor is harmless: nothing is bound there, so the kernel just refuses the
-connection until that node actually becomes an anchor and binds it. Plain nodes run
-no control plane, so on a node that will never be an anchor you *could* omit the mesh-interface/
-`gw-door` TCP rules and open only the two UDP ports if you really want the most minimal config.
-
-**Multi-user hosts:** the overlay is host-wide — *any* local user can use the
+**Multi-user hosts:** the overlay is host-wide, *any* local user can use the
 tunnel once it's up (identity is per-machine, not per-user). To restrict which
 users may originate overlay traffic, add an nftables owner-match on the output
 chain; see the "Multi-user hosts" section of [SECURITY.md](SECURITY.md).
 
 ### Reachability
 
-WireGuard has no client/server roles — both peers try to handshake and the
+WireGuard has no client/server roles. Both peers try to handshake and the
 direction that physically works wins, then endpoint roaming pins it. So a link
 forms as long as **at least one side is reachable**: a firewalled node dials an
 open one, and the reply returns via the NAT hole it punched. Two fully-blocked
-nodes can't pair (direct-or-fail — no relays).
+nodes can't pair (direct-or-fail — no relays). Greasewood inherits this semi-tolerance
+of NAT/firewall issues from WireGuard directly, but it makes no serious effort to reason 
+about the underlying network state and automatically just work (that is the domain of Tailscale, etc).
+The best greasewood can do is to examine IP address and determine when a node obviously has no
+externally reachable address (LAN NAT, CGNAT, etc. So when reachability issues arise, 
+it is very likely to be that BOTH peers are behind a
+NAT/Firewall that does not provide them an externally reachable endpoint. The only solution
+in that case would be to try and make changes to the underlying network state. 
 
-Because of that, greasewood has **no `inbound` flag** — reachability is emergent.
-A node advertises whatever endpoint it detects (or the `--endpoint` you give it);
-one that advertises none is naturally **outbound-only** — it dials peers, and
-peers can't dial it. You don't declare this or get it wrong: it's just a
-consequence of whether an endpoint exists.
-
-And guessing "reachable" when you aren't is harmless. Peers pin your advertised
-endpoint, get no handshake, and after a short probe window **drop keepalive to
-that endpoint** — so the futile poll stops and the link still works via you
-dialing out. The endpoint stays pinned, so if it later becomes reachable, the
-next packet re-establishes it automatically. `gw diagnose` shows a node's
-reachability (confirmed from an inbound handshake, or "outbound-only" if it
-advertises nothing), and the two-unreachable-nodes case surfaces as `✗ no
-dialable direction`.
-
-An **anchor** must be reachable (it serves the control plane), so
-`anchor-promote` refuses a node that advertises no endpoint.
+An **anchor** must be reachable (it serves the control plane), so in order for a node
+to become the anchor, it must have a reachable external address. So
+`anchor-promote` refuses on a node that knows it advertises no endpoint.
 
 ## Access control (roles & grants)
 
