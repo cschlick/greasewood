@@ -384,12 +384,12 @@ resolve the same either way. Two things to know:
   `ca_key_passphrase_env`: use `sudo -E`, or the unit's `Environment=` /
   `EnvironmentFile=` for the service.
 
-Keep `data_dir` / `ca_key_file` absolute — a `~` expands to the *running* user's
+Keep `data_dir` / `ca_key_file` absolute... a `~` expands to the *running* user's
 home, which differs under sudo.
 
 ## Provisioning many nodes
 
-Enrollment tokens are **pushed by the anchor, never pulled by nodes**. A node
+Enrollment tokens are **initiated by the anchor, never by nodes**. A node
 cannot request admission; you (or an orchestrator acting on the anchor) decide to
 admit a machine, run `gw invite`, and deliver the token out of band. The node
 only redeems what it was handed. The door is **single-slot by construction**:
@@ -400,8 +400,8 @@ provisioning many instances at once), use the `--standing` flag:
 On the anchor:
 
 ```bash
-sudo gw invite            # prints a one-time token
-sudo gw invite --standing # prints a multi-use token
+sudo gw invite               # prints a one-time token
+sudo gw invite --standing    # prints a multi-use token
 ```
 
 Joining is the same either way
@@ -486,8 +486,8 @@ nodes can't pair (direct-or-fail — no relays). Greasewood inherits this semi-t
 of NAT/firewall issues from WireGuard directly, but it makes no serious effort to reason 
 about the underlying network state and automatically just work (that is the domain of Tailscale, etc).
 The best greasewood can do is to examine IP address and determine when a node obviously has no
-externally reachable address (LAN NAT, CGNAT, etc. So when reachability issues arise, 
-it is very likely to be that BOTH peers are behind a
+externally reachable address (LAN NAT, CGNAT, etc) and print that in `gw diagnose`. 
+So, when a reachability issue arise it is very likely to be that BOTH peers are behind a
 NAT/Firewall that does not provide them an externally reachable endpoint. The only solution
 in that case would be to try and make changes to the underlying network state. 
 
@@ -500,27 +500,22 @@ to become the anchor, it must have a reachable external address. So
 A fresh anchor ships **default-closed**: the grant table is a **secure star** —
 the anchor (which holds `role:admin`) can SSH every node, nodes reach only the
 anchor's control plane, and **nodes cannot reach each other at all**. You open
-what you need by adding grants. (Running with *no* policy file is still flat —
-`* -> * : *` — but `gw create` never leaves you there; it writes the closed
-baseline, with the flat and lateral-SSH alternatives spelled out commented.)
+what you need by adding grants.
 
 To control **who talks to whom, on what**, give nodes **roles** and write a
-**grant table** — the mesh then *derives its tunnel topology from the policy*.
+**grant table**. The mesh then *derives its tunnel topology from the policy*.
 Three roles are built in:
 
 | Role | Who holds it | Meaning |
 |------|--------------|---------|
 | `node` | every ordinary member (the default) | an ordinary fleet node |
-| `anchor` | the anchor, and **only** the anchor | single-member; reserved — never assignable to a joiner; addressable in grants as `to = ["anchor"]` |
-| `admin` | the anchor by default; tag any box | **terminal access** — SSH to every node. `role:*` (reach-all) is likewise reserved to the anchor. |
+| `anchor` | the anchor, and **only** the anchor | single-member reserved. Addressable in grants as `to = ["anchor"]` |
+| `admin` | the anchor by default, tag any box | **terminal access** — SSH to every node.|
 
-Want an operator workstation that can SSH the fleet? Give it `role:admin` — the
-shipped grant `from admin -> to anchor,node : tcp/22` then opens its SSH over
-the overlay (and only the overlay; every grant rule is scoped to the mesh
-interface, so your underlay firewall never sees it).
-
-**Roles are CA-signed caps** (`role:<name>`), and crucially **the anchor
-assigns them — a node cannot choose its own** (no self-assertion):
+**Roles are CA-signed caps** (`role:<name>`), and crucially, the anchor
+assigns them, a node cannot assert its own. However, the anchor can choose to
+provide new nodes with a "menu" of available roles. This is helpful for auto-provisioning,
+where multiple roles can join with a single standing token. 
 
 ```bash
 # On the anchor — the invite decides the node's roles:
