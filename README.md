@@ -527,16 +527,16 @@ MENU=$(sudo gw invite --self-roles web,worker,db)
 sudo gw join "$MENU" --roles worker --hostname worker1   # anchor signs iff 'worker' is on the menu
 
 # Change roles later without re-joining (effective at the node's next renewal):
-sudo gw set-roles web1 web,worker
+`sudo gw set-roles web1 web,worker`
 ```
 
 **Defaults for new nodes** live in the anchor's config — `[anchor]
-default_roles` (ships `["node"]`) and `default_caps` (ships `["tls"]`). A
+default_roles` (`["node"]`) and `default_caps` (`["tls"]`). A
 plain `gw invite` uses them; the flags override per token; they're read fresh
 at each invite, so editing the config changes future enrollments with no
 restart.
 
-### The grant table derives the topology
+### The grant table derives the topology (examples)
 
 ```toml
 # <data_dir>/grants.toml on the anchor  (full reference: grants.toml.example)
@@ -564,7 +564,7 @@ sudo gw policy apply
 gw policy show              # on any node: the active table (flags unapplied edits)
 ```
 
-**grants.toml is the source of truth, applied deliberately.** `gw create`
+**grants.toml is the source of truth.** `gw create`
 writes it (the default-closed baseline — `admin -> anchor,node : tcp/22`) and signs it into the
 distributed, CA-signed `policy.json` — the form nodes actually receive and
 trust (a node can't trust a plaintext file from another host). To change
@@ -576,12 +576,12 @@ joining node is handed the current signed policy at enrollment, so it enforces
 the real table from its first run — the mesh never operates on an implicit
 default.
 
-With a policy applied, a tunnel exists between two nodes **iff some grant
+With a policy applied, a tunnel exists between two nodes **only if some grant
 connects their roles** (either direction — tunnels are symmetric; the grant's
 direction is for port filtering). Tunnels are **minimal by construction**:
 delete a grant and its tunnels are torn down on the next sync; peers,
 keepalives, and handshake exposure all shrink to the grant graph. Two `web`
-nodes have no tunnel unless someone writes `web -> web` — client and server
+nodes have no tunnel unless someone writes `web -> web`, client and server
 are roles that coexist without talking sideways.
 
 **Segments are emergent, not configured.** There is no segment cap, flag, or
