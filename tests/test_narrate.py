@@ -160,3 +160,67 @@ def test_render_does_not_collapse_when_a_command_failed():
     out = "\n".join(N.narrate(entries, color=False))
     assert "×" not in out                           # no collapse
     assert "✗" in out and "boom" in out             # the failure is shown
+
+
+# ── domain-event lines (event=topology / event=policy) ───────────────────────
+
+def test_parse_line_parses_event():
+    e = N.parse_line("ts=2026-07-02T22:12:08Z event=topology added=2 removed=1 peers=7")
+    assert isinstance(e, N.EventEntry)
+    assert e.ts == "2026-07-02T22:12:08Z" and e.kind == "topology"
+    assert e.fields == {"added": "2", "removed": "1", "peers": "7"}
+    assert not e.failed                      # events are never failures
+
+
+def test_command_line_never_parsed_as_event():
+    # a command whose ctx text mentions 'event' is still a command, not an event
+    line = ('ts=2026-07-02T22:12:03Z cmd rc=0 t=1ms ctx="reconcile: note" '
+            'argv="ip -6 route replace fd8d::a1/128 dev gw-mesh"')
+    assert isinstance(N.parse_line(line), N.Entry)
+
+
+def test_describe_event_topology_and_policy():
+    topo = N.EventEntry("t", "topology", {"added": "2", "removed": "1", "peers": "7"})
+    assert N.describe_event(topo) == \
+        "Topology settled — 2 peers added, 1 removed (7 peers now up)."
+    one = N.EventEntry("t", "topology", {"added": "1", "removed": "0", "peers": "1"})
+    assert N.describe_event(one).startswith("Topology settled — 1 peer added (1 peer now up)")
+    pol = N.EventEntry("t", "policy", {"prev": "4", "seq": "5", "grants": "3"})
+    assert N.describe_event(pol).startswith("Policy adopted — v4 → v5 (3 grants)")
+    first = N.EventEntry("t", "policy", {"prev": "none", "seq": "1", "grants": "1"})
+    assert "the first policy → v1 (1 grant)" in N.describe_event(first)
+
+
+def test_narrate_renders_event_markers_interleaved():
+    lines = [
+        "ts=2026-07-02T22:12:01Z event=policy prev=4 seq=5 grants=3",
+        ('ts=2026-07-02T22:12:03Z cmd rc=0 t=12ms ctx="reconcile: +peer db01 [fd8d::a1]" '
+         'argv="wg set gw-mesh peer ABC= allowed-ips fd8d::a1/128"'),
+        "ts=2026-07-02T22:12:08Z event=topology added=2 removed=1 peers=7",
+    ]
+    entries = [N.parse_line(x) for x in lines]
+    out = "\n".join(N.narrate(entries, color=False))
+    assert "◆" in out and "●" in out                  # both markers present
+    assert "Policy adopted — v4 → v5" in out
+    assert "Topology settled — 2 peers added, 1 removed" in out
+    # the event marker is standalone (not folded into the command op's ✓ block)
+    assert "◆ 2026-07-02 22:12:08Z  Topology settled" in out
+
+
+def test_summarize_counts_events_separately():
+    lines = [
+        "ts=2026-07-02T22:12:01Z event=policy prev=4 seq=5 grants=3",
+        ('ts=2026-07-02T22:12:03Z cmd rc=0 t=12ms ctx="reconcile: +peer db01 [fd8d::a1]" '
+         'argv="wg set gw-mesh peer ABC= allowed-ips fd8d::a1/128"'),
+        "ts=2026-07-02T22:12:08Z event=topology added=2 removed=1 peers=7",
+    ]
+    entries = [N.parse_line(x) for x in lines]
+    s = N.summarize(entries)
+    assert "1 data-plane commands" in s                # the event lines aren't commands
+    assert "Events: 1 policy change(s), 1 topology transition(s)." in s
+
+
+def test_searchable_matches_event_content():
+    ev = N.parse_line("ts=t event=policy prev=4 seq=5 grants=3")
+    assert "policy" in N.searchable(ev)
+    assert "seq=5" in N.searchable(ev)
