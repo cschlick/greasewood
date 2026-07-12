@@ -593,44 +593,41 @@ false-alarming on pairs the policy correctly keeps apart.
 
 Properties to rely on:
 
-- **Allow-only, by schema.** A flow passes iff some grant covers it; a deny
-  rule is *not expressible* (no action field exists). No ordering, no
-  conflicts — grants are a set, not a program.
+- **Allow-only, by schema.** A flow passes iff some grant covers it; there's
+  no deny rule (no action field) — grants are a set, not an ordered program,
+  so no conflicts.
 - **The anchor is hardwired beneath the table.** Every node always tunnels to
-  the anchor (`role:*`), and no grant can remove that: the policy rides the
-  directory sync, which rides the anchor tunnel — the channel that carries
-  the policy must never be prunable *by* the policy (one bad edit could
-  otherwise brick the fleet beyond remote repair).
+  the anchor (`role:*`), and no grant can prune it — the policy rides the
+  directory sync, which rides the anchor tunnel, so the channel that carries
+  the policy can't be severed *by* the policy.
 - **Signed and replay-proof.** The table is CA-signed with a monotonic
   version; nodes adopt only newer, validly-signed tables and keep
   last-known-good on disk across reboots.
-- **Anchor-assigned, attested, mutually enforced.** A tunnel needs *both*
-  ends to install each other, and each side reads the *other's* roles from
-  its CA-signed credential — a node can neither talk its way into a role it
-  wasn't issued nor be forced into a link it denies.
+- **Anchor-assigned, mutually enforced.** A tunnel needs *both* ends to
+  install each other, each reading the other's roles from its CA-signed
+  credential — a node can't talk its way into a role it wasn't issued, nor be
+  forced into a link it denies.
 
-**Port enforcement is on by default.** The daemon enforces each grant's
-`ports` with nftables: it maintains **greasewood's own** `table inet
-greasewood`, scoped to the mesh interface, that default-denies mesh traffic
-and admits only the granted flows (server-side inbound; a client's replies
-ride `ct established`, so the client/server asymmetry needs no rule). The
-**default policy is fully open** (`* -> * : *`), so a fresh mesh with no
-`grants.toml` behaves exactly like a flat mesh — enforcement is a policy
-*state*, always installed, not a mode you switch on. Writing grants tightens
-it.
+**Port enforcement is on by default.** The daemon realizes each grant's
+`ports` in **greasewood's own** `table inet greasewood_<mesh>`, scoped to the
+mesh interface: it default-denies mesh traffic and admits only the granted
+flows (server-side inbound; a client's replies ride `ct established`, so the
+asymmetry needs no rule). A fresh anchor ships **default-closed** — a secure
+star where only `role:admin` (the anchor) can SSH nodes; you open services by
+writing grants. Enforcement is a policy *state*, always installed, not a mode
+you switch on.
 
 It writes **only** its own table on `gw-<mesh>` — never your host firewall,
-never a physical NIC — so it can only ever *tighten* mesh traffic, and it
-presupposes you've admitted the overlay in your own firewall (`iifname
-"gw-<mesh>" accept`, or no host firewall) — `gw firewall` advises exactly
-that. The table **persists across daemon restarts** (fail closed); `gw purge`
-removes it.
+never a physical NIC — so it can only ever *tighten*, and it presupposes
+you've admitted the overlay (`iifname "gw-<mesh>" accept`, or no host
+firewall; `gw firewall` advises exactly that). The table **persists across
+daemon restarts** (fail closed); `gw purge` removes it.
 
-Because enforcement is on by default, **nftables must be usable** — the
-daemon refuses to start rather than run silently unenforced. A host without
-nftables sets `enforce_ports = false` under `[network]` (or a one-off `gw run
---no-enforce-ports`): grants still control which *tunnels* exist, but the
-port scopes go advisory.
+Because enforcement is on by default, **nftables must be usable** — the daemon
+refuses to start rather than run silently unenforced. A host without it sets
+`enforce_ports = false` under `[network]` (or a one-off `gw run
+--no-enforce-ports`): grants still gate which *tunnels* exist, but port scopes
+go advisory.
 
 ## Command reference
 
