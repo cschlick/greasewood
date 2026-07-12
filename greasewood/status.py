@@ -498,18 +498,38 @@ def _cfg_control_port(cfg) -> int:
         return 51902
 
 
+def _strip_gw_table(lines: list, gw_table: str) -> list:
+    """Drop greasewood's own `table inet <gw_table> { … }` block from raw
+    `nft list ruleset` output, so a HOST-firewall view doesn't display
+    greasewood's overlay rules (gw-<mesh>/gw-door/51902 — which also match a
+    'gw-' grep) as if the operator had written them. The table's closing brace is
+    the only `}` at column 0; sub-blocks (set/chain) close indented."""
+    out, skip = [], False
+    for ln in lines:
+        if not skip and ln.startswith(f"table inet {gw_table} "):
+            skip = True
+            continue
+        if skip:
+            if ln.rstrip() == "}":            # column-0 close = end of the table
+                skip = False
+            continue
+        out.append(ln)
+    return out
+
+
 def _main_firewall_lines(cfg) -> list:
     """The operator's OWN firewall vs the greasewood underlay port(s), surfaced
     in `gw watch` so a blocked port is visible at a glance — greasewood NEVER
     edits these rules. Line 0 is the verdict (the only line kept when the section
-    is collapsed with `f`); the rest is the raw command + the matching lines.
+    is collapsed with `f`); the rest is the command + the matching HOST rules.
 
     Omitted entirely when nft isn't installed — that host isn't firewalling with
     nftables, so there's nothing to check. Per role: a plain node needs only the
     mesh WireGuard UDP port; an anchor also needs the enrollment-door port. LOUD
     when a default-drop firewall doesn't accept a needed port (the daemon is then
-    likely unreachable inbound). We check the UNDERLAY ports, which never appear
-    in greasewood's own overlay table — so the grep shows the host firewall only."""
+    likely unreachable inbound). greasewood's OWN table is excluded from the shown
+    rules (its overlay rules match a 'gw-' grep and would masquerade as the
+    operator's) — it's shown verbatim in its own section below."""
     from . import firewall as fw
     if shutil.which("nft") is None:
         return []
@@ -526,8 +546,13 @@ def _main_firewall_lines(cfg) -> list:
     # — a default-drop host drops gw-* before our table ever sees it.
     portlist = ", ".join(f"{r.proto}/{r.port}" for r in rules)
     need = f"{portlist} + gw-* overlay"
-    cmd = ("  $ sudo nft list ruleset | grep -E '"
-           + "|".join(str(p) for p in ports) + "|gw-'")
+    from .portfilter import table_name
+    from .config import membership_key
+    gw_table = table_name(membership_key(cfg.mesh_domain))
+    # The shown command strips greasewood's own table too, so it reproduces
+    # exactly what's displayed (only the operator's rules).
+    cmd = (f"  $ sudo nft list ruleset | sed '/^table inet {gw_table} /,/^}}/d' "
+           "| grep -E '" + "|".join(str(p) for p in ports) + "|gw-'")
 
     ruleset = fw._load_ruleset()
     if ruleset is None:
@@ -535,12 +560,12 @@ def _main_firewall_lines(cfg) -> list:
                 "(run `sudo gw watch` to read the ruleset)", cmd]
 
     try:
-        raw = [ln.strip() for ln in subprocess.run(
-                   ["nft", "list", "ruleset"], capture_output=True, text=True
-               ).stdout.splitlines()
-               if any(str(p) in ln for p in ports) or "gw-" in ln]
+        full = subprocess.run(["nft", "list", "ruleset"], capture_output=True,
+                              text=True).stdout.splitlines()
     except FileNotFoundError:
-        raw = []
+        full = []
+    raw = [ln.strip() for ln in _strip_gw_table(full, gw_table)
+           if any(str(p) in ln for p in ports) or "gw-" in ln]
 
     drop = fw.default_drop(ruleset)
     if not drop:
