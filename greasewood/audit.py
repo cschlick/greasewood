@@ -98,6 +98,21 @@ def record_command(argv, rc: int, elapsed_ms: int,
     log.log(level, line)
 
 
+def event(kind: str, **fields) -> None:
+    """Emit a domain-level EVENT — the durable, greppable narrative of MESH
+    state transitions (a topology change, a policy-version adoption), a layer
+    ABOVE the per-command trail. One logfmt line at INFO, so it lands in both
+    the journal and the rotating audit.log; `grep 'event='` reads the history.
+
+    The per-command lines already record WHAT touched the kernel and why; this
+    records the higher-level SO-WHAT (e.g. `event=topology added=2 removed=1
+    peers=7`) that a snapshot can't show because it's a transition, not a state.
+    Values are logfmt-quoted; keys are caller-controlled (kept bare)."""
+    parts = [f"event={_q(str(kind))}"]
+    parts += [f"{k}={_q(str(v))}" for k, v in fields.items()]
+    log.info(" ".join(parts))
+
+
 # ---------------------------------------------------------------------------
 # Sinks
 # ---------------------------------------------------------------------------

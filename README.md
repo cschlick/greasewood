@@ -262,6 +262,21 @@ elsewhere with `[network] audit_log = "/var/log/greasewood/audit.log"`, or
 every reconcile cycle — go to debug, so the durable trail is only commands that
 *changed* something.)
 
+Above the per-command lines, the same file carries a **domain-event trail** — one
+line per *mesh state transition*, the so-what a point-in-time view can't show
+because it's a change, not a state. `grep event= audit.log`:
+
+```
+ts=2026-07-02T22:12:03Z INFO greasewood.audit: event=policy prev=4 seq=5 grants=3
+ts=2026-07-02T22:12:08Z INFO greasewood.audit: event=topology added=2 removed=1 peers=7
+```
+
+So the narrative reads at a glance: policy v4→v5 was adopted, and the next
+reconcile settled the topology (+2/−1, 7 peers) — with the per-peer `+peer`/
+`-peer` commands right below carrying the who and why. A topology line appears
+only when membership actually changes (a re-verified endpoint isn't a
+transition), so steady state stays silent.
+
 And you don't have to read raw commands: **`gw narrate` translates the trail into
 plain English** — grouping the commands of each operation and explaining what
 each did and why:
