@@ -1062,6 +1062,137 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     return lines
 
 
+_SNAPSHOT_SCHEMA = "gw.watch/v1"
+
+
+def _iso_z(t) -> "str | None":
+    """A dt → 'YYYY-MM-DDTHH:MM:SSZ' (UTC, second precision), or None."""
+    if t is None:
+        return None
+    return t.astimezone(_UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
+    """Structured, machine-readable state for `gw watch --snapshot --json`.
+
+    Same underlying data as the text snapshot — identity, mesh + enforcement,
+    daemon/sync freshness, the signed policy summary, and one entry per directory
+    record (roles, caps, endpoints, expiry, the policy peering verdict from THIS
+    node, the node's advertised `reachable` set, and live WireGuard stats when run
+    as root) — as a STABLE contract (the `schema` field is versioned) so monitors
+    and jq pipelines don't scrape the human view. Expired records are INCLUDED and
+    flagged (`expired: true`); tooling filters as it sees fit."""
+    from .directory import Directory
+    from .policy import peers_allowed, POLICY_BASENAME
+    from .wire import GrantTable
+    from . import reconcile as rmod
+    from . import sync as syncmod
+
+    now = dt.datetime.now(_UTC)
+    now_epoch = int(now.timestamp())
+    directory = Directory.load(cfg.dir_cache_path)
+    grants = _load_policy_grants(cfg)
+
+    policy = None
+    ppath = cfg.data_dir / POLICY_BASENAME
+    if ppath.exists():
+        try:
+            t = GrantTable.from_dict(json.loads(ppath.read_text()))
+            policy = {"seq": t.seq, "grants": len(t.grants)}
+        except Exception:
+            policy = None
+
+    records = sorted(directory.all(), key=lambda r: r.hostname)
+    own_rec = next((r for r in records if r.id_pub.hex() == own_id), None)
+    own_caps = list(own_rec.cred.caps) if own_rec else list(cfg.caps)
+
+    # Live data plane (root only, wg readable) — else the entry omits `live`.
+    live_peers = None
+    if os.geteuid() == 0:
+        try:
+            from . import wg as wgmod
+            live_peers = wgmod.get_peers(cfg.wg_interface)
+        except Exception:
+            live_peers = None
+
+    nodes, live_n, expired_n = [], 0, 0
+    for r in records:
+        caps = list(r.cred.caps)
+        expired = now >= r.cred.exp
+        expired_n += expired
+        live_n += not expired
+        entry = {
+            "id": r.id_pub.hex(),
+            "hostname": r.hostname,
+            "addr": r.cred.addr,
+            "roles": [c[len("role:"):] for c in caps if c.startswith("role:")],
+            "caps": [c for c in caps if not c.startswith("role:")],
+            "endpoints": list(r.endpoints),
+            "iat": _iso_z(r.cred.iat),
+            "exp": _iso_z(r.cred.exp),
+            "expired": expired,
+            "ttl_remaining_s": int((r.cred.exp - now).total_seconds()),
+            "is_self": r.id_pub.hex() == own_id,
+            "peer_expected": peers_allowed(own_caps, caps, grants),
+            "reachable": sorted(r.reachable) if r.reachable else [],
+        }
+        if live_peers is not None:
+            lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
+            if lp:
+                entry["live"] = {
+                    "installed": True,
+                    "up": _handshake_fresh(lp, now_epoch),
+                    "last_handshake": (_iso_z(dt.datetime.fromtimestamp(
+                        lp.latest_handshake, _UTC)) if lp.latest_handshake else None),
+                    "handshake_age_s": ((now_epoch - lp.latest_handshake)
+                                        if lp.latest_handshake else None),
+                    "rx_bytes": lp.rx_bytes,
+                    "tx_bytes": lp.tx_bytes,
+                }
+            else:
+                entry["live"] = {"installed": False}
+        nodes.append(entry)
+
+    last_recon = rmod.read_last_reconcile(cfg.data_dir)
+    recon_dt = _parse_iso(last_recon) if last_recon else None
+    recon_age = (now - recon_dt).total_seconds() if recon_dt else None
+    fatal = rmod.read_daemon_fatal(cfg.data_dir)
+    last_sync = None if cfg.role == "anchor" else syncmod.read_last_sync(cfg.data_dir)
+    sync_dt = _parse_iso(last_sync) if last_sync else None
+
+    return {
+        "schema": _SNAPSHOT_SCHEMA,
+        "generated_at": _iso_z(now),
+        "self": {
+            "id": own_id,
+            "hostname": cfg.hostname,
+            "addr": own_addr,
+            "role": cfg.role,
+            "roles": [c[len("role:"):] for c in own_caps if c.startswith("role:")],
+            "is_anchor": "*" in [c[len("role:"):] for c in own_caps
+                                 if c.startswith("role:")],
+        },
+        "mesh": {
+            "domain": cfg.mesh_domain,
+            "interface": cfg.wg_interface,
+            "enforce_ports": bool(getattr(cfg, "enforce_ports", True)),
+        },
+        "policy": policy,
+        "daemon": {
+            "last_reconcile": _iso_z(recon_dt),
+            "reconcile_age_s": round(recon_age, 1) if recon_age is not None else None,
+            "healthy": recon_age is not None and recon_age <= 30,
+            "fatal": {"reason": fatal["reason"], "ts": fatal["ts"]} if fatal else None,
+        },
+        "sync": {
+            "last": _iso_z(sync_dt),
+            "age_s": round((now - sync_dt).total_seconds(), 1) if sync_dt else None,
+        },
+        "counts": {"total": len(nodes), "live": live_n, "expired": expired_n},
+        "nodes": nodes,
+    }
+
+
 def cmd_watch(args) -> int:
     from .config import load_config
     from .directory import Directory
@@ -1084,6 +1215,12 @@ def cmd_watch(args) -> int:
                  f"install with a 0700 data dir?). Either run: sudo gw watch, "
                  f"or open the public files up: sudo chmod 755 {cfg.data_dir}")
     own_id, own_addr = _own_identity(cfg.data_dir)
+
+    # --json is a one-shot machine snapshot (implies --snapshot): a stable,
+    # versioned schema for monitors/jq, so nothing has to scrape the human view.
+    if getattr(args, "json", False):
+        print(json.dumps(_watch_snapshot_dict(cfg, own_id, own_addr), indent=2))
+        return 0
 
     # Live is the default; a static one-shot is --snapshot (for piping/logging),
     # and we auto-fall-back to it when there's no terminal to redraw into.
