@@ -436,8 +436,9 @@ def test_cmd_join_second_leg_framing_is_in_scope():
 
 
 def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
-    """gw create drops an explicit-open grants.toml so the operator has a
-    visible policy baseline to edit (idempotent — never clobbers one)."""
+    """gw create drops a default-CLOSED grants.toml (a secure star — only
+    role:admin can SSH nodes) so the operator has a visible policy baseline to
+    edit (idempotent — never clobbers one)."""
     import types
     from greasewood import cli
     monkeypatch.setattr(cli, "_require_root", lambda *a, **k: None)
@@ -454,7 +455,7 @@ def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
     assert grants.exists()
     from greasewood.policy import parse_grants_toml
     assert parse_grants_toml(grants.read_text()) == \
-        [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+        [{"from": ["admin"], "to": ["anchor", "node"], "ports": ["tcp/22"]}]
     # create SIGNS it into policy.json v1 (real signed policy from birth, not
     # just a decorative file) — and it verifies under the mesh CA.
     import json
@@ -465,7 +466,8 @@ def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
     table = GrantTable.from_dict(json.loads(pol.read_text()))
     ca = CAKeys.load(data_dir / "ca.key")
     table.verify([ca.ca_pub_bytes])             # must not raise
-    assert table.seq == 1 and table.grants == [{"from": ["*"], "to": ["*"], "ports": ["*"]}]
+    assert table.seq == 1 and table.grants == \
+        [{"from": ["admin"], "to": ["anchor", "node"], "ports": ["tcp/22"]}]
     # idempotent: a hand-edited grants.toml survives a re-create
     grants.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["tcp/8000"]\n')
     cli.cmd_create(ns)

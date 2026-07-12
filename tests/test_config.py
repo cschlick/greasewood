@@ -47,9 +47,9 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.wg_interface == "gw-mesh"       # default
     assert cfg.hosts_sync is True              # /etc/hosts sync on by default
     assert cfg.mesh_domain == "gw.internal"    # namespaced under reserved TLD
-    # The default caps must place the node in the default segment — a bare
-    # "mesh" tag is NOT a segment, and default_policy would peer it with nobody.
-    assert cfg.caps == ["role:mesh"]
+    # The default caps tag the node with the default role — role:node, the
+    # ordinary-member role every grant vocabulary starts from.
+    assert cfg.caps == ["role:node"]
     assert cfg.aliases == []                    # no published service names by default
 
 
@@ -61,10 +61,10 @@ def test_aliases_parsed(tmp_path):
 
 
 def test_new_node_defaults_fallback(tmp_path):
-    # No [anchor] defaults set → ship defaults: mesh segment, tls on.
+    # No [anchor] defaults set → ship defaults: the node role, tls on.
     p = _write(tmp_path, '[node]\nhostname = "n1"\n')
     cfg = load_config(p)
-    assert cfg.default_roles == ["mesh"]
+    assert cfg.default_roles == ["node"]
     assert cfg.default_caps == ["tls"]
 
 

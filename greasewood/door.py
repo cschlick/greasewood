@@ -306,7 +306,7 @@ def parse_window(data: dict) -> "Window | None":
             return None
     return Window(standing=standing, expires=expires,
                   expires_str=data.get("expires"),
-                  caps=list(data.get("caps") or ["role:mesh"]),
+                  caps=list(data.get("caps") or ["role:node"]),
                   allowed_roles=list(data.get("allowed_roles") or []),
                   hostname=data.get("hostname"),
                   guest_pub=data.get("guest_pub"), psk=data.get("psk"))
