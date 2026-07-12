@@ -21,9 +21,9 @@ past the point of practical, and wanted the smallest possible mesh upgrade.
 - **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables. Uses
   the stock `wg`/`ip` tools over subprocess. Greasy.
 - **[Service TLS.](#tls-certificates-for-services)** The same CA issues auto-renewing
-  x509 certs for your services (Postgres, nginx, …) — with profiles that place them where each wants them.
+  x509 certs for your services (Postgres, nginx, …), with profiles that place them where each wants them.
 - **[Offline-tolerant.](#offline-tolerance)** The anchor can be down for a credential
-  lifetime — nodes run from cache.
+  lifetime, nodes run from cache.
 - **[Hands-off.](#firewall)** Never automatically configures your main firewall.
   Port access control for the overlay lives on a dedicated table
 - **[Auditable.](#auditable)** Pure Python, one dependency. Fanatical logging.
@@ -367,25 +367,6 @@ template when it's the last mesh) providing a from-scratch reset in one command.
 - A **config-changing re-join** (new anchor, etc) isn't auto-detected — the
   daemon reads its config at startup, so run `sudo systemctl restart greasewood@<name>`
   afterward.
-
-### Root vs. sudo
-
-`gw` needs root (it manages WireGuard), and the service runs as root, so paths
-resolve the same either way. Two things to know:
-
-- **State is always root-owned** — greasewood never chowns it to the `sudo` user
-  (that would put the **CA key on a login account**). Legacy state gets a startup
-  warning; fix with `chown root:root`. Read-only commands need no root: the data
-  dir is `0755` and public files (`id_pub.hex`, `directory.json`, `*.pub`) are
-  world-readable — so `gw watch --snapshot` works for anyone — while secrets stay
-  `0600` root. Commands that need root **say so up front** (`… needs root (<why>);
-  try: sudo gw <cmd>`).
-- **`sudo` strips the environment** — only matters if you set
-  `ca_key_passphrase_env`: use `sudo -E`, or the unit's `Environment=` /
-  `EnvironmentFile=` for the service.
-
-Keep `data_dir` / `ca_key_file` absolute... a `~` expands to the *running* user's
-home, which differs under sudo.
 
 ## Provisioning many nodes
 
@@ -1043,16 +1024,16 @@ hostssl all all ::/0 cert map=mesh clientcert=verify-full
 
 ```
 # MAPNAME   CERT CN (= client's <hostname>.<mesh_domain>)   PG ROLE
-mesh        nats01.myfleet.internal                              nats
-mesh        chat01.myfleet.internal                              chat
+mesh        nats01.mymesh.internal                              nats
+mesh        chat01.mymesh.internal                              chat
 ```
 
-This is the only place client hostnames appear — it's the allow-list of *which*
+This is the only place client hostnames appear, it's the allow-list of *which*
 identities may connect, and each entry is that node's own automatic name.
 
 > **CA rotation.** The `ssl_ca_file` matters only because of client-cert auth. A
 > re-root changes the CA, and both the server's CA file and every client cert
-> re-issue under the new CA on their next renewal — so rotate the CA (re-root)
+> re-issue under the new CA on their next renewal, so rotate the CA (re-root)
 > and let the fleet re-issue together; don't swap a CA independently, or client
 > certs signed by the old one stop validating.
 
