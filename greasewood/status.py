@@ -445,7 +445,8 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     # daemon logged) and the audit file (every ip/wg/nft command it ran).
     lines.append(f"logs     : journalctl -eu greasewood@{membership_key(cfg.mesh_domain)}")
     if getattr(cfg, "audit_log", None):
-        lines.append(f"audit    : {cfg.audit_log}  (ip/wg/nft command trail)")
+        lines.append(f"audit    : {cfg.audit_log}  (ip/wg/nft commands + "
+                     f"'grep event=' for topology/policy changes)")
     lines += _self_health_lines(cfg, directory, own_id)
     if cfg.role == "anchor":                       # the door only exists here
         lines += _door_status_lines(cfg)
