@@ -696,49 +696,6 @@ control_listen = ":51902"
 credential_ttl = "24h"
 ```
 
-### Baked images & autoscaling: the standing door
-
-The default door is deliberately one-token-one-node. For cloud images and
-autoscaling groups — where instances must enroll themselves at first boot —
-open a **standing door** instead:
-
-```bash
-# On the anchor, once per fleet:
-sudo gw invite --standing --roles autoscale --endpoint anchor.example.com -q
-# → ONE token. Put it in the image or launch template's user-data.
-```
-
-Every instance runs the same `gw join <token>` at first boot. Each join is
-still the **full one-node ceremony** — fresh identity keys, its own CA-signed
-credential, the same door isolation (a token holder can reach the enroll port
-and *nothing else*) — the door just doesn't close afterward. Joins serialize
-(all holders share the door's guest key), so a boot burst enrolls one node
-every couple of seconds; have the first-boot script retry on failure.
-
-Threat model, honestly: a leaked standing token lets its holder **enroll a
-rogue node** with the pinned roles — a bounded, visible (`gw watch` shows
-`door: OPEN (standing) — N enrolled`; every join is in the audit trail), and
-reversible (`gw revoke`) failure. That is the deliberate trade against the
-alternatives (e.g. giving instances SSH to the anchor, whose failure mode is anchor
-compromise). Contain it with a quarantine role (grant it nothing) and rotate freely:
-
-```bash
-sudo gw close-door                 # token permanently dead, fleet-wide, instantly
-sudo gw invite --standing ... -q   # fresh seed → fresh token → update user-data
-```
-
-Lost the token? A standing token is stored (0600 root) so you can re-retrieve
-it without re-issuing — **`sudo gw watch`** on the anchor prints it in the door
-block while the standing door is open (root only; it's the enrollment
-credential). Re-issuing would invalidate copies already baked into images, so
-retrieve rather than re-invite.
-
-Enrolled nodes are never affected by door operations — their credentials come
-from the CA, not the door. A standing door survives anchor reboots (the daemon
-re-erects it), and a plain `gw invite` refuses to silently supersede one (pass
-`--supersede` or `close-door` first), so a one-off invite can't accidentally
-invalidate the token baked into your image pipeline.
-
 ### Roles
 
 - **anchor** — holds the CA private key; serves the control plane and the
@@ -763,16 +720,15 @@ refreshes that membership; an unknown CA **auto-provisions the next membership
 slot** — config `/etc/greasewood2.toml`, data `/var/lib/greasewood2`, interface
 `gw-<name>`, UDP `51910` (then +10 each). The mesh's **name domain rides
 in the token** (declared once at `gw create <name>` → `<name>.internal`), so
-every member of a mesh — including multi-mesh hosts — mounts it under the SAME
+every member of a mesh, including multi-mesh hosts, mounts it under the SAME
 suffix, and TLS names agree fleet-wide with no flags.
 
-**Domain collisions are a hard no**: a node cannot bridge two meshes with the
+**Domain collisions**: a node cannot bridge two meshes with the
 same domain — no local aliasing exists (a per-host alias would diverge from the
 names in the mesh's TLS certs, a debugging trap; and rewriting is off the table
 since names are CA-attested). The join refuses *before* the door dance (the
 token is not consumed) and tells you the fix: rename one mesh on its anchor.
-Requiring a mesh name at create makes this a genuine coincidence rather than
-the default-default certainty it used to be.
+Requiring a mesh name at create (becomes subdomain) should makes this a rare coincidence.
 
 Every derived value is still overridable — pass any of the explicit knobs and
 the auto-slotting steps aside entirely:
@@ -785,53 +741,30 @@ sudo gw -c /etc/gw-b.toml join "$TOKEN_B" --data-dir /var/lib/gw-b \
 **The mesh domain must differ between the two, for the same reason the interface
 name must** — both are flat, host-global namespaces with no scoping. The
 `/etc/hosts` block is *keyed by* `mesh_domain`, so two meshes sharing one would
-(a) clobber each other's block every reconcile — each daemon strips and rewrites
-the same-tagged block — and (b) collide on the names themselves: both meshes'
-`db.myfleet.internal` would claim the same name for two different addresses. Unlike a
-duplicate `listen-port` (which fails loudly at bind), a duplicate `mesh_domain`
-fails *silently*, so greasewood watches for it: if it finds another mesh writing
-its `/etc/hosts` block (foreign addresses under its tag), it logs a loud warning
-telling you to set a distinct `mesh_domain`. The rest (port, data dir) collide
-loudly on their own. With distinct domains, the blocks are tagged per mesh and
-file-locked, so the two daemons coexist cleanly.
-
-**What about two meshes on the same overlay `/64`?** (Likely, since both
-probably use the stock prefix.) Surprisingly: *it works.* greasewood's data
-plane never routes the /64 — every address, kernel route, and WireGuard
-allowed-ip is an **identity-derived /128** (`blake2s(id_pub)` host bits), so
-two meshes sharing a prefix produce no ambiguous route; an actual /128 overlap
-is a birthday collision over 64 bits (ignorable). What a shared prefix breaks
-is *prefix-based reasoning*: a firewall rule or script scoped to the /64 now
-silently matches **both** meshes, and an address no longer tells a human which
-mesh it belongs to — so `join` warns when a new membership lands on a /64
-another membership already uses, and distinct `create --overlay-prefix` per
-mesh remains the recommendation for legibility. Rewriting one mesh's addresses
-to avoid the overlap is not on the table and never will be: addresses are
-self-certifying (derived from the node's identity key and attested by the CA),
-so a rewritten address is a *lie about identity* that every peer's
-verification would reject.
+(a) clobber each other's block every reconcile, each daemon strips and rewrites
+the same-tagged block, and (b) collide on the names themselves: both meshes'
+`db.mymesh.internal` would claim the same name for two different addresses. 
 
 ## Names
 
 Every node has a stable overlay address, and `gw watch` shows each node's
-resolvable name↔address map. Name resolution is **on by default**: the daemon
+resolvable name↔address map. Name resolution is **encouraged**: the daemon
 keeps a marked `/etc/hosts` block mapping each node's address to
-`<hostname>.<mesh>.internal` (e.g. `db.myfleet.internal`), built from the records that pass the reconcile loop's
+`<hostname>.<mesh>.internal` (e.g. `db.mymesh.internal`), built from the records that pass the reconcile loop's
 full verification — the same gate that decides WireGuard peers, so a revoked or
 expired node's name stops resolving on the same cycle its tunnel comes down.
-It's re-checked each reconcile but **only rewritten when the block actually
-changes** (a join, departure, revocation, or rename) — in steady state it never
-touches the file, so it won't churn your `/etc/hosts` or noise up
-etckeeper/config management:
+It's re-checked each reconcile but *only rewritten when the block actually
+changes* (a join, departure, revocation, or rename) — in steady state it never
+touches the file, so it won't hammer `/etc/hosts`
 
 ```
 # BEGIN greasewood — managed, do not edit
-fd8d:e5c1:db1a:7:…  db.myfleet.internal
-fd8d:e5c1:db1a:7:…  node01.myfleet.internal
+fd8d:e5c1:db1a:7:…  db.mymesh.internal
+fd8d:e5c1:db1a:7:…  node01.mymesh.internal
 # END greasewood
 ```
 
-So `ping db.myfleet.internal`, `ssh db.myfleet.internal`, etc. just work — no DNS
+So `ping db.mymesh.internal`, `ssh db.mymesh.internal`, etc. just work — no DNS
 server, and it keeps resolving even if the anchor is down (it's from the cache,
 for as long as the cached credentials remain valid — one credential TTL, the
 same horizon as the tunnels themselves). It
@@ -862,18 +795,18 @@ cert to this node's `<hostname>.myfleet.internal` **plus** its overlay address. 
 name a node is reached by is exactly the name its certificate is valid for —
 resolve `db.myfleet.internal` → connect over WireGuard → TLS validates the
 `db.myfleet.internal` SAN (Subject Alternative Name — the x509 field listing the
-name(s) a certificate is valid for).
+names a certificate is valid for).
 
 A node's hostname defaults to the machine's own hostname at enrollment; change
 it later with `sudo gw rename-node <newname>` (then restart the daemon). Rename goes
-through the anchor, so it's uniqueness-checked and frees the old name — the keys and
+through the anchor, so it's uniqueness-checked and frees the old name. The keys and
 overlay address don't change. (Editing `hostname` in the config directly is not
 enough: the anchor wouldn't know, so always use `gw rename-node`.)
 
 > Names are sanitized to a DNS-safe form (`ops@node01` → `ops-node01`) and must
 > be **unique**. For a self-chosen name, uniqueness is checked at enrollment: a
-> `join` whose (sanitized) name is already taken is refused — but the token isn't
-> burned, so the joiner is told how many attempts remain and can retry with a
+> `join` whose (sanitized) name is already taken is refused. However, the token isn't
+> immediately burned, so the joiner is told how many attempts remain and can retry with a
 > different `--hostname` (a few tries per window). For a **anchor-pinned** name
 > (`gw invite --hostname`), uniqueness is checked at *invite* instead, so a
 > pinned name is guaranteed free before the token goes out and can't collide at
@@ -884,7 +817,7 @@ enough: the anchor wouldn't know, so always use `gw rename-node`.)
 ## TLS certificates for services
 
 The same CA that gates the mesh also issues ordinary **x509 TLS certificates**,
-so a service on a node (Postgres, an internal API, …) gets a cert that every
+so a service on a node (Postgres, an internal API, etc) gets a cert that every
 peer validates against one trust root — no second PKI (public-key
 infrastructure). These are real x509 certs with SANs, distinct from the mesh
 credential, but signed by the same Ed25519 CA key.
@@ -894,7 +827,7 @@ traffic between nodes, so TLS here is **not** about adding encryption — that p
 would be redundant. Its value is at the layers WireGuard doesn't cover:
 
 - **Service identity by name.** WireGuard authenticates the *node* you reached,
-  not that you reached the *right* node for a name — the `db.myfleet.internal`→address
+  not that you reached the *right* node. The `db.myfleet.internal`→address
   mapping lives outside its crypto. A cert with `SAN=db.myfleet.internal`, validated by
   the client, is what proves "this endpoint is authorized for that name."
 - **Process/tenant identity.** The mesh interface is host-global, so any
@@ -909,7 +842,7 @@ cert only for opportunistic encryption (no SAN check) *is* just redundant with
 WireGuard.
 
 A node may request certs only if its credential carries the **`tls`**
-capability. It's granted by the anchor, and **ships on by default** (`[anchor]
+capability. It's granted by the anchor, and **is on by default** (`[anchor]
 default_caps = ["tls"]`), so a plain `gw invite` already yields a cert-capable
 node — no extra flag:
 
