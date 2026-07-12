@@ -32,11 +32,12 @@ def test_grant_table_derives_topology(gw_image, gw_network):
                              hostname="api1", roles="api")
         cids.append(api1["cid"])
 
-        # ---- no policy → flat mesh: everyone reaches everyone ----
+        # ---- open policy (* -> * : *) → flat mesh: everyone reaches everyone.
+        # make_anchor applies the open baseline (a fresh anchor is default-CLOSED). ----
         assert wait_for_ping(web1["cid"], api1["overlay"], timeout=40), \
-            "flat mesh: web1 should reach api1 with no policy applied"
+            "flat mesh: web1 should reach api1 under the open policy"
         assert wait_for_ping(web1["cid"], web2["overlay"], timeout=40), \
-            "flat mesh: web1 should reach web2 with no policy applied"
+            "flat mesh: web1 should reach web2 under the open policy"
 
         # ---- apply web -> api : the table now derives the topology ----
         podman("exec", anchor["cid"], "sh", "-c",
@@ -70,6 +71,37 @@ def test_grant_table_derives_topology(gw_image, gw_network):
         podman("exec", anchor["cid"], "gw", "policy", "apply", "-y")
         assert wait_for_ping(web1["cid"], web2["overlay"], timeout=90), \
             "widening the policy must restore web1↔web2"
+    finally:
+        for cid in cids:
+            podman("rm", "-f", cid, check=False)
+
+
+def test_fresh_anchor_ships_default_closed_star(gw_image, gw_network):
+    """A fresh anchor ships DEFAULT-CLOSED: the shipped grant is
+    `admin -> anchor,node : tcp/22`, so the anchor (role:admin) reaches nodes but
+    two ordinary nodes CANNOT reach each other — the secure star. No open policy
+    applied (open_policy=False)."""
+    cids = []
+    try:
+        anchor = make_anchor(gw_image, gw_network, hostname="staranchor",
+                             open_policy=False)
+        cids.append(anchor["cid"])
+        n1 = bring_up_node(gw_image, gw_network, anchor, hostname="star1")
+        cids.append(n1["cid"])
+        n2 = bring_up_node(gw_image, gw_network, anchor, hostname="star2")
+        cids.append(n2["cid"])
+
+        # anchor reaches every node (role:* peering + hardwired icmp/control)
+        assert wait_for_ping(anchor["cid"], n1["overlay"], timeout=40), \
+            "default-closed: the anchor must still reach every node"
+        assert wait_for_ping(anchor["cid"], n2["overlay"], timeout=40), \
+            "default-closed: the anchor must still reach every node"
+
+        # ...but the two ordinary nodes have no grant connecting them → no tunnel.
+        for _ in range(3):
+            assert not ping_once(n1["cid"], n2["overlay"], timeout=2), \
+                "default-closed star: node<->node must NOT be reachable"
+            time.sleep(2)
     finally:
         for cid in cids:
             podman("rm", "-f", cid, check=False)
