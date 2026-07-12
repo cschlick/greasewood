@@ -3858,6 +3858,10 @@ def main(argv=None) -> int:
     sp.add_argument("--snapshot", action="store_true",
                     help="print a single static view and exit (no root needed) — "
                          "for piping/logging. Auto-used when there's no terminal.")
+    sp.add_argument("--json", action="store_true",
+                    help="emit one-shot machine-readable JSON (stable versioned "
+                         "schema) instead of the text view — for monitors/jq. "
+                         "Add live WireGuard stats by running as root.")
     sp.add_argument("--by-role", dest="by_role", action="store_true",
                     help="group into one table per role (a node appears under "
                          "each of its roles; the anchor appears under all) with "
