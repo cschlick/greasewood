@@ -518,11 +518,15 @@ provide new nodes with a "menu" of available roles. This is helpful for auto-pro
 where multiple roles can join with a single standing token. 
 
 ```bash
-# On the anchor — the invite decides the node's roles:
-TOKEN=$(sudo gw invite --roles web)          # a token for a role:web node
-# On the new node — join takes no role flags; it gets what the token granted:
+# Fixed role — the invite decides; join takes what the token granted:
+TOKEN=$(sudo gw invite --roles web)          # this token → a role:web node
 sudo gw join "$TOKEN" --hostname web1
-# Change later without re-joining (effective at the node's next renewal):
+
+# ...or a MENU — one standing token, and the joiner picks a role from it:
+MENU=$(sudo gw invite --self-roles web,worker,db)
+sudo gw join "$MENU" --roles worker --hostname worker1   # anchor signs iff 'worker' is on the menu
+
+# Change roles later without re-joining (effective at the node's next renewal):
 sudo gw set-roles web1 web,worker
 ```
 
