@@ -370,35 +370,22 @@ template when it's the last mesh) providing a from-scratch reset in one command.
 
 ### Root vs. sudo
 
-`gw` needs root (it manages WireGuard interfaces), and the systemd service always
-runs as root, so config and data paths (`/etc/greasewood_<name>.toml`,
-`/var/lib/greasewood_<name>`) are read identically however you invoke it — nothing gets
-corrupted either way. Two behaviors *do* differ, so pick one style and stick with
-it:
+`gw` needs root (it manages WireGuard), and the service runs as root, so paths
+resolve the same either way. Two things to know:
 
-- **State ownership.** Everything under the data dir is **root-owned, always** —
-  greasewood never chowns state to the invoking user. (It used to hand the data
-  dir to the `sudo` user; that put the **CA key on a login account**, which
-  could then mint mesh credentials — the daemon now warns at startup if it finds
-  that legacy state, and the fix is `chown root:root` on the flagged keys.)
-  Read-only commands don't need ownership: the data dir is `0755` and the public
-  files (`id_pub.hex`, `directory.json`, `*.pub`) are world-readable, so
-  `gw watch --snapshot` works for **any** user; each secret is its own `0600` root-owned
-  file. Every command that needs root **says so up front** — a clean
-  `'gw <cmd>' needs root (<why>). Try: sudo gw <cmd>` — instead of failing
-  partway on whichever file access breaks first. Root-needing commands: the
-  data-plane set (`run`, `join`, `create`, `invite`, `purge`, `renew`,
-  `rename`, `anchor-promote`, `anchor-restore`) and the anchor
-  registry/key set (`revoke`, `set-caps`, `set-roles`, `renew-all`,
-  `cert-request`, `anchor-backup`).
-- **Environment variables.** `sudo` strips the environment by default. This only
-  matters if you protect the CA key with `ca_key_passphrase_env`: a var exported
-  in your shell won't reach `sudo gw` (you'd get "environment variable is
-  empty"). Use `sudo -E` for one-off commands, and for the **service** set it in
-  the unit's `Environment=` / `EnvironmentFile=`, never a login shell.
+- **State is always root-owned** — greasewood never chowns it to the `sudo` user
+  (that would put the **CA key on a login account**). Legacy state gets a startup
+  warning; fix with `chown root:root`. Read-only commands need no root: the data
+  dir is `0755` and public files (`id_pub.hex`, `directory.json`, `*.pub`) are
+  world-readable — so `gw watch --snapshot` works for anyone — while secrets stay
+  `0600` root. Commands that need root **say so up front** (`… needs root (<why>);
+  try: sudo gw <cmd>`).
+- **`sudo` strips the environment** — only matters if you set
+  `ca_key_passphrase_env`: use `sudo -E`, or the unit's `Environment=` /
+  `EnvironmentFile=` for the service.
 
-(Keep config paths absolute — a `~` in `data_dir`/`ca_key_file` expands to the
-*running* user's home, which differs under sudo.)
+Keep `data_dir` / `ca_key_file` absolute — a `~` expands to the *running* user's
+home, which differs under sudo.
 
 ## Provisioning many nodes
 
