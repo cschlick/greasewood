@@ -917,6 +917,23 @@ def _memberships(etc: "Path" = Path("/etc")) -> "list[tuple[str, Path]]":
     return sorted(out)
 
 
+def _anchor_membership(etc: "Path" = Path("/etc")) -> "tuple[str, Path] | None":
+    """The (key, config_path) of a role=anchor membership on this host, or None.
+
+    `gw join` refuses on an anchor host: the enrollment door is a shared singleton
+    (one gw-door interface, one door subnet, one policy-routing table), so the
+    anchor's permanent door isolation would blackhole any join this host attempts
+    — it hangs at 'connecting to enroll daemon'. Better to refuse loudly up front."""
+    from .config import load_config
+    for key, p in _memberships(etc):
+        try:
+            if getattr(load_config(p), "role", "node") == "anchor":
+                return key, p
+        except Exception:
+            continue
+    return None
+
+
 def _membership_for_ca(ca_pub_hex: str, etc: "Path" = Path("/etc")) -> "str | None":
     """The membership key already trusting this CA, or None. This is how a
     token is routed: its CA pub identifies WHICH mesh it belongs to, so a token
@@ -1424,6 +1441,23 @@ def cmd_join(args) -> int:
     except ValueError as e:
         sys.exit(f"invalid token: {e}")
     ca_pub_hex = ca_pub_bytes.hex()
+
+    # Refuse on an anchor host BEFORE touching the door: the door plane (gw-door,
+    # subnet fd8d:e5c1:db1a:d::/64, table 51820) is a shared singleton, so the
+    # anchor's door isolation blackholes this join — it would hang forever at
+    # 'connecting to enroll daemon' with no hint why. Fail loudly with the reason.
+    anchored = _anchor_membership()
+    if anchored:
+        from .door import DOOR_TABLE, GUEST_DOOR_IP
+        akey, apath = anchored
+        sys.exit(
+            f"this host is the anchor for mesh '{akey}' ({apath}). A host can't be "
+            f"an anchor AND join another mesh — the enrollment door (gw-door, table "
+            f"{DOOR_TABLE}) is a shared singleton, so the anchor's door isolation "
+            f"would blackhole this join (it hangs at 'connecting to enroll daemon'). "
+            f"Join from a non-anchor host. To override for a one-off: "
+            f"`sudo ip -6 rule del from {GUEST_DOOR_IP} lookup {DOOR_TABLE}`, run the "
+            f"join, then `sudo systemctl restart greasewood@{akey}` to restore it.")
 
     # Roles the joiner self-selects (menu invite). Validate against the token's
     # menu client-side for a friendly early error — the anchor re-checks and is
