@@ -261,6 +261,7 @@ class GrantPolicy:
             log.warning("rejected synced policy: %s", e)
             return False
         with self._lock:
+            prev = self._table.seq if self._table is not None else None
             if self._table is not None and table.seq <= self._table.seq:
                 return False
             self._table = table
@@ -272,6 +273,11 @@ class GrantPolicy:
                 log.warning("could not persist policy cache: %s", e)
         log.info("policy v%d adopted (%d grants) — topology follows on this "
                  "reconcile cycle", table.seq, len(table.grants))
+        # Durable domain-event: the policy VERSION changed (the cause; the
+        # topology event on the next reconcile is the effect).
+        from . import audit
+        audit.event("policy", prev=(prev if prev is not None else "none"),
+                    seq=table.seq, grants=len(table.grants))
         return True
 
 

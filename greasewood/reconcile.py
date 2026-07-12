@@ -309,6 +309,14 @@ def reconcile_once(
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", wg_pub[-8:], e)
 
+    # A MEMBERSHIP change this cycle → one durable domain-event line summarizing
+    # the transition (the per-peer +/-peer commands above carry the detail). Only
+    # emitted when the peer set actually changed — a re-verify (~peer: endpoint/
+    # keepalive) is not a membership event, so steady state stays silent.
+    if to_install or to_remove:
+        audit.event("topology", added=len(to_install), removed=len(to_remove),
+                    peers=len(desired_pubs))
+
     # The overlay addrs we currently have a LIVE link to (recent handshake). This
     # is what a node publishes as its `reachable` set so the fleet can see which
     # edges are up — an unreachable segment-mate (firewalled) shows as a missing
