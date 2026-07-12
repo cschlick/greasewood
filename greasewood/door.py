@@ -176,6 +176,20 @@ def encode_token(
     host_bytes = anchor_host.encode()
     domain_bytes = (mesh_domain or "").encode()
     menu_bytes = ",".join(self_roles).encode()
+    # Each of these three fields is length-prefixed by ONE byte, so 255 is the
+    # hard cap. Reject an over-long field with a clear, field-named error instead
+    # of the cryptic `bytes([256])` ValueError from the payload assembly below.
+    for _label, _b in (("endpoint/host", host_bytes),
+                       ("mesh domain", domain_bytes),
+                       ("role menu (--self-roles)", menu_bytes)):
+        if len(_b) > 255:
+            raise ValueError(
+                f"{_label} is {len(_b)} bytes; the token encodes it with a "
+                f"one-byte length, so the limit is 255. "
+                + ("Trim the menu — the comma-joined role names (plus commas) "
+                   "must total ≤ 255 bytes (~25–40 roles)."
+                   if _label.startswith("role menu")
+                   else "Shorten it."))
     payload = (
         anchor_door_pub_bytes + ca_pub_bytes
         + struct.pack(">H", door_port)

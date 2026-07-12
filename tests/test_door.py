@@ -221,3 +221,39 @@ def test_node_door_log_reports_configured_port(monkeypatch, caplog):
                                       "203.0.113.9", door_port=51999)
     assert any(":51999" in r.getMessage() for r in caplog.records)
     assert not any(":51901" in r.getMessage() for r in caplog.records)
+
+
+# --- one-byte length caps on token fields (host / domain / role menu) ---
+
+def test_encode_token_rejects_overlong_role_menu():
+    import pytest
+    from greasewood import door
+    big = [f"role{i:03d}" for i in range(40)]        # 40 * ~7B + commas > 255
+    assert len(",".join(big).encode()) > 255
+    with pytest.raises(ValueError, match="role menu.*255"):
+        door.encode_token(b"\x01" * 32, b"\x02" * 32, "fd::1", b"\x03" * 32,
+                          mesh_domain="pm.internal", self_roles=big)
+
+
+def test_encode_token_accepts_a_menu_at_the_limit():
+    from greasewood import door
+    # a comma-joined menu of exactly 255 bytes must still encode + round-trip
+    roles, size = [], 0
+    while size <= 255:
+        roles.append("r" * 4)
+        size = len(",".join(roles).encode())
+    roles.pop()                                       # back under 255
+    assert 240 < len(",".join(roles).encode()) <= 255
+    tok = door.encode_token(b"\x01" * 32, b"\x02" * 32, "fd::1", b"\x03" * 32,
+                            mesh_domain="pm.internal", self_roles=roles)
+    assert door.decode_token(tok).self_roles == roles
+
+
+def test_encode_token_rejects_overlong_host_and_domain():
+    import pytest
+    from greasewood import door
+    with pytest.raises(ValueError, match="endpoint/host.*255"):
+        door.encode_token(b"\x01" * 32, b"\x02" * 32, "h" * 256, b"\x03" * 32)
+    with pytest.raises(ValueError, match="mesh domain.*255"):
+        door.encode_token(b"\x01" * 32, b"\x02" * 32, "fd::1", b"\x03" * 32,
+                          mesh_domain="d" * 256)
