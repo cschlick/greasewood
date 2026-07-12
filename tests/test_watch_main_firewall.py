@@ -95,3 +95,48 @@ def test_verdict_is_line0_so_collapse_keeps_it_visible(monkeypatch):
     # `f`-collapse keeps only line 0, so the loud BLOCKED verdict must be it.
     _nft_present(monkeypatch, _rs(_DROP_INPUT))   # nothing accepted at all
     assert status._main_firewall_lines(_cfg("node"))[0].startswith("main firewall : ⚠")
+
+
+def test_greasewoods_own_table_excluded_from_host_rules(monkeypatch):
+    """Regression: the host-firewall view must NOT echo greasewood's OWN table.
+    Its gw-pm/gw-door/51902 rules match the 'gw-' grep and were masquerading as
+    rules the operator wrote (the operator only put the two `filter` rules)."""
+    raw = (
+        'table inet filter {\n'
+        '\tchain input {\n'
+        '\t\ttype filter hook input priority filter; policy drop;\n'
+        '\t\tudp dport { 51900, 51901 } accept\n'
+        '\t\tiifname "gw-*" accept\n'
+        '\t}\n'
+        '}\n'
+        'table inet greasewood_pm {\n'
+        '\tchain meshfilter {\n'
+        '\t\tiifname "gw-pm" tcp dport 51902 accept\n'
+        '\t\tiifname "gw-door" tcp dport 51903 accept\n'
+        '\t\tiifname "gw-pm" drop\n'
+        '\t}\n'
+        '}'
+    )
+    _nft_present(monkeypatch, _rs(_DROP_INPUT, _accept("udp", 51900),
+                                  _accept("udp", 51901), _admit_iface()), raw=raw)
+    lines = status._main_firewall_lines(_cfg("anchor"))
+    body = [l.strip() for l in lines]
+    # the operator's two rules ARE shown
+    assert "udp dport { 51900, 51901 } accept" in body
+    assert 'iifname "gw-*" accept' in body
+    # greasewood's OWN table rules are NOT shown as host-firewall rules
+    assert not any("51902" in l for l in body)
+    assert not any("gw-door" in l for l in body)
+    assert not any('iifname "gw-pm"' in l for l in body)
+    # and the copy-paste command reproduces the exclusion
+    assert any("sed '/^table inet greasewood_pm /,/^}/d'" in l for l in lines)
+
+
+def test_strip_gw_table_leaves_other_tables_intact():
+    lines = ('table inet filter {\n\tchain input {\n\t\taccept\n\t}\n}\n'
+             'table inet greasewood_pm {\n\tset s {\n\t\telements = { a }\n\t}\n'
+             '\tchain meshfilter {\n\t\tdrop\n\t}\n}\n'
+             'table inet nat {\n\tchain out {\n\t\taccept\n\t}\n}').splitlines()
+    out = "\n".join(status._strip_gw_table(lines, "greasewood_pm"))
+    assert "greasewood_pm" not in out and "meshfilter" not in out
+    assert "table inet filter" in out and "table inet nat" in out   # neighbours kept
