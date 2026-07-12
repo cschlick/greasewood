@@ -130,3 +130,47 @@ def test_peer_expected_tracks_policy(tmp_path):
     assert doc["policy"] == {"seq": 2, "grants": 1}
     assert by["api1"]["peer_expected"] is True          # web -> api
     assert by["old1"]["peer_expected"] is False         # web -> web not granted
+
+
+def test_static_roster_is_rendered_from_the_snapshot(tmp_path, monkeypatch):
+    """The dogfood: `gw watch --snapshot` (text) renders its roster from the SAME
+    _watch_snapshot_dict that `--json` emits — so a per-node column can't exist
+    that the JSON contract doesn't carry. Spy that the builder is on the path."""
+    import io, contextlib, types
+    cfg = _setup(tmp_path)
+    calls = []
+    orig = status._watch_snapshot_dict
+    monkeypatch.setattr(status, "_watch_snapshot_dict",
+                        lambda *a, **k: (calls.append(1), orig(*a, **k))[1])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = status.cmd_watch(types.SimpleNamespace(
+            config=str(cfg.dir_cache_path.parent / "gw.toml")))
+    out = buf.getvalue()
+    assert rc == 0
+    assert calls, "static roster must be built from _watch_snapshot_dict (the --json model)"
+    assert "web1" in out and "api1" in out          # the model's nodes reached the text view
+
+
+def test_text_peer_column_tracks_json_peer_expected(tmp_path):
+    """Couple the two views on real data: under a web->api policy, the JSON marks
+    api1 peer_expected=True and old1 (web) False from this web node — and the text
+    roster's peer? column shows 'yes' / 'no' to match."""
+    import io, contextlib, types, json as _json
+    from greasewood import policy as polmod
+    from greasewood.wire import GrantTable
+    cfg = _setup(tmp_path)
+    (cfg.data_dir / polmod.POLICY_BASENAME).write_text(_json.dumps(GrantTable(
+        seq=2, grants=[{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]).to_dict()))
+
+    by = {n["hostname"]: n for n in _run_json(cfg)["nodes"]}
+    assert by["api1"]["peer_expected"] is True and by["old1"]["peer_expected"] is False
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        status.cmd_watch(types.SimpleNamespace(
+            config=str(cfg.dir_cache_path.parent / "gw.toml"), all=True))
+    rows = {ln.split(".")[0]: ln for ln in buf.getvalue().splitlines()
+            if ln.startswith(("api1.", "old1."))}
+    assert rows["api1"].rstrip().endswith("yes")     # peer? column ← peer_expected True
+    assert rows["old1"].rstrip().endswith("no")      # peer? column ← peer_expected False
