@@ -15,6 +15,12 @@ it: instead of `wg set gw-mesh peer qa7IAQ… allowed-ips fd8d::a1/128 …`, you
 
 So you can read the mesh's whole history as prose: what happened, when, why, and
 whether it worked.
+
+The trail also carries domain-EVENT lines (`event=topology …`, `event=policy …`)
+— mesh state TRANSITIONS, not kernel commands. Those render as standalone ◆
+markers interleaved by time, so the story reads as headline-then-detail: a
+policy adoption or a topology settle (◆), with the +peer/-peer commands that
+realize it (●) grouped around it.
 """
 from __future__ import annotations
 
@@ -35,6 +41,19 @@ class Entry:
         self.ctx, self.argv, self.stderr, self.failed = ctx, argv, stderr, failed
 
 
+class EventEntry:
+    """A domain-EVENT line (`event=topology …` / `event=policy …`) — a mesh
+    state transition, not a kernel command. Carries the same neutral attributes
+    the command filters/renderers read (ts, ctx, argv, failed, t_ms) so it flows
+    through the pipeline harmlessly, plus its own kind + parsed fields."""
+    __slots__ = ("ts", "kind", "fields", "ctx", "argv", "stderr", "failed", "t_ms")
+
+    def __init__(self, ts, kind, fields):
+        self.ts, self.kind, self.fields = ts, kind, fields
+        self.ctx, self.argv, self.stderr = "", [], ""
+        self.failed, self.t_ms = False, 0
+
+
 def _field(line: str, key: str) -> "str | None":
     m = re.search(_FIELD.format(k=re.escape(key)), line)
     if not m:
@@ -46,12 +65,31 @@ def _field(line: str, key: str) -> "str | None":
     return v
 
 
-def parse_line(line: str) -> "Entry | None":
-    """Parse one audit line into an Entry, or None if it isn't a command line."""
-    # One test suffices: every command line carries argv="..."; anything
-    # without it (banners, tracebacks, other loggers) isn't a command line.
+def _all_fields(line: str) -> dict:
+    """Every logfmt `key=value` pair on a line, values unescaped. Used to parse
+    a domain-event line's fields generically (event=<kind> plus its k=v's)."""
+    out = {}
+    for m in re.finditer(r'(?:^|\s)(\w+)=("(?:[^"\\]|\\.)*"|\S+)', line):
+        k, v = m.group(1), m.group(2)
+        if v.startswith('"'):
+            v = re.sub(r"\\(.)", r"\1", v[1:-1])
+        out[k] = v
+    return out
+
+
+def parse_line(line: str) -> "Entry | EventEntry | None":
+    """Parse one audit line into an Entry (command), an EventEntry (domain event),
+    or None if it's neither. A line with `argv=` is always a command; only an
+    argv-less line is considered for `event=` — so a command can never be
+    mistaken for an event."""
     argv_s = _field(line, "argv")
     if argv_s is None:
+        kind = _field(line, "event")
+        if kind is not None:
+            f = _all_fields(line)
+            f.pop("event", None)
+            f.pop("ts", None)
+            return EventEntry(_field(line, "ts") or "", kind, f)
         return None
     ts = _field(line, "ts") or ""
     try:
@@ -195,6 +233,45 @@ def describe_operation(ctx: str) -> "str | None":
     return ctx
 
 
+def describe_event(ev: "EventEntry") -> str:
+    """One sentence about a mesh state TRANSITION, from an event line's fields."""
+    f = ev.fields
+
+    def _n(key, default=0):
+        try:
+            return int(f.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    if ev.kind == "topology":
+        added, removed, peers = _n("added"), _n("removed"), f.get("peers", "?")
+        parts = []
+        if added:
+            parts.append(f"{added} peer{'' if added == 1 else 's'} added")
+        if removed:
+            parts.append(f"{removed} removed")
+        delta = ", ".join(parts) or "no net change"
+        return (f"Topology settled — {delta} "
+                f"({peers} peer{'' if peers == '1' else 's'} now up).")
+    if ev.kind == "policy":
+        prev, seq, grants = f.get("prev", "?"), f.get("seq", "?"), f.get("grants", "?")
+        frm = "the first policy" if prev == "none" else f"v{prev}"
+        return (f"Policy adopted — {frm} → v{seq} "
+                f"({grants} grant{'' if grants == '1' else 's'}); the new topology "
+                f"follows on the next reconcile.")
+    kv = " ".join(f"{k}={v}" for k, v in f.items())
+    return f"{ev.kind} event — {kv}".rstrip(" —")
+
+
+def searchable(e) -> str:
+    """The text `gw narrate --grep` matches an entry against — the command's
+    ctx/argv/translation, or an event's kind/fields/translation."""
+    if isinstance(e, EventEntry):
+        return f"{e.kind} {' '.join(f'{k}={v}' for k, v in e.fields.items())} " \
+               f"{describe_event(e)}".lower()
+    return f"{e.ctx} {' '.join(e.argv)} {describe(e.argv)}".lower()
+
+
 # ── rendering ────────────────────────────────────────────────────────────────
 
 class _C:
@@ -204,6 +281,7 @@ class _C:
         self.g = "\033[32m" if on else ""
         self.r = "\033[31m" if on else ""
         self.d = "\033[2m" if on else ""
+        self.cy = "\033[36m" if on else ""
         self.x = "\033[0m" if on else ""
 
 
@@ -235,9 +313,17 @@ def _hang(text: str, first_prefix: str, prefix_len: int, width: int) -> list:
 
 
 def _group(entries):
-    """Yield operations: maximal runs of consecutive entries sharing a context."""
+    """Yield operations: maximal runs of consecutive commands sharing a context.
+    A domain EVENT is never grouped — it's yielded as its own singleton so it
+    renders as a standalone transition marker in the timeline."""
     cur = []
     for e in entries:
+        if isinstance(e, EventEntry):
+            if cur:
+                yield cur
+                cur = []
+            yield [e]
+            continue
         if cur and e.ctx == cur[-1].ctx:
             cur.append(e)
         else:
@@ -270,6 +356,18 @@ def narrate(entries, *, color=False, raw=False, width=88):
     c = _C(color)
     for op in _group(entries):
         first = op[0]
+
+        # A domain EVENT: a standalone transition marker (◆), no sub-commands.
+        # It reads as the "so-what" headline; the +peer/-peer commands that
+        # realize it sit in their own operation blocks around it.
+        if isinstance(first, EventEntry):
+            tsx = _fmt_ts(first.ts)
+            plen = 2 + len(tsx) + 2
+            prefix = f"{c.cy}◆{c.x} {c.b}{tsx}{c.x}  "
+            yield from _hang(describe_event(first), prefix, plen, width)
+            yield ""
+            continue
+
         intro = describe_operation(first.ctx) or "greasewood ran data-plane commands."
         total = sum(e.t_ms for e in op)
         tsx = _fmt_ts(first.ts)
@@ -315,10 +413,12 @@ def narrate(entries, *, color=False, raw=False, width=88):
 def summarize(entries) -> str:
     """A one-block tally — counted by operation (a run of commands), not by raw
     command, so 'peers added' means peers, not the two commands each add takes."""
+    cmds = [e for e in entries if not isinstance(e, EventEntry)]
+    events = [e for e in entries if isinstance(e, EventEntry)]
     kinds = {"added": 0, "removed": 0, "repaired": 0, "enrolled": 0}
-    failures = sum(1 for e in entries if e.failed)
+    failures = sum(1 for e in cmds if e.failed)
     peers = set()
-    for op in _group(entries):
+    for op in _group(cmds):
         h = op[0].ctx
         if h.startswith("reconcile: +peer"):
             kinds["added"] += 1
@@ -335,7 +435,13 @@ def summarize(entries) -> str:
     stamped = [e.ts for e in entries if e.ts]
     if stamped:
         span = f" from {_fmt_ts(stamped[0])} to {_fmt_ts(stamped[-1])}"
-    return (f"{len(entries)} data-plane commands{span}: "
-            f"{kinds['added']} peer(s) added, {kinds['removed']} removed, "
-            f"{kinds['repaired']} repaired, {kinds['enrolled']} enrolled, "
-            f"{failures} command(s) failed. {len(peers)} distinct peer(s) touched.")
+    out = (f"{len(cmds)} data-plane commands{span}: "
+           f"{kinds['added']} peer(s) added, {kinds['removed']} removed, "
+           f"{kinds['repaired']} repaired, {kinds['enrolled']} enrolled, "
+           f"{failures} command(s) failed. {len(peers)} distinct peer(s) touched.")
+    if events:
+        pol = sum(1 for e in events if e.kind == "policy")
+        topo = sum(1 for e in events if e.kind == "topology")
+        out += (f" Events: {pol} policy change(s), "
+                f"{topo} topology transition(s).")
+    return out

@@ -2857,9 +2857,7 @@ def cmd_narrate(args) -> int:
         entries = [e for e in entries if args.peer.lower() in e.ctx.lower()]
     if getattr(args, "grep", None):
         g = args.grep.lower()
-        entries = [e for e in entries
-                   if g in e.ctx.lower() or g in " ".join(e.argv).lower()
-                   or g in N.describe(e.argv).lower()]
+        entries = [e for e in entries if g in N.searchable(e)]
 
     if not entries:
         print("no matching data-plane commands.")
