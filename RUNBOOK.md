@@ -170,6 +170,41 @@ remove it), or for immediate cleanup `sudo gw revoke <hostname>` (which also
 releases the hostname). On the node itself, `sudo gw purge` tears down its local
 config, data dir, interface, and service.
 
+## SOP: open access through the grant table (SSH, or any service)
+
+A fresh anchor ships **default-closed**: `<data_dir>/grants.toml` holds one
+grant, `admin -> anchor,node : tcp/22`, so the anchor (it holds `role:admin`)
+can SSH every node, but **nodes cannot reach each other**. Everything else is
+opened by editing that file and running `sudo gw policy apply` (it previews the
+tunnel/grant delta and asks to confirm before signing).
+
+**Give an operator workstation SSH to the whole fleet** — tag it `role:admin`;
+the shipped grant then covers it (no policy edit needed):
+
+```bash
+# on the anchor: mint an invite that lands the box in role:admin
+sudo gw invite --roles admin
+# ...or promote an already-enrolled node (effective at its next renewal; --now to expedite)
+sudo gw set-roles laptop admin --now
+```
+
+`admin` opens SSH *over the overlay only* — every grant rule is scoped to the
+mesh interface, so your underlay firewall never sees it (the whole point of the
+SSH-on-overlay / WG-only-on-underlay posture).
+
+**Open a real service** (e.g. web + worker nodes reach an api node on 8000) —
+add a grant and apply:
+
+```bash
+sudo $EDITOR "$(ls -d /var/lib/greasewood_*)"/grants.toml   # add [[grant]] from=["web"] to=["api"] ports=["tcp/8000"]
+sudo gw policy apply                                        # preview → confirm → sign + publish
+```
+
+Reserved roles: `anchor` (single-member, the anchor itself) and `*` (reach-all)
+can't be assigned to a node — `gw invite/set-roles/set-caps` refuse them. Full
+reference and the other baselines (fully open, lateral SSH) live commented in
+`grants.toml.example`.
+
 ## SOP: lost door key (`door.key`)
 
 Outstanding join tokens embed the anchor's door public key, so they break if the key

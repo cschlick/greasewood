@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  greasewood grant table — the mesh's access policy (grants.toml)
 #
-#  `gw create` already drops a copy of the DEFAULT (the `* -> * : *` grant
-#  below) at <data_dir>/grants.toml on the anchor, and signs it into the
+#  `gw create` already drops a DEFAULT-CLOSED grants.toml at <data_dir>/grants.toml
+#  on the anchor (the admin-only-SSH grant below) and signs it into the
 #  distributed policy.json. This file is the fuller reference.
 #
 #  grants.toml is the SOURCE OF TRUTH, applied deliberately: edit it, then run
@@ -15,30 +15,58 @@
 #    · a tunnel exists between two nodes iff some grant connects their roles
 #      (either direction — tunnels are symmetric; direction matters to port
 #      filtering, enforced by default; set enforce_ports=false to opt out)
+#    · a node with no inbound grant is reachable by no one, yet is NOT isolated:
+#      it can still DIAL OUT wherever a `from <me> -> to <them>` grant allows
+#      (the reply rides the established tunnel)
 #    · deleting a grant tears its tunnels down on the next sync + reconcile
 #    · a deny rule is NOT expressible — omit the grant instead
-#    · hardwired beneath the table, never editable here: every node <-> anchor
-#      (the channel that carries this policy must not be prunable by it)
+#    · hardwired beneath the table, never editable here (policy must never sever
+#      the channel that distributes policy):
+#        every node <-> anchor  tcp/51902   the control plane (carries this file)
+#        the enrollment door     tcp/51903   join-time only
+#        established replies, ICMPv6
 #
-#  Roles are CA-signed caps, assigned at invite / set-roles / set-caps:
+#  Built-in roles (CA-signed caps, assigned at invite / set-roles / set-caps):
+#      node    every ordinary member (the default role for new nodes)
+#      anchor  the single anchor host — RESERVED, never assignable to a joiner
+#              (the anchor is its sole member); address it as `to = ["anchor"]`
+#      admin   terminal access: hold it to SSH every node. The anchor holds it
+#              by default; tag any box `role:admin` to add an operator.
+#              (`*`, reach-all, is likewise reserved to the anchor.)
 #      sudo gw invite --roles web            # → role:web (+ default caps)
 #      sudo gw set-roles db01 db             # → role:db
 #  Roles are the ONLY configured vocabulary. "Segments" are emergent: the
-#  unnamed connected structure this table produces (role:client and
-#  role:server nodes granted an interface share one; delete the grant and it
-#  dissolves). `gw watch --by-role` reports them; nothing configures them.
+#  unnamed connected structure this table produces. `gw watch --by-role` reports
+#  them; nothing configures them.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# THE DEFAULT — everything open. This is exactly how a mesh with no policy
-# behaves (a flat mesh); it's written out so you edit from a visible baseline.
-# Leaving it in keeps the mesh fully open no matter what else you add below.
+# THE DEFAULT — DEFAULT-CLOSED, a secure star: the anchor (role:admin) can SSH
+# every node, nodes reach only the anchor's control plane, and nodes cannot
+# reach EACH OTHER at all. Open real services by ADDING grants below.
 [[grant]]
-from  = ["*"]
-to    = ["*"]
-ports = ["*"]
+from  = ["admin"]
+to    = ["anchor", "node"]
+ports = ["tcp/22"]
 
-# ── To tighten, DELETE the wildcard grant above and use specific grants. ─────
-# A worked example (uncomment + adapt to your roles):
+# ── Other baselines — uncomment one to REPLACE the grant above. ──────────────
+#
+# ALLOW EVERYTHING (flat mesh — identical to running with no policy, written out):
+# [[grant]]
+# from  = ["*"]
+# to    = ["*"]
+# ports = ["*"]
+#
+# SSH BETWEEN ALL NODES (lateral SSH — any node may SSH any other; looser than
+# admin-only, it permits node-to-node movement):
+# [[grant]]
+# from  = ["node"]
+# to    = ["node", "anchor"]
+# ports = ["tcp/22"]
+#
+# ALLOW NOTHING is not a grant you write — it's the ABSENCE of grants: delete
+# every [[grant]] and nodes reach ONLY the anchor (the hardwired control plane).
+
+# ── Add service grants alongside the active one. A worked example: ───────────
 #
 # [[grant]]
 # from  = ["web", "worker"]

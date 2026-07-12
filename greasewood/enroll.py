@@ -119,7 +119,7 @@ class EnrollServer:
         self._max_attempts = max_attempts
         # Caps the anchor authorized for this window (from `gw invite`) — the
         # BASE grant. The joiner does NOT choose these — the window is authoritative.
-        self._caps = list(caps) if caps else ["role:mesh"]
+        self._caps = list(caps) if caps else ["role:node"]
         # The role MENU (from `gw invite --self-roles`): roles the joiner MAY
         # self-select from, added on top of the base. [] = classic invite where
         # any role in the request is ignored. The window is authoritative; the

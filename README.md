@@ -558,6 +558,23 @@ overlay address and loopback — *never* the underlay — so nothing it runs is
 reachable off-mesh regardless of firewall policy. The only thing that must face
 the underlay is WireGuard itself (UDP), which you open like for any VPN.
 
+greasewood uses **four ports**, one contiguous block — two pairs of *(WireGuard
+transport, TCP service)*, one pair for the mesh and one for the enrollment
+**door**:
+
+|         | UDP — WireGuard transport | TCP — service inside the tunnel |
+|---------|---------------------------|---------------------------------|
+| **mesh** | `51900` — overlay data plane | `51902` — control plane |
+| **door** | `51901` — ephemeral join tunnel | `51903` — enroll exchange |
+
+Within each pair, WireGuard (UDP) is the encrypted pipe and the TCP port is the
+service reachable *inside* it. The **door** is a whole second pair because a
+joining node has no credential yet, so it can't speak over the mesh (WireGuard
+cryptokey routing only accepts pinned keys); the door is a separate tunnel keyed
+by a **pre-shared key from the invite token**, letting a stranger-with-an-invite
+enroll without ever touching the trusted mesh interface. Only the two **UDP**
+ports ever face the underlay; both TCP services live inside their tunnels.
+
 `create` and `join` **check** the local nftables ruleset and
 loudly warn if a needed port looks blocked by a default-drop policy, printing the
 exact rule to add. That's all greasewood does. You apply the printed rules yourself (put them in your nftables
@@ -758,10 +775,27 @@ An **anchor** must be reachable (it serves the control plane), so
 
 ## Access control (roles & grants)
 
-By default the mesh is **flat**: every verified member tunnels with every
-other (implicitly `* -> * : *`). To control **who talks to whom, on what**,
-give nodes **roles** and write a **grant table** — the mesh then *derives its
-tunnel topology from the policy*.
+A fresh anchor ships **default-closed**: the grant table is a **secure star** —
+the anchor (which holds `role:admin`) can SSH every node, nodes reach only the
+anchor's control plane, and **nodes cannot reach each other at all**. You open
+what you need by adding grants. (Running with *no* policy file is still flat —
+`* -> * : *` — but `gw create` never leaves you there; it writes the closed
+baseline, with the flat and lateral-SSH alternatives spelled out commented.)
+
+To control **who talks to whom, on what**, give nodes **roles** and write a
+**grant table** — the mesh then *derives its tunnel topology from the policy*.
+Three roles are built in:
+
+| Role | Who holds it | Meaning |
+|------|--------------|---------|
+| `node` | every ordinary member (the default) | an ordinary fleet node |
+| `anchor` | the anchor, and **only** the anchor | single-member; reserved — never assignable to a joiner; addressable in grants as `to = ["anchor"]` |
+| `admin` | the anchor by default; tag any box | **terminal access** — SSH to every node. `role:*` (reach-all) is likewise reserved to the anchor. |
+
+Want an operator workstation that can SSH the fleet? Give it `role:admin` — the
+shipped grant `from admin -> to anchor,node : tcp/22` then opens its SSH over
+the overlay (and only the overlay; every grant rule is scoped to the mesh
+interface, so your underlay firewall never sees it).
 
 **Roles are CA-signed caps** (`role:<name>`), and crucially **the anchor
 assigns them — a node cannot choose its own** (no self-assertion):
@@ -776,7 +810,7 @@ sudo gw set-roles web1 web,worker
 ```
 
 **Defaults for new nodes** live in the anchor's config — `[anchor]
-default_roles` (ships `["mesh"]`) and `default_caps` (ships `["tls"]`). A
+default_roles` (ships `["node"]`) and `default_caps` (ships `["tls"]`). A
 plain `gw invite` uses them; the flags override per token; they're read fresh
 at each invite, so editing the config changes future enrollments with no
 restart.
@@ -810,7 +844,7 @@ gw policy show              # on any node: the active table (flags unapplied edi
 ```
 
 **grants.toml is the source of truth, applied deliberately.** `gw create`
-writes it (the explicit open default, `* -> * : *`) and signs it into the
+writes it (the default-closed baseline — `admin -> anchor,node : tcp/22`) and signs it into the
 distributed, CA-signed `policy.json` — the form nodes actually receive and
 trust (a node can't trust a plaintext file from another host). To change
 policy you edit grants.toml and run `gw policy apply`, which **previews the

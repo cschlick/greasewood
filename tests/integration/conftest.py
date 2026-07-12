@@ -110,6 +110,11 @@ def gw_anchor(gw_image, gw_network):
         assert wait_for_control_plane(cid, timeout=20), \
             "anchor daemon did not start — check /tmp/gw.log in the container"
 
+        # Every consumer of the shared anchor predates default-closed and assumes
+        # a flat mesh — restore that baseline once, here. (apply_open_policy is
+        # defined below; it's in module scope by the time this fixture runs.)
+        apply_open_policy(cid)
+
         yield {
             "cid": cid,
             "ipv6": ipv6,
@@ -135,10 +140,29 @@ def overlay_addr_from_id_pub(id_pub_hex: str,
     return str(ipaddress.IPv6Address(pfx + digest[:8]))
 
 
-def make_anchor(gw_image, gw_network, *, ttl="24h", hostname="anchor") -> dict:
+def apply_open_policy(cid: str) -> None:
+    """Overwrite the anchor's grants.toml with the flat `* -> * : *` and apply it.
+
+    A fresh anchor now ships DEFAULT-CLOSED (a secure star — only role:admin can
+    SSH nodes, nodes can't reach each other). Most integration tests predate that
+    and assume a flat mesh where every member reaches every other, so the anchor
+    factories apply the open policy at setup to restore that baseline in ONE
+    place. Tests that exercise the closed default pass open_policy=False."""
+    toml = '[[grant]]\nfrom = ["*"]\nto = ["*"]\nports = ["*"]\n'
+    podman("exec", cid, "sh", "-c",
+           f'cat > "$(ls -d /var/lib/greasewood_*)"/grants.toml <<\'EOF\'\n{toml}\nEOF')
+    pexec(cid, "gw", "policy", "apply", "-y")
+
+
+def make_anchor(gw_image, gw_network, *, ttl="24h", hostname="anchor",
+                open_policy=True) -> dict:
     """Spin up a DEDICATED anchor container (own CA) — for tests that must not
     pollute the shared session `gw_anchor` (revoke, short-TTL renewal, etc.) or that
-    need a second anchor. Same shape as the gw_anchor fixture. CALLER owns cleanup."""
+    need a second anchor. Same shape as the gw_anchor fixture. CALLER owns cleanup.
+
+    open_policy=True (default) applies the flat `* -> * : *` so connectivity tests
+    see the historical flat mesh; pass False to keep the shipped default-closed
+    star (see apply_open_policy)."""
     cid = podman(
         "run", "-d", "--privileged", "--network", gw_network,
         "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
@@ -153,6 +177,8 @@ def make_anchor(gw_image, gw_network, *, ttl="24h", hostname="anchor") -> dict:
     ca_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/ca.pub").stdout.strip()
     podman("exec", "-d", cid, "sh", "-c", "gw run >> /tmp/gw.log 2>&1")
     assert wait_for_control_plane(cid, timeout=20), "dedicated anchor daemon did not start"
+    if open_policy:
+        apply_open_policy(cid)
     return {"cid": cid, "ipv6": ipv6, "ca_pub": ca_pub,
             "overlay": overlay_addr_from_id_pub(id_pub)}
 

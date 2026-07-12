@@ -413,9 +413,9 @@ def _make_port_enforcer(cfg, args, grant_policy):
 
     Crucially this NEVER raises or exits on a missing/broken nftables — it
     degrades to None with a loud error. Exiting here would be a systemd restart
-    loop that never resolves (exactly the bug an nft-less host hit). The default
-    policy is fully open, so an unenforced node still peers normally; grants
-    still gate which tunnels exist, only per-port scopes drop to advisory."""
+    loop that never resolves (exactly the bug an nft-less host hit). An
+    unenforced node still peers per policy — grants gate which tunnels exist
+    regardless; only the per-port scopes within them drop to advisory."""
     if not (cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)):
         log.info("port enforcement OFF (enforce_ports=false): grants still "
                  "control which tunnels exist; port scopes are advisory")
@@ -434,7 +434,7 @@ def _make_port_enforcer(cfg, args, grant_policy):
                   getattr(args, "config", "the config"))
         return None
     log.info("port enforcement ON: greasewood's own nftables table on %s "
-             "(default policy is fully open until grants tighten it)",
+             "(realizing the grant table — default-closed on a fresh anchor)",
              cfg.wg_interface)
     return PortFilter(table_name(membership_key(cfg.mesh_domain)),
                       cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy)
@@ -466,9 +466,14 @@ def cmd_create(args) -> int:
     hostname = args.hostname or socket.gethostname().split(".")[0] or "anchor"
     listen_port = args.listen_port if args.listen_port is not None else _free_listen_port()
     control_port = args.control_port
-    # The anchor must reach every node (it serves the control plane + door), so
-    # it carries the reach-all wildcard role. Plus any ability caps (--caps).
-    caps = ["role:*"]
+    # The anchor's roles, each load-bearing:
+    #   role:*      reach-all — it peers with every node (serves control + door).
+    #   role:anchor the single-member name grants address it by (`to=["anchor"]`).
+    #   role:admin  terminal access — makes the default-closed policy's ssh grant
+    #               (`from admin -> to anchor,node : tcp/22`) open on every node
+    #               FROM the anchor, so admin-only SSH bootstraps out of the box.
+    # Plus any ability caps (--caps).
+    caps = ["role:*", "role:anchor", "role:admin"]
     if args.caps:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     ttl = _parse_duration(args.credential_ttl)
@@ -539,14 +544,16 @@ def cmd_create(args) -> int:
                 "door_port": args.door_port}))
     log.info("wrote config → %s", cfg_path)
 
-    # Drop the default grant table, explicit: `* -> * : *` (fully open — exactly
-    # the no-policy behavior, written out so the operator edits from a visible
-    # baseline). Idempotent: never clobber an existing grants.toml on re-create.
+    # Drop the default grant table: DEFAULT-CLOSED (a secure star — only
+    # role:admin, i.e. the anchor, can SSH nodes; nodes reach only the control
+    # plane). Alternatives ship commented in the file. Idempotent: never clobber
+    # an existing grants.toml on re-create.
     from .policy import GRANTS_BASENAME, DEFAULT_GRANTS_TOML, sign_default_policy
     grants_path = data_dir / GRANTS_BASENAME
     if not grants_path.exists():
         grants_path.write_text(DEFAULT_GRANTS_TOML)
-        log.info("wrote default grant table → %s (fully open)", grants_path)
+        log.info("wrote default grant table → %s (default-closed: admin-only SSH)",
+                 grants_path)
     # Sign it into policy.json v1 now, so the anchor has a real signed policy
     # sourced from grants.toml from birth — the daemon runs on grants.toml's
     # content, not an implicit default. The running daemon re-signs on edits.
@@ -608,6 +615,19 @@ def _extract_token(text: str) -> str:
     if s.startswith(TOKEN_PREFIX):
         return s
     sys.exit("no join token (gw1.…) found in input")
+
+
+def _reject_reserved_roles(names, where: str) -> None:
+    """Refuse any anchor-reserved role on an assignment path. Keeps 'anchor' a
+    single-member role (only the create-time anchor holds it) and '*' (reach-all)
+    unassignable to a joiner or node. `names` are bare role names (no role:)."""
+    from .policy import RESERVED_ROLES
+    bad = [r for r in names if r in RESERVED_ROLES]
+    if bad:
+        sys.exit(f"role(s) {', '.join(bad)} are reserved for the anchor and "
+                 f"cannot be assigned via {where}: 'anchor' is single-member "
+                 f"(the anchor is its sole member) and '*' is reach-all. Use a "
+                 f"concrete role (e.g. node, web, admin).")
 
 
 def cmd_invite(args) -> int:
@@ -728,12 +748,10 @@ def cmd_invite(args) -> int:
     # NEVER offer '*' (reach-all) as self-serve — that's the anchor's role.
     allowed_roles = ([r.strip() for r in args.self_roles.split(",") if r.strip()]
                      if getattr(args, "self_roles", None) else [])
-    if "*" in allowed_roles:
-        sys.exit("--self-roles must not include '*' (reach-all): never let a "
-                 "joiner self-assign the anchor's role. List concrete classes "
-                 "(e.g. --self-roles web,db,cache).")
+    _reject_reserved_roles(allowed_roles, "--self-roles")   # never self-serve *, anchor
     if args.roles is not None:
         roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+        _reject_reserved_roles(roles, "--roles")
     elif allowed_roles:
         roles = []                                 # menu invite → no default role
     else:
@@ -1749,10 +1767,15 @@ def cmd_set_caps(args) -> int:
     cfg, ca = _load_anchor_ca(args, "set-caps")
     id_pub, name = _resolve_node(ca, cfg, args.node)
     caps = [c.strip() for c in args.caps.split(",") if c.strip()]
+    # set-caps takes raw caps, so it's also a role-assignment path — reject the
+    # reserved role: tags here too (else `set-caps role:anchor` would bypass the
+    # single-member guard).
+    _reject_reserved_roles([c[len("role:"):] for c in caps if c.startswith("role:")],
+                           "set-caps")
     if not any(c.startswith("role:") for c in caps):
         log.warning("caps %s include no role: tag — once a grant table is "
                     "applied, %r will reach only the anchor (add e.g. "
-                    "role:mesh)", caps, name)
+                    "role:node)", caps, name)
     ca.set_caps(id_pub, caps)
     print(f"caps for {name} ({id_pub.hex()}) → {caps}")
     print(_NEXT_RENEWAL_NOTE)
@@ -1774,7 +1797,8 @@ def cmd_set_roles(args) -> int:
     _, current = ca.node_info(id_pub)
     # Replace only the role: tags; keep tls/hostname-pinned and anything else.
     kept = [c for c in current if not c.startswith("role:")]
-    names = [r.strip() for r in args.roles.split(",") if r.strip()] or ["mesh"]
+    names = [r.strip() for r in args.roles.split(",") if r.strip()] or ["node"]
+    _reject_reserved_roles(names, "set-roles")
     caps = kept + ["role:" + r for r in names]
     ca.set_caps(id_pub, caps)
     print(f"roles for {name} ({id_pub.hex()}) → {names}  (caps now {caps})")
@@ -2539,7 +2563,7 @@ def cmd_run(args) -> int:
     if not any(c.startswith("role:") for c in cfg.caps):
         log.warning("[node] caps = %s contains no role:<name> tag — once a "
                     "grant table is applied, this node will reach only the "
-                    "anchor (add e.g. role:mesh)", cfg.caps)
+                    "anchor (add e.g. role:node)", cfg.caps)
 
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     log.info("overlay addr: %s", keys.addr)

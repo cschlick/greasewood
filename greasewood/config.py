@@ -35,10 +35,11 @@ class Config:
     hosts_sync: bool
     mesh_domain: str
     # Enforce the grant table's port scopes with nftables (greasewood's own
-    # table, mesh interface only). ON by default; the default policy is fully
-    # open (* -> * : *), so a fresh mesh behaves like a flat mesh until you
-    # write grants. Set false ONLY on a host without usable nftables — the
-    # daemon otherwise refuses to start rather than run silently unenforced.
+    # table, mesh interface only). ON by default; the shipped default policy is
+    # closed (a secure star — only role:admin can SSH nodes), so enforcement
+    # realizes that from the first boot. Set false ONLY on a host without usable
+    # nftables — the daemon otherwise refuses to start rather than run silently
+    # unenforced.
     enforce_ports: bool
     # Re-detect this node's advertised underlay endpoint(s) periodically and
     # re-advertise when they change (e.g. an IPv6 prefix renumbering swaps the
@@ -181,9 +182,9 @@ door_window = "15m"
 # lower it for high-churn ephemeral instances left to expire.
 drop_grace = "7d"
 door_port = {anchor["door_port"]}
-# Defaults granted to new nodes at `gw invite` (when --segments/--caps are
+# Defaults granted to new nodes at `gw invite` (when --roles/--caps are
 # omitted). Edit anytime — the next invite reads them fresh, no restart.
-default_roles = ["mesh"]
+default_roles = ["node"]
 default_caps = ["tls"]
 """
     return text
@@ -212,10 +213,10 @@ def load_config(path: Path) -> Config:
         data_dir=data_dir,
         hostname=node["hostname"],
         role=node.get("role", "node"),
-        # role:mesh is the conventional default tag. With no policy applied
-        # every verified member peers regardless; once a grant table exists,
-        # grants reference roles like this one.
-        caps=node.get("caps", ["role:mesh"]),
+        # role:node is the conventional default tag for an ordinary member.
+        # With no policy applied every verified member peers regardless; once a
+        # grant table exists, grants reference roles like this one.
+        caps=node.get("caps", ["role:node"]),
         endpoints=node.get("endpoints", []),
         endpoint_auto=bool(node.get("endpoint_auto", True)),
 
@@ -243,7 +244,7 @@ def load_config(path: Path) -> Config:
         tls_cert_ttl=_duration(anchor, "tls_cert_ttl", "7d"),
         drop_grace=_duration(anchor, "drop_grace", "7d"),
         door_port=int(anchor.get("door_port", 51901)),
-        default_roles=list(anchor.get("default_roles", ["mesh"])),
+        default_roles=list(anchor.get("default_roles", ["node"])),
         default_caps=list(anchor.get("default_caps", ["tls"])),
     )
 

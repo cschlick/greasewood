@@ -3,10 +3,11 @@ greasewood.portfilter — per-port enforcement of the grant table (on by default
 
 Grants already enforce tunnel EXISTENCE (no grant → no WireGuard peer → nothing
 to filter). This adds the finer layer: within the tunnels that exist, allow only
-the ports the grants name. It is ON by default (the default policy is fully open,
-so a fresh mesh is flat until grants tighten it); `enforce_ports = false` opts a
-host out. It writes ONLY greasewood's own nftables table, scoped to the mesh
-interface — never the operator's rules, never a physical NIC.
+the ports the grants name. It is ON by default; a fresh anchor ships a
+default-CLOSED policy (a secure star — only role:admin can SSH nodes), and this
+layer realizes it. `enforce_ports = false` opts a host out. It writes ONLY
+greasewood's own nftables table, scoped to the mesh interface — never the
+operator's rules, never a physical NIC.
 
 Design (the model settled in the roles/grants discussion):
   - greasewood owns `table inet greasewood_<mesh>` (per-membership,
