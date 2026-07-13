@@ -68,7 +68,7 @@ def _setup_logging(verbose: bool) -> None:
 _SERVICE_UNIT = """\
 [Unit]
 Description=greasewood mesh daemon (%i)
-Documentation=https://gitlab.com/cschlick/greasewood
+Documentation=https://github.com/cschlick/greasewood
 After=network-online.target
 Wants=network-online.target
 # Only run once this membership is configured (create / join writes it).
