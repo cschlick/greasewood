@@ -52,6 +52,9 @@ def _attempt(monkeypatch, ca, joiner):
         ca=ca, directory=types.SimpleNamespace(get=lambda *a: None),
         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
     srv = EnrollServer(ctx, lambda: None)
+    from greasewood.wire import enroll_pop_body
+    id_sig = base64.b64encode(joiner.id_priv.sign(
+        enroll_pop_body(joiner.id_pub_bytes, joiner.wg_pub_bytes, "nats01"))).decode()
     ours, theirs = socket.socketpair()
     try:
         ours.sendall(_framed({
@@ -59,6 +62,7 @@ def _attempt(monkeypatch, ca, joiner):
             "id_pub": joiner.id_pub_hex,
             "wg_pub": base64.b64encode(joiner.wg_pub_bytes).decode(),
             "hostname": "nats01",
+            "id_sig": id_sig,
         }))
         ok = srv._handle(theirs, "fd8d::2", attempts_left=3)
         return ok, _recv_msg(ours)
