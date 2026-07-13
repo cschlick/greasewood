@@ -47,6 +47,23 @@ jobs:
           name: dist
           path: dist/*
 
+  pypi:
+    name: publish to PyPI
+    needs: dist
+    # Tag pushes only — never on a workflow_dispatch dry run. Uses PyPI Trusted
+    # Publishing (OIDC): no token stored anywhere. One-time setup on PyPI, see
+    # packaging/README.md ("PyPI Trusted Publishing").
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # mint the short-lived OIDC token PyPI verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist          # sdist + wheel only (no deb/rpm in this artifact)
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
   packages:
     name: ${{ matrix.arch }} deb + rpm
     needs: dist
