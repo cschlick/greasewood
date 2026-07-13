@@ -293,10 +293,24 @@ cd greasewood
 sudo ./install.sh
 ```
 
-Either way you get the `gw` command, and `gw create`/`join` install + enable the
-systemd service. Most subcommands need sudo/root (they create WireGuard
-interfaces and edit routing); `gw watch` does not. For plain library/dev use,
-`pip install greasewood` (or `pip install '.[test]'` from a checkout for pytest).
+**Distro packages** — `.deb` and `.rpm` are attached to each [GitHub
+release](https://github.com/cschlick/greasewood/releases); they bundle their own
+Python, so they need nothing but glibc (and pull in `wireguard-tools`,
+`iproute2`, `nftables`):
+
+```bash
+sudo apt install ./greasewood_<ver>_amd64.deb     # Debian/Ubuntu
+sudo dnf install ./greasewood-<ver>.x86_64.rpm    # Fedora/RHEL
+```
+
+On Arch it's on the AUR: `yay -S greasewood`. See [packaging/](packaging/) for
+how these are built.
+
+Either way you get the `gw` command (and `man gw`), and `gw create`/`join`
+install + enable the systemd service. Most subcommands need sudo/root (they
+create WireGuard interfaces and edit routing); `gw watch` does not. For plain
+library/dev use, `pip install greasewood` (or `pip install '.[test]'` from a
+checkout for pytest).
 
 After install the workflow is just setup/join → the daemon runs as a managed
 systemd service that `gw create`/`gw join` set up for you — see [Running as a

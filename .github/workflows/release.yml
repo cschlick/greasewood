@@ -1,0 +1,115 @@
+name: Release
+
+# On a version tag (v0.1.1, …): build the sdist + wheel, build self-contained
+# .deb/.rpm for amd64 + arm64 (each bundling a relocatable Python via
+# packaging/build-standalone.sh + nfpm), and attach everything to a GitHub
+# Release. PyPI is published manually (see packaging/README.md) — this workflow
+# deliberately does NOT touch it.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: version without the leading v (for manual test runs)
+        required: true
+
+permissions:
+  contents: write            # create the Release + upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dist:
+    name: sdist + wheel
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: v
+        run: |
+          v="${{ github.event.inputs.version }}"
+          [ -z "$v" ] && v="${GITHUB_REF_NAME#v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: build
+        run: |
+          python -m pip install --quiet build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  packages:
+    name: ${{ matrix.arch }} deb + rpm
+    needs: dist
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, pbs_arch: x86_64,  nfpm_arch: x86_64, runner: ubuntu-latest }
+          - { arch: arm64, pbs_arch: aarch64, nfpm_arch: arm64,  runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: install nfpm
+        run: |
+          ntag=$(curl -fsSL https://api.github.com/repos/goreleaser/nfpm/releases/latest \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/${ntag}/nfpm_${ntag#v}_Linux_${{ matrix.nfpm_arch }}.tar.gz" \
+            | tar -xz nfpm
+          sudo install -m755 nfpm /usr/local/bin/nfpm
+      - name: build self-contained bundle
+        env:
+          ARCH: ${{ matrix.pbs_arch }}
+        run: |
+          wheel=$(ls dist/greasewood-*.whl)
+          DESTDIR="$PWD/stage" GREASEWOOD_SPEC="$wheel" ./packaging/build-standalone.sh
+      - name: build .deb + .rpm
+        env:
+          GREASEWOOD_VERSION: ${{ needs.dist.outputs.version }}
+          PKG_ARCH: ${{ matrix.arch }}
+        run: |
+          nfpm pkg -f packaging/nfpm.yaml -p deb -t dist/
+          nfpm pkg -f packaging/nfpm.yaml -p rpm -t dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+
+  release:
+    name: publish GitHub Release
+    needs: [dist, packages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: collect artifacts
+        run: |
+          mkdir release
+          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \
+            -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} release/ \;
+          ls -l release
+      - name: create release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${{ github.repository }}" \
+            --title "greasewood ${GITHUB_REF_NAME#v}" \
+            --generate-notes
