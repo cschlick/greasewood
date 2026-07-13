@@ -12,8 +12,8 @@ past the point of practicality, and wanted the simplest possible upgrade.
   directly or it honestly fails.
 - **[IPv6 only overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
   IPv4 or IPv6.
-- **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables. Uses
-  the stock `wg`/`ip` tools over subprocess. Greasy.
+- **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables.
+- **[Greasy.](#greasy)** Uses the stock `wg`/`ip` tools over subprocess.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
 - **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
