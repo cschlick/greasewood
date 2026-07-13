@@ -12,14 +12,14 @@ past the point of practicality, and wanted the simplest possible upgrade.
   directly or it honestly fails.
 - **[IPv6 only overlay.](#ipv6-overlay)** The overlay is IPv6-only; the underlay may be
   IPv4 or IPv6.
+- **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables. Uses
+  the stock `wg`/`ip` tools over subprocess. Greasy.
 - **[Named.](#names)** Every node gets a `<host>.<mesh>.internal` name and
   matching TLS certs from the same CA.
 - **[Policy-derived topology.](#access-control-roles--grants)** Roles + an allow-only grant table control who
   talks to whom.
 - **[Self-certifying addresses.](#self-certifying-addresses)** A node's IPv6
   address is a hash of its identity key.
-- **[Linux-only.](#linux-only)** Leans heavily on systemd, nftables. Uses
-  the stock `wg`/`ip` tools over subprocess. Greasy.
 - **[Service TLS.](#tls-certificates-for-services)** The same CA issues auto-renewing
   x509 certs for your services (Postgres, nginx, …), with profiles that place them where each wants them.
 - **[Offline-tolerant.](#offline-tolerance)** The anchor can be down for a credential
