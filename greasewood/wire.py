@@ -51,6 +51,16 @@ def _b64d(s: str) -> bytes:
     return base64.b64decode(s)
 
 
+def _b64d_key(s: str, field: str) -> bytes:
+    """Decode a base64 public key and require 32 bytes, so a wrong-length key is
+    a clean ValueError at the parse boundary (the control-plane handlers map that
+    to a 400) rather than a crypto failure surfacing as a 500 deep in verify()."""
+    raw = base64.b64decode(s)
+    if len(raw) != 32:
+        raise ValueError(f"{field} must be a 32-byte key (got {len(raw)} bytes)")
+    return raw
+
+
 def _canonical(d: dict) -> bytes:
     """Deterministic JSON — the bytes that signatures cover."""
     return json.dumps(d, sort_keys=True, separators=(",", ":")).encode()
@@ -179,8 +189,8 @@ class Credential:
     @classmethod
     def from_dict(cls, d: dict) -> "Credential":
         return cls(
-            id_pub=_b64d(d["id_pub"]),
-            wg_pub=_b64d(d["wg_pub"]),
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            wg_pub=_b64d_key(d["wg_pub"], "wg_pub"),
             addr=_str(d["addr"], "addr"),
             hostname=_str(d["hostname"], "hostname"),
             caps=_str_list(d["caps"], "caps"),
@@ -302,7 +312,7 @@ class NodeRecord:
     @classmethod
     def from_dict(cls, d: dict) -> "NodeRecord":
         return cls(
-            id_pub=_b64d(d["id_pub"]),
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
             seq=d["seq"],
             endpoints=_str_list(d["endpoints"], "endpoints"),
             cred=Credential.from_dict(d["cred"]),
@@ -365,8 +375,8 @@ class RenewRequest:
     @classmethod
     def from_dict(cls, d: dict) -> "RenewRequest":
         return cls(
-            id_pub=_b64d(d["id_pub"]),
-            wg_pub=_b64d(d["wg_pub"]),
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            wg_pub=_b64d_key(d["wg_pub"], "wg_pub"),
             nonce=d["nonce"],
             ts=_parse_ts(d["ts"]),
             hostname=d.get("hostname", ""),
@@ -425,8 +435,8 @@ class CertRequest:
     @classmethod
     def from_dict(cls, d: dict) -> "CertRequest":
         return cls(
-            id_pub=_b64d(d["id_pub"]),
-            leaf_pub=_b64d(d["leaf_pub"]),
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            leaf_pub=_b64d_key(d["leaf_pub"], "leaf_pub"),
             cn=_str(d["cn"], "cn"),
             # dns/ips are ALWAYS in the signed body (unlike aliases/reachable,
             # which .get() signals as omitted-when-empty) — so index, don't .get.
