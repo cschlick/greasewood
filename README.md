@@ -1,15 +1,5 @@
 # Greasewood
 
-
-           , \ , / . | \ , / . \ | , / , \ . / ,
-      \ , \,\\,X,\|/,//,\,X,/|\,\,X,//,\|/,X,//,/ , /
-    \,\\,>-<,\\|//,>-X-<,\\|//,>-<,\\|/,>-X-<,\|//,//,/
-     '-,\_X_,\\|,/,_X_,\,/|\,/,_X_,\,\|/,_X_,/,|//,_,-'
-       '--<,>--X--<,>--<,>-X-<,>--<,>--X--<,>--<,>--'
-          '-,_/,\_,-'\,_/|\_,/'-,_/,\_,-'\,_,-'
- .~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.
-                  g r e a s e w o o d
-
 A minimal, self-hosted, and greasy Wiregaurd mesh network. 
 
 Its one priority is being **easy to reason about**. It was built by someone who
