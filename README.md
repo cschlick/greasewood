@@ -145,16 +145,56 @@ supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
 backend and a different supervisor, and are out of scope: greasewood is,
 deliberately, a Linux tool.
 
+## Greasy
+
+greasewood drives the data plane by **shelling out to the stock `wg`, `ip`, and
+`nft` command-line tools** over subprocess, rather than talking to the kernel
+directly through netlink (via a binding like `pyroute2`, or the userspace
+transport a Go implementation such as `wireguard-go` ships). The clean way would
+be netlink; this is the greasy way. It's a deliberate trade, and the single
+biggest one in the codebase.
+
+**Why it's the right trade here.** greasewood's top priority is being *easy to
+reason about*, and its scale is small — tens of nodes, a reconcile every few
+seconds, not thousands of updates a second. At that scale the readability win
+dominates, and the surface it depends on (`wg set`, `ip route`, `nft`) is small
+and stable, so the fragility is bounded.
+
+**Pros:**
+
+- **It *is* the audit trail.** Every data-plane change is a real command, so
+  greasewood can log the exact `wg`/`ip`/`nft` argv it ran, with the exit code
+  and the reason — see [Auditable](#auditable). You can copy any line, run it by
+  hand, and compare against `wg show`.
+- **One dependency.** The tools are already on the host, so the whole thing stays
+  **pure Python with one dependency (`cryptography`)**. A netlink binding would
+  add a dependency (or a pile of fragile low-level socket code).
+- **Reproducible by hand.** Debugging is "what command did it run, and what
+  happens when I run it myself" — not decoding a binary protocol.
+- **Matches the operator's mental model.** greasewood is for people who already
+  manage WireGuard by hand; the code reads the way they'd type.
+
+**Cons:**
+
+- **Slower.** A process spawn per command costs more than a netlink round-trip.
+  Fine at this scale; it would not suit a control plane pushing thousands of
+  rapid updates.
+- **Text parsing is more brittle than structured netlink replies.** greasewood is
+  tied to the tools' CLI output, which can shift across versions.
+- **Depends on the tools being present and current.** `wg`, `ip`, and `nft` must
+  be on `PATH` at compatible versions.
+- **No transactional batching.** netlink can apply a set of changes atomically;
+  subprocess means more round-trips and per-command error handling (exit codes and
+  stderr rather than typed errors).
+
 ## Auditable
 
 The entire thing is **pure Python (3.11+), one dependency (`cryptography`), one
 binary (`gw`)**, and it manages the data plane by shelling out to `wg`/`ip` via
-subprocess. That's gre-eee-easy. The clean way would be
-netlink bindings. It's a deliberate trade: you can read the exact `wg set
-peer …` commands, run them by hand, and compare them against what `wg show`
-reports.
+subprocess ([the greasy trade](#greasy)): you can read the exact `wg set peer …`
+commands, run them by hand, and compare them against what `wg show` reports.
 
-That trade pays off in the **command trail**. Because every data-plane change is
+That pays off in the **command trail**. Because every data-plane change is
 a subprocess, greasewood records *every `ip`/`wg` command it issues* — always, 
 with the exit code, how long it took, and **why it
 ran** — to a durable, rotating `<data_dir>/audit.log` and to the journal.
