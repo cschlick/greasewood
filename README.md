@@ -1,6 +1,6 @@
 # Greasewood
 
-A minimal, self-hosted, and greasy Wiregaurd mesh network. 
+A minimal, self-hosted, greasy Wiregaurd mesh network. 
 
 Its one priority is being **easy to reason about**. It was built by someone who
 lovingly maintained a fleet of hand-written WireGuard/networkd text files far
