@@ -247,41 +247,48 @@ Requires Python 3.11+, the WireGuard userspace tools (`wireguard-tools`/`wg`),
 and `iproute2` (`ip`). The kernel WireGuard module is built into Linux 5.6+ and
 autoloads on first use.
 
-greasewood isn't on PyPI yet — every install builds **from this git repo**, not
-a package index. Two ways to install on a host that will run the daemon; both set
-up the managed systemd service.
+Two ways to install on a host that will run the daemon; both set up the managed
+systemd service.
 
 **With pipx (recommended on Linux)** — the standard way to install a Python
-application in its own isolated environment. pipx installs **straight from the
-git URL, not PyPI**, so it builds the latest commit on the default branch — no
-clone needed:
+application in its own isolated environment, straight from PyPI:
 
 ```bash
 sudo apt install pipx wireguard-tools    # Debian/Ubuntu; use your distro's pkg mgr
-sudo pipx install --global "git+https://gitlab.com/cschlick/greasewood.git"
+sudo pipx install --global greasewood
 ```
 
 `--global` puts `gw` on root's `PATH` so `sudo gw …` resolves, and the daemon
 service launches as `<interpreter> -m greasewood`, so it stays valid wherever
 pipx put the package. pipx manages only the Python side — install the WireGuard
-tools separately with your distro's package manager (shown above). To pull newer
-commits later, `sudo pipx reinstall greasewood` (a clean re-pull from the repo;
-plain `pipx upgrade` can skip a git install when the version string hasn't moved).
+tools separately with your distro's package manager (shown above). Upgrade with
+`sudo pipx upgrade greasewood`.
+
+To run an **unreleased commit** instead of the latest release, point pipx at the
+git URL — it builds the default branch directly, no clone needed:
+
+```bash
+sudo pipx install --global "git+https://github.com/cschlick/greasewood.git"
+```
+
+(For a git install, pull newer commits with `sudo pipx reinstall greasewood` — a
+clean re-pull; plain `pipx upgrade` can skip a git install when the version
+string hasn't moved.)
 
 **With the bundled installer** — a self-contained alternative that also installs
 the WireGuard deps and pins a fixed venv at `/opt/greasewood`. Re-run any time
 (after a `git pull`) to upgrade in place:
 
 ```bash
-git clone https://gitlab.com/cschlick/greasewood.git
+git clone https://github.com/cschlick/greasewood.git
 cd greasewood
 sudo ./install.sh
 ```
 
 Either way you get the `gw` command, and `gw create`/`join` install + enable the
 systemd service. Most subcommands need sudo/root (they create WireGuard
-interfaces and edit routing); `gw watch` does not. For a plain library/dev use,
-`pip install .` (add `'.[test]'` for pytest) from a checkout is all you need.
+interfaces and edit routing); `gw watch` does not. For plain library/dev use,
+`pip install greasewood` (or `pip install '.[test]'` from a checkout for pytest).
 
 After install the workflow is just setup/join → the daemon runs as a managed
 systemd service that `gw create`/`gw join` set up for you — see [Running as a
