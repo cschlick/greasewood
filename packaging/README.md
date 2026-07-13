@@ -29,20 +29,14 @@ versioning (the interpreter then dies with *"no version information available"*)
 1. Bump `version` in `pyproject.toml`; commit.
 2. Regenerate the man page and confirm it's in sync:
    `python scripts/gen_manpage.py && git add man/gw.1`
-3. **PyPI** (manual, keeps you in control):
-   ```bash
-   rm -rf dist && python -m build
-   python -m twine check dist/*
-   python -m twine upload dist/*
-   ```
-4. Tag and push — this fires `release.yml`:
+3. Tag and push — this fires `release.yml`, which does everything:
    ```bash
    git tag -a vX.Y.Z -m "greasewood X.Y.Z" && git push origin vX.Y.Z
    ```
-   The workflow builds the sdist/wheel and the amd64+arm64 `.deb`/`.rpm`, then
-   creates the GitHub Release with all of them attached. (It does **not** touch
-   PyPI — step 3 already did.)
-5. **AUR:** in the `aur/` clone, bump `pkgver` (and `sha256sums` — take it from
+   The workflow builds the sdist/wheel, **publishes them to PyPI** via Trusted
+   Publishing (OIDC — no token), builds the amd64+arm64 `.deb`/`.rpm`, and
+   creates the GitHub Release with all of them attached.
+4. **AUR:** in the `aur/` clone, bump `pkgver` (and `sha256sums` — take it from
    the PyPI JSON `digests.sha256`), regenerate `.SRCINFO`
    (`makepkg --printsrcinfo > .SRCINFO`), then `git push` to the AUR remote.
 
@@ -58,9 +52,22 @@ GREASEWOOD_VERSION=X.Y.Z PKG_ARCH=amd64 nfpm pkg -f packaging/nfpm.yaml -p rpm -
 Smoke-test the result: `dpkg-deb -x dist/greasewood_*.deb /tmp/r &&
 /tmp/r/opt/greasewood/python/bin/python3 -m greasewood --version`.
 
-## Future: PyPI Trusted Publishing
+## PyPI Trusted Publishing
 
-Step 3 can move into `release.yml` via PyPI Trusted Publishing (OIDC, no stored
-token) — add a `pypi` job with `permissions: id-token: write` and
-`pypa/gh-action-pypi-publish`. Left out for now so releases to PyPI stay a
-deliberate manual act.
+`release.yml`'s `pypi` job publishes via OIDC — no API token is stored anywhere.
+This needs a **one-time** setup on PyPI (already done for the `greasewood`
+project; repeat only if the repo/workflow name changes):
+
+- pypi.org → the `greasewood` project → *Manage* → *Publishing* → *Add a trusted
+  publisher* (GitHub):
+  - Owner: `cschlick`
+  - Repository: `greasewood`
+  - Workflow: `release.yml`
+  - Environment: *(leave blank — the job uses none)*
+
+Optional hardening: put the `pypi` job behind a GitHub Environment (e.g. `pypi`)
+with required reviewers, and set the same environment name in both the workflow
+and the PyPI trusted-publisher config.
+
+The first automated release (0.1.0 was published manually) will be the first to
+exercise this — watch that run.
