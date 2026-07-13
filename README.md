@@ -1,5 +1,9 @@
 # Greasewood
 
+[![PyPI](https://img.shields.io/pypi/v/greasewood)](https://pypi.org/project/greasewood/)
+[![Python versions](https://img.shields.io/pypi/pyversions/greasewood)](https://pypi.org/project/greasewood/)
+[![License: MIT](https://img.shields.io/pypi/l/greasewood)](LICENSE)
+
 A minimal, self-hosted, greasy Wiregaurd mesh network. 
 
 Its one priority is being **easy to reason about**. It was built by someone who
@@ -263,6 +267,10 @@ service launches as `<interpreter> -m greasewood`, so it stays valid wherever
 pipx put the package. pipx manages only the Python side — install the WireGuard
 tools separately with your distro's package manager (shown above). Upgrade with
 `sudo pipx upgrade greasewood`.
+
+Prefer **uv**? `sudo UV_TOOL_BIN_DIR=/usr/local/bin uv tool install greasewood`
+is the faster equivalent (`uv tool` is uv's app installer). uv has no `--global`
+flag, so point its bin dir at a spot already on root's `PATH` yourself, as shown.
 
 To run an **unreleased commit** instead of the latest release, point pipx at the
 git URL — it builds the default branch directly, no clone needed:
