@@ -630,6 +630,34 @@ def _reject_reserved_roles(names, where: str) -> None:
                  f"concrete role (e.g. node, web, admin).")
 
 
+def _menu_from_grants(data_dir: "Path") -> list:
+    """The role menu derived from grants.toml (`gw invite --self-roles-from-grants`):
+    every role name referenced in any grant's from/to, minus the roles that must
+    never be self-serve — the reserved set ('*', 'anchor'), the default 'node'
+    (it's what a plain invite grants anyway), and 'admin' (fleet-wide terminal
+    access doesn't belong on an auto-derived standing token; offer it explicitly
+    with --self-roles if you mean it). grants.toml is the human-authored source
+    of truth, so the menu tracks the policy vocabulary with no second list."""
+    from .policy import parse_grants_toml, GRANTS_BASENAME, RESERVED_ROLES
+    path = data_dir / GRANTS_BASENAME
+    if not path.exists():
+        sys.exit(f"--self-roles-from-grants: no {GRANTS_BASENAME} at {path} to "
+                 f"derive a menu from")
+    try:
+        grants = parse_grants_toml(path.read_text())
+    except ValueError as e:
+        sys.exit(f"--self-roles-from-grants: {e}")
+    referenced = {r for g in grants for r in (g["from"] + g["to"])}
+    excluded = set(RESERVED_ROLES) | {"node", "admin"}
+    menu = sorted(referenced - excluded)
+    if not menu:
+        sys.exit("--self-roles-from-grants: grants.toml references no offerable "
+                 "roles (only built-ins: " +
+                 ", ".join(sorted(referenced & excluded)) + "). Add role-to-role "
+                 "grants first, or list a menu explicitly with --self-roles.")
+    return menu
+
+
 def cmd_invite(args) -> int:
     _require_root("invite")
     if getattr(args, "quiet", False):
@@ -746,8 +774,19 @@ def cmd_invite(args) -> int:
     # A menu invite's BASE carries no default role: the joiner opts into a class
     # (explicit beats implicit for provisioning); --roles still adds a fixed base.
     # NEVER offer '*' (reach-all) as self-serve — that's the anchor's role.
-    allowed_roles = ([r.strip() for r in args.self_roles.split(",") if r.strip()]
-                     if getattr(args, "self_roles", None) else [])
+    # --self-roles-from-grants derives the menu from grants.toml instead of a
+    # hand-typed list, so the policy vocabulary IS the provisioning menu.
+    if getattr(args, "self_roles_from_grants", False):
+        if getattr(args, "self_roles", None):
+            sys.exit("--self-roles and --self-roles-from-grants are mutually "
+                     "exclusive: list the menu yourself, or derive it — not both.")
+        allowed_roles = _menu_from_grants(cfg.data_dir)
+        log.info("role menu derived from grants.toml: %s (excluded: *, anchor, "
+                 "node, admin — list admin explicitly via --self-roles to offer it)",
+                 ",".join(allowed_roles))
+    else:
+        allowed_roles = ([r.strip() for r in args.self_roles.split(",") if r.strip()]
+                         if getattr(args, "self_roles", None) else [])
     _reject_reserved_roles(allowed_roles, "--self-roles")   # never self-serve *, anchor
     if args.roles is not None:
         roles = [r.strip() for r in args.roles.split(",") if r.strip()]
@@ -3792,7 +3831,7 @@ def main(argv=None) -> int:
                     help="roles the invited node holds (comma-sep) — the grant-table "
                          "vocabulary (`gw policy`). The anchor decides this; the "
                          "joiner cannot. Omitted → the anchor's [anchor] "
-                         "default_roles (ships as 'mesh'). With no policy applied "
+                         "default_roles (ships as 'node'). With no policy applied "
                          "every node peers regardless; grants reference these roles.")
     sp.add_argument("--caps", default=None,
                     help="ability caps granted to the invited node (comma-sep), "
@@ -3805,6 +3844,13 @@ def main(argv=None) -> int:
                          "land outside this set. Sets no default role (the joiner "
                          "opts in). NEVER include '*' (reach-all). Combine with "
                          "--roles to also grant a fixed base role.")
+    sp.add_argument("--self-roles-from-grants", action="store_true",
+                    dest="self_roles_from_grants",
+                    help="derive the menu from grants.toml instead: offer every "
+                         "role referenced in a grant, minus the built-ins (*, "
+                         "anchor, node, admin). The policy vocabulary becomes the "
+                         "provisioning menu — no second list to maintain. Mutually "
+                         "exclusive with --self-roles.")
     sp.add_argument("--endpoint", default=None, metavar="ADDR",
                     help="underlay address, v6 or v4, to embed in the token (auto-detected if omitted)")
     sp.add_argument("--standing", action="store_true",

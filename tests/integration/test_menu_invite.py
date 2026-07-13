@@ -63,3 +63,42 @@ def test_menu_invite_self_select_roles(gw_image, gw_network):
         for cid in cids:
             podman("rm", "-f", cid, check=False)
         podman("rm", "-f", anchor["cid"], check=False)
+
+
+def test_menu_invite_derived_from_grants(gw_image, gw_network):
+    """--self-roles-from-grants: the menu comes from grants.toml — roles the
+    policy references are offered; built-ins (admin/anchor/node) are not."""
+    anchor = make_anchor(gw_image, gw_network, hostname="derivanchor")
+    cids = []
+    try:
+        # A real policy: web -> api, plus the shipped admin grant. The derived
+        # menu must be exactly {api, web} — admin referenced but NOT offered.
+        pexec(anchor["cid"], "sh", "-c",
+              'cat > "$(ls -d /var/lib/greasewood_*)"/grants.toml <<\'EOF\'\n'
+              '[[grant]]\nfrom = ["web"]\nto = ["api"]\nports = ["tcp/8000"]\n'
+              '[[grant]]\nfrom = ["admin"]\nto = ["anchor", "node"]\nports = ["tcp/22"]\n'
+              'EOF')
+        with _ENROLL_LOCK:
+            res = pexec(anchor["cid"], "gw", "invite", "--standing",
+                        "--self-roles-from-grants",
+                        "--endpoint", anchor["ipv6"], "-q")
+            token = _extract_token(res.stdout + "\n" + res.stderr)
+
+            # A joiner picks 'api' — on the derived menu, so it lands role:api.
+            a_cid, a_ip = _fresh(gw_image, gw_network); cids.append(a_cid)
+            j = pexec(a_cid, "gw", "join", token, "--endpoint", f"[{a_ip}]:51900",
+                      "--hostname", "api1", "--roles", "api", check=False)
+            assert j.returncode == 0, f"api join failed:\n{j.stdout}\n{j.stderr}"
+            assert wait_for_hostname(anchor["cid"], "api1", timeout=20)
+            assert "role:api" in _cfg(a_cid)
+
+            # 'admin' is referenced in grants.toml but EXCLUDED from the menu.
+            x_cid, x_ip = _fresh(gw_image, gw_network); cids.append(x_cid)
+            j = pexec(x_cid, "gw", "join", token, "--endpoint", f"[{x_ip}]:51900",
+                      "--hostname", "sneaky1", "--roles", "admin", check=False)
+            assert j.returncode != 0, "admin must not be offerable via a derived menu"
+            assert "not offered" in (j.stdout + j.stderr)
+    finally:
+        for cid in cids:
+            podman("rm", "-f", cid, check=False)
+        podman("rm", "-f", anchor["cid"], check=False)
