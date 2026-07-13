@@ -1,0 +1,60 @@
+# nfpm config → greasewood .deb + .rpm (https://nfpm.goreleaser.com).
+#
+# One YAML, both formats, no dpkg/rpm toolchains. The payload is the
+# self-contained tree that packaging/build-standalone.sh stages under ./stage
+# (a bundled relocatable Python at /opt/greasewood + docs/man) — so the package
+# depends on NO system Python and works across distros regardless of their
+# python3 version.
+#
+# Build (see .github/workflows/release.yml):
+#   DESTDIR=./stage GREASEWOOD_SPEC=greasewood==$VER ./packaging/build-standalone.sh
+#   GREASEWOOD_VERSION=$VER PKG_ARCH=amd64 nfpm pkg -f packaging/nfpm.yaml -p deb -t dist/
+#   GREASEWOOD_VERSION=$VER PKG_ARCH=amd64 nfpm pkg -f packaging/nfpm.yaml -p rpm -t dist/
+#
+# nfpm expands ${ENV} at build time; the workflow sets these per matrix entry.
+name: greasewood
+arch: ${PKG_ARCH}                 # amd64 | arm64 (nfpm maps to x86_64/aarch64 for rpm)
+platform: linux
+version: ${GREASEWOOD_VERSION}    # e.g. 0.1.1 (no leading v)
+maintainer: cschlick <schlicksupchristopher@gmail.com>
+description: |
+  Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only,
+  CA-gated. Ships a self-contained interpreter, so it needs no system Python.
+homepage: https://github.com/cschlick/greasewood
+license: MIT
+section: net
+priority: optional
+
+# greasewood drives the data plane by shelling out to these — hard runtime deps.
+depends:
+  - wireguard-tools
+  - iproute2
+  - nftables
+overrides:
+  rpm:
+    depends:
+      - wireguard-tools
+      - iproute            # rpm distros name it 'iproute', not 'iproute2'
+      - nftables
+
+deb:
+  compression: zstd
+
+contents:
+  # the self-contained app (bundled python + greasewood), staged at final paths
+  - src: ./stage/opt/greasewood
+    dst: /opt/greasewood
+
+  # stable PATH entry — the console script inside the bundle
+  - src: /opt/greasewood/python/bin/gw
+    dst: /usr/bin/gw
+    type: symlink
+
+  # man page (generated from the CLI parser) + examples/reference docs
+  - src: ./stage/usr/share/man/man1/gw.1.gz
+    dst: /usr/share/man/man1/gw.1.gz
+  - src: ./stage/usr/share/doc/greasewood
+    dst: /usr/share/doc/greasewood
+
+  # /opt/greasewood is machine-generated; don't let dpkg/rpm try to verify or
+  # back up its contents as config.

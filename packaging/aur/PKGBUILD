@@ -1,0 +1,39 @@
+# Maintainer: cschlick <schlicksupchristopher@gmail.com>
+#
+# AUR package for greasewood. Unlike the .deb/.rpm (which bundle their own
+# interpreter for old distros), Arch always ships a current Python, so this is a
+# clean native package: greasewood's pure-Python code installed into the system
+# site-packages, with cryptography satisfied by the distro's python-cryptography.
+# `gw` lands on PATH at /usr/bin/gw and `python -m greasewood` works, so the
+# self-managed systemd unit resolves normally.
+pkgname=greasewood
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated"
+arch=('any')
+url="https://github.com/cschlick/greasewood"
+license=('MIT')
+depends=('python' 'python-cryptography' 'wireguard-tools' 'iproute2' 'nftables')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+source=("https://files.pythonhosted.org/packages/source/g/greasewood/greasewood-${pkgver}.tar.gz")
+sha256sums=('0c12e9df4eb4264783d3c04f232789d6f951e726d60661c1a666e8ee62a55b13')
+
+build() {
+  cd "greasewood-${pkgver}"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "greasewood-${pkgver}"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # man page (shipped in the sdist, generated from the CLI parser)
+  install -Dm644 man/gw.1 "$pkgdir/usr/share/man/man1/gw.1"
+
+  # license + examples
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 greasewood.toml.example \
+    "$pkgdir/usr/share/doc/$pkgname/greasewood.toml.example"
+  install -Dm644 grants.toml.example \
+    "$pkgdir/usr/share/doc/$pkgname/grants.toml.example"
+}
