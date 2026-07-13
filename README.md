@@ -4,7 +4,7 @@ A minimal, self-hosted, and greasy Wiregaurd mesh network.
 
 Its one priority is being **easy to reason about**. It was built by someone who
 lovingly maintained a fleet of hand-written WireGuard/networkd text files far
-past the point of practical, and wanted the smallest possible mesh upgrade.
+past the point of practicality, and wanted the simplest possible upgrade.
 
 - **[Private.](#membership)** Membership is gated by a certificate authority;
   revoke a node by not renewing it.
