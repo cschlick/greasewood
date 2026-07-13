@@ -32,9 +32,9 @@ dependencies = [
 test = ["pytest>=7", "hypothesis>=6"]
 
 [project.urls]
-Homepage = "https://gitlab.com/cschlick/greasewood"
-Repository = "https://gitlab.com/cschlick/greasewood"
-Issues = "https://gitlab.com/cschlick/greasewood/-/issues"
+Homepage = "https://github.com/cschlick/greasewood"
+Repository = "https://github.com/cschlick/greasewood"
+Issues = "https://github.com/cschlick/greasewood/issues"
 
 [project.scripts]
 gw = "greasewood.cli:main"
