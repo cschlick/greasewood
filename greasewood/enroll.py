@@ -286,6 +286,24 @@ class EnrollServer:
             raise ValueError("id_pub must be 32 bytes")
         if len(wg_pub_bytes) != 32:
             raise ValueError("wg_pub must be 32 bytes")
+        # Proof-of-possession of id_priv. The door seed authorizes that SOMEONE
+        # may enroll; this proves they hold the private key for the id_pub they
+        # present, so a token holder can't enroll under another node's public
+        # id_pub (re-binding its caps/route). Fail CLOSED on any decode/verify
+        # error. Brand-new and re-joining ids alike hold their id_priv and sign.
+        from .wire import enroll_pop_body
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+        sig = req.get("id_sig")
+        if not isinstance(sig, str) or not sig:
+            raise ValueError("enroll request missing id_sig (proof-of-possession)")
+        try:
+            Ed25519PublicKey.from_public_bytes(id_pub_bytes).verify(
+                base64.b64decode(sig),
+                enroll_pop_body(id_pub_bytes, wg_pub_bytes, req.get("hostname") or ""))
+        except Exception:                             # fail closed on ANY error
+            raise ValueError("invalid id_sig: joiner did not prove possession of "
+                             "id_priv for the id_pub it presented")
         # Roles the joiner PROPOSES (`gw join --roles`). Only meaningful for a
         # menu invite; authorized against the window's menu at issue time, never
         # trusted as-is. Malformed → treated as none.

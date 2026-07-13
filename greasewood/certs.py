@@ -188,18 +188,27 @@ def place_cert_files(files: list, key_pem: str, cert_pem: str, ca_pem: str) -> N
                 f"(greasewood won't fabricate a deep directory tree.)") from None
         # Deliberately NOT keys.atomic_write: the owner must change on the TEMP,
         # before the atomic swap, so the file appears fully-owned or not at all.
-        tmp = dest.with_name(dest.name + ".gwtmp")
+        # We run as ROOT and dest.parent may be writable by a non-root service
+        # account (e.g. the postgres profile's data dir), so a fixed-name temp
+        # invites a symlink race: an attacker pre-plants <name>.gwtmp -> a
+        # root-owned target and our O_TRUNC/write/chown clobbers and hands it
+        # over. Defeat it with mkstemp (random name, O_CREAT|O_EXCL|0600, so a
+        # pre-planted name can't be opened) and operate on the FD (fchmod/fchown,
+        # never a path) so no symlink is ever followed.
+        import tempfile
+        fd, tmpname = tempfile.mkstemp(dir=str(dest.parent),
+                                       prefix="." + dest.name + ".", suffix=".gwtmp")
+        tmp = Path(tmpname)
         placed = False
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
             try:
                 os.write(fd, content)
+                os.fchmod(fd, mode)             # on the fd — mkstemp made it 0600
+                if f.get("owner"):
+                    os.fchown(fd, *_resolve_owner(f["owner"]))
             finally:
                 os.close(fd)
-            os.chmod(tmp, mode)                  # O_CREAT mode is umask-masked
-            if f.get("owner"):
-                os.chown(tmp, *_resolve_owner(f["owner"]))
-            os.replace(tmp, dest)                # atomic swap
+            os.replace(tmp, dest)               # atomic swap (renames the name, not through a symlink)
             placed = True
         finally:
             # A failed chown (unknown owner) etc. must NOT leave the 0600 temp —

@@ -855,7 +855,11 @@ def cmd_invite(args) -> int:
         # bakeable, so the operator can re-retrieve it later (via anchor `gw
         # status`) without re-issuing — re-issuing would invalidate the copies
         # already baked into images. Same 0600-root posture as the guest key.
-        window_path.write_text(json.dumps({
+        # atomic_write => 0600 from creation (mkstemp), so the PSK/token never sit
+        # world-readable in a pre-chmod window a co-tenant could race. Same
+        # primitive every other secret file uses.
+        from .keys import atomic_write
+        atomic_write(window_path, json.dumps({
             "v": 1,
             "standing": True,
             "caps": caps,
@@ -864,8 +868,7 @@ def cmd_invite(args) -> int:
             "guest_pub": params.guest_pub_b64,
             "psk": params.psk_b64,
             "token": token,
-        }))
-        os.chmod(window_path, 0o600)   # it now carries key material
+        }), mode=0o600)
         log.info("STANDING door opened — this token enrolls any number of "
                  "nodes until: sudo gw close-door")
     else:
@@ -1332,6 +1335,15 @@ def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
         "hostname": hostname,
         "roles": list(requested_roles),
     }
+    # Proof-of-possession: sign id_pub↔wg_pub↔hostname with id_priv, so the anchor
+    # can confirm we actually hold the private key for the id_pub we present — the
+    # door seed alone can't (id_pubs are public). Blocks a token holder enrolling
+    # under someone else's identity.
+    import base64 as _b64mod
+    from .wire import enroll_pop_body
+    req["id_sig"] = _b64mod.b64encode(node_keys.id_priv.sign(
+        enroll_pop_body(node_keys.id_pub_bytes, node_keys.wg_pub_bytes,
+                        hostname or ""))).decode()
     from .door import recv_msg as _recv_framed, send_msg as _send_framed
 
     # Leave the connection OPEN after the response — we send our signed record

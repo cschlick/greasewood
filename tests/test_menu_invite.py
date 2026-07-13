@@ -53,9 +53,13 @@ def _enroll(monkeypatch, *, base_caps, menu, requested):
     joiner = NodeKeys.generate()
     ours, theirs = socket.socketpair()
     try:
+        from greasewood.wire import enroll_pop_body
+        id_sig = base64.b64encode(joiner.id_priv.sign(
+            enroll_pop_body(joiner.id_pub_bytes, joiner.wg_pub_bytes, "n1"))).decode()
         body = json.dumps({"v": 1, "id_pub": joiner.id_pub_hex,
                            "wg_pub": base64.b64encode(joiner.wg_pub_bytes).decode(),
-                           "hostname": "n1", "roles": requested}).encode()
+                           "hostname": "n1", "roles": requested,
+                           "id_sig": id_sig}).encode()
         ours.sendall(struct.pack(">I", len(body)) + body)
         srv._handle(theirs, "fd8d::2", attempts_left=3)
         return ca, _recv_msg(ours)
