@@ -52,19 +52,30 @@ class _ReplayGuard:
     the stale-timestamp check would reject a replay anyway.
     """
 
+    # Soft mark triggers a bulk eviction of expired nonces; hard cap is the true
+    # memory bound. A window's worth of legitimate traffic is far below _SOFT; the
+    # gap up to _HARD only fills if an authenticated member FLOODS unique nonces
+    # faster than they expire, at which point we refuse rather than grow without
+    # limit (fail closed — a flood is denied, not accepted).
+    _SOFT = 4096
+    _HARD = 16384
+
     def __init__(self, window: float = 600.0) -> None:
         self._window = window
         self._seen: dict[str, float] = {}  # nonce -> expiry epoch
         self._lock = threading.Lock()
 
     def check_and_add(self, nonce: str) -> bool:
-        """True if the nonce is fresh (and records it); False if it is a replay."""
+        """True if the nonce is fresh (and records it); False if it is a replay
+        OR the guard is saturated (a nonce flood — bounded, so refused)."""
         now = time.time()
         with self._lock:
-            if len(self._seen) > 4096:  # bound memory; evict expired in bulk
+            if len(self._seen) >= self._SOFT:   # evict expired in bulk
                 self._seen = {n: e for n, e in self._seen.items() if e > now}
             exp = self._seen.get(nonce)
             if exp is not None and exp > now:
+                return False
+            if len(self._seen) >= self._HARD:   # still full of LIVE nonces → refuse
                 return False
             self._seen[nonce] = now + self._window
             return True
