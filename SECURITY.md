@@ -3,17 +3,43 @@
 greasewood is a control plane for a WireGuard mesh. WireGuard itself (the Noise
 protocol) provides confidentiality, integrity, and forward secrecy for traffic
 on the wire; greasewood decides **who is allowed into the mesh and who each node
-will form a tunnel with**. This document describes the trust boundaries, what is
-enforced, the accepted risks, and the results of the security review.
+will form a tunnel with**. This document states the threat model, the trust
+boundaries, what is enforced, and the accepted risks.
+
+## Threat model
+
+Assets, in order of value: the CA key (mesh admission), node identity keys
+(who a node *is*), tunnel keys (traffic), the signed directory + policy
+(topology), and control-plane availability.
+
+Adversary positions, weakest to strongest — what each can and cannot achieve:
+
+| Adversary position | Outcome |
+|--------------------|---------|
+| **Internet attacker** — knows a node's IP and port, holds no secret | Nothing observable. The only underlay surface is WireGuard UDP, which silently drops anything that isn't a valid handshake from a pinned key — no reply, no banner, no HTTP ([Network exposure](#network-exposure)). |
+| **On-path attacker** — can read, modify, or replay underlay packets | Sees only WireGuard ciphertext (Noise: confidentiality, integrity, forward secrecy). Control-plane requests are additionally replay-bounded (nonce + skew) even though they already ride inside the tunnel. Can drop packets — underlay availability is out of scope. |
+| **Join-token holder** — stole an unexpired invite | Enrolls **one** node, during one time-boxed window, with exactly the roles the token (or its menu) grants — no self-asserted roles, no pinned name. `gw watch` shows door activity; `gw revoke` evicts the result. |
+| **Malicious member** — legitimately enrolled, tries to escalate | Bounded by its CA-signed credential: cannot self-assert roles/caps/hostname, forge directory records, obtain TLS certs for names it doesn't own, or reach anything the grant table doesn't allow (default-closed) — mechanisms in [What is enforced](#what-is-enforced). Residual: first-come claim of *unused* hostnames (pin names that matter), plus whatever traffic the grants do permit. |
+| **Compromised node** — attacker holds its `id_priv`/`wg_priv` | *Is* that node until revoked: its reachability, its names, its certs — but no other node's, and no wider grants. `gw revoke` cuts it off immediately at the anchor and fleet-wide within one credential TTL. |
+| **Compromised anchor** — attacker holds `ca.key` | Full admission control: mint identities, assign roles, sign policy. Cannot passively decrypt tunnels or take over an *existing* node's overlay address (addresses are self-certifying, keys never leave nodes) — but can mint a new node and re-bind mesh *names* to it, hijacking future by-name connections. No defense inside the model: this is the root of trust. Recovery is a re-root ([RUNBOOK](RUNBOOK.md)). |
+| **Local non-root user** on a member host | Network reachability over the overlay, not the node's identity — see [Multi-user hosts](#multi-user-hosts). |
+
+Out of scope: underlay availability against an on-path attacker; denial of
+service by a live, malicious anchor (see accepted risks); kernel/WireGuard
+implementation bugs; physical access to a node.
 
 ## Keys and trust boundaries
 
-| Secret | Held by | Blast radius if leaked | Protection |
-|--------|---------|------------------------|------------|
-| `ca.key` (Ed25519) | the anchor | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | Encrypt at rest (`ca_key_passphrase_env`), back up offline, never copy to another node. Moving the anchor should generate a *new* CA and re-roots — the key isn't shuffled around; the offline backup is only for a disaster *restore*. |
-| `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | On-disk at `0600` on server VMs (the primary deployment; no TPM expected — hardware-backed identity is a v2 item, see the founding doc). Treat a leak as "that node is compromised" → revoke. |
-| `wg_priv` (X25519) | each node | **Impersonate that node on the wire.** Contained by expiry, not a CRL: a `wg_pub` is accepted only while a live credential binds it, so `gw revoke` (or rotating `wg_priv`) drops it fleet-wide within one credential TTL on the next reconcile. **Not** auto-contained while the node keeps renewing — act on a known leak. | On-disk at `0600`; on-disk exposure is an accepted, bounded risk. |
-| join token / door seed | transient | Enroll **one** node during a single open window. The anchor still enforces revoke + unique hostname, and the door admits one peer. | High-entropy, time-boxed (`door_window`, default 15m), single-slot. |
+| Secret | Held by | What it authorizes (if compromised) | Enforced protection |
+|--------|---------|-------------------------------------|---------------------|
+| `ca.key` (Ed25519) | the anchor | **Total.** Issue credentials for any identity → join the mesh as anyone. Revocation does not help (the attacker *is* the CA). | `0600` in a root-owned dir; optional encryption at rest (`ca_key_passphrase_env`); never carried by any greasewood protocol — it exists on the anchor only (`gw anchor-transfer` moves it over SSH, out of band). |
+| `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | `0600` on disk; no hardware backing on server VMs (accepted risk — hardware-backed identity is a v2 item). |
+| `wg_priv` (X25519) | each node | **Impersonate that node on the wire.** Contained by expiry, not a CRL: a `wg_pub` is accepted only while a live credential binds it, so `gw revoke` (or rotating `wg_priv`) drops it fleet-wide within one credential TTL. **Not** auto-contained while the node keeps renewing — act on a known leak. | `0600` on disk; acceptance is credential-bound (expiry + revocation are the structural containment). |
+| join token / door seed | transient | Enroll **one** node during a single open window. The anchor still enforces revoke + unique hostname, and the door admits one peer. | High-entropy 32-byte seed; time-boxed (`door_window`, default 15m); single-slot. |
+
+Operational key handling — offline backups, leak response, moving or re-rooting
+the CA — is deliberately out of band: it's your key ceremony, not the
+protocol's. The [RUNBOOK](RUNBOOK.md) has the SOPs.
 
 ## Network exposure
 
@@ -157,5 +183,6 @@ won't, by design — it never touches your firewall):
 
 ## Reporting
 
-This is a personal/homelab project. File issues on the GitLab repository. For the
-operational response to key loss or compromise, see [RUNBOOK.md](RUNBOOK.md).
+This is a personal/homelab project. File issues on the GitHub repository (the
+GitLab copy is a read-only mirror). For the operational response to key loss or
+compromise, see [RUNBOOK.md](RUNBOOK.md).
