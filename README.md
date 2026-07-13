@@ -505,6 +505,9 @@ sudo gw join "$TOKEN" --hostname web1
 
 # ...or a MENU — one standing token, and the joiner picks a role from it:
 MENU=$(sudo gw invite --self-roles web,worker,db)
+#   ...or derive the menu from the policy itself — every role grants.toml
+#   references, minus built-ins (*, anchor, node, admin):
+# MENU=$(sudo gw invite --self-roles-from-grants)
 sudo gw join "$MENU" --roles worker --hostname worker1   # anchor signs iff 'worker' is on the menu
 
 # Change roles later without re-joining (effective at the node's next renewal):

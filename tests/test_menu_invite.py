@@ -111,3 +111,76 @@ def test_token_carries_and_roundtrips_the_menu():
     plain = door.encode_token(b"\x01" * 32, b"\x02" * 32, "fd::1", b"\x03" * 32,
                               mesh_domain="pm.internal")
     assert door.decode_token(plain).self_roles == []
+
+
+# --- --self-roles-from-grants: the menu derived from grants.toml ------------
+
+def _write_grants(tmp_path, text):
+    (tmp_path / "grants.toml").write_text(text)
+    return tmp_path
+
+
+def test_menu_from_grants_collects_from_and_to_minus_builtins(tmp_path):
+    from greasewood import cli
+    _write_grants(tmp_path, '''
+[[grant]]
+from  = ["web", "worker"]
+to    = ["api"]
+ports = ["tcp/8000"]
+
+[[grant]]
+from  = ["admin"]
+to    = ["anchor", "node"]
+ports = ["tcp/22"]
+
+[[grant]]
+from  = ["metrics"]
+to    = ["*"]
+ports = ["tcp/9100"]
+''')
+    # from+to union, deduped + sorted; *, anchor, node, admin all excluded
+    assert cli._menu_from_grants(tmp_path) == ["api", "metrics", "web", "worker"]
+
+
+def test_menu_from_grants_refuses_builtin_only_policy(tmp_path):
+    """The shipped default grants.toml (admin -> anchor,node) yields NOTHING
+    offerable — refuse with a pointer rather than mint an empty menu."""
+    import pytest
+    from greasewood import cli
+    _write_grants(tmp_path, '''
+[[grant]]
+from  = ["admin"]
+to    = ["anchor", "node"]
+ports = ["tcp/22"]
+''')
+    with pytest.raises(SystemExit, match="no offerable roles"):
+        cli._menu_from_grants(tmp_path)
+
+
+def test_menu_from_grants_requires_the_file(tmp_path):
+    import pytest
+    from greasewood import cli
+    with pytest.raises(SystemExit, match="no grants.toml"):
+        cli._menu_from_grants(tmp_path)
+
+
+def test_menu_from_grants_surfaces_parse_errors(tmp_path):
+    import pytest
+    from greasewood import cli
+    _write_grants(tmp_path, "this is [ not toml")
+    with pytest.raises(SystemExit, match="self-roles-from-grants"):
+        cli._menu_from_grants(tmp_path)
+
+
+def test_invite_parser_wires_the_flag():
+    """argparse wiring: the flag lands on args.self_roles_from_grants (a dest
+    typo here would silently disable the feature)."""
+    import contextlib, io
+    import pytest
+    from greasewood import cli
+    # The flag must PARSE; invite then exits early (_require_root) in a test
+    # env — a clean SystemExit either way, whereas a dest/wiring typo dies at
+    # argparse with its distinct usage error.
+    with pytest.raises(SystemExit):
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["invite", "--self-roles-from-grants", "--endpoint", "fd::1"])
