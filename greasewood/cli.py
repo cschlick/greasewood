@@ -652,6 +652,19 @@ def _reject_reserved_roles(names, where: str) -> None:
                  f"concrete role (e.g. node, web, admin).")
 
 
+def _reject_derived_caps(caps) -> None:
+    """Refuse anchor-DERIVED caps on the user-supplied caps path. `hostname-pinned`
+    is added by the invite path itself, ONLY when --hostname fixes the name; hand-
+    supplying it via --caps or [anchor] default_caps is always wrong — with no
+    pinned name it marks a self-naming node permanently un-renameable, and on a
+    --standing door it back-doors the "one pinned name for many nodes" state the
+    --hostname + --standing guard forbids."""
+    if "hostname-pinned" in caps:
+        sys.exit("`hostname-pinned` can't be set via --caps/default_caps — it's "
+                 "added automatically by --hostname. To pin a name, use "
+                 "--hostname NAME (not on a --standing door).")
+
+
 def _menu_from_grants(data_dir: "Path") -> list:
     """The role menu derived from grants.toml (`gw invite --self-roles-from-grants`):
     every role name referenced in any grant's from/to, minus the roles that must
@@ -828,6 +841,9 @@ def cmd_invite(args) -> int:
     # every other path enforces (mirrors cmd_set_caps). (L4)
     _reject_reserved_roles([c[len("role:"):] for c in caps if c.startswith("role:")],
                            "the invite's caps/default_roles")
+    # `hostname-pinned` is DERIVED: the --hostname path re-adds it below, and only
+    # there. Screen it out of the user-supplied caps first (see the helper). (L4-adjacent)
+    _reject_derived_caps(caps)
     # --hostname pins the name: the anchor fixes it at enrollment (the joiner's
     # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
