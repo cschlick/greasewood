@@ -56,6 +56,22 @@ def _canonical(d: dict) -> bytes:
     return json.dumps(d, sort_keys=True, separators=(",", ":")).encode()
 
 
+def enroll_pop_body(id_pub: bytes, wg_pub: bytes, hostname: str) -> bytes:
+    """Canonical bytes a joiner self-signs with id_priv at door enrollment, to
+    PROVE it holds the private key for the id_pub it presents (proof-of-
+    possession). The door seed authorizes *that someone* may enroll; this binds
+    the enrollment to an identity the joiner actually controls. Binding id_pub ↔
+    wg_pub ↔ hostname means a token holder cannot enroll under another node's
+    public id_pub (it lacks that id_priv), nor replay a captured signature with a
+    different wg_pub. ONE definition, imported by both `gw join` (signer) and the
+    enroll server (verifier) so the two can never drift."""
+    return _canonical({
+        "hostname": hostname or "",
+        "id_pub": _b64e(id_pub),
+        "wg_pub": _b64e(wg_pub),
+    })
+
+
 def _ts(t: dt.datetime) -> str:
     """RFC 3339 UTC, second precision. Microseconds would produce different
     canonical bytes depending on how the timestamp was constructed."""
