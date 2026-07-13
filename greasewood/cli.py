@@ -416,9 +416,11 @@ def _make_port_enforcer(cfg, args, grant_policy):
     loop that never resolves (exactly the bug an nft-less host hit). An
     unenforced node still peers per policy — grants gate which tunnels exist
     regardless; only the per-port scopes within them drop to advisory."""
+    from . import reconcile as _rec
     if not (cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)):
         log.info("port enforcement OFF (enforce_ports=false): grants still "
                  "control which tunnels exist; port scopes are advisory")
+        _rec.clear_enforce_degraded(cfg.data_dir)    # OFF is deliberate, not degraded
         return None
     from .portfilter import (PortFilter, NftUnavailable, ensure_available,
                              table_name)
@@ -432,10 +434,14 @@ def _make_port_enforcer(cfg, args, grant_policy):
                   "install nftables, or set `enforce_ports = false` under "
                   "[network] in %s to make this the intended state.",
                   getattr(args, "config", "the config"))
+        # Leave a breadcrumb so the unfiltered state is VISIBLE in gw watch /
+        # --json, not just a line in the journal. (H2)
+        _rec.write_enforce_degraded(cfg.data_dir, str(e))
         return None
     log.info("port enforcement ON: greasewood's own nftables table on %s "
              "(realizing the grant table — default-closed on a fresh anchor)",
              cfg.wg_interface)
+    _rec.clear_enforce_degraded(cfg.data_dir)        # healthy
     return PortFilter(table_name(membership_key(cfg.mesh_domain)),
                       cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy)
 
@@ -816,6 +822,12 @@ def cmd_invite(args) -> int:
         caps += [c.strip() for c in args.caps.split(",") if c.strip()]
     else:
         caps += list(cfg.default_caps)
+    # Screen the MERGED caps too, not just --roles/--self-roles: --caps and the
+    # [anchor] default_caps/default_roles are also role-assignment paths, so a
+    # stray `role:*`/`role:anchor` there would bypass the reserved-role guard
+    # every other path enforces (mirrors cmd_set_caps). (L4)
+    _reject_reserved_roles([c[len("role:"):] for c in caps if c.startswith("role:")],
+                           "the invite's caps/default_roles")
     # --hostname pins the name: the anchor fixes it at enrollment (the joiner's
     # requested name is ignored) and marks the credential `hostname-pinned` so the
     # node can't rename itself afterward. Without it, the node names itself at
@@ -889,13 +901,18 @@ def cmd_invite(args) -> int:
                  "nodes until: sudo gw close-door")
     else:
         expires = dt.datetime.now(dt.timezone.utc) + window
-        window_path.write_text(json.dumps({
+        # atomic_write (0600 from creation) — no world-readable pre-chmod window.
+        # No key material here (the timed door isn't persisted for reboot), but it
+        # discloses the caps/roles being granted, and consistency avoids the L6
+        # class of bug entirely. (L1)
+        from .keys import atomic_write
+        atomic_write(window_path, json.dumps({
             "v": 1,
             "expires": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "caps": caps,
             "allowed_roles": allowed_roles,   # menu: roles a joiner may self-select
             "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
-        }))
+        }), mode=0o600)
 
     print(token)
     return 0

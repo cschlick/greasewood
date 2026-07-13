@@ -17,7 +17,8 @@ def _cfg(enforce_ports=True):
     return types.SimpleNamespace(
         enforce_ports=enforce_ports, wg_interface="gw-pm",
         mesh_domain="pm.internal", caps=["role:mesh"],
-        control_listen=":51902")
+        control_listen=":51902",
+        data_dir="/nonexistent-gw-test")   # H2 breadcrumb writes here; no-op if unwritable
 
 
 def _args():

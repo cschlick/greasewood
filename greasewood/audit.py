@@ -136,16 +136,23 @@ def attach_file(path, max_mb: float = 8.0, keep: int = 12) -> "RotatingFileHandl
     for h in log.handlers:
         if isinstance(h, RotatingFileHandler) and getattr(h, "_gw_path", None) == str(path):
             return h  # already attached
+    import os
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Pre-create 0600 so the log (source IPs / topology) is never world-
+        # readable in the window between RotatingFileHandler's umask-create and
+        # the chmod — it lives in the 0755 data dir. (L2)
+        try:
+            os.close(os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
+        except OSError:
+            pass
         h = RotatingFileHandler(path, maxBytes=int(max_mb * 1024 * 1024),
                                 backupCount=keep, encoding="utf-8")
         h._gw_path = str(path)              # type: ignore[attr-defined]
         h.setLevel(logging.INFO)
         h.setFormatter(_FILE_FMT)
         try:
-            import os
-            os.chmod(path, 0o600)           # holds source IPs / topology
+            os.chmod(path, 0o600)           # belt-and-suspenders (rotation reopens)
         except OSError:
             pass
         log.addHandler(h)

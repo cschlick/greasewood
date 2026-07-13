@@ -449,6 +449,11 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     recon = _reconcile_freshness(cfg)              # daemon-liveness heartbeat (all roles)
     if recon:
         lines.append(f"daemon   : {recon}")
+    from . import reconcile as _rec                 # port enforcement degraded? (H2)
+    degraded = _rec.read_enforce_degraded(cfg.data_dir)
+    if degraded:
+        lines.append(f"enforce  : ⚠ port enforcement DOWN — running UNFILTERED "
+                     f"(enforce_ports=true but nftables unusable: {degraded['reason']})")
     # Where to look when the daemon line above is unhappy: the journal (what the
     # daemon logged) and the audit file (every ip/wg/nft command it ran).
     lines.append(f"logs     : journalctl -eu greasewood@{membership_key(cfg.mesh_domain)}")
@@ -1219,6 +1224,9 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
             "domain": cfg.mesh_domain,
             "interface": cfg.wg_interface,
             "enforce_ports": bool(getattr(cfg, "enforce_ports", True)),
+            # True = enforce_ports is on but nftables is unusable, so the daemon
+            # is running UNFILTERED (see gw watch). (H2)
+            "enforcement_degraded": rmod.read_enforce_degraded(cfg.data_dir) is not None,
         },
         "policy": policy,
         "daemon": {

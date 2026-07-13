@@ -562,3 +562,37 @@ def clear_daemon_fatal(data_dir) -> None:
         daemon_fatal_path(data_dir).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def enforce_degraded_path(data_dir) -> "Path":
+    return Path(data_dir) / "enforce_degraded.json"
+
+
+def write_enforce_degraded(data_dir, reason: str) -> None:
+    """Record that the daemon is running with enforce_ports=true but WITHOUT port
+    enforcement (nftables unusable) — it degrades to open rather than crash-loop,
+    so this is the only signal the operator gets that the mesh is unfiltered.
+    Surfaced in `gw watch` and the --json snapshot. (H2)"""
+    try:
+        enforce_degraded_path(data_dir).write_text(json.dumps({
+            "ts": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+            "reason": reason,
+        }))
+    except OSError:
+        pass
+
+
+def read_enforce_degraded(data_dir) -> "dict | None":
+    try:
+        d = json.loads(enforce_degraded_path(data_dir).read_text())
+        return d if isinstance(d, dict) and "reason" in d else None
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
+def clear_enforce_degraded(data_dir) -> None:
+    """Enforcement is healthy (or deliberately off) — clear the breadcrumb."""
+    try:
+        enforce_degraded_path(data_dir).unlink(missing_ok=True)
+    except OSError:
+        pass

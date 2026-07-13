@@ -58,17 +58,25 @@ def test_door_is_locked_to_enrollment_only():
 
 
 def test_control_plane_is_scoped_to_mesh_not_door():
-    # the control plane rides the mesh overlay; scope it to gw-mesh so a door
-    # peer can't reach it (nothing binds it on the door IP anyway).
-    out = _render(["api"], None)
+    # the control plane rides the mesh overlay; on the ANCHOR (where it listens)
+    # scope it to gw-mesh so a door peer can't reach it.
+    out = _render(["*"], None)                    # role:* == the anchor
     assert 'iifname "gw-mesh" tcp dport 51902 accept' in out
     assert out.count("dport 51902") == 1          # the only 51902 rule is that scoped one
 
 
+def test_control_port_accept_is_anchor_only():    # M1
+    # The control server runs ONLY on the anchor; emitting the accept on a plain
+    # node would open its 51902 to every mesh peer, grant-free. Node replies to
+    # the anchor ride ct-established, so a node needs no inbound 51902 rule.
+    assert 'iifname "gw-mesh" tcp dport 51902 accept' in _render(["*"], None)
+    assert "dport 51902" not in _render(["db"], None)
+
+
 def test_control_and_diagnostics_are_hardwired():
-    # the control port + ct-established + icmpv6 are always allowed, so
-    # enforcement never cuts the channel that carries the policy, nor replies.
-    out = _render(["web"], [{"from": ["web"], "to": ["api"], "ports": ["*"]}])
+    # ct-established + icmpv6 are ALWAYS allowed (every node) so enforcement never
+    # cuts replies/diagnostics; the control port is allowed on the anchor.
+    out = _render(["*"], [{"from": ["web"], "to": ["api"], "ports": ["*"]}])
     assert "tcp dport 51902 accept" in out
     assert "ct state established,related accept" in out
     assert "meta l4proto ipv6-icmp accept" in out
@@ -135,10 +143,13 @@ def test_explicit_wildcard_grant_renders_as_clean_open():
 
 def test_policy_with_no_rule_for_this_node_default_denies_mesh():
     # a table exists but grants nothing TO this node → default-deny within mesh
-    # (established/icmp/control still allowed, so it's reachable + replies work).
+    # (established/icmp still allowed, so it's reachable + replies work; the
+    # anchor-only control-port rule isn't emitted on a node).
     out = _render(["db"], [{"from": ["web"], "to": ["api"], "ports": ["*"]}])
     assert 'iifname "gw-mesh" drop' in out
-    assert "tcp dport 51902 accept" in out
+    assert "ct state established,related accept" in out
+    assert "meta l4proto ipv6-icmp accept" in out
+    assert "dport 51902" not in out               # control port is anchor-only (M1)
 
 
 # ---------------------------------------------------------------------------

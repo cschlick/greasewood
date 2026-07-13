@@ -64,9 +64,13 @@ class NftUnavailable(RuntimeError):
 
 def ensure_available() -> None:
     """Raise NftUnavailable unless nftables is usable. Called ONCE at daemon
-    start when enforcement is on (the default), before anything is touched — so
-    the daemon refuses loudly rather than running with silently-absent
-    enforcement (fail closed)."""
+    start when enforcement is on (the default), before anything is touched.
+
+    NOTE: the caller (cli._make_port_enforcer) does NOT crash on this — exiting
+    would be a systemd restart loop on an nft-less host. It instead runs the
+    daemon UNENFORCED (port scopes advisory; grants still gate tunnels) and
+    records an `enforce_degraded` breadcrumb so the unfiltered state is visible
+    in `gw watch` / `--json`. So this path degrades-open-but-loud, not fail-closed."""
     if shutil.which("nft") is None:
         raise NftUnavailable(
             "nftables (nft) is not installed. Port enforcement (on by default) "
@@ -183,7 +187,15 @@ def render_ruleset(table: str, iface: str, control_port: int, records,
         f'        iifname != {{ "{iface}", "{DOOR_IFACE}" }} accept',
         "        ct state established,related accept",   # replies to our outbound
         "        meta l4proto ipv6-icmp accept",         # ND / ping / PMTU
-        f'        iifname "{iface}" tcp dport {control_port} accept',   # control plane
+    ]
+    # The control plane listens ONLY on the anchor; nodes dial it and their
+    # replies ride ct established, so a node needs no inbound 51902 rule. Emitting
+    # the accept on a plain node would open its 51902 to EVERY mesh peer,
+    # grant-free (the rule had no saddr scope) — so scope it to the anchor. (M1)
+    if "*" in node_tags(local_caps):                      # reach-all == the anchor
+        body.append(f'        iifname "{iface}" tcp dport {control_port} accept   '
+                    f'# control plane (anchor only)')
+    body += [
         # The enrollment door carries ONLY the enroll exchange, then is locked
         # down — greasewood owns this so the operator's firewall needn't. Always
         # present (harmless on a node, whose gw-door never comes up); keeps the
