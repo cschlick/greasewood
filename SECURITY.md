@@ -20,7 +20,7 @@ Adversary positions, weakest to strongest — what each can and cannot achieve:
 | **On-path attacker** — can read, modify, or replay underlay packets | Sees only WireGuard ciphertext (Noise: confidentiality, integrity, forward secrecy). Control-plane requests are additionally replay-bounded (nonce + skew) even though they already ride inside the tunnel. Can drop packets — underlay availability is out of scope. |
 | **Join-token holder** — stole an unexpired invite | Enrolls **one** node, during one time-boxed window, with exactly the roles the token (or its menu) grants — no self-asserted roles, no pinned name. `gw watch` shows door activity; `gw revoke` evicts the result. |
 | **Malicious member** — legitimately enrolled, tries to escalate | Bounded by its CA-signed credential: cannot self-assert roles/caps/hostname, forge directory records, obtain TLS certs for names it doesn't own, or reach anything the grant table doesn't allow (default-closed) — mechanisms in [What is enforced](#what-is-enforced). Residual: first-come claim of *unused* hostnames (pin names that matter), plus whatever traffic the grants do permit. |
-| **Compromised node** — attacker holds its `id_priv`/`wg_priv` | *Is* that node until revoked: its reachability, its names, its certs — but no other node's, and no wider grants. `gw revoke` cuts it off immediately at the anchor and fleet-wide within one credential TTL. |
+| **Compromised node** — attacker holds its `id_priv`/`wg_priv` | *Is* that node until revoked: its reachability, its names, its certs — but no other node's, and no wider grants. `gw revoke` cuts it off immediately at the anchor and fleet-wide within one credential TTL (an already-issued TLS *service* cert can outlive that — see [Accepted risks](#accepted-risks--non-goals)). |
 | **Compromised anchor** — attacker holds `ca.key` | Full admission control: mint identities, assign roles, sign policy. Cannot passively decrypt tunnels or take over an *existing* node's overlay address (addresses are self-certifying, keys never leave nodes) — but can mint a new node and re-bind mesh *names* to it, hijacking future by-name connections. No defense inside the model: this is the root of trust. Recovery is a re-root ([RUNBOOK](RUNBOOK.md)). |
 | **Local non-root user** on a member host | Network reachability over the overlay, not the node's identity — see [Multi-user hosts](#multi-user-hosts). |
 
@@ -95,7 +95,12 @@ Additional control-plane protections:
   from the records that pass the reconcile loop's *full* verification (CA
   signature, expiry, revocation), never from the raw directory cache. Revoking
   a node removes its name on the same reconcile cycle that removes its tunnel;
-  an expired credential drops out of resolution the same way.
+  an expired credential drops out of resolution the same way — **except on the
+  anchor**, which deliberately admits expired-but-not-revoked records so a lapsed
+  node can renew over its tunnel. On the *anchor host* such a node's name keeps
+  resolving (and its address keeps passing the port filter) until it is revoked
+  or aged past the drop-grace window (default 7d); on every other node it drops
+  within one credential TTL as stated. Revoke to drop a name immediately.
 - **Caps/roles are anchor-decided, not self-asserted** — a node's capabilities
   (e.g. `tls`) and roles (`role:<name>` tags, the grant-table vocabulary) are chosen by the anchor at
   `gw invite` and bound into the CA-signed credential; the enroll server issues
@@ -111,6 +116,17 @@ Additional control-plane protections:
   deliberate re-root (a config change to that set), not an automatic runtime
   handoff, so a decommissioned or leaked anchor key cannot inject itself into the
   fleet's trust; it stays trusted only as long as it's in `trusted_pubs`.
+- **Port enforcement (grants → nftables)** — a second layer *below* tunnel
+  existence: on by default, the daemon realizes each grant's port scopes in
+  **greasewood's own** `table inet greasewood_<mesh>`, scoped to the mesh
+  interface — it never touches your own firewall or a physical NIC, so it can
+  only ever *tighten* mesh traffic. A fresh anchor ships **default-closed** (only
+  granted flows pass). The table persists across daemon stop/crash (fail closed),
+  removed only by `gw purge`. Caveats worth knowing: `enforce_ports = false` opts
+  a host out (grants still gate which *tunnels* exist; per-port scopes go
+  advisory), and if nftables is unusable while `enforce_ports = true` the daemon
+  degrades to unenforced with a loud error rather than crash-looping — an
+  operational gap to monitor, not a remote exposure.
 
 ## Accepted risks / non-goals
 
@@ -123,6 +139,14 @@ Additional control-plane protections:
   is immediate (refuses renew/publish and evicts locally, live — no restart). On
   other nodes a revoked peer falls out within at most one credential TTL as its
   credential expires. Shorten `credential_ttl` if you need a tighter bound.
+- **Issued TLS service certs are a separate, longer window.** A leaf lives for
+  `tls_cert_ttl` (default 7d) and is **not** CRL-revocable, so a revoked node
+  keeps a CA-valid, `verify-full`-trusted service cert until that leaf expires —
+  potentially several credential TTLs. Re-issuance *is* blocked (`gw revoke`
+  deletes the registry entry, so `/cert` refuses), and the revoked node loses
+  mesh reachability within one credential TTL, so exploiting the tail needs an
+  off-mesh path to the service. Set `tls_cert_ttl ≤ credential_ttl` if a service
+  cert must not outlive mesh membership.
 - **Clock integrity is a security dependency.** Every allow/deny is a timestamp
   comparison (expiry, skew). Run NTP/chrony and treat it as part of your security
   posture.
@@ -137,14 +161,19 @@ reach mesh peers, be reached, and read the (non-secret) directory over `::1`.
 
 What a non-root local user still **cannot** do:
 
-- read the private keys (`id_priv.pem`, `ca.key`, `wg.key` are `0600` inside a
-  `0700` data dir) → no impersonation, no CA abuse, no TLS cert;
+- read the private keys — `id_priv.pem`, `ca.key`, `wg.key` are each their own
+  `0600`, root-owned file → no impersonation, no CA abuse, no TLS cert. (The data
+  dir itself is `0755` by design, so root-free reads like `gw watch --snapshot`
+  can see the *public* files; confidentiality is carried per-file, not by the
+  directory mode.)
 - administer or tear down the interface (needs `CAP_NET_ADMIN`);
 - forge control-plane requests (`/renew`, `/cert`, `/publish` require signatures).
 
 So a co-tenant gets **network reachability to the mesh**, not the node's identity.
-If that reachability itself is unacceptable, enforce it at the OS layer (greasewood
-won't, by design.
+If that reachability itself is unacceptable, enforce it at the OS layer — greasewood
+never edits *your* firewall or underlay rules, and its only nftables state is the
+mesh-scoped table above ([What is enforced](#what-is-enforced)); a per-user gate
+is yours to add (e.g. an `nftables` owner-match on the `gw-<mesh>` interface).
 
 
 ## Reporting
