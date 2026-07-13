@@ -1122,5 +1122,5 @@ old — don't move the private key to a new machine. See [Moving the anchor](#mo
 
 ## AI Disclaimer
 
-Greasewood was built with the assistance of SWE LLM agents, if that matters to you. 
+Greasewood is a greasy project and was built with the assistance of SWE LLM agents, if that matters to you. 
 
