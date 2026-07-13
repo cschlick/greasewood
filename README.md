@@ -1,6 +1,16 @@
 # Greasewood
 
-A minimal, self-hosted WireGuard mesh overlay — one that is particularly greasy.
+
+           , \ , / . | \ , / . \ | , / , \ . / ,
+      \ , \,\\,X,\|/,//,\,X,/|\,\,X,//,\|/,X,//,/ , /
+    \,\\,>-<,\\|//,>-X-<,\\|//,>-<,\\|/,>-X-<,\|//,//,/
+     '-,\_X_,\\|,/,_X_,\,/|\,/,_X_,\,\|/,_X_,/,|//,_,-'
+       '--<,>--X--<,>--<,>-X-<,>--<,>--X--<,>--<,>--'
+          '-,_/,\_,-'\,_/|\_,/'-,_/,\_,-'\,_,-'
+ .~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.
+                  g r e a s e w o o d
+
+A minimal, self-hosted, and greasy Wiregaurd mesh network. 
 
 Its one priority is being **easy to reason about**. It was built by someone who
 lovingly maintained a fleet of hand-written WireGuard/networkd text files far
@@ -1115,3 +1125,9 @@ old — don't move the private key to a new machine. See [Moving the anchor](#mo
   enforces, accepted risks, and the results of the security review.
 - **[RUNBOOK.md](RUNBOOK.md)** — disaster SOPs: compromised node, lost/leaked CA
   key, destroyed anchor, fleet-wide teardown, and how to read `gw diagnose`.
+
+
+## AI Disclaimer
+
+Greasewood was built with the assistance of SWE LLM agents, if that matters to you. 
+
