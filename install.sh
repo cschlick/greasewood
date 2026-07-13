@@ -146,6 +146,22 @@ fi
 ln -sfn "$VENV/bin/gw" "$BIN_LINK"
 say "linked $BIN_LINK -> $VENV/bin/gw"
 
+# --- man page (best-effort — `pip install` can't place one, so source/script
+# installs get `man gw` here). The page is committed (man/gw.1), generated from
+# the CLI parser; nothing to build at install time. -------------------------
+MAN_SRC="$REPO_DIR/man/gw.1"
+MAN_DIR="${GREASEWOOD_MANDIR:-/usr/share/man/man1}"
+if [ -f "$MAN_SRC" ]; then
+    mkdir -p "$MAN_DIR"
+    if command -v gzip >/dev/null 2>&1; then
+        gzip -9 -c "$MAN_SRC" > "$MAN_DIR/gw.1.gz" && rm -f "$MAN_DIR/gw.1"
+    else
+        cp "$MAN_SRC" "$MAN_DIR/gw.1"
+    fi
+    command -v mandb >/dev/null 2>&1 && mandb -q >/dev/null 2>&1 || true
+    say "installed man page -> $MAN_DIR (man gw)"
+fi
+
 # --- verify it actually runs (a broken exec here is a create/join failure) --
 VER="$("$BIN_LINK" --version 2>/dev/null)" || die "gw is installed but won't run — see: $BIN_LINK --version"
 

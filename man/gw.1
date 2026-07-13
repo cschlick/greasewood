@@ -1,0 +1,474 @@
+.TH GW 1 "2026-07-13" "greasewood 0.1.0" "User Commands"
+.SH NAME
+gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
+.SH SYNOPSIS
+.B gw
+[\fIGLOBAL OPTIONS\fR] \fICOMMAND\fR [\fIARGS\fR...]
+.SH DESCRIPTION
+greasewood is a minimal, self\-hosted WireGuard mesh overlay: direct\-or\-fail links, an IPv6\-only overlay over a v4\-or\-v6 underlay, membership gated by a certificate authority. It manages the data plane by shelling out to wg(8), ip(8) and nft(8), and logs every command it runs. The gw command is the whole interface; the daemon it starts is a self\-managed systemd service.
+.SH GLOBAL OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-c\fR, \fB\-\-config\fR \fIFILE\fR
+membership config (default: the host's single /etc/greasewood_<name>.toml, discovered; required when the host is on several meshes)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+\ 
+.TP
+\fB\-\-version\fR
+show program's version number and exit
+.SH COMMANDS
+.SS gw create
+\fBUsage:\fR gw create [\-h] [\-\-hostname HOSTNAME] [\-\-data\-dir DATA_DIR] [\-\-listen\-port LISTEN_PORT] [\-\-control\-port CONTROL_PORT] [\-\-door\-port DOOR_PORT] [\-\-endpoint ADDR] [\-\-interface INTERFACE] [\-\-overlay\-prefix OVERLAY_PREFIX] [\-\-mesh\-domain MESH_DOMAIN] [\-\-caps CAPS] [\-\-credential\-ttl CREDENTIAL_TTL] [\-\-force] [\-\-no\-hosts\-sync] [\-\-no\-service] name
+.PP
+[sudo] one\-shot anchor bootstrap: CA + door key + routing + self\-credential
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINAME\fR
+the mesh's name (a DNS label, e.g. 'prod\-fleet') \(em members resolve as <hostname>.<name>.internal. Required so no two meshes sit on the same default: a node can never bridge two meshes with one domain.
+.TP
+\fB\-\-hostname\fR \fIHOSTNAME\fR
+this anchor's hostname in the mesh (default: the machine's hostname)
+.TP
+\fB\-\-data\-dir\fR \fIDATA_DIR\fR
+state directory (default: /var/lib/greasewood_<name>)
+.TP
+\fB\-\-listen\-port\fR \fILISTEN_PORT\fR
+mesh WireGuard UDP port (default: first free of 51900, 51910, ...)
+.TP
+\fB\-\-control\-port\fR \fICONTROL_PORT\fR
+\ 
+.TP
+\fB\-\-door\-port\fR \fIDOOR_PORT\fR
+UDP port for the enrollment door (carried in tokens)
+.TP
+\fB\-\-endpoint\fR \fIADDR\fR
+underlay address, v6 or v4 (auto\-detected if omitted)
+.TP
+\fB\-\-interface\fR \fIINTERFACE\fR
+WireGuard interface name (default: gw\-<name[:12]>)
+.TP
+\fB\-\-overlay\-prefix\fR \fIOVERLAY_PREFIX\fR
+the fleet's overlay /64 ULA (default: fd8d:e5c1:db1a:7::)
+.TP
+\fB\-\-mesh\-domain\fR \fIMESH_DOMAIN\fR
+full domain override (default: <name>.internal)
+.TP
+\fB\-\-caps\fR \fICAPS\fR
+extra ability caps for the anchor (it always carries role:* to reach every node), e.g. 'tls'
+.TP
+\fB\-\-credential\-ttl\fR \fICREDENTIAL_TTL\fR
+\ 
+.TP
+\fB\-\-force\fR
+overwrite existing CA key
+.TP
+\fB\-\-no\-hosts\-sync\fR
+don't maintain the managed /etc/hosts block (<name>.gw.internal \-> overlay addr); it's on by default
+.TP
+\fB\-\-no\-service\fR
+don't set up the systemd service; print the manual 'gw run' line instead (for non\-systemd hosts)
+.SS gw invite
+\fBUsage:\fR gw invite [\-h] [\-\-hostname HOSTNAME] [\-\-roles R1,R2] [\-\-caps CAPS] [\-\-self\-roles R1,R2] [\-\-self\-roles\-from\-grants] [\-\-endpoint ADDR] [\-\-standing] [\-\-supersede] [\-q]
+.PP
+[sudo, anchor] open a 15\-min door window and print a single\-use join token
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-hostname\fR \fIHOSTNAME\fR
+pin the invited node's mesh hostname (the anchor fixes it; the joiner can't choose or later `gw rename\-node` it). Omit to let the node name itself at join.
+.TP
+\fB\-\-roles\fR \fIR1,R2\fR
+roles the invited node holds (comma\-sep) \(em the grant\-table vocabulary (`gw policy`). The anchor decides this; the joiner cannot. Omitted \(-> the anchor's [anchor] default_roles (ships as 'node'). With no policy applied every node peers regardless; grants reference these roles.
+.TP
+\fB\-\-caps\fR \fICAPS\fR
+ability caps granted to the invited node (comma\-sep), e.g. 'tls'. Omitted \(-> the anchor's [anchor] default_caps (ships as 'tls'). Roles are set with \-\-roles.
+.TP
+\fB\-\-self\-roles\fR \fIR1,R2\fR
+role MENU the joiner may self\-select from at `gw join \-\-roles` (comma\-sep) \(em one standing invite provisions many classes. The anchor still signs, and the joiner can never land outside this set. Sets no default role (the joiner opts in). NEVER include '*' (reach\-all). Combine with \-\-roles to also grant a fixed base role.
+.TP
+\fB\-\-self\-roles\-from\-grants\fR
+derive the menu from grants.toml instead: offer every role referenced in a grant, minus the built\-ins (*, anchor, node, admin). The policy vocabulary becomes the provisioning menu \(em no second list to maintain. Mutually exclusive with \-\-self\-roles.
+.TP
+\fB\-\-endpoint\fR \fIADDR\fR
+underlay address, v6 or v4, to embed in the token (auto\-detected if omitted)
+.TP
+\fB\-\-standing\fR
+open a STANDING door: the token enrolls any number of nodes (one at a time) and never expires \(em for baked images / autoscaling. Each join is still the full per\-node ceremony (fresh identity, CA\-signed credential, door isolation). Revoke the token any time with 'gw close\-door'. Cannot pin \-\-hostname.
+.TP
+\fB\-\-supersede\fR
+required to replace an open STANDING door (which would invalidate its token everywhere it's baked)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+print only the token; silence informational messages
+.SS gw close\-door
+\fBUsage:\fR gw close\-door [\-h]
+.PP
+[sudo, anchor] close the current door window \(em permanently invalidates its token (standing or single\-use); enrolled nodes are unaffected
+.SS gw join
+\fBUsage:\fR gw join [\-h] [\-\-hostname HOSTNAME] [\-\-roles R1,R2] [\-\-data\-dir DATA_DIR] [\-\-listen\-port LISTEN_PORT] [\-\-interface INTERFACE] [\-\-endpoint [ADDR]:PORT] [\-\-no\-hosts\-sync] [\-\-no\-service] token
+.PP
+[sudo] enroll this machine using a token from 'gw invite'
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fITOKEN\fR
+join token from 'gw invite', or '\-' to read it from stdin (raw `gw invite` output is accepted \(em the gw1.... line is extracted)
+.TP
+\fB\-\-hostname\fR \fIHOSTNAME\fR
+this node's hostname in the mesh (default: keep existing, else the machine's hostname)
+.TP
+\fB\-\-roles\fR \fIR1,R2\fR
+role(s) to self\-select (comma\-sep) when the invite offers a menu (`gw invite \-\-self\-roles`). Must be within the menu; the anchor authorizes and signs. Ignored (with a warning) for a classic invite, where the anchor sets roles.
+.TP
+\fB\-\-data\-dir\fR \fIDATA_DIR\fR
+state directory (default: /var/lib/greasewood_<name>)
+.TP
+\fB\-\-listen\-port\fR \fILISTEN_PORT\fR
+mesh WireGuard UDP port (default: first free of 51900, 51910, ...)
+.TP
+\fB\-\-interface\fR \fIINTERFACE\fR
+WireGuard interface name (default: keep existing, else gw\-mesh; use a distinct name per mesh on one host)
+.TP
+\fB\-\-endpoint\fR \fI[ADDR]:PORT\fR
+this node's underlay endpoint, v6 or v4 (auto\-detected if omitted)
+.TP
+\fB\-\-no\-hosts\-sync\fR
+don't maintain the managed /etc/hosts block (<name>.gw.internal \-> overlay addr); on by default
+.TP
+\fB\-\-no\-service\fR
+don't set up the systemd service; print the manual 'gw run' line instead (for non\-systemd hosts)
+.SS gw purge
+\fBUsage:\fR gw purge [\-h] [\-\-yes]
+.PP
+[sudo] remove this mesh entirely \(em stop+disable its service, tear down the interface, delete data dir + config + /etc/hosts block (and the systemd template if it was the last mesh). A from\-scratch reset.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-yes\fR, \fB\-y\fR
+skip confirmation prompt
+.SS gw run
+\fBUsage:\fR gw run [\-h] [\-\-no\-enforce\-ports]
+.PP
+[sudo] start the daemon (creates WireGuard interface)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-no\-enforce\-ports\fR
+run WITHOUT nftables port enforcement (on by default). For a host with no usable nftables \(em grants still control which tunnels exist; port scopes go advisory. The persistent form is `enforce_ports = false` under [network] (systemd runs `gw run` with no flags).
+.SS gw watch
+\fBUsage:\fR gw watch [\-h] [\-\-snapshot] [\-\-json] [\-\-by\-role] [\-\-interval SECS] [\-\-all] [\-\-total]
+.PP
+[sudo] live mesh dashboard (redraws in place): the roster + link state, per\-second throughput, and a latency column that fills in as pings return. Ctrl\-C to exit. Use \-\-snapshot for a static view.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-snapshot\fR
+print a single static view and exit (no root needed) \(em for piping/logging. Auto\-used when there's no terminal.
+.TP
+\fB\-\-json\fR
+emit one\-shot machine\-readable JSON (stable versioned schema) instead of the text view \(em for monitors/jq. Add live WireGuard stats by running as root.
+.TP
+\fB\-\-by\-role\fR
+group into one table per role (a node appears under each of its roles; the anchor appears under all) with per\-group connectivity health
+.TP
+\fB\-\-interval\fR \fISECS\fR
+live refresh interval (default 2s; min 1s)
+.TP
+\fB\-\-all\fR
+also show expired nodes (hidden by default \(em the roster shows only the live mesh)
+.TP
+\fB\-\-total\fR
+live view shows cumulative traffic instead of per\-second rate (toggle with 't' while watching)
+.SS gw config
+\fBUsage:\fR gw config [\-h] [key]
+.PP
+print resolved config facts (machine\-readable) for scripting, e.g. `gw config interface`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fIKEY\fR
+print just this value (interface, mesh_domain, listen_port, data_dir, role, hostname, root_url, ...); omit to list all as key<TAB>value
+.SS gw diagnose
+\fBUsage:\fR gw diagnose [\-h] [NODE ...]
+.PP
+pairwise link diagnosis: compare up to two nodes + the anchor side by side and explain whether a tunnel can form (policy/roles, reachability, firewall directionality). No args = this host <\-> anchor.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINODE\fR
+0, 1, or 2 node hostnames. none \(-> this host <\-> anchor; one \(-> this host <\-> NODE; two \(-> NODE <\-> NODE (anchor shown as reference either way)
+.SS gw revoke
+\fBUsage:\fR gw revoke [\-h] node
+.PP
+[sudo, anchor] revoke a node \(em deny its renew/publish, evict it, free its hostname
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINODE\fR
+the node: its hostname, its <host>.<mesh_domain> mesh name, or its 64\-char id_pub hex
+.SS gw set\-caps
+\fBUsage:\fR gw set\-caps [\-h] node caps
+.PP
+[sudo, anchor] change an enrolled node's caps (effective next renewal)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINODE\fR
+node hostname (or its 64\-char id_pub hex)
+.TP
+\fICAPS\fR
+comma\-separated full tag set, e.g. 'role:web,tls' (replaces the node's current caps)
+.SS gw set\-roles
+\fBUsage:\fR gw set\-roles [\-h] [\-\-now] node roles
+.PP
+[sudo, anchor] change an enrolled node's roles (effective next renewal)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINODE\fR
+node hostname (or its 64\-char id_pub hex)
+.TP
+\fIROLES\fR
+comma\-separated roles, e.g. 'web,worker' (replaces role: tags; keeps tls; empty = mesh default)
+.TP
+\fB\-\-now\fR
+apply immediately \(em also request a fleet renewal (as `gw renew\-all` does) so the node adopts the new roles live, no restart. Omit and it takes effect at the node's next natural renewal (~half TTL). Fleet\-wide, so for a batch prefer several set\-roles then one renew\-all.
+.SS gw policy
+\fBUsage:\fR gw policy [\-h] [\-y] {show,apply} [file]
+.PP
+show the mesh's grant table, or [sudo, anchor] apply grants.toml \(em the allow\-only role policy that derives which tunnels exist
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fI{show,apply}\fR
+show: render the active table (no root). apply: validate + preview tunnel delta + sign + publish
+.TP
+\fIFILE\fR
+grants.toml path (apply only; default: <data_dir>/grants.toml)
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+apply without the interactive confirmation
+.SS gw anchor\-promote
+\fBUsage:\fR gw anchor\-promote [\-h] [\-\-control\-port CONTROL_PORT] [\-\-credential\-ttl CREDENTIAL_TTL]
+.PP
+[sudo] turn this enrolled node into an anchor (generate CA key, set role=anchor)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-control\-port\fR \fICONTROL_PORT\fR
+\ 
+.TP
+\fB\-\-credential\-ttl\fR \fICREDENTIAL_TTL\fR
+\ 
+.SS gw cert\-request
+\fBUsage:\fR gw cert\-request [\-h] [\-\-san NAME|IP] [\-\-name NAME] [\-\-out\-dir OUT_DIR] [\-\-key\-out PATH] [\-\-cert\-out PATH] [\-\-ca\-out PATH] [\-\-anchor ANCHOR] [\-\-reload\-cmd CMD] [\-\-no\-auto\-renew] [\-\-profile NAME|PATH] [\-\-show] [\-\-renew]
+.PP
+[sudo] request an x509 TLS cert from the anchor for a local service
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-san\fR \fINAME|IP\fR
+subject alternative name (repeatable; DNS or IP). Must be a name the node owns (its <hostname>.<mesh_domain>, a subdomain of it, or its overlay address). Defaults to the node's own name + address if omitted.
+.TP
+\fB\-\-name\fR \fINAME\fR
+basename for the written .key/.crt (default: first SAN)
+.TP
+\fB\-\-out\-dir\fR \fIOUT_DIR\fR
+directory for key/cert/ca (default: <data_dir>/tls). The per\-file flags below override individual paths.
+.TP
+\fB\-\-key\-out\fR \fIPATH\fR
+exact path for the private key (overrides \-\-out\-dir; e.g. /etc/ssl/private/pg.key)
+.TP
+\fB\-\-cert\-out\fR \fIPATH\fR
+exact path for the leaf certificate (overrides \-\-out\-dir)
+.TP
+\fB\-\-ca\-out\fR \fIPATH\fR
+exact path for the CA certificate (overrides \-\-out\-dir)
+.TP
+\fB\-\-anchor\fR \fIANCHOR\fR
+override the anchor control\-plane URL
+.TP
+\fB\-\-reload\-cmd\fR \fICMD\fR
+command the daemon runs after auto\-renewing this cert, e.g. 'systemctl reload postgresql'. Run as an argv, not through a shell \(em for pipes/redirects wrap it: "sh \-c '...'"
+.TP
+\fB\-\-no\-auto\-renew\fR
+do not auto\-renew this cert in the daemon (one\-shot; re\-run manually before expiry)
+.TP
+\fB\-\-profile\fR \fINAME|PATH\fR
+a cert profile (a shipped template name like 'postgres', or a path to your own .toml): issues + places the key/cert/ca where the service wants them, with the right owner/mode, and registers its reload. The daemon re\-places them on every renewal too. See 'gw cert\-profiles'.
+.TP
+\fB\-\-show\fR
+with \-\-profile, print that profile template (to copy and adapt) and exit \(em no root/config needed
+.TP
+\fB\-\-renew\fR
+re\-issue even if a current cert already exists (cert\-request is otherwise idempotent: an unchanged re\-request of a valid cert is a no\-op)
+.SS gw cert\-profiles
+\fBUsage:\fR gw cert\-profiles [\-h]
+.PP
+list the bundled cert profile templates for common TLS services (postgres, nginx, haproxy, redis, nats, minio, mosquitto)
+.SS gw cert\-remove
+\fBUsage:\fR gw cert\-remove [\-h] [\-\-delete\-files] name
+.PP
+[sudo] stop managing a cert (drop it from auto\-renewal); \-\-delete\-files also removes the placed key/cert/ca
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINAME\fR
+the managed cert's name (see gw cert\-status)
+.TP
+\fB\-\-delete\-files\fR
+also delete the placed key/cert/ca files (default: leave them \(em a service may still be reading them)
+.SS gw cert\-status
+\fBUsage:\fR gw cert\-status [\-h]
+.PP
+show every daemon\-managed TLS cert (expiry, renewal, SANs, files, profile) from the manifest
+.SS gw narrate
+\fBUsage:\fR gw narrate [\-h] [\-\-since DUR] [\-\-peer NAME] [\-\-grep TEXT] [\-\-failures] [\-\-raw] [\-\-stats] [\-\-no\-color] [source]
+.PP
+translate the ip/wg command trail (audit.log) into a plain\-English story of what greasewood did and why
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fISOURCE\fR
+audit log path, or '\-' for stdin (default: <data_dir>/audit.log)
+.TP
+\fB\-\-since\fR \fIDUR\fR
+only commands newer than DUR (e.g. 30m, 2h, 7d)
+.TP
+\fB\-\-peer\fR \fINAME\fR
+only operations mentioning this peer/hostname
+.TP
+\fB\-\-grep\fR \fITEXT\fR
+only operations matching TEXT (context, argv, or description)
+.TP
+\fB\-\-failures\fR
+only commands that failed
+.TP
+\fB\-\-raw\fR
+also show the raw argv under each translated command
+.TP
+\fB\-\-stats\fR
+print a one\-line tally before the narrative
+.TP
+\fB\-\-no\-color\fR
+disable ANSI colour
+.SS gw rename\-mesh
+\fBUsage:\fR gw rename\-mesh [\-h] new_name
+.PP
+[sudo] rename this mesh \(em domain, config, data dir, interface, and service move together (run on the anchor to rename the mesh; on a member to adopt a rename the anchor made). Old names resolve for one credential TTL.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINEW_NAME\fR
+the mesh's new name (a DNS label)
+.SS gw rename\-node
+\fBUsage:\fR gw rename\-node [\-h] hostname
+.PP
+[sudo] change this node's mesh hostname (anchor\-validated, no re\-join)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fIHOSTNAME\fR
+the new hostname
+.SS gw renew
+\fBUsage:\fR gw renew [\-h]
+.PP
+[sudo] force an immediate credential renewal for THIS node (applies an anchor\-side set\-caps/set\-roles now, instead of waiting ~half the TTL)
+.SS gw renew\-all
+\fBUsage:\fR gw renew\-all [\-h]
+.PP
+[sudo, anchor] request a fleet\-wide renewal \(em advertise renew_after=now so cooperating nodes renew (jittered, rate ~constant with mesh size)
+.SS gw anchor\-backup
+\fBUsage:\fR gw anchor\-backup [\-h] [\-\-out PATH]
+.PP
+[sudo, anchor] write an encrypted backup of the CA key + node registry + revoke list (passphrase via prompt or $GW_BACKUP_PASSPHRASE)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-out\fR \fIPATH\fR
+output file (default: <data_dir>/greasewood\-anchor\-backup\-<hostname>.gwbk); '\-' streams the blob to stdout (for a pipe)
+.SS gw anchor\-restore
+\fBUsage:\fR gw anchor\-restore [\-h] [\-\-data\-dir DATA_DIR] [\-\-force] archive
+.PP
+[sudo] restore an anchor backup into a data dir (stand up a replacement anchor on the same CA key \(em not a re\-root)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fIARCHIVE\fR
+the .gwbk backup file, or '\-' to read from stdin
+.TP
+\fB\-\-data\-dir\fR \fIDATA_DIR\fR
+where to restore (default: /var/lib/greasewood)
+.TP
+\fB\-\-force\fR
+overwrite an existing ca.key in the target dir
+.SS gw anchor\-transfer
+\fBUsage:\fR gw anchor\-transfer [\-h] [\-\-ssh\-opts SSH_OPTS] [\-\-force] [\-\-yes] [user@]host
+.PP
+[sudo, anchor] hand the anchor role to another host over SSH \(em same CA, no re\-root; stops this anchor as part of the handoff. The target assumes this anchor's identity.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fI[user@]host\fR
+UNDERLAY (out\-of\-band) SSH destination of the target \(em its real address, NOT its overlay/mesh address. The target takes over this anchor's overlay identity, so the handoff can't ride the overlay; open underlay SSH for the transfer if you normally run overlay\-only.
+.TP
+\fB\-\-ssh\-opts\fR \fISSH_OPTS\fR
+extra options passed to ssh (e.g. '\-p 2222 \-i key')
+.TP
+\fB\-\-force\fR
+overwrite an existing anchor on the target
+.TP
+\fB\-\-yes\fR, \fB\-y\fR
+skip the confirmation
+.SH EXAMPLES
+.nf
+sudo requirements ([sudo] in a command's help = root\-gated):
+sudo gw create <name> \-\- one\-shot anchor bootstrap
+sudo gw invite \-\- open a door window, print a join token
+sudo gw join <token> \-\- enroll this machine (creates WG interfaces)
+sudo gw run \-\- start the daemon
+sudo gw watch \-\- live dashboard (reads live WireGuard state)
+sudo gw purge \-\- remove this mesh's local state
+
+no sudo needed (read\-only):
+gw watch \-\-snapshot \(bu config \(bu cert\-status \(bu cert\-profiles
+gw diagnose (add sudo for live link state + firewall inference)
+.fi
+.SH FILES
+.TP
+\fB/etc/greasewood_\fR\fINAME\fR\fB.toml\fR
+Per-mesh membership config written by \fBgw create\fR / \fBgw join\fR.
+.TP
+\fB/var/lib/greasewood_\fR\fINAME\fR
+Per-mesh state: keys, credentials, the directory, and the audit log.
+.SH SEE ALSO
+wg(8), wg\-quick(8), ip(8), nft(8), systemctl(1)
+.PP
+Full documentation: \fIhttps://github.com/cschlick/greasewood\fR
+.SH AUTHOR
+cschlick

@@ -3817,7 +3817,12 @@ def _require_supported_os() -> None:
         sys.exit(f"greasewood is a Linux-only tool (this host is {_plat.system()}).")
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the full `gw` argument parser (all subcommands wired to their
+    cmd_* handlers via set_defaults(fn=…)). Split out of main() so the same
+    parser object feeds both runtime dispatch and offline tooling — the man page
+    (argparse-manpage) and shell completions are generated from THIS, so they
+    can't drift from `--help`."""
     p = argparse.ArgumentParser(
         prog="gw",
         description="Minimal WireGuard mesh overlay — direct-or-fail; IPv6-only overlay, v4-or-v6 underlay",
@@ -4251,6 +4256,11 @@ def main(argv=None) -> int:
     sp.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
     sp.set_defaults(fn=cmd_anchor_transfer)
 
+    return p
+
+
+def main(argv=None) -> int:
+    p = build_parser()
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
     _require_supported_os()   # after parse_args, so --version/-h still work

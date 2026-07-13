@@ -1,4 +1,6 @@
 include LICENSE
 include RUNBOOK.md SECURITY.md
 include greasewood.toml.example grants.toml.example
+include man/gw.1
+include scripts/gen_manpage.py
 recursive-include systemd *
