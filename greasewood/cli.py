@@ -440,12 +440,28 @@ def _make_port_enforcer(cfg, args, grant_policy):
                       cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy)
 
 
+_IFACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
+
+
+def _reject_bad_interface(name: str) -> None:
+    """Refuse an interface name that isn't a valid Linux ifname (1-15 chars of
+    [A-Za-z0-9_-]). The derived `gw-<mesh>` names always pass; this guards an
+    operator-supplied --interface, whose value is interpolated verbatim into
+    greasewood's `nft -f` ruleset and into filesystem paths — a `"`, newline, or
+    `;` would otherwise break the ruleset render (falling open) or escape a path."""
+    if not _IFACE_RE.match(name or ""):
+        sys.exit(f"--interface {name!r} must be 1-15 characters of "
+                 f"[A-Za-z0-9_-] (a valid Linux interface name)")
+
+
 def cmd_create(args) -> int:
     _require_root("create")
     from .hosts import valid_label as _vl
     if not _vl(args.name):
         sys.exit(f"mesh name {args.name!r} must be a DNS label "
                  "(lowercase letters/digits/hyphens, e.g. 'prod-fleet')")
+    if args.interface is not None:
+        _reject_bad_interface(args.interface)
     from .keys import CAKeys, NodeKeys
     from .ca import CA
     from .wire import NodeRecord
@@ -1391,6 +1407,9 @@ def _route_join(args, ca_pub_hex: str, token_domain: "str | None"):
     (cfg_path, data_dir, listen_port, joined_key); may set args.interface for
     a newly provisioned membership."""
     from .config import load_config
+
+    if args.interface is not None:                # covers every join branch
+        _reject_bad_interface(args.interface)
 
     cfg_path = Path(args.config) if args.config else None
     data_dir = Path(args.data_dir) if args.data_dir else None
