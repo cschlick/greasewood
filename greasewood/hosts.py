@@ -183,10 +183,16 @@ def render_block(records, domain: str) -> str:
 def _atomic_write(path: Path, text: str) -> None:
     # surrogateescape mirrors the reads: a user's non-UTF-8 hosts line comes back
     # as surrogates and must be written back byte-for-byte, not re-encoded.
-    tmp = path.with_suffix(path.suffix + ".gw.tmp")
-    tmp.write_text(text, errors="surrogateescape")
-    os.chmod(tmp, 0o644)
+    # mkstemp (random name, O_CREAT|O_EXCL, 0600) in the target dir instead of a
+    # predictable `<name>.gw.tmp`, so a pre-planted symlink can't be followed. (L3)
+    import tempfile
+    fd, tmpname = tempfile.mkstemp(dir=str(path.parent),
+                                   prefix="." + path.name + ".", suffix=".gw.tmp")
+    tmp = Path(tmpname)
     try:
+        with os.fdopen(fd, "w", errors="surrogateescape") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except OSError:
         # /etc/hosts is often a bind mount (containers) or on another fs, where

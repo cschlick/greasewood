@@ -286,6 +286,14 @@ class EnrollServer:
             raise ValueError("id_pub must be 32 bytes")
         if len(wg_pub_bytes) != 32:
             raise ValueError("wg_pub must be 32 bytes")
+        # Bound + shape the joiner hostname BEFORE it flows into the PoP body and
+        # ca.issue: reject a non-string or an over-long / control-char name so it
+        # can't bloat the registry/directory or inject into a display sink. (L5)
+        raw_host = req.get("hostname")
+        if raw_host is not None:
+            if (not isinstance(raw_host, str) or len(raw_host) > 253
+                    or any(ord(c) < 32 for c in raw_host)):
+                raise ValueError("hostname must be a printable string of <= 253 chars")
         # Proof-of-possession of id_priv. The door seed authorizes that SOMEONE
         # may enroll; this proves they hold the private key for the id_pub they
         # present, so a token holder can't enroll under another node's public
