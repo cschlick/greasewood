@@ -24,9 +24,6 @@ Adversary positions, weakest to strongest — what each can and cannot achieve:
 | **Compromised anchor** — attacker holds `ca.key` | Full admission control: mint identities, assign roles, sign policy. Cannot passively decrypt tunnels or take over an *existing* node's overlay address (addresses are self-certifying, keys never leave nodes) — but can mint a new node and re-bind mesh *names* to it, hijacking future by-name connections. No defense inside the model: this is the root of trust. Recovery is a re-root ([RUNBOOK](RUNBOOK.md)). |
 | **Local non-root user** on a member host | Network reachability over the overlay, not the node's identity — see [Multi-user hosts](#multi-user-hosts). |
 
-Out of scope: underlay availability against an on-path attacker; denial of
-service by a live, malicious anchor (see accepted risks); kernel/WireGuard
-implementation bugs; physical access to a node.
 
 ## Keys and trust boundaries
 
@@ -36,10 +33,6 @@ implementation bugs; physical access to a node.
 | `id_priv` (Ed25519) | each node | Impersonate **that one node**: renew its credential, publish its record, request its TLS certs. | `0600` on disk; no hardware backing on server VMs (accepted risk — hardware-backed identity is a v2 item). |
 | `wg_priv` (X25519) | each node | **Impersonate that node on the wire.** Contained by expiry, not a CRL: a `wg_pub` is accepted only while a live credential binds it, so `gw revoke` (or rotating `wg_priv`) drops it fleet-wide within one credential TTL. **Not** auto-contained while the node keeps renewing — act on a known leak. | `0600` on disk; acceptance is credential-bound (expiry + revocation are the structural containment). |
 | join token / door seed | transient | Enroll **one** node during a single open window. The anchor still enforces revoke + unique hostname, and the door admits one peer. | High-entropy 32-byte seed; time-boxed (`door_window`, default 15m); single-slot. |
-
-Operational key handling — offline backups, leak response, moving or re-rooting
-the CA — is deliberately out of band: it's your key ceremony, not the
-protocol's. The [RUNBOOK](RUNBOOK.md) has the SOPs.
 
 ## Network exposure
 
@@ -130,10 +123,6 @@ Additional control-plane protections:
   is immediate (refuses renew/publish and evicts locally, live — no restart). On
   other nodes a revoked peer falls out within at most one credential TTL as its
   credential expires. Shorten `credential_ttl` if you need a tighter bound.
-- **64-bit address host portion.** A deliberate address collision needs ~2⁶⁴
-  work *and* still requires the victim's `id_priv` to be useful — that should be acceptable.
-- **On-disk `id_priv`** on server VMs (no hardware backing). Documented and
-  intentional for the primary deployment.
 - **Clock integrity is a security dependency.** Every allow/deny is a timestamp
   comparison (expiry, skew). Run NTP/chrony and treat it as part of your security
   posture.
@@ -155,34 +144,11 @@ What a non-root local user still **cannot** do:
 
 So a co-tenant gets **network reachability to the mesh**, not the node's identity.
 If that reachability itself is unacceptable, enforce it at the OS layer (greasewood
-won't, by design — it never touches your firewall):
+won't, by design.
 
-1. **nftables owner match** — restrict which local users may originate overlay
-   traffic (egress; owner match is output-only). Combined with the base
-   `ct state established,related accept`, a denied user can't initiate anything
-   over the mesh:
-
-   ```
-   # Members of group "gwmesh" (and root, for the daemon) may use the overlay.
-   chain output {
-       type filter hook output priority 0; policy accept;
-       oifname "gw-myfleet" meta skuid 0 accept
-       oifname "gw-myfleet" meta skgid "gwmesh" accept
-       oifname "gw-myfleet" drop
-   }
-   ```
-
-   This gates who can *initiate*. It does not gate inbound *new* connections from
-   the mesh to a local service (owner match has no input-side equivalent); for
-   that, restrict inbound `iifname "gw-myfleet"` to an allowlist of dports, or use
-   option 2.
-2. **Network namespace** — run greasewood and the intended workloads in a
-   dedicated netns so `gw-myfleet` isn't visible to other users' processes at all.
-   Strongest isolation; more setup.
-3. **Don't co-tenant** untrusted users on a mesh machine — the implicit default.
 
 ## Reporting
 
-This is a personal/homelab project. File issues on the GitHub repository (the
+This is a personal project. File issues on the GitHub repository (the
 GitLab copy is a read-only mirror). For the operational response to key loss or
 compromise, see [RUNBOOK.md](RUNBOOK.md).
