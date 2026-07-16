@@ -606,6 +606,10 @@ ports = ["tcp/9100"]
 # why: prometheus scrapes everyone — hub-and-spoke tunnels, not a clique.
 ```
 
+A single grant can be a whole service: `worker -> files : tcp/2049` is a
+complete file share, with the grant table acting as the share's ACL — see the
+[NFS worked example](#worked-example-a-shared-directory-over-the-mesh-nfs).
+
 ```bash
 # edit the anchor's <data_dir>/grants.toml, then apply it — with a preview:
 sudo gw policy apply
