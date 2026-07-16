@@ -85,3 +85,12 @@ ports = ["tcp/22"]
 # to    = ["*"]                  # every node
 # ports = ["tcp/9100"]
 # # why: prometheus scrapes node_exporter fleet-wide (hub-and-spoke tunnels).
+#
+# [[grant]]
+# from  = ["worker"]
+# to    = ["files"]
+# ports = ["tcp/2049"]
+# # why: workers mount the NFS workspace on the role:files node. This grant IS
+# #      the share's ACL — NFSv4 is single-port, so the exports file stays
+# #      static (scoped to the overlay /64) and membership in role:worker
+# #      decides who can mount. Full recipe: the README's NFS worked example.
