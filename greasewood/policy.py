@@ -3,11 +3,14 @@ greasewood.policy — roles, grants, and the derived tunnel topology.
 
 The mesh's access policy is a single allow-only grant table (grants.toml on
 the anchor → CA-signed GrantTable → distributed via directory sync). Grants
-are sentences about ROLES — `from = ["web"], to = ["api"], ports = ["tcp/8000"]`
-— where a role is a CA-signed cap (`role:web`), anchor-assigned, never
-self-asserted. Roles are the ONLY configured vocabulary; "segments" are the
-emergent, unnamed structure the grant graph produces (nodes a grant connects
-share one), reported by `gw watch`, configured by nothing.
+are sentences about TAGS — `from = ["web"], to = ["api"], ports = ["tcp/8000"]`
+— where a tag is a role (a CA-signed cap `role:web`, anchor-assigned, never
+self-asserted) or a specific machine by its CA-attested hostname
+(`host:nas` — derived at match time from the credential's hostname field,
+never stored or assignable as a cap; see node_tags). Roles and host names are
+the ONLY configured vocabulary; "segments" are the emergent, unnamed
+structure the grant graph produces (nodes a grant connects share one),
+reported by `gw watch`, configured by nothing.
 
 The table DERIVES the tunnel topology: a WireGuard peer link exists between
 two nodes iff some grant connects their tags, in either direction (tunnels
@@ -71,12 +74,16 @@ RESERVED_ROLES = ("*", "anchor")
 DEFAULT_GRANTS_TOML = """\
 # greasewood grant table — the mesh's access policy.
 #
-# A grant is a sentence about ROLES:  from = [...] -> to = [...] : ports = [...]
+# A grant is a sentence about TAGS:  from = [...] -> to = [...] : ports = [...]
 # A flow is allowed iff some grant covers it; there is NO deny rule — you omit
 # the grant instead. Grants govern BOTH which tunnels exist and which ports are
 # open. A node with no inbound grant is reachable by no one, yet is NOT isolated:
 # it can still DIAL OUT to anything it has a `from <me> -> to <them>` grant for
 # (replies ride the established tunnel).
+#
+# An entry in from/to is a ROLE name, `host:<name>` (ONE machine, by its
+# CA-attested hostname — e.g. from = ["host:bb"], to = ["host:nas"]; pin any
+# name you grant by: `gw invite --hostname <name>`), or '*' (every node).
 #
 # Roles (assigned by the anchor at `gw invite`):
 #   node    — every ordinary member (the default role for new nodes)
@@ -132,10 +139,24 @@ ports = ["tcp/22"]
 """
 
 
-def node_tags(caps: list) -> set:
-    """The roles a node holds — its role: caps, prefix stripped. Includes '*'
-    if the node holds the wildcard role (the anchor)."""
-    return {c.split(":", 1)[1] for c in caps if c.startswith(_TAG_PREFIXES)}
+def node_tags(caps: list, hostname: "str | None" = None) -> set:
+    """The grant-matchable tags a node holds: its role: caps (prefix stripped —
+    includes '*' for the anchor), PLUS the derived `host:<hostname>` tag when a
+    hostname is given. The host tag is never stored anywhere — it is derived
+    at match time from the CA-signed credential's hostname field, so it rides
+    the same trust chain as a role without being assignable, revocable, or
+    forgeable as a cap. A role-derived tag containing ':' is DROPPED: a role
+    cap must never be able to smuggle a `host:`-namespaced tag (a role named
+    'host:nas' would otherwise impersonate a host grant target)."""
+    tags = set()
+    for c in caps:
+        if c.startswith(_TAG_PREFIXES):
+            t = c.split(":", 1)[1]
+            if ":" not in t:
+                tags.add(t)
+    if hostname:
+        tags.add(f"host:{hostname}")
+    return tags
 
 
 def parse_grants_toml(text: str) -> list:
@@ -166,18 +187,23 @@ def _grant_connects(grant: dict, a_tags: set, b_tags: set) -> bool:
 
 
 def peers_allowed(local_caps: list, peer_caps: list,
-                  grants: "list | None") -> bool:
+                  grants: "list | None",
+                  local_hostname: "str | None" = None,
+                  peer_hostname: "str | None" = None) -> bool:
     """THE tunnel-existence decision (used as reconcile's step-6 policy).
 
     Hardwired first, beneath any table: the anchor ('*' role on either side)
     peers with everyone — the control plane is never prunable by policy.
     Then: NO table → the flat trusted mesh (every verified member peers; the
     implicit policy is `* -> * : *`, so a fresh mesh needs no file). With a
-    table → a link exists iff some grant connects the two nodes' roles in
-    either direction. Roles never create connectivity by themselves; only
-    grants (or the absence of any policy) do.
+    table → a link exists iff some grant connects the two nodes' tags in
+    either direction. Tags are roles plus the derived `host:<name>` (see
+    node_tags) — pass the credential hostnames to enable host grants; omitted,
+    only role grants match (back-compatible). Roles never create connectivity
+    by themselves; only grants (or the absence of any policy) do.
     """
-    local, peer = node_tags(local_caps), node_tags(peer_caps)
+    local = node_tags(local_caps, local_hostname)
+    peer = node_tags(peer_caps, peer_hostname)
     if "*" in local or "*" in peer:
         return True
     if grants is None:
@@ -206,10 +232,13 @@ class GrantPolicy:
         with self._lock:
             return self._table
 
-    def __call__(self, local_caps: list, peer_caps: list) -> bool:
+    def __call__(self, local_caps: list, peer_caps: list,
+                 local_hostname: "str | None" = None,
+                 peer_hostname: "str | None" = None) -> bool:
         table = self.table
         return peers_allowed(local_caps, peer_caps,
-                             table.grants if table else None)
+                             table.grants if table else None,
+                             local_hostname, peer_hostname)
 
     def load_cache(self) -> None:
         """Adopt the on-disk last-known-good table, if any (verified — the
@@ -370,8 +399,10 @@ def tunnel_delta(records, old_grants: "list | None",
     recs = list(records)
     for i, a in enumerate(recs):
         for b in recs[i + 1:]:
-            before = peers_allowed(a.cred.caps, b.cred.caps, old_grants)
-            after = peers_allowed(a.cred.caps, b.cred.caps, new_grants)
+            before = peers_allowed(a.cred.caps, b.cred.caps, old_grants,
+                                   a.cred.hostname, b.cred.hostname)
+            after = peers_allowed(a.cred.caps, b.cred.caps, new_grants,
+                                  a.cred.hostname, b.cred.hostname)
             if after and not before:
                 created.append((a.hostname, b.hostname))
             elif before and not after:
@@ -380,15 +411,33 @@ def tunnel_delta(records, old_grants: "list | None",
 
 
 def unmatched_tags(grants: list, records) -> set:
-    """Grant tags that NO current node holds — usually a typo'd role. A grant
-    naming one fails closed and silently, so `gw policy apply` warns."""
+    """Grant tags that NO current node holds — usually a typo'd role or a
+    `host:` name no member has. A grant naming one fails closed and silently,
+    so `gw policy apply` warns."""
     held = set()
     for r in records:
-        held |= node_tags(r.cred.caps)
+        held |= node_tags(r.cred.caps, r.cred.hostname)
     named = set()
     for g in grants:
         named |= set(g["from"]) | set(g["to"])
     return {t for t in named - held if t != "*"}
+
+
+def unpinned_host_grants(grants: list, records) -> list:
+    """`host:` grant targets whose current holder chose its own name (no
+    `hostname-pinned` cap). A host grant is only as strong as name assignment:
+    a self-named node controls what it is called (within uniqueness), so `gw
+    policy apply` warns and suggests pinning. Returns sorted hostnames."""
+    named = set()
+    for g in grants:
+        for entry in list(g["from"]) + list(g["to"]):
+            if entry.startswith("host:"):
+                named.add(entry[len("host:"):])
+    unpinned = []
+    for r in records:
+        if r.cred.hostname in named and "hostname-pinned" not in r.cred.caps:
+            unpinned.append(r.cred.hostname)
+    return sorted(unpinned)
 
 
 def unapplied_edits(data_dir) -> str:

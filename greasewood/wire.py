@@ -467,6 +467,26 @@ def _validate_grant(g: dict, i: int) -> dict:
     ports = _str_list(g.get("ports", ["*"]), f"grant #{i} ports")
     if not src or not dst:
         raise ValueError(f"grant #{i}: from and to must be non-empty")
+    # Entry vocabulary: '*', a role name, or 'host:<name>'. A host entry's name
+    # must be a DNS-safe label (the sanitized form credentials carry — a raw
+    # unsanitized name here would silently never match). A ROLE entry must not
+    # contain ':' — that namespace is reserved for prefixed entry kinds, and a
+    # colon in a role name is a typo'd host: entry waiting to grant nothing.
+    from .hosts import valid_label
+    for entry in src + dst:
+        if entry == "*":
+            continue
+        if entry.startswith("host:"):
+            name = entry[len("host:"):]
+            if not valid_label(name):
+                raise ValueError(
+                    f"grant #{i}: bad host entry {entry!r} — the name must be "
+                    f"a DNS-safe label (lowercase [a-z0-9-], as `gw watch` "
+                    f"shows it)")
+        elif ":" in entry:
+            raise ValueError(
+                f"grant #{i}: bad entry {entry!r} — a role name can't contain "
+                f"':' (did you mean 'host:<name>'?)")
     for p in ports:
         if p == "*":
             continue

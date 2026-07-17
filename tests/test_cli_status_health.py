@@ -202,7 +202,7 @@ def test_roster_live_mode_columns(tmp_path):
         return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
                           cred=cred).sign(k.id_priv)
     records = [rec(keys, "me"), rec(linked, "db01"), rec(pending, "web1")]
-    cfg = types.SimpleNamespace(caps=["segment:mesh"], mesh_domain="gw.internal")
+    cfg = types.SimpleNamespace(caps=["segment:mesh"], mesh_domain="gw.internal", hostname="self")
     nowe = int(time.time())
     live = {
         base64.b64encode(linked.wg_pub_bytes).decode():

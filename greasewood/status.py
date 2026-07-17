@@ -331,7 +331,8 @@ def _segment_analysis(members, grants=None):
         for b in members[i + 1:]:
             if linked(a, b):
                 parent[find(a.cred.addr)] = find(b.cred.addr)
-            elif peers_allowed(a.cred.caps, b.cred.caps, grants) \
+            elif peers_allowed(a.cred.caps, b.cred.caps, grants,
+                               a.cred.hostname, b.cred.hostname) \
                     and (a.endpoints or b.endpoints):
                 missing.append((a, b))         # possible + authorized, but absent
     comps = {}
@@ -1132,7 +1133,8 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
         "expired": now >= r.cred.exp,
         "ttl_remaining_s": int((r.cred.exp - now).total_seconds()),
         "is_self": r.id_pub.hex() == own_id,
-        "peer_expected": peers_allowed(own_caps, caps, grants),
+        "peer_expected": peers_allowed(own_caps, caps, grants,
+                                       cfg.hostname, r.cred.hostname),
         "reachable": sorted(r.reachable) if r.reachable else [],
     }
     if live_peers is not None:
@@ -1656,10 +1658,14 @@ def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
     possible."""
     from .policy import peers_allowed
 
+    def _hn(col):
+        return col.rec.cred.hostname if col.rec is not None else None
+
     print(f"  {col_a.label} ↔ {col_b.label}")
-    if not peers_allowed(col_a.caps, col_b.caps, grants):
-        print("    ✗ policy: no grant connects their roles — no tunnel by design "
-              "(add a grant to grants.toml and `gw policy apply` to change this)")
+    if not peers_allowed(col_a.caps, col_b.caps, grants, _hn(col_a), _hn(col_b)):
+        print("    ✗ policy: no grant connects their roles or host names — no "
+              "tunnel by design (add a grant to grants.toml and `gw policy "
+              "apply` to change this)")
         return
     if "*" in col_a.roles or "*" in col_b.roles:
         why = "anchor is reach-all (hardwired beneath the policy)"

@@ -443,7 +443,8 @@ def _make_port_enforcer(cfg, args, grant_policy):
              cfg.wg_interface)
     _rec.clear_enforce_degraded(cfg.data_dir)        # healthy
     return PortFilter(table_name(membership_key(cfg.mesh_domain)),
-                      cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy)
+                      cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy,
+                      local_hostname=cfg.hostname)
 
 
 _IFACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
@@ -697,7 +698,10 @@ def _menu_from_grants(data_dir: "Path") -> list:
         sys.exit(f"--self-roles-from-grants: {e}")
     referenced = {r for g in grants for r in (g["from"] + g["to"])}
     excluded = set(RESERVED_ROLES) | {"node", "admin"}
-    menu = sorted(referenced - excluded)
+    # host: entries name a specific machine, not a role — a menu offering
+    # "host:nas" would let any joiner self-select into another machine's
+    # grants, so they are never menu material.
+    menu = sorted(r for r in referenced - excluded if ":" not in r)
     if not menu:
         sys.exit("--self-roles-from-grants: grants.toml references no offerable "
                  "roles (only built-ins: " +
@@ -2608,6 +2612,33 @@ def cmd_rename_node(args) -> int:
         sys.exit("this node's hostname is anchor-pinned; rename is disabled. "
                  "To change it, re-invite the node with a new --hostname on the anchor.")
 
+    # A rename silently detaches this node from any `host:<oldname>` grants in
+    # the active policy — access drops (fail closed, but surprising) until the
+    # anchor's grants.toml says host:<newname> and is re-applied. Check the
+    # local signed policy cache and confirm BEFORE asking the anchor.
+    try:
+        from .wire import GrantTable as _GT
+        from . import policy as _polmod
+        _pp = cfg.data_dir / _polmod.POLICY_BASENAME
+        if _pp.exists():
+            _tags = set()
+            for _g in _GT.from_dict(json.loads(_pp.read_text())).grants:
+                _tags |= set(_g["from"]) | set(_g["to"])
+            if f"host:{cfg.hostname}" in _tags:
+                print(f"⚠ the active policy grants by this node's NAME "
+                      f"(host:{cfg.hostname}) — renaming to {newname!r} detaches "
+                      f"it from those grants until the anchor's grants.toml says "
+                      f"host:{newname} and `gw policy apply` runs.")
+                try:
+                    if input("rename anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                        print("not renamed.")
+                        return 1
+                except EOFError:
+                    sys.exit("not renamed (no confirmation on a non-interactive "
+                             "run; update grants.toml first, or confirm at a tty).")
+    except (ValueError, KeyError, OSError) as e:
+        log.debug("could not check the policy cache for host grants: %s", e)
+
     try:
         keys = NodeKeys.load(cfg.data_dir)
     except FileNotFoundError:
@@ -2900,6 +2931,7 @@ def cmd_run(args) -> int:
         on_reachable=_publish_reachable,
         port_enforcer=port_enforcer,
         policy_refresh=grant_policy.refresh_from_cache,
+        local_hostname=cfg.hostname,
     )
     recon.start()
 
@@ -3192,8 +3224,21 @@ def cmd_policy(args) -> int:
     records = directory.all()
 
     for tag in sorted(polmod.unmatched_tags(grants, records)):
-        print(f"  ⚠ grant names {tag!r} but NO current node holds role:{tag} "
-              f"— typo? (it grants nothing until a node holds it)")
+        if tag.startswith("host:"):
+            print(f"  ⚠ grant names {tag!r} but NO current member has that "
+                  f"hostname — typo, or a not-yet-joined machine? Until then it "
+                  f"grants nothing; when a node DOES take that name it inherits "
+                  f"these grants, so pin the name at invite "
+                  f"(gw invite --hostname {tag[len('host:'):]}).")
+        else:
+            print(f"  ⚠ grant names {tag!r} but NO current node holds role:{tag} "
+                  f"— typo? (it grants nothing until a node holds it)")
+    for name in polmod.unpinned_host_grants(grants, records):
+        print(f"  ⚠ host grant on {name!r}, but that node named ITSELF (its "
+              f"hostname isn't anchor-pinned): it could rename away from its "
+              f"grants, and after decommissioning the freed name — and these "
+              f"grants — pass to whoever claims it. Prefer pinning: re-invite "
+              f"with `gw invite --hostname {name}`.")
 
     new_seq = (old_table.seq + 1) if old_table else 1
     old_grants = old_table.grants if old_table else []

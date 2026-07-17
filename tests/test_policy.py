@@ -401,3 +401,62 @@ def test_unapplied_edits_flags_pending_changes(tmp_path):
     (tmp_path / "grants.toml").write_text(
         '[[grant]]\nfrom=["web"]\nto=["db"]\nports=["*"]\n')
     assert "grant(s)" in policy.unapplied_edits(tmp_path)
+
+
+# --- host grants (`host:<name>` — derived from the credential hostname) -----
+
+def test_host_grant_connects_exactly_that_pair():
+    g = _grants((["host:bb"], ["host:nas"], ["tcp/2049"]))
+    assert policy.peers_allowed(["role:node"], ["role:node"], g, "bb", "nas")
+    assert policy.peers_allowed(["role:node"], ["role:node"], g, "nas", "bb")  # symmetric
+    assert not policy.peers_allowed(["role:node"], ["role:node"], g, "bb", "other")
+    assert not policy.peers_allowed(["role:node"], ["role:node"], g, "x", "y")
+
+
+def test_host_and_role_entries_mix_in_one_grant():
+    g = _grants((["worker", "host:laptop"], ["host:nas"], ["tcp/2049"]))
+    assert policy.peers_allowed(["role:worker"], ["role:node"], g, "w1", "nas")
+    assert policy.peers_allowed(["role:node"], ["role:node"], g, "laptop", "nas")
+    assert not policy.peers_allowed(["role:node"], ["role:node"], g, "other", "nas")
+
+
+def test_host_grants_inert_without_hostnames():
+    # Back-compat: a caller that doesn't pass hostnames gets role matching only.
+    g = _grants((["host:bb"], ["host:nas"], ["*"]))
+    assert not policy.peers_allowed(["role:node"], ["role:node"], g)
+
+
+def test_role_cap_cannot_smuggle_a_host_tag():
+    # A cap 'role:host:nas' must NOT match a host:nas grant — host tags derive
+    # ONLY from the credential hostname, never from role caps.
+    g = _grants((["host:nas"], ["*"], ["*"]))
+    assert not policy.peers_allowed(["role:host:nas"], ["role:node"], g, "evil", "n2")
+    assert "host:nas" not in policy.node_tags(["role:host:nas"])
+    assert "host:nas" in policy.node_tags(["role:node"], "nas")
+
+
+def test_unmatched_tags_flags_unheld_host_names_only():
+    recs = [_rec("nas", ["role:node"]), _rec("bb", ["role:worker"])]
+    g = _grants((["host:bb"], ["host:nas"], ["*"]),
+                (["host:ghost"], ["worker"], ["*"]))
+    assert policy.unmatched_tags(g, recs) == {"host:ghost"}
+
+
+def test_unpinned_host_grants_flags_self_named_holders():
+    pinned = _rec("nas", ["role:node", "hostname-pinned"])
+    selfnamed = _rec("bb", ["role:node"])
+    ungran = _rec("other", ["role:node"])
+    g = _grants((["host:bb"], ["host:nas"], ["*"]))
+    assert policy.unpinned_host_grants(g, [pinned, selfnamed, ungran]) == ["bb"]
+
+
+def test_parse_grants_validates_host_entries():
+    ok = policy.parse_grants_toml(
+        '[[grant]]\nfrom = ["host:bb"]\nto = ["host:nas"]\nports = ["tcp/2049"]\n')
+    assert ok[0]["from"] == ["host:bb"]
+    with pytest.raises(ValueError, match="bad host entry"):
+        policy.parse_grants_toml(
+            '[[grant]]\nfrom = ["host:Not_Valid!"]\nto = ["*"]\n')
+    with pytest.raises(ValueError, match="can't contain"):
+        policy.parse_grants_toml(
+            '[[grant]]\nfrom = ["hosts:nas"]\nto = ["*"]\n')   # typo'd prefix

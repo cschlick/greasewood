@@ -149,7 +149,7 @@ def test_roster_columns_are_rock_solid_across_dynamic_values():
     a, b = NodeKeys.generate(), NodeKeys.generate()
     records = [_rec(a, _cred(ca, a, "alpha", ["mesh"], hours=23)),
                _rec(b, _cred(ca, b, "beta", ["mesh"], secs=1800))]   # 23h and <1h!
-    cfg = types.SimpleNamespace(mesh_domain="pm.internal", caps=["role:mesh"])
+    cfg = types.SimpleNamespace(mesh_domain="pm.internal", caps=["role:mesh"], hostname="self")
     now = dt.datetime.now(_UTC)
 
     def header(rates, lat):
