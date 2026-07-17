@@ -26,6 +26,21 @@
 #        the enrollment door     tcp/51903   join-time only
 #        established replies, ICMPv6
 #
+#  A from/to entry is a ROLE name, `host:<name>` (ONE specific machine, by its
+#  CA-attested hostname), or '*' (every node). Host grants skip the ceremony of
+#  a single-member role when you just mean "this box":
+#      [[grant]]
+#      from  = ["host:bb"]
+#      to    = ["host:nas"]
+#      ports = ["tcp/2049"]
+#  Two sharp edges, both warned about at `gw policy apply`:
+#    · a host grant is only as strong as name assignment — by default a node
+#      NAMES ITSELF at join, so pin any name you grant by (`gw invite
+#      --hostname nas` makes it anchor-chosen and un-renameable)
+#    · the grant follows the NAME: a rename detaches the node from it (fail
+#      closed, and `gw rename-node` warns); a freed name hands its grants to
+#      the next machine the anchor lets claim it.
+#
 #  Built-in roles (CA-signed caps, assigned at invite / set-roles / set-caps):
 #      node    every ordinary member (the default role for new nodes)
 #      anchor  the single anchor host — RESERVED, never assignable to a joiner

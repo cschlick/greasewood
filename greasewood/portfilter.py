@@ -97,7 +97,8 @@ def nft_usable() -> bool:
         return False
 
 
-def _port_allowances(records, local_caps: list, grants: "list | None") -> dict:
+def _port_allowances(records, local_caps: list, grants: "list | None",
+                     local_hostname: "str | None" = None) -> dict:
     """For THIS node (server side), map each allowed inbound flow to the set of
     source overlay addresses permitted to use it:
 
@@ -108,14 +109,14 @@ def _port_allowances(records, local_caps: list, grants: "list | None") -> dict:
     `to` (or `to` names `*`); its sources are the addresses of every node
     holding a role in the grant's `from` (or every node, for `from = ["*"]`).
     """
-    my_tags = node_tags(local_caps)
+    my_tags = node_tags(local_caps, local_hostname)
     allow: dict = {}
 
     def _sources(from_roles: list) -> set:
         wild = "*" in from_roles
         want = set(from_roles)
         return {r.cred.addr for r in records
-                if wild or (node_tags(r.cred.caps) & want)}
+                if wild or (node_tags(r.cred.caps, r.cred.hostname) & want)}
 
     for grant in (grants or []):
         to = grant["to"]
@@ -147,12 +148,14 @@ def _fully_open(grants: "list | None") -> bool:
 
 
 def render_ruleset(table: str, iface: str, control_port: int, records,
-                   local_caps: list, grants: "list | None") -> str:
+                   local_caps: list, grants: "list | None",
+                   local_hostname: "str | None" = None) -> str:
     """The full desired `table inet greasewood_<mesh>` as an `nft -f` document. A fully
     open policy (no table, or an explicit * -> * : *) admits all mesh traffic
     with one accept; otherwise default-deny within the mesh + the granted flows.
     Enforcement is always installed — 'open' is a policy state, not its absence."""
-    allow = {} if _fully_open(grants) else _port_allowances(records, local_caps, grants)
+    allow = {} if _fully_open(grants) else _port_allowances(
+        records, local_caps, grants, local_hostname)
 
     sets, rules = [], []
     # Set + rule per port bucket. Deterministic ordering → stable text → the
@@ -218,11 +221,13 @@ class PortFilter:
     changed. Holds no lock — reconcile calls it single-threaded."""
 
     def __init__(self, table: str, iface: str, control_port: int,
-                 local_caps: list, grant_policy) -> None:
+                 local_caps: list, grant_policy,
+                 local_hostname: "str | None" = None) -> None:
         self._table = table
         self._iface = iface
         self._control_port = control_port
         self._local_caps = local_caps
+        self._local_hostname = local_hostname  # enables derived host: tags
         self._grant_policy = grant_policy      # .table → GrantTable | None
         self._applied: "str | None" = None
 
@@ -246,7 +251,8 @@ class PortFilter:
 
     def apply(self, records) -> None:
         desired = render_ruleset(self._table, self._iface, self._control_port,
-                                 records, self._local_caps, self._grants())
+                                 records, self._local_caps, self._grants(),
+                                 self._local_hostname)
         # Skip only when the ruleset is unchanged AND our table is still in the
         # kernel. The in-memory cache alone isn't enough: an operator's
         # `nft -f` that starts with `flush ruleset` wipes every table including
