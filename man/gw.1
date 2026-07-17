@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-13" "greasewood 0.1.1" "User Commands"
+.TH GW 1 "2026-07-17" "greasewood 0.1.1" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -249,15 +249,15 @@ comma\-separated roles, e.g. 'web,worker' (replaces role: tags; keeps tls; empty
 \fB\-\-now\fR
 apply immediately \(em also request a fleet renewal (as `gw renew\-all` does) so the node adopts the new roles live, no restart. Omit and it takes effect at the node's next natural renewal (~half TTL). Fleet\-wide, so for a batch prefer several set\-roles then one renew\-all.
 .SS gw policy
-\fBUsage:\fR gw policy [\-h] [\-y] {show,apply} [file]
+\fBUsage:\fR gw policy [\-h] [\-y] {show,edit,apply} [file]
 .PP
 show the mesh's grant table, or [sudo, anchor] apply grants.toml \(em the allow\-only role policy that derives which tunnels exist
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit
 .TP
-\fI{show,apply}\fR
-show: render the active table (no root). apply: validate + preview tunnel delta + sign + publish
+\fI{show,edit,apply}\fR
+show: render the active table (no root). edit: [sudo, anchor] open grants.toml in your editor ($SUDO_EDITOR/$VISUAL/$EDITOR, else nano), validate on save, then offer the apply preview. apply: validate + preview tunnel delta + sign + publish
 .TP
 \fIFILE\fR
 grants.toml path (apply only; default: <data_dir>/grants.toml)

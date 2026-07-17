@@ -3166,8 +3166,30 @@ def cmd_config(args) -> int:
 # policy — the mesh's grant table (roles → roles : ports; derives the topology)
 # ---------------------------------------------------------------------------
 
+def _resolve_editor() -> list:
+    """The editor argv for `gw policy edit`, visudo-style: $SUDO_EDITOR, then
+    $VISUAL, then $EDITOR (any may carry arguments, e.g. 'code --wait'), else
+    nano, else vi. Under sudo the user's EDITOR is often stripped by env_reset,
+    which is exactly why the nano fallback matters."""
+    import shlex
+    for var in ("SUDO_EDITOR", "VISUAL", "EDITOR"):
+        val = os.environ.get(var)
+        if val:
+            argv = shlex.split(val)
+            if argv and shutil.which(argv[0]):
+                return argv
+    for fallback in ("nano", "vi"):
+        if shutil.which(fallback):
+            return [fallback]
+    sys.exit("no editor found — set $EDITOR, or install nano")
+
+
 def cmd_policy(args) -> int:
     """`gw policy show` — render the active grant table (any node, no root).
+    `gw policy edit` — anchor: open grants.toml in the operator's editor,
+    validate on save (re-edit loop on a parse error, so a typo never lands),
+    then offer to run the apply preview immediately — the edit → apply gap is
+    where forgotten applies come from.
     `gw policy apply [file]` — anchor: validate grants.toml, PREVIEW the change
     (grant diff + tunnel delta), ask to confirm, then sign + publish. This is
     the deliberate path a policy change takes — grants.toml is the source, but
@@ -3192,6 +3214,53 @@ def cmd_policy(args) -> int:
             print(f"\n⚠ grants.toml has unapplied changes ({pending}) — run "
                   f"`sudo gw policy apply` to review and apply them.")
         return 0
+
+    # ---- edit (anchor, root: editor → validate loop → offer apply) ----
+    if args.action == "edit":
+        _require_root("policy edit", "grants.toml lives in the root-owned data dir")
+        cfg = load_config(Path(args.config))
+        if cfg.role != "anchor":
+            sys.exit("gw policy edit must run on the anchor — grants.toml is "
+                     "authored there; this node only receives the signed policy")
+        gpath = Path(args.file) if args.file else cfg.data_dir / polmod.GRANTS_BASENAME
+        if not gpath.exists():
+            gpath.write_text(polmod.DEFAULT_GRANTS_TOML)
+            print(f"no grants.toml yet — seeded the default-closed template at {gpath}")
+        editor = _resolve_editor()
+        print(f"editing {gpath}  ({' '.join(editor)})")
+        while True:
+            r = subprocess.run([*editor, str(gpath)])
+            if r.returncode != 0:
+                sys.exit(f"{editor[0]} exited {r.returncode} — {gpath} left "
+                         f"as-is, nothing applied")
+            try:
+                polmod.parse_grants_toml(gpath.read_text())
+                break
+            except ValueError as e:
+                print(f"  ✗ {e}")
+                try:
+                    again = input("re-edit? [Y/n] ").strip().lower()
+                except EOFError:
+                    again = "n"
+                if again in ("n", "no"):
+                    sys.exit(f"saved but INVALID — {gpath} cannot be applied "
+                             f"until fixed (`gw policy show` will flag it)")
+        if args.file is None:
+            pending = polmod.unapplied_edits(cfg.data_dir)
+            if not pending:
+                print("✓ valid — identical to the applied policy; nothing to do")
+                return 0
+            print(f"✓ valid — {pending}")
+        else:
+            print("✓ valid")
+        try:
+            go = input("run the apply preview now? [Y/n] ").strip().lower()
+        except EOFError:
+            go = "n"
+        if go in ("n", "no"):
+            print("not applied — edits are inert until:  sudo gw policy apply")
+            return 0
+        # confirmed: fall through into apply below (it re-reads + previews).
 
     # ---- apply (anchor, root: signs with the CA key) ----
     from .directory import Directory
@@ -4218,8 +4287,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show the mesh's grant table, or [sudo, anchor] "
                              "apply grants.toml — the allow-only role policy "
                              "that derives which tunnels exist")
-    sp.add_argument("action", choices=["show", "apply"],
+    sp.add_argument("action", choices=["show", "edit", "apply"],
                     help="show: render the active table (no root). "
+                         "edit: [sudo, anchor] open grants.toml in your editor "
+                         "($SUDO_EDITOR/$VISUAL/$EDITOR, else nano), validate "
+                         "on save, then offer the apply preview. "
                          "apply: validate + preview tunnel delta + sign + publish")
     sp.add_argument("file", nargs="?", default=None,
                     help="grants.toml path (apply only; default: "
