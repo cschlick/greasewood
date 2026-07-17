@@ -317,6 +317,52 @@ systemd service that `gw create`/`gw join` set up for you — see [Running as a
 service](#running-as-a-service). The Quickstart below
 runs it by hand with `gw run` to show the moving parts.
 
+### First-run pitfalls
+
+Every one of these comes from a real fleet coming up; each has a one-command
+fix.
+
+- **`sudo: gw: command not found` after a plain `pipx install`.** A per-user
+  install lands in `~/.local/bin`, which sudo's `secure_path` never searches.
+  And "fixing" it with `sudo pipx install` (no `--global`) is the same trap
+  one home directory over: it lands in `/root/.local/bin`, on *nobody's* PATH.
+  The `--global` flag isn't cosmetic — the daemon is a root service, so its
+  venv must live somewhere root-owned and stable, not inside a login account's
+  home. Uninstall the stray one (`pipx uninstall greasewood`, with `sudo` if
+  it went to root's home) and reinstall with `--global`.
+
+- **`pipx: error: unrecognized arguments: --global`.** The distro's pipx
+  predates 1.5 (Ubuntu 24.04 ships 1.4.3). Set by hand exactly what
+  `--global` sets:
+
+  ```bash
+  sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install greasewood
+  ```
+
+  Upgrades on that host need the same env vars (a plain `sudo pipx upgrade`
+  looks in `/root/.local` and finds nothing). Or skip pipx and use the
+  bundled `install.sh`, which pins its own venv at `/opt/greasewood`.
+
+- **`FileNotFoundError: ... 'wg'` at join.** pipx installs only the Python
+  side; the WireGuard tools come from your distro (`sudo apt install
+  wireguard-tools`). Don't be fooled by the join getting partway: the kernel
+  module being present (`ip link add … type wireguard` succeeds) says nothing
+  about the `wg` *binary* being installed. The distro `.deb`/`.rpm` packages
+  pull it in for you; pipx cannot.
+
+- **`credential verification failed: no trusted CA signature found` at join —
+  even with a fresh token.** If the anchor was re-created (`gw create
+  --force`) after its daemon started, the daemon keeps signing with the old
+  CA it loaded at startup while every new invite embeds the new on-disk CA:
+  the join's door tunnel comes up (the door key survives a re-create) and
+  then the credential is rightly refused. Restart the anchor daemon so it
+  re-reads the key, then mint a fresh invite:
+
+  ```bash
+  sudo systemctl restart greasewood@<mesh>   # on the anchor
+  sudo gw invite                             # token minted AFTER the restart
+  ```
+
 ## Quickstart
 
 ### 1. Bootstrap the anchor
