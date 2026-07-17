@@ -130,3 +130,53 @@ def test_unknown_node_is_typed_not_prose():
     src = inspect.getsource(server._Handler._reroot_reissue)
     assert "isinstance(orig_err, UnknownNodeError)" in src
     assert '"unknown node" not in' not in src         # the prose gate is gone
+
+
+# --- stale-key guard (key_file) -------------------------------------------
+# A long-running daemon arms the guard by passing key_file; if ca.key changes
+# on disk underneath it (gw create --force while the daemon is up), issue()
+# must refuse with an actionable error instead of signing with the stale
+# in-memory key — the failure otherwise surfaces on the JOINING machine as an
+# unexplained "no trusted CA signature found".
+
+def test_issue_refused_when_key_file_changes(tmp_path):
+    keys = CAKeys.generate()
+    kf = tmp_path / "ca.key"
+    keys.save(kf)
+    ca = CA(keys, tmp_path, key_file=kf)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["mesh"])   # snapshot matches
+    CAKeys.generate().save(kf)                                 # re-create underneath
+    k2 = NodeKeys.generate()
+    with pytest.raises(ValueError, match="changed on disk"):
+        ca.issue(k2.id_pub_bytes, k2.wg_pub_bytes, "n2", ["mesh"])
+
+
+def test_renew_refused_when_key_file_changes(tmp_path):
+    keys = CAKeys.generate()
+    kf = tmp_path / "ca.key"
+    keys.save(kf)
+    ca = CA(keys, tmp_path, key_file=kf)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["mesh"])
+    CAKeys.generate().save(kf)
+    with pytest.raises(ValueError, match="changed on disk"):
+        ca.renew(_req(k))
+
+
+def test_issue_refused_when_key_file_unreadable(tmp_path):
+    keys = CAKeys.generate()
+    kf = tmp_path / "ca.key"
+    keys.save(kf)
+    ca = CA(keys, tmp_path, key_file=kf)
+    kf.unlink()
+    k = NodeKeys.generate()
+    with pytest.raises(ValueError, match="unreadable"):
+        ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["mesh"])
+
+
+def test_guard_dormant_without_key_file(tmp_path):
+    # One-shot CLI constructions pass no key_file — no guard, no disk reads.
+    ca = _ca(tmp_path)
+    k = NodeKeys.generate()
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["mesh"])   # must not raise
