@@ -369,7 +369,7 @@ def test_roster_live_rate_vs_cumulative_total():
     lp = _t.SimpleNamespace(latest_handshake=int(now.timestamp()) - 5,
                             rx_bytes=4_200_000, tx_bytes=1_050_000,
                             allowed_ips=r.cred.addr + "/128", keepalive=25)
-    cfg = _t.SimpleNamespace(mesh_domain="pm.internal", caps=["role:db"])
+    cfg = _t.SimpleNamespace(mesh_domain="pm.internal", caps=["role:db"], hostname="self")
     rates = {r.cred.addr: "↓46B/s ↑46B/s"}
     common = dict(records=[r], cfg=cfg, now=now, own_id="deadbeef",
                   live_peers={wg_key: lp}, is_root=True,

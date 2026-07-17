@@ -656,6 +656,36 @@ A single grant can be a whole service: `worker -> files : tcp/2049` is a
 complete file share, with the grant table acting as the share's ACL — see the
 [NFS worked example](#worked-example-a-shared-directory-over-the-mesh-nfs).
 
+### Grants to specific machines (`host:`)
+
+When a grant really means *this one box*, name it directly instead of minting
+a single-member role:
+
+```toml
+[[grant]]
+from  = ["host:bb"]
+to    = ["host:nas"]
+ports = ["tcp/2049"]
+# why: exactly one workstation mounts the NAS — no role ceremony for a pair.
+```
+
+`host:<name>` matches the node's **CA-attested hostname** — the same signed
+credential field behind `/etc/hosts` names and TLS CNs — so a host grant rides
+the identical trust chain as a role: nothing self-asserted enters the policy.
+(Mechanically it's a derived tag, computed from the credential at match time;
+it is never stored and can never be assigned or spoofed as a cap.) Roles and
+host entries mix freely in one grant: `from = ["worker", "host:laptop"]`.
+
+**The one caveat: a host grant is only as strong as name assignment.** Roles
+are always anchor-chosen, but by default a node *names itself* at join — so a
+grant written for a name nobody currently holds (or a name freed by
+decommissioning) would be inherited by whichever machine the anchor next
+admits under it. `gw policy apply` warns on both cases (an unheld `host:` name,
+and a granted node whose name is self-chosen), and the fix is one flag:
+**pin any name you grant by** (`gw invite --hostname nas` — anchor-chosen,
+un-renameable). Relatedly, the grant follows the *name*: `gw rename-node`
+warns and asks before renaming a node out of its own grants (fail closed).
+
 ```bash
 # edit the anchor's <data_dir>/grants.toml, then apply it — with a preview:
 sudo gw policy apply

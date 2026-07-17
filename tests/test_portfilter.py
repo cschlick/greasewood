@@ -11,9 +11,10 @@ import pytest
 from greasewood import portfilter as pf
 
 
-def _rec(addr, roles):
+def _rec(addr, roles, hostname="n"):
     return types.SimpleNamespace(
-        cred=types.SimpleNamespace(addr=addr, caps=[f"role:{r}" for r in roles]))
+        cred=types.SimpleNamespace(addr=addr, caps=[f"role:{r}" for r in roles],
+                                   hostname=hostname))
 
 
 WEB1, WEB2, API1, DB1 = "fd8d::1", "fd8d::2", "fd8d::3", "fd8d::4"
@@ -262,3 +263,17 @@ def test_set_local_caps_reroles_this_node_live(monkeypatch):
     enforcer.set_local_caps(["role:api"])
     enforcer.apply(FLEET)
     assert "tcp dport 8000" in loads[-1] and "p_tcp_8000" in loads[-1]
+
+
+def test_host_grant_scopes_saddr_set_to_that_machine():
+    # from=["host:bb"] → only bb's overlay address lands in the port's saddr
+    # set, even when other nodes share bb's roles.
+    recs = [_rec("fd8d::1", ["node"], hostname="bb"),
+            _rec("fd8d::2", ["node"], hostname="other")]
+    grants = [{"from": ["host:bb"], "to": ["host:nas"], "ports": ["tcp/2049"]}]
+    allow = pf._port_allowances(recs, ["role:node"], grants,
+                                        local_hostname="nas")
+    assert allow == {("tcp", 2049): {"fd8d::1"}}
+    # And a node that isn't the named destination gets no rule at all.
+    assert pf._port_allowances(recs, ["role:node"], grants,
+                                       local_hostname="other") == {}

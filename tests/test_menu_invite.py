@@ -188,3 +188,16 @@ def test_invite_parser_wires_the_flag():
     with pytest.raises(SystemExit):
         with contextlib.redirect_stderr(io.StringIO()):
             cli.main(["invite", "--self-roles-from-grants", "--endpoint", "fd::1"])
+
+
+def test_menu_from_grants_never_offers_host_entries(tmp_path):
+    # host:<name> names ONE machine — offering it on a self-serve menu would
+    # let any joiner walk into that machine's grants. Roles only.
+    from greasewood import cli
+    _write_grants(tmp_path, '''
+[[grant]]
+from  = ["host:bb", "worker"]
+to    = ["host:nas"]
+ports = ["tcp/2049"]
+''')
+    assert cli._menu_from_grants(tmp_path) == ["worker"]

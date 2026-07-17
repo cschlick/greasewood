@@ -39,8 +39,11 @@ _KEEPALIVE = 25
 # idle-but-live tunnel (keepalive=25 keeps it well inside).
 _LIVE_LINK_SECS = 180
 
-# Step 6 authorization policy: (local_caps, peer_caps) → bool
-Policy = Callable[[list[str], list[str]], bool]
+# Step 6 authorization policy:
+#   (local_caps, peer_caps, local_hostname=None, peer_hostname=None) → bool
+# Hostnames enable derived host: tags (see policy.node_tags); a policy that
+# ignores them (role grants only) is fine — they default to None.
+Policy = Callable[..., bool]
 
 
 class _Desired(NamedTuple):
@@ -62,7 +65,9 @@ def _roles(caps: list[str]) -> set[str]:
     return {c[len("role:"):] for c in caps if c.startswith("role:")}
 
 
-def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
+def default_policy(local_caps: list[str], peer_caps: list[str],
+                   local_hostname: "str | None" = None,
+                   peer_hostname: "str | None" = None) -> bool:
     """The peering decision when the daemon is wired without a GrantPolicy
     (tests, embedding): defer to policy.peers_allowed with no table — the flat
     trusted mesh. The real decision lives in greasewood.policy; enforcement is
@@ -70,7 +75,8 @@ def default_policy(local_caps: list[str], peer_caps: list[str]) -> bool:
     reading the other's roles from its CA-signed credential — a node can't
     talk its way into a role it wasn't issued)."""
     from .policy import peers_allowed
-    return peers_allowed(local_caps, peer_caps, None)
+    return peers_allowed(local_caps, peer_caps, None,
+                         local_hostname, peer_hostname)
 
 
 def _endpoint_candidates(endpoints: list[str],
@@ -175,6 +181,7 @@ def reconcile_once(
     policy: Policy = default_policy,
     local_families: "set[int] | None" = None,
     endpoint_tracker: "_EndpointTracker | None" = None,
+    local_hostname: "str | None" = None,
 ) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
@@ -237,8 +244,10 @@ def reconcile_once(
         if record.id_pub == local_id_pub:
             continue  # never install self as peer
 
-        # Step 6: authorization policy
-        if not policy(local_caps, record.cred.caps):
+        # Step 6: authorization policy. Hostnames ride along so derived
+        # host: tags match — both come from CA-signed credentials.
+        if not policy(local_caps, record.cred.caps,
+                      local_hostname, record.cred.hostname):
             log.debug("skip %s: policy denied", record.hostname)
             continue
 
@@ -349,6 +358,7 @@ class ReconcileLoop(Loop):
         port_enforcer=None,   # portfilter.PortFilter | None (opt-in --enforce-ports)
         policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
+        local_hostname: "str | None" = None,   # enables derived host: tags
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -368,6 +378,7 @@ class ReconcileLoop(Loop):
         self._directory = directory
         self._local_id_pub = local_id_pub
         self._local_caps = local_caps
+        self._local_hostname = local_hostname
         # Which underlay families this node can originate on (v4/v6), for
         # peer-endpoint selection. Resolved EACH CYCLE (like the CA/revoke
         # callables below), NOT captured once: a laptop that loses IPv6 mid-run
@@ -450,6 +461,7 @@ class ReconcileLoop(Loop):
                 self._policy,
                 self._get_local_families() if self._get_local_families else None,
                 endpoint_tracker=self._endpoint_tracker,
+                local_hostname=self._local_hostname,
             )
         except Exception as e:
             log.error("reconcile error: %s", e)
