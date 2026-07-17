@@ -687,7 +687,11 @@ un-renameable). Relatedly, the grant follows the *name*: `gw rename-node`
 warns and asks before renaming a node out of its own grants (fail closed).
 
 ```bash
-# edit the anchor's <data_dir>/grants.toml, then apply it — with a preview:
+# the low-friction path — finds the file, opens your editor ($SUDO_EDITOR/
+# $VISUAL/$EDITOR, else nano), validates on save, then offers the apply preview:
+sudo gw policy edit
+
+# or edit the anchor's <data_dir>/grants.toml by hand, then apply — with a preview:
 sudo gw policy apply
 #   this will change the policy: v1 → v2
 #     - grant  * -> * : *
