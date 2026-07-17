@@ -175,8 +175,11 @@ config, data dir, interface, and service.
 A fresh anchor ships **default-closed**: `<data_dir>/grants.toml` holds one
 grant, `admin -> anchor,node : tcp/22`, so the anchor (it holds `role:admin`)
 can SSH every node, but **nodes cannot reach each other**. Everything else is
-opened by editing that file and running `sudo gw policy apply` (it previews the
-tunnel/grant delta and asks to confirm before signing).
+opened by editing that file and applying it. The one-command path is
+`sudo gw policy edit` — it finds the file, opens your editor, validates on
+save, and offers the apply preview; or edit by hand and run
+`sudo gw policy apply` (either way the apply previews the tunnel/grant delta
+and asks to confirm before signing).
 
 **Give an operator workstation SSH to the whole fleet** — tag it `role:admin`;
 the shipped grant then covers it (no policy edit needed):
