@@ -1144,6 +1144,27 @@ def _warn_shared_overlay_prefix(cfg_path: "Path", my_prefix: str,
     return False
 
 
+# systemd can wedge (a stuck job queue, a dead D-Bus), and a bare systemctl
+# call then blocks FOREVER. Seen in the field at the worst possible spot: the
+# final daemon-reload of an otherwise-successful join, which made the whole
+# join look hung. Every systemctl greasewood runs goes through this wrapper:
+# hard timeout, one loud warning, and a synthetic rc=124 (the timeout(1)
+# convention) so each caller's existing nonzero-rc handling degrades to its
+# manual-fallback path instead of hanging.
+_SYSTEMCTL_TIMEOUT = 30
+
+
+def _systemctl_run(argv, **kwargs) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(argv, timeout=_SYSTEMCTL_TIMEOUT, **kwargs)
+    except subprocess.TimeoutExpired:
+        log.warning("'%s' gave no answer in %ss — systemd looks wedged "
+                    "(check: systemctl list-jobs). Skipping it; run it "
+                    "yourself once systemd recovers.",
+                    " ".join(argv), _SYSTEMCTL_TIMEOUT)
+        return subprocess.CompletedProcess(argv, 124, "", "")
+
+
 def _membership_service(key: str) -> str:
     """Enable this membership's daemon as greasewood@<key> — an instance of the
     template unit create/join install (ExecStart=gw -c /etc/greasewood_%i.toml
@@ -1159,11 +1180,11 @@ def _membership_service(key: str) -> str:
     systemctl = shutil.which("systemctl")
     if not systemctl or not (_UNIT_DIR / "greasewood@.service").exists():
         return "manual"
-    r = subprocess.run([systemctl, "is-active", "--quiet", unit],
+    r = _systemctl_run([systemctl, "is-active", "--quiet", unit],
                        capture_output=True)
     if r.returncode == 0:
         return "active"
-    r = subprocess.run([systemctl, "enable", "--now", f"{unit}"],
+    r = _systemctl_run([systemctl, "enable", "--now", f"{unit}"],
                        capture_output=True)
     if r.returncode != 0:
         return "manual"            # systemctl present but no live manager → manual
@@ -1197,7 +1218,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     systemctl = shutil.which("systemctl")
     old_unit = f"greasewood@{old_key}.service"
     if systemctl:
-        subprocess.run([systemctl, "disable", "--now", old_unit],
+        _systemctl_run([systemctl, "disable", "--now", old_unit],
                        capture_output=True)
 
     # Data dir moves first (the new config points at it).
@@ -1235,7 +1256,7 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
         {"old_domain": cfg.mesh_domain, "until": until.isoformat()}))
 
     if systemctl and (_UNIT_DIR / "greasewood@.service").exists():
-        subprocess.run([systemctl, "enable", "--now",
+        _systemctl_run([systemctl, "enable", "--now",
                         f"greasewood@{new_key}.service"], check=False)
     return mp["config"]
 
@@ -3544,18 +3565,18 @@ def cmd_anchor_transfer(args) -> int:
 
     ok = _do_handoff(
         unit,
-        stop_local=lambda u: subprocess.run(["systemctl", "stop", u]),
+        stop_local=lambda u: _systemctl_run(["systemctl", "stop", u]),
         start_remote=lambda u: rssh(f"sudo systemctl enable --now {u}",
                                     capture_output=True).returncode == 0,
         remote_active=remote_active,
-        start_local=lambda u: subprocess.run(["systemctl", "start", u]),
+        start_local=lambda u: _systemctl_run(["systemctl", "start", u]),
     )
     if not ok:
         sys.exit(f"⚠ {dest} did not come up as the anchor — ROLLED BACK; this anchor "
                  "is running again. Check the target (journalctl -eu " + unit + ") "
                  "and retry.")
 
-    subprocess.run(["systemctl", "disable", unit], capture_output=True)  # no auto-restart
+    _systemctl_run(["systemctl", "disable", unit], capture_output=True)  # no auto-restart
     print(f"✓ anchor transferred to {dest} — same CA, the fleet reconnects, no re-root.")
     print(f"  This host is stopped and won't auto-start. Decommission when ready: "
           "sudo gw purge")
@@ -3696,10 +3717,10 @@ def cmd_purge(args) -> int:
     # against the re-created anchor fails with a peer-install error.
     systemctl = shutil.which("systemctl")
     if systemctl:
-        r = subprocess.run([systemctl, "is-active", "--quiet", unit],
+        r = _systemctl_run([systemctl, "is-active", "--quiet", unit],
                            capture_output=True)
         if r.returncode == 0:
-            subprocess.run([systemctl, "disable", "--now", unit],
+            _systemctl_run([systemctl, "disable", "--now", unit],
                            capture_output=True)
             removed.append(f"stopped {unit}")
     # A stray daemon that survives the purge haunts the next mesh: it holds the
@@ -3787,9 +3808,9 @@ def cmd_purge(args) -> int:
         if not remaining:
             tmpl = _UNIT_DIR / "greasewood@.service"
             if tmpl.exists():
-                subprocess.run([systemctl, "disable", unit], capture_output=True)
+                _systemctl_run([systemctl, "disable", unit], capture_output=True)
                 tmpl.unlink()
-                subprocess.run([systemctl, "daemon-reload"], capture_output=True)
+                _systemctl_run([systemctl, "daemon-reload"], capture_output=True)
                 removed.append("systemd template greasewood@.service (last mesh)")
         elif (_UNIT_DIR / "greasewood@.service").exists():
             print(f"note: kept greasewood@.service — {len(remaining)} other mesh"
@@ -3847,7 +3868,7 @@ def _write_service_template(exec_path: "str | None" = None) -> "str | None":
     (_UNIT_DIR / "greasewood@.service").write_text(_SERVICE_UNIT.format(exec=gw_exec))
     systemctl = shutil.which("systemctl")
     if systemctl:
-        subprocess.run([systemctl, "daemon-reload"], check=False)
+        _systemctl_run([systemctl, "daemon-reload"], check=False)
     return systemctl
 
 
@@ -3857,7 +3878,7 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
     execs and crashes within a couple of seconds flaps active→activating
     (auto-restart) — the settle re-check catches exactly that."""
     def _state() -> str:
-        r = subprocess.run([systemctl, "is-active", unit],
+        r = _systemctl_run([systemctl, "is-active", unit],
                            capture_output=True, text=True)
         return (r.stdout or "").strip()
 

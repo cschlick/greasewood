@@ -314,3 +314,21 @@ def test_main_prettifies_missing_tool_crash(monkeypatch):
     args.fn = boom_file
     with pytest.raises(FileNotFoundError):
         cli.main([])
+
+
+def test_systemctl_run_times_out_instead_of_hanging(monkeypatch):
+    # systemd wedged (stuck jobs / dead D-Bus) used to block the CLI forever —
+    # at its worst on the final daemon-reload of a SUCCESSFUL join. The wrapper
+    # must give up on schedule and hand back rc=124 so callers fall through to
+    # their manual-guidance paths.
+    import time
+    monkeypatch.setattr(cli, "_SYSTEMCTL_TIMEOUT", 0.2)
+    t0 = time.monotonic()
+    r = cli._systemctl_run(["sleep", "30"])
+    assert time.monotonic() - t0 < 5      # did not wait the full 30s
+    assert r.returncode == 124
+
+
+def test_systemctl_run_passes_through_on_success():
+    r = cli._systemctl_run(["true"], capture_output=True)
+    assert r.returncode == 0
