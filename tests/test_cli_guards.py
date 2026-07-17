@@ -265,3 +265,52 @@ def test_version_still_works_on_non_linux(monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.main(["--version"])
     assert e.value.code == 0
+
+
+# --- data-plane tool preflight ---------------------------------------------
+# create/join/run must fail fast, BEFORE any state is created, when wg/ip are
+# missing (pipx installs only the Python side) — not crash mid-bringup with a
+# raw FileNotFoundError and a half-made gw-door left behind.
+
+def test_require_tools_exits_cleanly_when_wg_missing(monkeypatch):
+    from greasewood import wg as wg_mod
+    monkeypatch.setattr(wg_mod, "missing_tools", lambda: ["wg"])
+    with pytest.raises(SystemExit) as e:
+        cli._require_tools()
+    assert "wireguard-tools" in str(e.value)
+    assert "wg" in str(e.value)
+
+
+def test_require_tools_passes_when_all_present(monkeypatch):
+    from greasewood import wg as wg_mod
+    monkeypatch.setattr(wg_mod, "missing_tools", lambda: [])
+    cli._require_tools()   # must not raise
+
+
+def test_missing_tools_reports_absent_binaries(monkeypatch):
+    import shutil
+    from greasewood import wg as wg_mod
+    monkeypatch.setattr(shutil, "which",
+                        lambda t: None if t == "wg" else f"/usr/bin/{t}")
+    assert wg_mod.missing_tools() == ["wg"]
+
+
+def test_main_prettifies_missing_tool_crash(monkeypatch):
+    # Belt-and-braces: a FileNotFoundError for a known tool escaping a command
+    # becomes a clean install hint; any other missing FILE re-raises untouched.
+    args = type("A", (), {"cmd": "x", "verbose": 0, "config": "c"})()
+    def boom(_):
+        raise FileNotFoundError(2, "No such file or directory", "wg")
+    args.fn = boom
+    monkeypatch.setattr(cli, "build_parser", lambda: type(
+        "P", (), {"parse_args": staticmethod(lambda argv=None: args)})())
+    monkeypatch.setattr(cli, "_require_supported_os", lambda: None)
+    with pytest.raises(SystemExit) as e:
+        cli.main([])
+    assert "wireguard-tools" in str(e.value)
+
+    def boom_file(_):
+        raise FileNotFoundError(2, "No such file or directory", "/etc/nope.toml")
+    args.fn = boom_file
+    with pytest.raises(FileNotFoundError):
+        cli.main([])

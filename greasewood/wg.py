@@ -63,6 +63,22 @@ def _wg_set(*args: str, key: str) -> None:
     _run("wg", "set", *args, input=key.strip() + "\n")
 
 
+# The data-plane binaries every state-changing command needs. `nft` is
+# deliberately absent: portfilter degrades explicitly when it's missing
+# (NftUnavailable), so it gates a feature, not the tool itself.
+REQUIRED_TOOLS = ("wg", "ip")
+
+
+def missing_tools() -> "list[str]":
+    """Which of the required data-plane binaries this host lacks. Used to fail
+    fast BEFORE any state is created — a missing `wg` otherwise surfaces as a
+    raw FileNotFoundError halfway through interface bring-up (seen in the
+    field: pipx installs only the Python side, wireguard-tools comes from the
+    distro)."""
+    import shutil
+    return [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
+
+
 def ensure_interface(
     iface: str,
     overlay_addr: str,

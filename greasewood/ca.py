@@ -63,12 +63,24 @@ class CA:
         data_dir: Path,
         credential_ttl: dt.timedelta = dt.timedelta(hours=24),
         cap_policy: CapPolicy | None = None,
+        key_file: "Path | None" = None,
     ) -> None:
         self._keys = ca_keys
         self._data_dir = data_dir
         self._ttl = credential_ttl
         self._cap_policy: CapPolicy = cap_policy or (lambda caps: caps)
         self._revoke_path = data_dir / "revoked.json"
+        # Stale-key guard (long-running daemon only — one-shot CLI uses skip it
+        # by not passing key_file): snapshot the key FILE's bytes at load so
+        # issue() can detect the file changing underneath a running daemon
+        # (e.g. `gw create --force` re-rooting while the old daemon is up).
+        # Without this the daemon keeps signing with the old in-memory key
+        # while every new invite embeds the new disk key, and every join fails
+        # with an unexplained bad signature (seen in the field). Raw-bytes
+        # comparison, not a key parse: it needs no passphrase, and ANY change
+        # to the key file means the operator did something a restart resolves.
+        self._key_file = Path(key_file) if key_file is not None else None
+        self._key_snapshot = self._key_file.read_bytes() if self._key_file else None
         # Serializes the registry's check-then-act / read-modify-write regions
         # (issue/renew/set-caps/revoke). The control plane is a
         # ThreadingHTTPServer, so these run concurrently; without this a hostname
@@ -80,6 +92,29 @@ class CA:
         self._lock = threading.RLock()
 
     # --- credential issuance ---
+
+    def _refuse_if_key_stale(self) -> None:
+        """Refuse to sign if the CA key file changed since this CA was loaded
+        (no-op when no key_file was given). Raises ValueError, which the
+        enroll/renew paths already report cleanly to the far side — so the
+        JOINER sees the real cause instead of a bare signature failure."""
+        if self._key_file is None:
+            return
+        try:
+            current = self._key_file.read_bytes()
+        except OSError as e:
+            log.error("CA key file %s unreadable at issue time: %s", self._key_file, e)
+            raise ValueError(f"anchor's CA key file is unreadable ({e}) — "
+                             f"refusing to sign; check {self._key_file} on the anchor")
+        if current != self._key_snapshot:
+            log.error("CA key file %s CHANGED since this daemon loaded it "
+                      "(a re-create/re-root while the daemon was running?) — "
+                      "refusing to sign with the stale in-memory key. Restart "
+                      "the daemon, then mint fresh invites.", self._key_file)
+            raise ValueError(
+                "anchor's CA key changed on disk after its daemon started (a "
+                "re-create?) — on the anchor: restart the daemon "
+                "(sudo systemctl restart greasewood@<mesh>) and mint a fresh invite")
 
     def issue(
         self,
@@ -98,6 +133,7 @@ class CA:
         # write are one atomic critical section: otherwise two concurrent
         # issues for the same name both see it free and both persist it.
         with self._lock:
+            self._refuse_if_key_stale()
             if self.is_revoked(id_pub):
                 raise ValueError("id_pub is on the revoke list")
 

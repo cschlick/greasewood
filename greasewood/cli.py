@@ -462,6 +462,7 @@ def _reject_bad_interface(name: str) -> None:
 
 def cmd_create(args) -> int:
     _require_root("create")
+    _require_tools()
     from .hosts import valid_label as _vl
     if not _vl(args.name):
         sys.exit(f"mesh name {args.name!r} must be a DNS label "
@@ -536,9 +537,21 @@ def cmd_create(args) -> int:
         ca_keys = CAKeys.load(ca_key_path)
         log.info("loaded existing CA key from %s", ca_key_path)
     else:
+        regenerated = ca_key_path.exists()   # --force over a live mesh's CA
         ca_keys = CAKeys.generate()
         ca_keys.save(ca_key_path)
         log.info("generated CA key → %s", ca_key_path)
+        if regenerated:
+            # A new CA orphans everything signed by the old one. Say so NOW —
+            # the failures otherwise surface later, on other machines, as
+            # unexplained signature errors at join/renew (seen in the field).
+            log.warning(
+                "--force replaced the CA key: every outstanding invite token "
+                "is now invalid, enrolled nodes stop renewing (re-enroll them "
+                "or follow the re-root SOP in the RUNBOOK), and an "
+                "already-RUNNING daemon keeps signing with the OLD key until "
+                "restarted — run: sudo systemctl restart greasewood@%s, then "
+                "mint fresh invites.", args.name)
 
     # Door keypair (persistent across invites)
     load_or_generate_door_key(data_dir)
@@ -1326,10 +1339,30 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
     return record
 
 
-def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
-                      anchor_door_pub_b64: str, params, door_port,
-                      ca_pub_bytes: bytes, already_enrolled: bool,
-                      requested_roles: "list | tuple" = ()):
+def _enroll_over_door(*args, **kwargs):
+    """Crash guard around the door dance: the inner function's graceful
+    refusals tear gw-door down themselves before sys.exit, but a CRASH path
+    (missing binary, Ctrl-C mid-wait, unexpected error) used to leave the
+    half-made interface behind (seen in the field). On success the door is
+    deliberately left UP — the caller pushes the signed record back through
+    it."""
+    from . import wg as wgmod
+    try:
+        return _enroll_over_door_inner(*args, **kwargs)
+    except SystemExit:
+        raise                     # graceful paths already tore the door down
+    except BaseException:
+        try:
+            wgmod.destroy_interface("gw-door")   # idempotent; no-op if never made
+        except Exception:
+            pass                  # e.g. `ip` itself missing — nothing to clean
+        raise
+
+
+def _enroll_over_door_inner(data_dir, node_keys, hostname: str, anchor_host: str,
+                            anchor_door_pub_b64: str, params, door_port,
+                            ca_pub_bytes: bytes, already_enrolled: bool,
+                            requested_roles: "list | tuple" = ()):
     """The door dance: bring up the transient gw-door interface, connect to the
     anchor's enroll daemon through it, exchange request → credential, and
     verify the credential against the token's CA. Every failure exits with an
@@ -1426,7 +1459,20 @@ def _enroll_over_door(data_dir, node_keys, hostname: str, anchor_host: str,
         cred.verify([ca_pub_bytes])
     except Exception as e:
         wgmod.destroy_interface("gw-door")
-        sys.exit(f"credential verification failed: {e}")
+        hint = ""
+        if "no trusted CA signature" in str(e):
+            # The door key matched (we got this far through the tunnel) but the
+            # CA didn't: the classic cause is an anchor re-created after its
+            # daemon started — the daemon signs with the stale in-memory CA
+            # while this token carries the new disk one. (New anchors refuse
+            # this at issue time; the hint covers older ones.)
+            hint = ("\nThe anchor answered through the door this token pinned, "
+                    "but signed with a CA key the token doesn't carry. If the "
+                    "anchor was re-created since its daemon started, the daemon "
+                    "is signing with a stale in-memory CA — on the anchor:\n"
+                    "  sudo systemctl restart greasewood@<mesh>\n"
+                    "  sudo gw invite     # mint the token AFTER the restart")
+        sys.exit(f"credential verification failed: {e}{hint}")
 
     return conn, resp, cred
 
@@ -1526,6 +1572,7 @@ def _route_join(args, ca_pub_hex: str, token_domain: "str | None"):
 
 def cmd_join(args) -> int:
     _require_root("join")
+    _require_tools()
     from .keys import NodeKeys
     from .wire import Credential, NodeRecord
     from .directory import Directory
@@ -1974,6 +2021,24 @@ def _require_root(cmd: str, why: "str | None" = None) -> None:
     if os.geteuid() != 0:
         why = why or "it changes WireGuard/routing/system files"
         sys.exit(f"'gw {cmd}' needs root ({why}).\nTry: sudo gw {cmd}")
+
+
+def _require_tools() -> None:
+    """Exit cleanly if the wg/ip binaries are missing — BEFORE any state is
+    created. Same posture as _require_root: the complaint comes first, not
+    from whichever subprocess call happens to crash deepest into the command
+    (seen in the field: a join with no wireguard-tools died mid-door-bringup
+    with a raw FileNotFoundError, leaving the half-made interface behind)."""
+    from . import wg as wgmod
+    missing = wgmod.missing_tools()
+    if missing:
+        pkgs = {"wg": "wireguard-tools", "ip": "iproute2"}
+        need = " ".join(dict.fromkeys(pkgs[t] for t in missing))
+        sys.exit(f"required tool(s) not installed: {', '.join(missing)} — "
+                 f"greasewood drives the data plane with the stock tools "
+                 f"(pipx installs only the Python side).\n"
+                 f"Install them first:  sudo apt install {need}   "
+                 f"# or your distro's equivalent")
 
 
 def _unit_for_config(cfg_path) -> str:
@@ -2599,7 +2664,10 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     if not cfg.ca_key_file:
         _daemon_fatal(cfg, "anchor role requires ca_key_file in [anchor]")
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl)
+    # key_file arms the stale-key guard: this CA lives as long as the daemon,
+    # and must refuse to sign if ca.key changes on disk underneath it.
+    ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl,
+            key_file=Path(cfg.ca_key_file))
     get_revoked = ca.load_revoked_set
     log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
     # Re-apply door routing in case the machine rebooted since create.
@@ -2675,6 +2743,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
 
 def cmd_run(args) -> int:
     _require_root("run")
+    _require_tools()
     from .config import load_config
     from .keys import NodeKeys
     from .directory import Directory
@@ -4274,6 +4343,19 @@ def main(argv=None) -> int:
         args.config = str(_discover_config())
     try:
         return args.fn(args)
+    except FileNotFoundError as e:
+        # Safety net for a data-plane tool vanishing mid-command (the entry
+        # points preflight wg/ip, but nft is optional-per-feature and a tool
+        # can be missing on paths preflight doesn't cover). A missing data
+        # FILE is not ours to prettify — re-raise anything else.
+        tool = getattr(e, "filename", None)
+        pkg = {"wg": "wireguard-tools", "ip": "iproute2", "nft": "nftables"}.get(tool)
+        if pkg is not None:
+            sys.exit(f"'{tool}' is not installed — greasewood shells out to the "
+                     f"stock tools for every data-plane change.\n"
+                     f"Install it:  sudo apt install {pkg}   "
+                     f"# or your distro's equivalent")
+        raise
     except PermissionError as e:
         # Safety net: turn a raw EACCES traceback into a clean hint. Most
         # greasewood data lives at 0600/root (keys) or is written by the daemon
