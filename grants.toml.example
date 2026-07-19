@@ -81,6 +81,29 @@ ports = ["tcp/22"]
 # ALLOW NOTHING is not a grant you write — it's the ABSENCE of grants: delete
 # every [[grant]] and nodes reach ONLY the anchor (the hardwired control plane).
 
+# ── Declarative role assignments (OPTIONAL) ─────────────────────────────────
+#
+# Add an [assign] table and the file also declares WHO HOLDS WHICH ROLES —
+# the one piece of policy-shaped state that was otherwise imperative
+# (`gw set-roles`). With it, this single file describes the whole mesh: who's
+# a member of what, and who talks to whom — diffable, reviewable, git-able.
+#
+#   [assign]
+#   nas = ["nfs_srv"]
+#   bb  = ["nfs_usr", "web"]
+#
+# Semantics:
+#   · `gw policy apply` reconciles LISTED hosts' registry roles to these
+#     values (previewing role diffs + the tunnel delta, like any grant edit),
+#     then sends one fleet renew hint so changes land within a poll interval.
+#   · unlisted hosts are untouched — invite-time roles / set-roles still work
+#     for them, so auto-provisioning via menu invites composes fine.
+#   · a LISTED host refuses `gw set-roles` (it would drift from this file);
+#     the `gw watch` role editor writes THIS table instead of the registry.
+#   · a listed host with no current member warns at apply and reconciles
+#     automatically once the machine joins under that name.
+#   · no [assign] section at all = today's behavior, fully imperative.
+#
 # ── Add service grants alongside the active one. A worked example: ───────────
 #
 # [[grant]]
