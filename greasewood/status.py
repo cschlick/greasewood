@@ -692,6 +692,7 @@ _KEY_ACTIONS = {
     b"t": "toggle_total",
     b"\r": "select", b"\n": "select",
     b"r": "roles",  b"y": "yes",
+    b"x": "revoke", b"a": "toggle_all",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -718,17 +719,19 @@ def _cbreak_terminal():
         sys.stdout.flush()
 
 
-def _read_action(fd: int, timeout: float) -> "str | None":
-    """Block up to `timeout` for a keypress; return its action name, None on
-    timeout, or "" for an unmapped key. One os.read grabs a whole escape
-    sequence, so arrow keys arrive intact."""
+def _read_action(fd: int, timeout: float) -> tuple:
+    """Block up to `timeout` for a keypress; return (action, raw_bytes) —
+    action is the mapped name, None on timeout, or "" for an unmapped key.
+    The raw bytes ride along for the one mode that needs literal typing (the
+    revoke confirmation), where 'j' must be the letter j, not scroll-down.
+    One os.read grabs a whole escape sequence, so arrow keys arrive intact."""
     import select
     if not select.select([fd], [], [], timeout)[0]:
-        return None
+        return None, b""
     data = os.read(fd, 16)
     if not data:
-        return "quit"                             # EOF on stdin
-    return _KEY_ACTIONS.get(data, "")
+        return "quit", b""                        # EOF on stdin
+    return _KEY_ACTIONS.get(data, ""), data
 
 
 def _sel_move(action: str, sel: int, total: int, page: int) -> int:
@@ -795,7 +798,7 @@ def _peer_panel_lines(n: dict, rate: "str | None" = None,
             lines.append(row("link", "○ installed, no fresh handshake"))
         else:
             lines.append(row("link", "not installed as a WireGuard peer"))
-    lines += ["", "(r edit roles · enter/q close)" if can_edit else
+    lines += ["", "(r edit roles · x revoke · enter/q close)" if can_edit else
               "(enter or q to close — this panel is read-only)"]
     return lines
 
@@ -932,6 +935,82 @@ def _make_role_applier(cfg):
     return _apply
 
 
+def _revoke_warnings(host: str, grants_text: "str | None") -> list:
+    """What outlives a revocation and shouldn't: policy references to the NAME
+    being freed. A freed hostname is claimable by the next machine the anchor
+    admits — and it would inherit any host: grants and [assign] entry written
+    for that name. Surface both on the confirm screen; the operator decides."""
+    if not grants_text:
+        return []
+    from .policy import parse_grants_toml, parse_assignments
+    warns = []
+    try:
+        grants = parse_grants_toml(grants_text)
+        assigns = parse_assignments(grants_text)
+    except ValueError:
+        return ["⚠ grants.toml is currently invalid — could not check it for "
+                "references to this name"]
+    tag = f"host:{host}"
+    if any(tag in (list(g["from"]) + list(g["to"])) for g in grants):
+        warns.append(f"⚠ grants.toml grants by this NAME ({tag}) — the freed "
+                     f"name carries that access to whatever machine next "
+                     f"claims it; update grants.toml")
+    if assigns is not None and host in assigns:
+        warns.append(f"⚠ [assign] lists {host} — the next claimant of the "
+                     f"name inherits those roles on apply; remove the entry "
+                     f"if that's not intended")
+    return warns
+
+
+def _revoke_lines(rvk: dict) -> list:
+    """The revoke confirmation overlay: consequences first, name-reference
+    warnings, then the typed-hostname gate — deliberately NOT a y/N. Pure."""
+    host = rvk["node"]["hostname"]
+    if rvk.get("result") is not None:
+        return [_rule(f"revoke — {host}"), rvk["result"], "",
+                "(any key to continue)"]
+    lines = [_rule(f"revoke — {host}"),
+             f"This PERMANENTLY revokes {host} from the mesh:",
+             "  · the anchor refuses its renewals and evicts it on the next "
+             "reconcile (seconds)",
+             "  · every peer evicts it as its credential expires "
+             "(within one credential TTL)",
+             f"  · the hostname '{host}' is freed for reuse by the next "
+             f"machine the anchor admits"]
+    if rvk["warns"]:
+        lines.append("")
+        lines += rvk["warns"]
+    lines += ["",
+              f"type the hostname to confirm: {rvk['typed']}▏",
+              "(enter confirm · esc cancel)"]
+    return lines
+
+
+def _make_revoker(cfg):
+    """The anchor-only revocation hook for the watch revoke flow, or None on
+    any other node (the flow simply doesn't exist there). Same path as
+    `gw revoke`: the CA revoke list + registry forget (which frees the
+    hostname). Membership isn't declarative — enrollment is a handshake — so
+    unlike roles there is no file for this to front; it mirrors the CLI."""
+    if getattr(cfg, "role", "node") != "anchor" or not getattr(cfg, "ca_key_file", None):
+        return None
+
+    def _revoke(node: dict) -> str:
+        from .ca import CA
+        from .keys import CAKeys
+        from . import cli as _cli                 # lazy: cli imports status
+        ca = CA(CAKeys.load(cfg.ca_key_file,
+                            _cli._get_passphrase(cfg.ca_key_passphrase_env)),
+                cfg.data_dir, cfg.credential_ttl)
+        host = node["hostname"]
+        freed = ca.add_revoke(bytes.fromhex(node["id"]))
+        return (f"✓ revoked {host} — the daemon evicts it on its next "
+                f"reconcile; peers evict it as its credential expires"
+                + (f"; the name '{host}' is free for reuse" if freed else ""))
+
+    return _revoke
+
+
 def _color_enabled() -> bool:
     """Color for the live watch view: on unless the user opted out (NO_COLOR,
     the informal standard) or the terminal can't (TERM=dumb). The live view is
@@ -1024,7 +1103,8 @@ class _WatchApp:
 
     def __init__(self, cfg, own_id, own_addr, prober, interval: float,
                  show_all: bool = False, show_total: bool = False,
-                 show_fw: bool = False, apply_roles=None) -> None:
+                 show_fw: bool = False, apply_roles=None,
+                 revoker=None) -> None:
         self._cfg = cfg
         self._own_id = own_id
         self._own_addr = own_addr
@@ -1054,6 +1134,8 @@ class _WatchApp:
         self._grants: "list | None" = None  # active grant table (for the editor)
         self._apply_roles = apply_roles  # anchor-only mutation hook, else None
         self._redit: "dict | None" = None  # role editor state (see _handle)
+        self._revoker = revoker          # anchor-only revoke hook, else None
+        self._rvk: "dict | None" = None  # revoke confirm state (see _handle)
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -1152,11 +1234,15 @@ class _WatchApp:
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
         hidden = f" · {self._hidden} expired hidden" if self._hidden else ""
         tkey = "t rate" if self._show_total else "t total"
+        if self._rvk is not None:
+            return (f"{now:%H:%M:%S}Z · REVOKE — "
+                    f"{self._rvk['node']['hostname']} (anchor) · esc cancels")
         if self._redit is not None:
             return (f"{now:%H:%M:%S}Z · role editor — "
                     f"{self._redit['node']['hostname']} (anchor)")
         if self._panel is not None:
-            edit = " · r roles" if self._can_edit(self._panel) else ""
+            edit = (" · r roles · x revoke"
+                    if self._can_edit(self._panel) else "")
             return (f"{now:%H:%M:%S}Z · peer detail — "
                     f"{self._panel['hostname']}{edit} · enter/q close")
         return (f"{now:%H:%M:%S}Z · {self._up} link"
@@ -1173,7 +1259,9 @@ class _WatchApp:
         top = self._top_lines()
         view_h = max(1, term_h - len(top) - 1)            # 1 row for the footer
         overlay = None
-        if self._redit is not None:
+        if self._rvk is not None:
+            overlay = _revoke_lines(self._rvk)
+        elif self._redit is not None:
             overlay = _role_editor_lines(self._redit)
         elif self._panel is not None:
             overlay = _peer_panel_lines(self._panel,
@@ -1230,7 +1318,13 @@ class _WatchApp:
         return bool(self._apply_roles and node is not None
                     and not node.get("is_self") and "*" not in node.get("roles", []))
 
-    def _handle(self, action: "str | None") -> bool:
+    def _can_revoke(self, node: "dict | None") -> bool:
+        """Revocation exists only on the anchor, never for the anchor's own
+        row (revoking the anchor from itself is how you brick a mesh)."""
+        return bool(self._revoker and node is not None
+                    and not node.get("is_self") and "*" not in node.get("roles", []))
+
+    def _handle(self, action: "str | None", raw: bytes = b"") -> bool:
         """Apply one key action; returns False when the app should exit.
         Factored out of run() so the interaction rules are unit-testable:
         with a panel open, quit/select CLOSE the panel (q must be pressed
@@ -1238,8 +1332,10 @@ class _WatchApp:
         the app's); movement keys move the selection CURSOR, and the viewport
         follows it in _compose. The role editor is a deeper mode on top of
         the panel with its own handler."""
-        if not action:
+        if not action and not raw:
             return True
+        if self._rvk is not None:
+            return self._handle_revoke(action, raw)
         if self._redit is not None:
             return self._handle_redit(action)
         if action == "quit":
@@ -1252,6 +1348,23 @@ class _WatchApp:
                 self._panel = None
             elif 0 <= self._sel < len(self._nodes):
                 self._panel = self._nodes[self._sel]
+            return True
+        if action == "toggle_all":
+            self._show_all = not self._show_all
+            self._fetch()
+            return True
+        if action == "revoke":
+            if self._panel is not None and self._can_revoke(self._panel):
+                host = self._panel["hostname"]
+                gtext = None
+                try:                              # best-effort: warnings only
+                    gpath = self._cfg.data_dir / "grants.toml"
+                    gtext = gpath.read_text() if gpath.exists() else None
+                except Exception:
+                    pass
+                self._rvk = {"node": self._panel, "typed": "",
+                             "warns": _revoke_warnings(host, gtext),
+                             "result": None}
             return True
         if action == "roles":
             if self._panel is not None and self._can_edit(self._panel):
@@ -1272,6 +1385,43 @@ class _WatchApp:
             _, term_h = shutil.get_terminal_size((80, 24))
             self._sel = _sel_move(action, self._sel, len(self._rows),
                                   self._view_h(term_h))
+        return True
+
+    def _handle_revoke(self, action: "str | None", raw: bytes) -> bool:
+        """The revoke confirmation's key handling. Deliberately NOT y/N: the
+        operator must TYPE the hostname — raw bytes are interpreted as literal
+        text here (a 'j' is the letter j, not scroll-down), enter submits and
+        only an exact match revokes, esc cancels. The one destructive action
+        in the TUI gets the most deliberate gate in it."""
+        rvk = self._rvk
+        if rvk["result"] is not None:            # result screen: any key closes
+            self._rvk = None
+            self._panel = None                    # the peer is gone; drop its panel
+            self._fetch()
+            return True
+        if raw in (b"\x1b", b"\x03"):             # esc / ctrl-c: cancel
+            self._rvk = None                      # ('q' stays typable — it's a
+            return True                           #  legitimate hostname letter)
+        if raw in (b"\r", b"\n"):
+            if rvk["typed"] == rvk["node"]["hostname"]:
+                try:
+                    rvk["result"] = self._revoker(rvk["node"])
+                except Exception as e:
+                    rvk["result"] = f"✗ revoke failed: {e}"
+            else:
+                rvk["result"] = (f"✗ not revoked — typed "
+                                 f"{rvk['typed']!r}, expected the exact "
+                                 f"hostname {rvk['node']['hostname']!r}")
+            return True
+        if raw in (b"\x7f", b"\x08"):             # backspace
+            rvk["typed"] = rvk["typed"][:-1]
+            return True
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError:
+            return True
+        if text and all(c.isprintable() for c in text) and "\x1b" not in text:
+            rvk["typed"] += text
         return True
 
     def _handle_redit(self, action: str) -> bool:
@@ -1312,13 +1462,14 @@ class _WatchApp:
                 self._fetch()
                 last = time.monotonic()
             self._render()
-            if not self._handle(_read_action(fd, min(0.25, self._interval))):
+            action, raw = _read_action(fd, min(0.25, self._interval))
+            if not self._handle(action, raw):
                 return
 
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
                 show_all: bool = False, show_total: bool = False,
-                show_fw: bool = False, apply_roles=None) -> int:
+                show_fw: bool = False, apply_roles=None, revoker=None) -> int:
     """Live, scrollable `gw watch`: link state + per-second throughput + an
     async latency column, in a viewport that scrolls when there are more peers
     than screen rows. See _WatchApp. Root + a terminal required."""
@@ -1334,7 +1485,8 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
     prober = _LatencyProber()
     prober.start()
     app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval),
-                    show_all, show_total, show_fw, apply_roles=apply_roles)
+                    show_all, show_total, show_fw, apply_roles=apply_roles,
+                    revoker=revoker)
     try:
         with _cbreak_terminal() as fd:
             app.run(fd)
@@ -1731,7 +1883,8 @@ def cmd_watch(args) -> int:
                             show_all=getattr(args, "all", False),
                             show_total=getattr(args, "total", False),
                             show_fw=getattr(args, "firewall", False),
-                            apply_roles=_make_role_applier(cfg))
+                            apply_roles=_make_role_applier(cfg),
+                            revoker=_make_revoker(cfg))
 
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)

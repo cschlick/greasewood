@@ -198,6 +198,9 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._grants = None
     app._apply_roles = None
     app._redit = None
+    app._revoker = None
+    app._rvk = None
+    app._show_all = False
     return app
 
 
@@ -701,3 +704,112 @@ def test_make_role_applier_anchor_only_and_real_registry(tmp_path):
     assert "role:nfs_srv" in caps and "tls" in caps      # roles swapped, caps kept
     assert "role:node" not in caps
     assert (tmp_path / "renew_after").exists()           # fleet renew hint written
+
+
+# ---------------------------------------------------------------------------
+# gw watch live view — revoke flow (anchor-only, typed-hostname gate)
+# ---------------------------------------------------------------------------
+
+def _revoke_app(revoker=None, cfg_dir=None):
+    import pathlib
+    app = _mk_app(["h1"], ["r1", "r2"])
+    app._nodes = [_node("n0", addr="fd8d::0"),
+                  _node("bb", addr="fd8d::9", roles=["nfs_usr"])]
+    app._revoker = revoker
+    app._cfg = types.SimpleNamespace(data_dir=pathlib.Path(cfg_dir or "/nonexistent"))
+    app._fetch = lambda: None
+    app._sel = 1
+    app._handle("select")                               # open the panel
+    return app
+
+
+def test_revoke_requires_typing_the_exact_hostname():
+    revoked = []
+    app = _revoke_app(lambda n: revoked.append(n["hostname"]) or "✓ revoked bb")
+    app._handle("revoke")
+    assert app._rvk is not None
+    # typing: mapped letters arrive as literal text (j is not scroll-down)
+    for ch in b"bj":
+        app._handle("", bytes([ch]))
+    app._handle("", b"\x7f")                            # backspace the j
+    app._handle("", b"b")
+    assert app._rvk["typed"] == "bb"
+    app._handle("select", b"\r")                        # enter → exact match
+    assert revoked == ["bb"] and app._rvk["result"].startswith("✓")
+    app._handle("", b"z")                               # any key: close + panel gone
+    assert app._rvk is None and app._panel is None
+
+
+def test_revoke_mismatch_refuses_and_esc_cancels():
+    revoked = []
+    app = _revoke_app(lambda n: revoked.append(1) or "✓")
+    app._handle("revoke")
+    app._handle("", b"nas")                             # wrong name
+    app._handle("select", b"\r")
+    assert not revoked and app._rvk["result"].startswith("✗ not revoked")
+    app._handle("", b" ")                               # close result
+    app._handle("revoke")                               # reopen
+    app._handle("", b"\x1b")                            # esc cancels
+    assert app._rvk is None and not revoked
+
+
+def test_revoke_gates_off_anchor_and_anchor_row():
+    app = _revoke_app(revoker=None)                     # not the anchor
+    app._handle("revoke")
+    assert app._rvk is None
+    app2 = _revoke_app(lambda n: "✓")
+    app2._panel = _node("router", roles=["*", "admin", "anchor"])
+    app2._handle("revoke")                              # anchor row: never
+    assert app2._rvk is None
+
+
+def test_revoke_warnings_surface_name_references(tmp_path):
+    from greasewood.status import _revoke_warnings
+    text = ('[[grant]]\nfrom = ["host:bb"]\nto = ["host:nas"]\n'
+            'ports = ["tcp/2049"]\n[assign]\nbb = ["nfs_usr"]\n')
+    warns = "\n".join(_revoke_warnings("bb", text))
+    assert "host:bb" in warns and "[assign]" in warns
+    assert _revoke_warnings("other", text) == []        # unreferenced: quiet
+    assert _revoke_warnings("bb", None) == []           # no file: quiet
+
+
+def test_revoke_overlay_renders_consequences_and_echo():
+    from greasewood.status import _revoke_lines
+    rvk = {"node": _node("bb"), "typed": "b", "result": None,
+           "warns": ["⚠ grants.toml grants by this NAME (host:bb) — ..."]}
+    text = "\n".join(_revoke_lines(rvk))
+    assert "PERMANENTLY" in text and "freed for reuse" in text
+    assert "host:bb" in text
+    assert "type the hostname to confirm: b▏" in text
+    rvk["result"] = "✓ revoked bb"
+    assert "✓ revoked bb" in "\n".join(_revoke_lines(rvk))
+
+
+def test_toggle_all_flips_and_refetches():
+    app = _mk_app(["h1"], ["r1"])
+    fetches = []
+    app._fetch = lambda: fetches.append(1)
+    assert app._show_all is False
+    app._handle("toggle_all")
+    assert app._show_all is True and fetches == [1]
+
+
+def test_make_revoker_real_ca(tmp_path):
+    import types as _t
+    from greasewood.status import _make_revoker
+    from greasewood.keys import CAKeys, NodeKeys
+    from greasewood.ca import CA
+    assert _make_revoker(_t.SimpleNamespace(role="node")) is None
+    keys = CAKeys.generate()
+    kf = tmp_path / "ca.key"
+    keys.save(kf)
+    k = NodeKeys.generate()
+    ca = CA(keys, tmp_path)
+    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "bb", ["role:node"])
+    cfg = _t.SimpleNamespace(role="anchor", ca_key_file=kf, data_dir=tmp_path,
+                             credential_ttl=dt.timedelta(hours=24),
+                             ca_key_passphrase_env=None)
+    msg = _make_revoker(cfg)({"id": k.id_pub_bytes.hex(), "hostname": "bb"})
+    assert msg.startswith("✓ revoked bb") and "free for reuse" in msg
+    assert CA(keys, tmp_path).is_revoked(k.id_pub_bytes)
+    assert ca.hostname_owner("bb") is None              # name actually freed
