@@ -4152,7 +4152,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "when the host is on several meshes)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=f"greasewood {_version()}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # required=False: bare `gw` routes to the dashboard (see _cmd_bare), not a
+    # usage error — the naive invocation should answer, not scold.
+    sub = p.add_subparsers(dest="cmd", required=False)
 
     # create
     sp = sub.add_parser("create",
@@ -4571,11 +4573,64 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_EVERYDAY_COMMANDS = """\
+everyday commands:
+  sudo gw watch                 live mesh dashboard (peers, links, firewall)
+  gw watch --snapshot           the same, static — no root, pipeable
+  gw diagnose [peer]            why a pair can or can't tunnel
+  sudo gw invite                mint a join token            (anchor)
+  sudo gw join <token>          enroll this machine in a mesh
+  sudo gw policy edit           edit grants.toml: validate, preview, apply (anchor)
+  gw policy show                the active grant table
+  sudo gw cert-request          mesh-CA TLS certs for a service
+  sudo gw set-roles <node> ...  change a node's roles         (anchor)
+  sudo gw revoke <node>         revoke a node; frees its name (anchor)
+  gw narrate --since 2h         the audit trail, in plain English
+
+full reference:  gw --help   ·   man gw"""
+
+
+def _cmd_bare(args) -> int:
+    """Bare `gw` — the dashboard, not a usage error. The naive invocation
+    answers both questions a naive typist has: what is my mesh doing (the
+    watch view) and what can I type (the everyday commands). Context decides
+    the shape: root + a terminal → the live TUI; otherwise the no-root static
+    snapshot with the commands below it; unconfigured or multi-mesh → the
+    commands, with how to start (or which -c) front and center."""
+    if getattr(args, "config", None):
+        target = Path(args.config)
+    else:
+        ms = _memberships()
+        if not ms:
+            print("no greasewood mesh is configured on this host.\n"
+                  "  start one:  sudo gw create <name>   (this machine becomes "
+                  "the anchor)\n"
+                  "  join one:   sudo gw join <token>    (token from `sudo gw "
+                  "invite` on the anchor)\n")
+            print(_EVERYDAY_COMMANDS)
+            return 0
+        if len(ms) > 1:
+            listing = "\n".join(f"  gw -c {p} watch   ({k})" for k, p in ms)
+            print(f"this host is on {len(ms)} meshes — say which one:\n"
+                  f"{listing}\n")
+            print(_EVERYDAY_COMMANDS)
+            return 0
+        target = ms[0][1]
+    live = sys.stdout.isatty() and os.geteuid() == 0
+    wargs = argparse.Namespace(config=str(target), snapshot=not live)
+    rc = cmd_watch(wargs)
+    if not live:
+        print(_EVERYDAY_COMMANDS)
+    return rc
+
+
 def main(argv=None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
     _require_supported_os()   # after parse_args, so --version/-h still work
+    if args.cmd is None:
+        return _cmd_bare(args)
     # -c discovery: with one membership on the host, every command finds it
     # unaided; with several, demand -c (loudly, listing them). create/join
     # derive their own config from the mesh name; cert-profiles (and
