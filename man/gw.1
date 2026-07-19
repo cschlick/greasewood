@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-17" "greasewood 0.1.1" "User Commands"
+.TH GW 1 "2026-07-19" "greasewood 0.1.1" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -165,7 +165,7 @@ show this help message and exit
 \fB\-\-no\-enforce\-ports\fR
 run WITHOUT nftables port enforcement (on by default). For a host with no usable nftables \(em grants still control which tunnels exist; port scopes go advisory. The persistent form is `enforce_ports = false` under [network] (systemd runs `gw run` with no flags).
 .SS gw watch
-\fBUsage:\fR gw watch [\-h] [\-\-snapshot] [\-\-json] [\-\-by\-role] [\-\-interval SECS] [\-\-all] [\-\-total]
+\fBUsage:\fR gw watch [\-h] [\-\-snapshot] [\-\-json] [\-\-by\-role] [\-\-interval SECS] [\-\-all] [\-\-firewall] [\-\-total]
 .PP
 [sudo] live mesh dashboard (redraws in place): the roster + link state, per\-second throughput, and a latency column that fills in as pings return. Ctrl\-C to exit. Use \-\-snapshot for a static view.
 .TP
@@ -186,6 +186,9 @@ live refresh interval (default 2s; min 1s)
 .TP
 \fB\-\-all\fR
 also show expired nodes (hidden by default \(em the roster shows only the live mesh)
+.TP
+\fB\-\-firewall\fR
+expand the firewall area (the host\-rule check + greasewood's own nftables table, verbatim). Default is a one\-line summary; in the live view the f key toggles
 .TP
 \fB\-\-total\fR
 live view shows cumulative traffic instead of per\-second rate (toggle with 't' while watching)

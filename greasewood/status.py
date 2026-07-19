@@ -496,6 +496,35 @@ def _nft_table_lines(cfg) -> list:
                   "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
+def _firewall_summary_line(fw_lines: list, nft_lines: list, hint: str) -> list:
+    """The COLLAPSED firewall area: one line, not a wall of tables. Starts with
+    the host-firewall verdict VERBATIM (fw_lines[0] — so a blocked port stays
+    exactly as loud collapsed as expanded), then a short state token for
+    greasewood's own table, then how to expand. Returns [] when there's nothing
+    to say (nft absent → both inputs empty)."""
+    own = ""
+    body = nft_lines[1] if len(nft_lines) > 1 else ""
+    if body.startswith("table inet"):
+        rules = sum(1 for ln in nft_lines[1:]
+                    if "accept" in ln or ln.strip().endswith("drop"))
+        own = f"own table ✓ ({rules} rules)"
+    elif "enforcement off" in body:
+        own = "port enforcement off"
+    elif "run as root" in body:
+        own = "own table: needs root"
+    elif "table not present" in body:
+        own = "own table MISSING (daemon running?)"
+    if fw_lines:
+        parts = [fw_lines[0]] + ([own] if own else [])
+    elif own:
+        # No host-firewall check (nft absent / nothing to verify) but the
+        # enforcement state is still worth one clause — label it ourselves.
+        parts = [f"firewall : {own}"]
+    else:
+        return []
+    return [" · ".join(parts + [f"({hint})"])]
+
+
 def _cfg_control_port(cfg) -> int:
     """The anchor control port from cfg.control_listen (':51902' → 51902)."""
     try:
@@ -713,7 +742,8 @@ class _WatchApp:
     scrolling responds immediately in between."""
 
     def __init__(self, cfg, own_id, own_addr, prober, interval: float,
-                 show_all: bool = False, show_total: bool = False) -> None:
+                 show_all: bool = False, show_total: bool = False,
+                 show_fw: bool = False) -> None:
         self._cfg = cfg
         self._own_id = own_id
         self._own_addr = own_addr
@@ -723,7 +753,9 @@ class _WatchApp:
         self._show_total = show_total    # t toggles rate ↔ cumulative traffic
         self._off = 0                    # scroll offset into the peer rows
         self._prev: dict = {}            # wg key → (rx, tx, mono) for rate deltas
-        self._show_nft = True            # f toggles the firewall area (both blocks)
+        self._show_nft = show_fw         # f toggles the firewall area; collapsed
+                                         # to a 1-line summary by default
+                                         # (--firewall starts expanded)
         # Pinned-top pieces, kept separate so `f` collapses the firewall area
         # instantly without a re-fetch.
         self._header: list = []          # role/addr/door/...
@@ -787,17 +819,16 @@ class _WatchApp:
 
     def _top_lines(self) -> list:
         """The pinned block above the scrollable roster: header, the firewall
-        area (the host-firewall port check + greasewood's own table), a blank,
-        then the roster's column header. `f` collapses the firewall area to each
-        block's line 0 — the host-firewall VERDICT (so a blocked port stays loud
-        even collapsed) and the gw-table command. Recomputed each render, so `f`
-        toggles instantly."""
+        area, a blank, then the roster's column header. Collapsed (the default),
+        the area is ONE summary line whose first part is the host-firewall
+        verdict verbatim — so a blocked port stays loud even collapsed; `f`
+        expands to the full host-rule check + greasewood's own table, verbatim.
+        Recomputed each render, so `f` toggles instantly."""
         fw, nft = self._fw_lines, self._nft_lines
         if self._show_nft:
             area = fw + ([""] if fw and nft else []) + nft
         else:
-            area = ([fw[0] + "   (f to expand)"] if fw else []) \
-                 + ([nft[0] + "   (f to expand)"] if nft else [])
+            area = _firewall_summary_line(fw, nft, "f for detail")
         return self._header + area + [""] + self._chrome
 
     def _footer(self, view_h: int) -> str:
@@ -874,7 +905,8 @@ class _WatchApp:
 
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
-                show_all: bool = False, show_total: bool = False) -> int:
+                show_all: bool = False, show_total: bool = False,
+                show_fw: bool = False) -> int:
     """Live, scrollable `gw watch`: link state + per-second throughput + an
     async latency column, in a viewport that scrolls when there are more peers
     than screen rows. See _WatchApp. Root + a terminal required."""
@@ -890,7 +922,7 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
     prober = _LatencyProber()
     prober.start()
     app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval),
-                    show_all, show_total)
+                    show_all, show_total, show_fw)
     try:
         with _cbreak_terminal() as fd:
             app.run(fd)
@@ -1285,17 +1317,25 @@ def cmd_watch(args) -> int:
         return _watch_live(cfg, own_id, own_addr,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0),
                             show_all=getattr(args, "all", False),
-                            show_total=getattr(args, "total", False))
+                            show_total=getattr(args, "total", False),
+                            show_fw=getattr(args, "firewall", False))
 
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
 
     for line in _watch_header(cfg, directory, own_id, own_addr):
         print(line)
-    for line in _main_firewall_lines(cfg):         # host firewall vs the mesh port(s)
-        print(line)
-    for line in _nft_table_lines(cfg):             # greasewood's own nftables table, verbatim
-        print(line)
+    # Firewall area: a 1-line summary by default (the host-firewall verdict
+    # stays verbatim, so a blocked port is as loud collapsed as expanded);
+    # --firewall prints the full host-rule check + greasewood's table.
+    fw_lines, nft_lines = _main_firewall_lines(cfg), _nft_table_lines(cfg)
+    if getattr(args, "firewall", False):
+        for line in fw_lines + nft_lines:
+            print(line)
+    else:
+        for line in _firewall_summary_line(fw_lines, nft_lines,
+                                           "--firewall for detail"):
+            print(line)
     print()
 
     now = dt.datetime.now(_UTC)
