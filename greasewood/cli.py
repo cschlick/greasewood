@@ -85,8 +85,19 @@ StartLimitBurst=5
 Type=simple
 # gw run creates WireGuard interfaces and edits routing → runs as root.
 ExecStart={exec} -c /etc/greasewood_%i.toml run
-Restart=on-failure
+# always, not on-failure: a mesh daemon down is a node silently rotting toward
+# credential expiry, whatever stopped it. Seen in the field: a stray
+# `sudo killall python` cleanly SIGTERM'd the daemon, on-failure (correctly)
+# ignored the clean exit, and the node spent 20h dying politely. Restart=
+# never overrides an explicit `systemctl stop`, so deliberate stops still stick.
+Restart=always
 RestartSec=5
+# Liveness watchdog: gw run pings WATCHDOG=1 after every successful reconcile
+# (~5s cadence). A daemon that is alive but no longer reconciling — wedged in
+# a way no process supervisor can see — misses its pings and is killed +
+# restarted after 120s. Pings are a no-op running outside systemd.
+WatchdogSec=120
+NotifyAccess=main
 
 # --- sandboxing ---------------------------------------------------------
 # The daemon runs as root only for CAP_NET_ADMIN (WireGuard + routing). It
@@ -2815,6 +2826,10 @@ def cmd_run(args) -> int:
 
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
+    # Unit-template self-heal: pick up unit improvements shipped by upgrades
+    # (no-op when unchanged, on non-systemd hosts, or running by hand).
+    _refresh_service_template()
+
     # Roles are the grant-table vocabulary. With no policy applied everyone
     # peers regardless; once one exists, a node with no role: tag reaches only
     # the anchor — worth saying once, up front.
@@ -3984,6 +3999,31 @@ def _write_service_template(exec_path: "str | None" = None) -> "str | None":
     if systemctl:
         _systemctl_run([systemctl, "daemon-reload"], check=False)
     return systemctl
+
+
+def _refresh_service_template() -> bool:
+    """Daemon-startup self-heal for the unit template: upgrades ship unit
+    improvements (Restart=always, the watchdog, …), but the installed
+    greasewood@.service is only written at create/join — so without this an
+    existing mesh would NEVER pick them up. If a template is installed and its
+    text differs from this version's, rewrite it + daemon-reload (safe
+    mid-run; applies from each instance's next restart). Never installs a
+    template where none exists — a host running `gw run` by hand stays
+    unmanaged. Returns True if it refreshed."""
+    tmpl = _UNIT_DIR / "greasewood@.service"
+    try:
+        if not tmpl.exists():
+            return False
+        desired = _SERVICE_UNIT.format(exec=_service_exec())
+        if tmpl.read_text() == desired:
+            return False
+        _write_service_template()
+        log.info("systemd unit template updated to this greasewood version "
+                 "(greasewood@.service) — applies from each instance's next restart")
+        return True
+    except OSError as e:
+        log.debug("could not refresh the unit template: %s", e)
+        return False
 
 
 def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> str:

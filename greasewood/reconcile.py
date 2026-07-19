@@ -467,6 +467,8 @@ class ReconcileLoop(Loop):
             log.error("reconcile error: %s", e)
             return  # no verified set this cycle; hosts stays as-is, heals next pass
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
+        from .loop import sd_watchdog_ping
+        sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
