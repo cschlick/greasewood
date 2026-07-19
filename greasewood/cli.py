@@ -4222,6 +4222,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true",
                     help="also show expired nodes (hidden by default — the roster "
                          "shows only the live mesh)")
+    sp.add_argument("--firewall", action="store_true",
+                    help="expand the firewall area (the host-rule check + "
+                         "greasewood's own nftables table, verbatim). Default is "
+                         "a one-line summary; in the live view the f key toggles")
     sp.add_argument("--total", action="store_true",
                     help="live view shows cumulative traffic instead of per-second "
                          "rate (toggle with 't' while watching)")
