@@ -237,7 +237,7 @@ def test_toggle_nft_collapses_the_top_block():
     app._show_nft = False
     collapsed = app._top_lines()
     assert len(collapsed) < len(expanded)              # collapsing shrinks the pinned top
-    assert any("f for detail" in ln for ln in collapsed)   # still shows how to expand
+    assert any("(f to expand" in ln for ln in collapsed)   # still shows how to expand
     assert any("own table" in ln for ln in collapsed)      # gw-table state, one clause
     # the whole firewall area is ONE line collapsed — that's the point
     assert len(expanded) - len(collapsed) >= len(app._nft_lines)
@@ -401,28 +401,33 @@ def test_scrollbar_column_geometry():
     assert s._scrollbar_column(0, 5, 10) == [" "] * 10
 
 
-def test_firewall_summary_line_states():
-    from greasewood.status import _firewall_summary_line as fsl
+def test_firewall_summary_rows():
+    from greasewood.status import _firewall_summary_lines as fsl
     fw = ["main firewall : ⚠ udp/51910, gw-* overlay BLOCKED by default-drop "
           "— daemon likely UNREACHABLE inbound", "  $ nft ...", "    (no rule)"]
     nft_ok = ["$ sudo nft list table inet greasewood_pm",
               "table inet greasewood_pm {",
               '        iifname "gw-pm" tcp dport 22 accept',
               '        iifname "gw-pm" drop', "}"]
-    # blocked verdict survives VERBATIM, own-table state + hint appended
-    line = fsl(fw, nft_ok, "f for detail")[0]
-    assert line.startswith(fw[0])
-    assert "own table ✓ (2 rules)" in line and "(f for detail)" in line
+    rows = fsl(fw, nft_ok, "f")
+    # three rows: verbatim verdict / own-table state / how to expand
+    assert rows[0] == fw[0]
+    assert rows[1].startswith("own table") and "✓" in rows[1] and "(2 rules)" in rows[1]
+    assert rows[2] == "(f to expand — raw nft rules)"
+    # the two labels' colons align (that's what makes the rows scannable)
+    assert rows[0].index(":") == rows[1].index(":")
     # missing table is loud
     nft_missing = [nft_ok[0], "  (table not present — the daemon isn't running "
                    "yet, or hasn't applied enforcement; ...)"]
-    assert "own table MISSING" in fsl(fw, nft_missing, "h")[0]
-    # enforcement off with no host check still yields one labeled clause
+    assert any("MISSING" in r for r in fsl(fw, nft_missing, "f"))
+    # enforcement off with no host check still yields labeled rows
     nft_off = [nft_ok[0], "  (port enforcement off — enforce_ports=false; no table)"]
-    assert fsl([], nft_off, "h") == ["firewall : port enforcement off · (h)"]
-    # nothing to say → no line (nft absent entirely)
-    assert fsl([], [], "h") == []
-    assert fsl([], [nft_ok[0], "  (nft not installed)"], "h") == []
+    rows_off = fsl([], nft_off, "--firewall")
+    assert rows_off[0].startswith("own table") and "port enforcement off" in rows_off[0]
+    assert rows_off[1] == "(--firewall to expand — raw nft rules)"
+    # nothing to say → no rows (nft absent entirely)
+    assert fsl([], [], "f") == []
+    assert fsl([], [nft_ok[0], "  (nft not installed)"], "f") == []
 
 
 # ---------------------------------------------------------------------------
