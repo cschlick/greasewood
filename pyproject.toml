@@ -1,6 +1,6 @@
 [project]
 name = "greasewood"
-version = "0.1.1"
+version = "0.1.2"
 description = "Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated"
 readme = "README.md"
 requires-python = ">=3.11"

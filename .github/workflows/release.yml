@@ -1,10 +1,10 @@
 name: Release
 
-# On a version tag (v0.1.1, …): build the sdist + wheel, build self-contained
-# .deb/.rpm for amd64 + arm64 (each bundling a relocatable Python via
-# packaging/build-standalone.sh + nfpm), and attach everything to a GitHub
-# Release. PyPI is published manually (see packaging/README.md) — this workflow
-# deliberately does NOT touch it.
+# On a version tag (v0.1.1, …): build the sdist + wheel, PUBLISH them to PyPI
+# via Trusted Publishing (the pypi job below — OIDC, no stored token, tag
+# pushes only), build self-contained .deb/.rpm for amd64 + arm64 (each
+# bundling a relocatable Python via packaging/build-standalone.sh + nfpm), and
+# attach everything to a GitHub Release.
 
 on:
   push:
