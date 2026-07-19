@@ -201,6 +201,7 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._revoker = None
     app._rvk = None
     app._show_all = False
+    app._help = False
     return app
 
 
@@ -813,3 +814,17 @@ def test_make_revoker_real_ca(tmp_path):
     assert msg.startswith("✓ revoked bb") and "free for reuse" in msg
     assert CA(keys, tmp_path).is_revoked(k.id_pub_bytes)
     assert ca.hostname_owner("bb") is None              # name actually freed
+
+
+def test_help_overlay_shows_keys_and_commands_and_any_key_closes():
+    app = _mk_app(["h1"], ["r1"])
+    app._handle("help")
+    frame = "\n".join(app._compose(110, 40))
+    assert "keys:" in frame and "everyday commands:" in frame
+    assert "gw --help" in frame                     # points at the full reference
+    assert "r  (in panel)" not in frame             # non-anchor: no admin keys
+    app._handle("down")                             # any key closes
+    assert app._help is False
+    app._apply_roles = lambda n, r: "✓"
+    app._handle("help")
+    assert "edit roles" in "\n".join(app._compose(110, 40))  # anchor: admin keys

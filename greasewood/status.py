@@ -693,6 +693,7 @@ _KEY_ACTIONS = {
     b"\r": "select", b"\n": "select",
     b"r": "roles",  b"y": "yes",
     b"x": "revoke", b"a": "toggle_all",
+    b"?": "help",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -1011,6 +1012,26 @@ def _make_revoker(cfg):
     return _revoke
 
 
+def _help_lines(can_admin: bool) -> list:
+    """The ? overlay: keys first (this view), then the everyday commands (the
+    CLI beyond it) — so the naive `sudo gw` typist discovers both without
+    leaving the dashboard. The command index is the same one bare `gw`
+    prints below a snapshot (single source, lazily imported — cli imports
+    this module)."""
+    from .cli import _EVERYDAY_COMMANDS
+    keys = [
+        "keys:",
+        "  ↑↓ / j k        select a peer        enter   open its detail panel",
+        "  PgUp/PgDn g G   jump                 f       expand/collapse firewall",
+        "  t               rate ↔ total         a       show/hide expired peers",
+    ]
+    if can_admin:
+        keys += ["  r  (in panel)   edit roles           x  (in panel)   revoke",]
+    keys += ["  ?               this help            q       close / quit", ""]
+    return ([_rule("help")] + keys + _EVERYDAY_COMMANDS.splitlines()
+            + ["", "(any key to close)"])
+
+
 def _color_enabled() -> bool:
     """Color for the live watch view: on unless the user opted out (NO_COLOR,
     the informal standard) or the terminal can't (TERM=dumb). The live view is
@@ -1136,6 +1157,7 @@ class _WatchApp:
         self._redit: "dict | None" = None  # role editor state (see _handle)
         self._revoker = revoker          # anchor-only revoke hook, else None
         self._rvk: "dict | None" = None  # revoke confirm state (see _handle)
+        self._help = False               # the ? overlay
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -1247,7 +1269,8 @@ class _WatchApp:
                     f"{self._panel['hostname']}{edit} · enter/q close")
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
-                f"↑↓ select · enter details · f firewall · {tkey} · q quit")
+                f"↑↓ select · enter details · f firewall · {tkey} · "
+                f"? help · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
         """The full frame as a list of exactly term_h lines: pinned top, the
@@ -1259,7 +1282,9 @@ class _WatchApp:
         top = self._top_lines()
         view_h = max(1, term_h - len(top) - 1)            # 1 row for the footer
         overlay = None
-        if self._rvk is not None:
+        if self._help:
+            overlay = _help_lines(bool(self._apply_roles))
+        elif self._rvk is not None:
             overlay = _revoke_lines(self._rvk)
         elif self._redit is not None:
             overlay = _role_editor_lines(self._redit)
@@ -1334,6 +1359,9 @@ class _WatchApp:
         the panel with its own handler."""
         if not action and not raw:
             return True
+        if self._help:
+            self._help = False            # any key closes the help overlay
+            return True
         if self._rvk is not None:
             return self._handle_revoke(action, raw)
         if self._redit is not None:
@@ -1348,6 +1376,9 @@ class _WatchApp:
                 self._panel = None
             elif 0 <= self._sel < len(self._nodes):
                 self._panel = self._nodes[self._sel]
+            return True
+        if action == "help":
+            self._help = True
             return True
         if action == "toggle_all":
             self._show_all = not self._show_all
