@@ -743,6 +743,20 @@ def _sgr(code: str, s: str) -> str:
     return f"\x1b[{code}m{s}\x1b[0m"
 
 
+_RULE_W = 100
+
+
+def _rule(label: str = "") -> str:
+    """A horizontal section rule — `── label ─────…` — the visual seam between
+    the watch views' three sections (node header / firewall / peers), so the
+    dense header doesn't run straight into the firewall line into the roster.
+    Rendered dim when color is on; still does its job as plain text. Emitted at
+    a fixed generous width: the live frame clips to the terminal, the snapshot
+    path clips at print time."""
+    body = f"── {label} " if label else ""
+    return body + "─" * max(0, _RULE_W - len(body))
+
+
 _LAT_RE = re.compile(r"\b(\d{1,4})ms\b")
 
 # Token → SGR. Glyphs and single words only, painted in place — never a whole
@@ -770,6 +784,8 @@ def _paint(ln: str) -> str:
     (there's a test holding that property)."""
     s = ln.strip()
     if s.startswith("$"):                       # command echoes: dim whole line
+        return _sgr("2", ln)
+    if s.startswith("─"):                       # section rules: dim
         return _sgr("2", ln)
     if "-+-" in ln:                             # roster separator: dim
         return _sgr("2", ln)
@@ -875,7 +891,9 @@ class _WatchApp:
         # Roster chrome (title, column header, separator) pins with the header;
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
-        self._header = _watch_header(self._cfg, directory, self._own_id, self._own_addr)
+        self._header = ([_rule(f"{self._cfg.hostname}.{self._cfg.mesh_domain}")]
+                        + _watch_header(self._cfg, directory, self._own_id,
+                                        self._own_addr))
         self._fw_lines = _main_firewall_lines(self._cfg)
         self._nft_lines = _nft_table_lines(self._cfg)
         self._chrome = roster[:sep + 1]
@@ -893,7 +911,10 @@ class _WatchApp:
             area = fw + ([""] if fw and nft else []) + nft
         else:
             area = _firewall_summary_line(fw, nft, "f for detail")
-        return self._header + area + [""] + self._chrome
+        # Labeled rules seam the three sections; a host with no firewall story
+        # gets no empty "firewall" section, just header → peers.
+        fw_sec = (["", _rule("firewall")] + area) if area else []
+        return self._header + fw_sec + ["", _rule("peers")] + self._chrome
 
     def _footer(self, view_h: int) -> str:
         now = dt.datetime.now(_UTC)
@@ -1393,6 +1414,12 @@ def cmd_watch(args) -> int:
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
 
+    cols = shutil.get_terminal_size((80, 24)).columns
+
+    def rule(label=""):
+        print(_rule(label)[:cols])
+
+    rule(f"{cfg.hostname}.{cfg.mesh_domain}")
     for line in _watch_header(cfg, directory, own_id, own_addr):
         print(line)
     # Firewall area: a 1-line summary by default (the host-firewall verdict
@@ -1400,11 +1427,14 @@ def cmd_watch(args) -> int:
     # --firewall prints the full host-rule check + greasewood's table.
     fw_lines, nft_lines = _main_firewall_lines(cfg), _nft_table_lines(cfg)
     if getattr(args, "firewall", False):
-        for line in fw_lines + nft_lines:
-            print(line)
+        fw_area = fw_lines + nft_lines
     else:
-        for line in _firewall_summary_line(fw_lines, nft_lines,
-                                           "--firewall for detail"):
+        fw_area = _firewall_summary_line(fw_lines, nft_lines,
+                                         "--firewall for detail")
+    if fw_area:
+        print()
+        rule("firewall")
+        for line in fw_area:
             print(line)
     print()
 
@@ -1439,6 +1469,7 @@ def cmd_watch(args) -> int:
     def _nodes_for(recs):                        # the model rows for these records
         return [node_by_id[r.id_pub.hex()] for r in recs if r.id_pub.hex() in node_by_id]
 
+    rule("peers")
     if getattr(args, "by_role", False):
         # One table per named role. A node appears under every role it holds,
         # and the anchor (role:*) appears under ALL of them — so many nodes
