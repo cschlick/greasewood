@@ -1,6 +1,6 @@
 pkgbase = greasewood
 	pkgdesc = Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated
-	pkgver = 0.1.1
+	pkgver = 0.1.2
 	pkgrel = 1
 	url = https://github.com/cschlick/greasewood
 	arch = any
@@ -14,7 +14,7 @@ pkgbase = greasewood
 	depends = wireguard-tools
 	depends = iproute2
 	depends = nftables
-	source = https://files.pythonhosted.org/packages/source/g/greasewood/greasewood-0.1.1.tar.gz
-	sha256sums = ae169e6f62d63c1e2534f797d5d3791f338e6df7669e5ee4b60d229bd5560016
+	source = https://files.pythonhosted.org/packages/source/g/greasewood/greasewood-0.1.2.tar.gz
+	sha256sums = 8d2a97160b635bcfb347d995877f7bf2ddd81564e7c376a058307ef258bba0aa
 
 pkgname = greasewood

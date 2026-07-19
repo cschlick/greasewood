@@ -7,7 +7,7 @@
 # `gw` lands on PATH at /usr/bin/gw and `python -m greasewood` works, so the
 # self-managed systemd unit resolves normally.
 pkgname=greasewood
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Minimal self-hosted WireGuard mesh overlay — direct-or-fail, IPv6-only, CA-gated"
 arch=('any')
@@ -16,7 +16,7 @@ license=('MIT')
 depends=('python' 'python-cryptography' 'wireguard-tools' 'iproute2' 'nftables')
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
 source=("https://files.pythonhosted.org/packages/source/g/greasewood/greasewood-${pkgver}.tar.gz")
-sha256sums=('ae169e6f62d63c1e2534f797d5d3791f338e6df7669e5ee4b60d229bd5560016')
+sha256sums=('8d2a97160b635bcfb347d995877f7bf2ddd81564e7c376a058307ef258bba0aa')
 
 build() {
   cd "greasewood-${pkgver}"
