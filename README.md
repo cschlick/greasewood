@@ -792,6 +792,12 @@ go advisory.
 
 ## Command reference
 
+Bare **`gw`** is the dashboard, not a usage error: `sudo gw` in a terminal
+opens the live watch view; without root (or piped) it prints the static
+snapshot with an everyday-commands index below it; on an unconfigured or
+multi-mesh host it tells you how to start (or which `-c`). `gw --help` keeps
+the full reference.
+
 | Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
 | `create`        | yes   | One-shot anchor bootstrap: CA, door key, routing, self-cred. |
