@@ -7,7 +7,7 @@ Postgres-style use case end to end. Also checks the capability gate.
 """
 import pytest
 
-from .conftest import bring_up_node
+from .conftest import bring_up_node, uniq_name
 from .helpers import pexec, podman, wait_for_ping
 
 pytestmark = pytest.mark.integration
@@ -35,7 +35,7 @@ def serve():
 t = threading.Thread(target=serve); t.start()
 try:
     with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
-        with cctx.wrap_socket(raw, server_hostname="postgres.dbnode.testmesh.internal") as cs:
+        with cctx.wrap_socket(raw, server_hostname=sys.argv[1]) as cs:
             cs.send(b"hi")
     print("HANDSHAKE_OK")
 except Exception as e:
@@ -106,14 +106,16 @@ def test_tls_service_between_two_nodes_over_mesh(gw_anchor, gw_image, gw_network
     a mesh-CA-secured web/DB link between two nodes."""
     cids = []
     try:
-        san = "webserver.testmesh.internal"
+        srv_name = uniq_name("webserver")
+        san = f"{srv_name}.testmesh.internal"
         port = "8443"
 
         server = bring_up_node(gw_image, gw_network, gw_anchor,
-                               hostname="webserver", caps="tls")
+                               hostname=srv_name, caps="tls")
         cids.append(server["cid"])
+        cli_name = uniq_name("webclient")
         client = bring_up_node(gw_image, gw_network, gw_anchor,
-                               hostname="webclient", caps="tls")
+                               hostname=cli_name, caps="tls")
         cids.append(client["cid"])
 
         # The two nodes must have a direct overlay tunnel before we talk TLS.
@@ -127,7 +129,7 @@ def test_tls_service_between_two_nodes_over_mesh(gw_anchor, gw_image, gw_network
                   check=False)
         assert r.returncode == 0, f"server cert-request failed:\n{r.stdout}\n{r.stderr}"
         r2 = pexec(client["cid"], "gw", "cert-request",
-                   "--san", "webclient.testmesh.internal", "--name", "client",
+                   "--san", f"{cli_name}.testmesh.internal", "--name", "client",
                    "--out-dir", "/tmp/tls", check=False)
         assert r2.returncode == 0, f"client cert-request failed:\n{r2.stdout}\n{r2.stderr}"
 
@@ -149,8 +151,10 @@ def test_node_requests_and_uses_tls_cert(gw_anchor, gw_image, gw_network):
     nodes = []
     try:
         # Node enrolled WITH the tls capability.
+        db_name = uniq_name("dbnode")
+        db_san = f"postgres.{db_name}.testmesh.internal"
         node = bring_up_node(gw_image, gw_network, gw_anchor,
-                             hostname="dbnode", caps="tls")
+                             hostname=db_name, caps="tls")
         nodes.append(node["cid"])
 
         # Wait for the node↔anchor overlay tunnel before talking to the control plane.
@@ -160,7 +164,7 @@ def test_node_requests_and_uses_tls_cert(gw_anchor, gw_image, gw_network):
         # Request a cert for a service name UNDER this node's own name (dbnode);
         # the anchor only issues SANs the node owns.
         r = pexec(node["cid"], "gw", "cert-request",
-                  "--san", "postgres.dbnode.testmesh.internal", "--name", "postgres",
+                  "--san", db_san, "--name", "postgres",
                   "--out-dir", "/tmp/tls", check=False)
         assert r.returncode == 0, f"cert-request failed:\n{r.stdout}\n{r.stderr}"
 
@@ -169,17 +173,16 @@ def test_node_requests_and_uses_tls_cert(gw_anchor, gw_image, gw_network):
         assert {"postgres.crt", "postgres.key", "ca.crt"} <= set(ls), ls
 
         # Real TLS handshake validated against the returned mesh CA cert.
-        h = pexec(node["cid"], "python3", "-c", _TLS_HANDSHAKE)
+        h = pexec(node["cid"], "python3", "-c", _TLS_HANDSHAKE, db_san)
         assert "HANDSHAKE_OK" in h.stdout, f"TLS handshake failed: {h.stdout}\n{h.stderr}"
 
         # cert-status shows it (manifest-based: no --out-dir flag anymore).
         st = pexec(node["cid"], "gw", "cert-status")
-        assert "postgres" in st.stdout \
-            and "postgres.dbnode.testmesh.internal" in st.stdout, st.stdout
+        assert "postgres" in st.stdout and db_san in st.stdout, st.stdout
 
         # A node WITHOUT the tls cap is refused. tls is on by default now, so opt
         # out explicitly with --caps "" (empty overrides the anchor's default_caps).
-        plain = bring_up_node(gw_image, gw_network, gw_anchor, hostname="plainnode",
+        plain = bring_up_node(gw_image, gw_network, gw_anchor, hostname=uniq_name("plainnode"),
                               caps="")
         nodes.append(plain["cid"])
         r2 = pexec(plain["cid"], "gw", "cert-request",
