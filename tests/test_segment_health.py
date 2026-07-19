@@ -195,6 +195,9 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._rates = {}
     app._panel = None
     app._prober = None
+    app._grants = None
+    app._apply_roles = None
+    app._redit = None
     return app
 
 
@@ -573,3 +576,128 @@ def test_paint_reverses_selected_row_and_preserves_content():
     ln = "▶  nas.home.internal fd8d::9 nfs_srv 4h │ ● up, 46s"
     assert _paint(ln) == "\x1b[7m" + ln + "\x1b[0m"
     assert _ANSI.sub("", _paint(ln)) == ln
+
+
+# ---------------------------------------------------------------------------
+# gw watch live view — role editor (phase 2: anchor-only, delta-confirmed)
+# ---------------------------------------------------------------------------
+
+def test_role_vocabulary_from_grants_plus_builtins():
+    from greasewood.status import _role_vocabulary
+    grants = [{"from": ["web", "host:bb"], "to": ["api", "*"], "ports": ["*"]},
+              {"from": ["admin"], "to": ["anchor", "node"], "ports": ["tcp/22"]}]
+    vocab = _role_vocabulary(_node(roles=["legacy"]), grants)
+    assert "web" in vocab and "api" in vocab            # policy-referenced
+    assert "node" in vocab and "admin" in vocab         # assignable built-ins
+    assert "legacy" in vocab                            # currently held survives
+    assert "host:bb" not in vocab and "*" not in vocab  # never machine names
+    assert "anchor" not in vocab                        # reserved
+
+
+def test_role_delta_shows_tunnel_changes():
+    from greasewood.status import _role_delta
+    grants = [{"from": ["web"], "to": ["api"], "ports": ["tcp/8000"]}]
+    target = _node("t1", addr="fd8d::t", roles=["node"], caps=[])
+    api = _node("api1", addr="fd8d::a", roles=["api"], caps=[])
+    other = _node("db1", addr="fd8d::d", roles=["db"], caps=[])
+    d = _role_delta([target, api, other], target, ["node", "web"], grants)
+    assert d == {"added": ["api1"], "removed": []}      # gains the api tunnel
+    d2 = _role_delta([target, api, other], _node("t2", addr="fd8d::t",
+                                                 roles=["web"], caps=[]),
+                     ["node"], grants)
+    assert d2 == {"added": [], "removed": ["api1"]}     # dropping web loses it
+
+
+def _editor_app(applier=None):
+    app = _mk_app(["h1"], ["r1", "r2"])
+    app._nodes = [_node("n0", addr="fd8d::0"),
+                  _node("nas", addr="fd8d::9", roles=["nfs_srv"])]
+    app._grants = [{"from": ["nfs_usr"], "to": ["nfs_srv"], "ports": ["tcp/2049"]}]
+    app._apply_roles = applier
+    app._fetch = lambda: None                           # no I/O in tests
+    app._sel = 1
+    app._handle("select")                               # open the panel
+    return app
+
+
+def test_role_editor_full_flow_applies_on_confirm():
+    calls = []
+    app = _editor_app(lambda node, roles: calls.append((node["hostname"], roles))
+                      or "✓ done")
+    app._handle("roles")                                # open the editor
+    assert app._redit is not None
+    assert app._redit["sel"] == {"nfs_srv"}             # current roles pre-checked
+    # toggle the cursor row (vocab is sorted; move to a known entry)
+    idx = app._redit["vocab"].index("nfs_usr")
+    app._redit["cur"] = idx
+    app._handle("pgdown")                               # space = toggle
+    assert "nfs_usr" in app._redit["sel"]
+    app._handle("select")                               # review
+    assert app._redit["confirm"] is not None
+    app._handle("yes")                                  # apply
+    assert calls == [("nas", ["nfs_srv", "nfs_usr"])]
+    assert app._redit["result"] == "✓ done"
+    app._handle("down")                                 # any key leaves result
+    assert app._redit is None
+
+
+def test_role_editor_backs_out_without_applying():
+    calls = []
+    app = _editor_app(lambda node, roles: calls.append(1) or "✓")
+    app._handle("roles")
+    app._handle("select")                               # review
+    app._handle("down")                                 # NOT y → back to editing
+    assert app._redit["confirm"] is None and not calls
+    app._handle("quit")                                 # back to the panel
+    assert app._redit is None and app._panel is not None and not calls
+
+
+def test_role_editor_absent_off_anchor_and_for_the_anchor_row():
+    app = _editor_app(applier=None)                     # not the anchor
+    app._handle("roles")
+    assert app._redit is None
+    calls = []
+    app2 = _editor_app(lambda n, r: calls.append(1) or "✓")
+    app2._panel = _node("router", roles=["*", "admin", "anchor"])
+    app2._handle("roles")                               # anchor row: reserved
+    assert app2._redit is None and not calls
+
+
+def test_role_editor_render_states():
+    from greasewood.status import _role_editor_lines
+    r = {"node": _node("nas", roles=["nfs_srv"]), "vocab": ["admin", "nfs_srv", "web"],
+         "sel": {"nfs_srv"}, "cur": 2, "confirm": None, "result": None}
+    text = "\n".join(_role_editor_lines(r))
+    assert "[x] nfs_srv" in text and "▶ [ ] web" in text
+    assert "terminal access" in text                    # admin is loud
+    r["confirm"] = {"added": ["api1"], "removed": ["db1"]}
+    text = "\n".join(_role_editor_lines(r))
+    assert "+ tunnel nas ↔ api1" in text and "- tunnel nas ↔ db1" in text
+    assert "y apply" in text
+    r["result"] = "✓ ok"
+    assert "✓ ok" in "\n".join(_role_editor_lines(r))
+
+
+def test_make_role_applier_anchor_only_and_real_registry(tmp_path):
+    import types as _t
+    from greasewood.status import _make_role_applier
+    from greasewood.keys import CAKeys, NodeKeys
+    from greasewood.ca import CA
+    # not an anchor → no hook at all
+    assert _make_role_applier(_t.SimpleNamespace(role="node")) is None
+    # real anchor-shaped cfg: CA key on disk + registry entry
+    keys = CAKeys.generate()
+    kf = tmp_path / "ca.key"
+    keys.save(kf)
+    k = NodeKeys.generate()
+    CA(keys, tmp_path).issue(k.id_pub_bytes, k.wg_pub_bytes, "nas", ["role:node", "tls"])
+    cfg = _t.SimpleNamespace(role="anchor", ca_key_file=kf, data_dir=tmp_path,
+                             credential_ttl=dt.timedelta(hours=24),
+                             ca_key_passphrase_env=None)
+    apply = _make_role_applier(cfg)
+    msg = apply({"id": k.id_pub_bytes.hex(), "hostname": "nas"}, ["nfs_srv"])
+    assert msg.startswith("✓")
+    _, caps = CA(keys, tmp_path).node_info(k.id_pub_bytes)
+    assert "role:nfs_srv" in caps and "tls" in caps      # roles swapped, caps kept
+    assert "role:node" not in caps
+    assert (tmp_path / "renew_after").exists()           # fleet renew hint written
