@@ -691,6 +691,7 @@ _KEY_ACTIONS = {
     b"f": "toggle_nft",
     b"t": "toggle_total",
     b"\r": "select", b"\n": "select",
+    b"r": "roles",  b"y": "yes",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -753,7 +754,7 @@ def _follow_sel(off: int, sel: int, total: int, view_h: int) -> int:
 
 
 def _peer_panel_lines(n: dict, rate: "str | None" = None,
-                      lat: "str | None" = None) -> list:
+                      lat: "str | None" = None, can_edit: bool = False) -> list:
     """The read-only detail panel for one selected peer, rendered PURELY from
     the per-node model dict (`_node_view` — the same one `--json` emits), so
     the panel can never show a fact the machine contract doesn't carry. Aligned
@@ -794,8 +795,113 @@ def _peer_panel_lines(n: dict, rate: "str | None" = None,
             lines.append(row("link", "○ installed, no fresh handshake"))
         else:
             lines.append(row("link", "not installed as a WireGuard peer"))
-    lines += ["", "(enter or q to close — this panel is read-only)"]
+    lines += ["", "(r edit roles · enter/q close)" if can_edit else
+              "(enter or q to close — this panel is read-only)"]
     return lines
+
+
+def _role_vocabulary(node: dict, grants: "list | None") -> list:
+    """The roles the editor offers: every role the grant table references
+    (the policy IS the vocabulary — same derivation as
+    `gw invite --self-roles-from-grants`), plus the built-ins an operator may
+    assign (node, admin) and whatever the node already holds. Excludes
+    reserved roles ('*', 'anchor' — never assignable) and host:/prefixed
+    entries (a machine's name is not a role)."""
+    from .policy import RESERVED_ROLES
+    ref = set()
+    for g in (grants or []):
+        for e in list(g["from"]) + list(g["to"]):
+            if ":" not in e and e != "*":
+                ref.add(e)
+    vocab = (ref | {"node", "admin"} | set(node["roles"])) - set(RESERVED_ROLES)
+    return sorted(vocab)
+
+
+def _role_delta(nodes: list, target: dict, new_roles: list,
+                grants: "list | None") -> dict:
+    """The tunnel delta a role change would cause — peers_allowed before/after
+    with the target's role caps swapped, against every other node. The same
+    honesty `gw policy apply` gives a grant change: topology never changes
+    without being shown first."""
+    from .policy import peers_allowed
+    old_caps = [f"role:{r}" for r in target["roles"]] + list(target["caps"])
+    new_caps = [f"role:{r}" for r in new_roles] + list(target["caps"])
+    added, removed = [], []
+    for n in nodes:
+        if n["addr"] == target["addr"]:
+            continue
+        o_caps = [f"role:{r}" for r in n["roles"]] + list(n["caps"])
+        before = peers_allowed(old_caps, o_caps, grants,
+                               target["hostname"], n["hostname"])
+        after = peers_allowed(new_caps, o_caps, grants,
+                              target["hostname"], n["hostname"])
+        if after and not before:
+            added.append(n["hostname"])
+        elif before and not after:
+            removed.append(n["hostname"])
+    return {"added": sorted(added), "removed": sorted(removed)}
+
+
+def _role_editor_lines(r: dict) -> list:
+    """The role editor overlay, rendered purely from its state dict: the
+    checkbox list, the review screen (proposed roles + tunnel delta + how the
+    change lands), or the result. Pure — the whole flow is unit-testable."""
+    name = r["node"]["hostname"]
+    if r.get("result") is not None:
+        return [_rule(f"roles — {name}"), r["result"], "",
+                "(any key to continue)"]
+    if r.get("confirm") is not None:
+        d = r["confirm"]
+        lines = [_rule(f"roles — {name} · review"),
+                 f"{'current':<10}: {', '.join(r['node']['roles']) or '(none)'}",
+                 f"{'proposed':<10}: {', '.join(sorted(r['sel'])) or '(none)'}",
+                 ""]
+        lines += [f"  + tunnel {name} ↔ {h}" for h in d["added"]]
+        lines += [f"  - tunnel {name} ↔ {h}" for h in d["removed"]]
+        if not d["added"] and not d["removed"]:
+            lines.append("  tunnels: (no change — port scopes may still change)")
+        lines += ["",
+                  "applies at each node's next renewal; a fleet renew hint is "
+                  "sent, so it lands within a poll interval",
+                  "", "(y apply · any other key back)"]
+        return lines
+    lines = [_rule(f"roles — {name}")]
+    for i, v in enumerate(r["vocab"]):
+        mark = "x" if v in r["sel"] else " "
+        warn = "   (terminal access: SSH to every node)" if v == "admin" else ""
+        lines.append(f"{'▶' if i == r['cur'] else ' '} [{mark}] {v}{warn}")
+    lines += ["", "(space toggle · enter review · q back)"]
+    return lines
+
+
+def _make_role_applier(cfg):
+    """The anchor-only mutation hook for the watch role editor, or None on any
+    other node (the editor simply doesn't exist there). Applies via the SAME
+    registry path as `gw set-roles --now`: CA registry caps rewrite + the
+    fleet renew hint, so the node adopts the roles live within a poll
+    interval. Returns a human line for the result screen."""
+    if getattr(cfg, "role", "node") != "anchor" or not getattr(cfg, "ca_key_file", None):
+        return None
+
+    def _apply(node: dict, roles: list) -> str:
+        from .ca import CA
+        from .keys import CAKeys
+        from . import cli as _cli                 # lazy: cli imports status
+        ca = CA(CAKeys.load(cfg.ca_key_file,
+                            _cli._get_passphrase(cfg.ca_key_passphrase_env)),
+                cfg.data_dir, cfg.credential_ttl)
+        id_pub = bytes.fromhex(node["id"])
+        info = ca.node_info(id_pub)
+        if info is None:
+            return "✗ node not found in the anchor registry"
+        _, current = info
+        kept = [c for c in current if not c.startswith("role:")]
+        ca.set_caps(id_pub, kept + [f"role:{r}" for r in roles])
+        _cli._request_fleet_renewal(cfg)
+        return (f"✓ {node['hostname']} roles → {', '.join(roles) or '(none)'} — "
+                f"renewal requested; adopts live within a poll interval")
+
+    return _apply
 
 
 def _color_enabled() -> bool:
@@ -890,7 +996,7 @@ class _WatchApp:
 
     def __init__(self, cfg, own_id, own_addr, prober, interval: float,
                  show_all: bool = False, show_total: bool = False,
-                 show_fw: bool = False) -> None:
+                 show_fw: bool = False, apply_roles=None) -> None:
         self._cfg = cfg
         self._own_id = own_id
         self._own_addr = own_addr
@@ -917,6 +1023,9 @@ class _WatchApp:
         self._nodes: list = []           # model dict per row (same order)
         self._rates: dict = {}           # addr → rate string (for the panel)
         self._panel: "dict | None" = None  # open peer panel: the node model
+        self._grants: "list | None" = None  # active grant table (for the editor)
+        self._apply_roles = apply_roles  # anchor-only mutation hook, else None
+        self._redit: "dict | None" = None  # role editor state (see _handle)
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -969,6 +1078,7 @@ class _WatchApp:
                                 show_total=self._show_total)
         self._nodes = nodes
         self._rates = rates
+        self._grants = grants
         self._sel = max(0, min(self._sel, len(nodes) - 1))
         if self._panel is not None:      # refresh the open panel's model
             self._panel = next((n for n in nodes
@@ -1014,9 +1124,13 @@ class _WatchApp:
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
         hidden = f" · {self._hidden} expired hidden" if self._hidden else ""
         tkey = "t rate" if self._show_total else "t total"
+        if self._redit is not None:
+            return (f"{now:%H:%M:%S}Z · role editor — "
+                    f"{self._redit['node']['hostname']} (anchor)")
         if self._panel is not None:
+            edit = " · r roles" if self._can_edit(self._panel) else ""
             return (f"{now:%H:%M:%S}Z · peer detail — "
-                    f"{self._panel['hostname']} · ↑↓ enter/q close")
+                    f"{self._panel['hostname']}{edit} · enter/q close")
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
                 f"↑↓ select · enter details · f firewall · {tkey} · q quit")
@@ -1030,14 +1144,19 @@ class _WatchApp:
         Pure — no terminal I/O — so the windowing is unit-testable."""
         top = self._top_lines()
         view_h = max(1, term_h - len(top) - 1)            # 1 row for the footer
-        if self._panel is not None:
-            panel = _peer_panel_lines(self._panel,
-                                      rate=self._rates.get(self._panel["addr"]),
-                                      lat=self._prober.results.get(self._panel["addr"])
-                                      if self._prober else None)
-            if len(panel) > view_h:               # tiny terminal: keep the
-                panel = panel[:view_h - 1] + [panel[-1]]   # close hint visible
-            body = panel + [""] * (view_h - len(panel))
+        overlay = None
+        if self._redit is not None:
+            overlay = _role_editor_lines(self._redit)
+        elif self._panel is not None:
+            overlay = _peer_panel_lines(self._panel,
+                                        rate=self._rates.get(self._panel["addr"]),
+                                        lat=self._prober.results.get(self._panel["addr"])
+                                        if self._prober else None,
+                                        can_edit=self._can_edit(self._panel))
+        if overlay is not None:
+            if len(overlay) > view_h:             # tiny terminal: keep the
+                overlay = overlay[:view_h - 1] + [overlay[-1]]  # hint visible
+            body = overlay + [""] * (view_h - len(overlay))
             return top + body + [self._footer(view_h)]
         self._off = _follow_sel(self._off, self._sel, len(self._rows), view_h)
         visible = [("▶ " if self._off + i == self._sel else "  ") + ln
@@ -1076,13 +1195,25 @@ class _WatchApp:
         body = "\r\n".join("\x1b[K" + ln for ln in cells)
         return "\x1b[H" + body + "\x1b[J"
 
+    def _can_edit(self, node: "dict | None") -> bool:
+        """Role editing exists only on the anchor (the mutation hook is None
+        elsewhere), and never for the anchor's own row (its roles — '*',
+        anchor — are reserved by design)."""
+        return bool(self._apply_roles and node is not None
+                    and not node.get("is_self") and "*" not in node.get("roles", []))
+
     def _handle(self, action: "str | None") -> bool:
         """Apply one key action; returns False when the app should exit.
         Factored out of run() so the interaction rules are unit-testable:
         with a panel open, quit/select CLOSE the panel (q must be pressed
         again to exit — a panel is a mode, and modes need an exit that isn't
         the app's); movement keys move the selection CURSOR, and the viewport
-        follows it in _compose."""
+        follows it in _compose. The role editor is a deeper mode on top of
+        the panel with its own handler."""
+        if not action:
+            return True
+        if self._redit is not None:
+            return self._handle_redit(action)
         if action == "quit":
             if self._panel is not None:
                 self._panel = None
@@ -1093,6 +1224,14 @@ class _WatchApp:
                 self._panel = None
             elif 0 <= self._sel < len(self._nodes):
                 self._panel = self._nodes[self._sel]
+            return True
+        if action == "roles":
+            if self._panel is not None and self._can_edit(self._panel):
+                node = self._panel
+                self._redit = {"node": node,
+                               "vocab": _role_vocabulary(node, self._grants),
+                               "sel": set(node["roles"]),
+                               "cur": 0, "confirm": None, "result": None}
             return True
         if action == "toggle_nft":
             self._show_nft = not self._show_nft     # instant, next render shows it
@@ -1105,6 +1244,37 @@ class _WatchApp:
             _, term_h = shutil.get_terminal_size((80, 24))
             self._sel = _sel_move(action, self._sel, len(self._rows),
                                   self._view_h(term_h))
+        return True
+
+    def _handle_redit(self, action: str) -> bool:
+        """The role editor's own key handling: checkbox list → review (with
+        the tunnel delta) → y applies via the anchor hook → result. Nothing
+        mutates until 'y' on the review screen — the same never-silently
+        posture as `gw policy apply`, at TUI speed."""
+        r = self._redit
+        if r["result"] is not None:              # result screen: any key closes
+            self._redit = None
+            self._fetch()                         # show the fresh registry state
+            return True
+        if r["confirm"] is not None:
+            if action == "yes":
+                try:
+                    r["result"] = self._apply_roles(r["node"], sorted(r["sel"]))
+                except Exception as e:
+                    r["result"] = f"✗ role change failed: {e}"
+            else:
+                r["confirm"] = None               # anything else: back to editing
+            return True
+        if action == "quit":
+            self._redit = None                    # back to the panel, unapplied
+        elif action == "select":
+            r["confirm"] = _role_delta(self._nodes, r["node"], sorted(r["sel"]),
+                                       self._grants)
+        elif action == "pgdown":                  # space toggles in the editor
+            name = r["vocab"][r["cur"]]
+            r["sel"] ^= {name}
+        elif action in ("up", "down", "top", "bottom", "pgup"):
+            r["cur"] = _sel_move(action, r["cur"], len(r["vocab"]), 5)
         return True
 
     def run(self, fd: int) -> None:
@@ -1120,7 +1290,7 @@ class _WatchApp:
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
                 show_all: bool = False, show_total: bool = False,
-                show_fw: bool = False) -> int:
+                show_fw: bool = False, apply_roles=None) -> int:
     """Live, scrollable `gw watch`: link state + per-second throughput + an
     async latency column, in a viewport that scrolls when there are more peers
     than screen rows. See _WatchApp. Root + a terminal required."""
@@ -1136,7 +1306,7 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
     prober = _LatencyProber()
     prober.start()
     app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval),
-                    show_all, show_total, show_fw)
+                    show_all, show_total, show_fw, apply_roles=apply_roles)
     try:
         with _cbreak_terminal() as fd:
             app.run(fd)
@@ -1532,7 +1702,8 @@ def cmd_watch(args) -> int:
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0),
                             show_all=getattr(args, "all", False),
                             show_total=getattr(args, "total", False),
-                            show_fw=getattr(args, "firewall", False))
+                            show_fw=getattr(args, "firewall", False),
+                            apply_roles=_make_role_applier(cfg))
 
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
