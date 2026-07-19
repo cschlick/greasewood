@@ -496,33 +496,31 @@ def _nft_table_lines(cfg) -> list:
                   "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
-def _firewall_summary_line(fw_lines: list, nft_lines: list, hint: str) -> list:
-    """The COLLAPSED firewall area: one line, not a wall of tables. Starts with
-    the host-firewall verdict VERBATIM (fw_lines[0] — so a blocked port stays
-    exactly as loud collapsed as expanded), then a short state token for
-    greasewood's own table, then how to expand. Returns [] when there's nothing
+def _firewall_summary_lines(fw_lines: list, nft_lines: list, expand: str) -> list:
+    """The COLLAPSED firewall area: a few aligned rows, not one dense line.
+    Row 1 is the host-firewall verdict VERBATIM (fw_lines[0] — so a blocked
+    port stays exactly as loud collapsed as expanded); row 2 is the state of
+    greasewood's own table, its colon aligned under the verdict's; the last
+    row says how to expand to the raw rules. Returns [] when there's nothing
     to say (nft absent → both inputs empty)."""
-    own = ""
-    body = nft_lines[1] if len(nft_lines) > 1 else ""
-    if body.startswith("table inet"):
-        rules = sum(1 for ln in nft_lines[1:]
-                    if "accept" in ln or ln.strip().endswith("drop"))
-        own = f"own table ✓ ({rules} rules)"
-    elif "enforcement off" in body:
-        own = "port enforcement off"
-    elif "run as root" in body:
-        own = "own table: needs root"
-    elif "table not present" in body:
-        own = "own table MISSING (daemon running?)"
+    rows = []
     if fw_lines:
-        parts = [fw_lines[0]] + ([own] if own else [])
-    elif own:
-        # No host-firewall check (nft absent / nothing to verify) but the
-        # enforcement state is still worth one clause — label it ourselves.
-        parts = [f"firewall : {own}"]
-    else:
-        return []
-    return [" · ".join(parts + [f"({hint})"])]
+        rows.append(fw_lines[0])
+    body = nft_lines[1] if len(nft_lines) > 1 else ""
+    label = f"{'own table':<13} : "                 # aligns with "main firewall : "
+    if body.startswith("table inet"):
+        n = sum(1 for ln in nft_lines[1:]
+                if "accept" in ln or ln.strip().endswith("drop"))
+        rows.append(label + f"✓ enforcing the grant table ({n} rules)")
+    elif "enforcement off" in body:
+        rows.append(label + "port enforcement off (enforce_ports=false)")
+    elif "run as root" in body:
+        rows.append(label + "needs root to read")
+    elif "table not present" in body:
+        rows.append(label + "MISSING — daemon running?")
+    if rows:
+        rows.append(f"({expand} to expand — raw nft rules)")
+    return rows
 
 
 def _cfg_control_port(cfg) -> int:
@@ -787,6 +785,8 @@ def _paint(ln: str) -> str:
         return _sgr("2", ln)
     if s.startswith("─"):                       # section rules: dim
         return _sgr("2", ln)
+    if s.startswith("(") and s.endswith(")"):   # aside rows (hints, notes): dim
+        return _sgr("2", ln)
     if "-+-" in ln:                             # roster separator: dim
         return _sgr("2", ln)
     for word, code in _PAINT_WORDS:
@@ -801,9 +801,6 @@ def _paint(ln: str) -> str:
         return _sgr(code, m.group(0)) if code else m.group(0)
     ln = _LAT_RE.sub(_lat, ln)
 
-    for hint in ("(f for detail)", "(--firewall for detail)"):
-        if hint in ln:
-            ln = ln.replace(hint, _sgr("2", hint))
     i = ln.find("↑↓/")                          # footer key help: dim the tail
     if i >= 0:
         ln = ln[:i] + _sgr("2", ln[i:])
@@ -910,7 +907,7 @@ class _WatchApp:
         if self._show_nft:
             area = fw + ([""] if fw and nft else []) + nft
         else:
-            area = _firewall_summary_line(fw, nft, "f for detail")
+            area = _firewall_summary_lines(fw, nft, "f")
         # Labeled rules seam the three sections; a host with no firewall story
         # gets no empty "firewall" section, just header → peers.
         fw_sec = (["", _rule("firewall")] + area) if area else []
@@ -1429,8 +1426,7 @@ def cmd_watch(args) -> int:
     if getattr(args, "firewall", False):
         fw_area = fw_lines + nft_lines
     else:
-        fw_area = _firewall_summary_line(fw_lines, nft_lines,
-                                         "--firewall for detail")
+        fw_area = _firewall_summary_lines(fw_lines, nft_lines, "--firewall")
     if fw_area:
         print()
         rule("firewall")
