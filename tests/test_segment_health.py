@@ -423,3 +423,64 @@ def test_firewall_summary_line_states():
     # nothing to say → no line (nft absent entirely)
     assert fsl([], [], "h") == []
     assert fsl([], [nft_ok[0], "  (nft not installed)"], "h") == []
+
+
+# ---------------------------------------------------------------------------
+# gw watch live view — color (paint is zero-width, opt-out honored)
+# ---------------------------------------------------------------------------
+
+_ANSI = __import__("re").compile(r"\x1b\[[0-9;]*m")
+
+
+def test_paint_never_changes_content():
+    # The invariant that makes painting safe AFTER layout: strip the escapes
+    # and you must get the input back, for every kind of line we render.
+    from greasewood.status import _paint
+    lines = [
+        "main firewall : ⚠ udp/51910, gw-* overlay BLOCKED by default-drop "
+        "— daemon likely UNREACHABLE inbound · own table MISSING (daemon "
+        "running?) · (f for detail)",
+        "main firewall : udp/51900 + gw-* overlay allowed ✓ · own table ✓ "
+        "(5 rules) · (--firewall for detail)",
+        "db01.pm.internal  fd8d::1  db  23h  │ ● up, 3m ago  ↓1.2K/s ↑340B/s  12ms",
+        "web1.pm.internal  fd8d::2  web  <1h!  │ ○ no handshake",
+        "self.pm.internal  fd8d::3  api  EXPIRED  │ (self)   0ms",
+        "  $ sudo nft list ruleset | grep -E '51900|gw-'",
+        "-----------------+------------------------------",
+        "12:00:00Z · 3 links up · all 5 · ↑↓/PgUp/PgDn/g/G scroll · f firewall "
+        "· t total · q quit",
+        "synced   : never synced (is the daemon running / reaching the anchor?)",
+        "plain line with no tokens at all",
+    ]
+    for ln in lines:
+        assert _ANSI.sub("", _paint(ln)) == ln
+
+
+def test_paint_latency_heat():
+    from greasewood.status import _paint
+    assert "\x1b[32m12ms\x1b[0m" in _paint("x 12ms")       # fast: green
+    assert _paint("x 80ms") == "x 80ms"                    # mid: untouched
+    assert "\x1b[33m400ms\x1b[0m" in _paint("x 400ms")     # slow: yellow
+
+
+def test_frame_paints_only_after_truncation():
+    from greasewood import status as s
+    # the ✓ sits beyond the 10-col clip → no escape may survive for it
+    out = s._WatchApp._frame(["0123456789 ✓"], 10, color=True)
+    assert "✓" not in out and "\x1b[32m" not in out
+    # default stays plain (snapshot/tests contract)
+    assert "\x1b[32m" not in s._WatchApp._frame(["a ✓"], 80)
+    # and colored mode paints within the clip
+    assert "\x1b[32m✓\x1b[0m" in s._WatchApp._frame(["a ✓"], 80, color=True)
+
+
+def test_color_enabled_honors_opt_outs(monkeypatch):
+    from greasewood.status import _color_enabled
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert _color_enabled()
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not _color_enabled()
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")
+    assert not _color_enabled()
