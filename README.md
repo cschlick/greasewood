@@ -656,6 +656,30 @@ A single grant can be a whole service: `worker -> files : tcp/2049` is a
 complete file share, with the grant table acting as the share's ACL — see the
 [NFS worked example](#worked-example-a-shared-directory-over-the-mesh-nfs).
 
+### Declarative role assignments (`[assign]`)
+
+Roles are assigned imperatively by default (`gw invite --roles`,
+`gw set-roles`). Add an **optional `[assign]` table** to grants.toml and the
+file also declares *who holds which roles* — making the one policy file a
+complete, diffable description of the mesh: membership shape **and** topology:
+
+```toml
+[assign]
+nas = ["nfs_srv"]
+bb  = ["nfs_usr", "web"]
+```
+
+`gw policy apply` reconciles listed hosts' roles to the table — previewing
+role diffs and the resulting tunnel delta exactly like a grant edit, then
+sending one fleet renew hint so every change lands within a poll interval.
+Listed hosts refuse `gw set-roles` (an imperative edit would silently drift
+from the file), and the `gw watch` role editor **writes this table** rather
+than the registry — the TUI is a hand on the file, never a bypass of it.
+Unlisted hosts keep the imperative flow, so menu-invite auto-provisioning
+composes untouched; a listed host that hasn't joined yet warns at apply and
+reconciles automatically once it does. No `[assign]` section — no change at
+all.
+
 ### Grants to specific machines (`host:`)
 
 When a grant really means *this one box*, name it directly instead of minting

@@ -876,29 +876,57 @@ def _role_editor_lines(r: dict) -> list:
 
 def _make_role_applier(cfg):
     """The anchor-only mutation hook for the watch role editor, or None on any
-    other node (the editor simply doesn't exist there). Applies via the SAME
-    registry path as `gw set-roles --now`: CA registry caps rewrite + the
-    fleet renew hint, so the node adopts the roles live within a poll
-    interval. Returns a human line for the result screen."""
+    other node (the editor simply doesn't exist there).
+
+    Two modes, decided by grants.toml:
+    - DECLARATIVE (an [assign] table exists): the editor writes the host's
+      entry into grants.toml — the file stays the single source of truth,
+      diffable and reviewable — then reconciles the registry to it, exactly
+      what `gw policy apply` would do for that entry. The TUI is a hand on
+      the file, never a bypass of it.
+    - imperative (no [assign] section): the direct `gw set-roles --now` path,
+      the same registry write the CLI performs.
+    Either way a fleet renew hint is sent so the node adopts its roles live
+    within a poll interval. Returns a human line for the result screen."""
     if getattr(cfg, "role", "node") != "anchor" or not getattr(cfg, "ca_key_file", None):
         return None
 
     def _apply(node: dict, roles: list) -> str:
         from .ca import CA
-        from .keys import CAKeys
+        from .keys import CAKeys, atomic_write
+        from .policy import (GRANTS_BASENAME, parse_assignments,
+                             rewrite_assignment, apply_assignments)
         from . import cli as _cli                 # lazy: cli imports status
         ca = CA(CAKeys.load(cfg.ca_key_file,
                             _cli._get_passphrase(cfg.ca_key_passphrase_env)),
                 cfg.data_dir, cfg.credential_ttl)
-        id_pub = bytes.fromhex(node["id"])
+        host = node["hostname"]
+        gpath = cfg.data_dir / GRANTS_BASENAME
+        declared = None
+        if gpath.exists():
+            try:
+                declared = parse_assignments(gpath.read_text())
+            except ValueError as e:
+                return f"✗ grants.toml is invalid ({e}) — fix it first"
+        if declared is not None:                  # declarative: write the file
+            text = rewrite_assignment(gpath.read_text(), host, roles)
+            atomic_write(gpath, text, mode=0o644)
+            changed, _ = apply_assignments({host: sorted(roles)}, ca)
+            if changed:
+                _cli._request_fleet_renewal(cfg)
+            return (f"✓ {host} = {sorted(roles)} recorded in grants.toml "
+                    f"[assign] and applied — renewal requested" if changed else
+                    f"✓ {host} = {sorted(roles)} recorded in grants.toml "
+                    f"[assign] (registry already matched)")
+        id_pub = bytes.fromhex(node["id"])        # imperative: set-roles path
         info = ca.node_info(id_pub)
         if info is None:
             return "✗ node not found in the anchor registry"
         _, current = info
         kept = [c for c in current if not c.startswith("role:")]
-        ca.set_caps(id_pub, kept + [f"role:{r}" for r in roles])
+        ca.set_caps(id_pub, kept + [f"role:{r}" for r in sorted(roles)])
         _cli._request_fleet_renewal(cfg)
-        return (f"✓ {node['hostname']} roles → {', '.join(roles) or '(none)'} — "
+        return (f"✓ {host} roles → {', '.join(sorted(roles)) or '(none)'} — "
                 f"renewal requested; adopts live within a poll interval")
 
     return _apply
