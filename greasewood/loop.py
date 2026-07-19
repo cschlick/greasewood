@@ -16,9 +16,33 @@ the base's start()/stop() so its lifecycle still matches.
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
 
 log = logging.getLogger(__name__)
+
+
+def sd_watchdog_ping() -> None:
+    """Tell systemd this daemon is genuinely alive (WATCHDOG=1) — called after
+    each SUCCESSFUL reconcile pass, so 'alive' means 'reconciling', not just
+    'process exists'. Pairs with WatchdogSec= in the unit: a daemon that keeps
+    running but stops reconciling misses its pings and is killed + restarted
+    by systemd — the failure mode a plain process supervisor can't see.
+    A no-op outside systemd (no NOTIFY_SOCKET) and on any socket error: the
+    watchdog is a supervisor contract, never a reason to fail a working
+    daemon. Pure stdlib — one datagram on the notify socket."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    try:
+        if addr.startswith("@"):                  # abstract-namespace socket
+            addr = "\0" + addr[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.send(b"WATCHDOG=1")
+    except OSError:
+        pass
 
 
 class Loop:
