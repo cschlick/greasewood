@@ -690,6 +690,7 @@ _KEY_ACTIONS = {
     b"G": "bottom", b"\x1b[F": "bottom",
     b"f": "toggle_nft",
     b"t": "toggle_total",
+    b"\r": "select", b"\n": "select",
     b"q": "quit",   b"\x03": "quit",  b"\x1b": "quit",
 }
 
@@ -727,6 +728,74 @@ def _read_action(fd: int, timeout: float) -> "str | None":
     if not data:
         return "quit"                             # EOF on stdin
     return _KEY_ACTIONS.get(data, "")
+
+
+def _sel_move(action: str, sel: int, total: int, page: int) -> int:
+    """Move the peer-list selection cursor. Same verbs as scrolling, but the
+    cursor is the unit — the viewport follows it (see _follow_sel)."""
+    if total <= 0:
+        return 0
+    if action == "top":
+        return 0
+    if action == "bottom":
+        return total - 1
+    sel += {"up": -1, "down": 1, "pgup": -page, "pgdown": page}.get(action, 0)
+    return max(0, min(sel, total - 1))
+
+
+def _follow_sel(off: int, sel: int, total: int, view_h: int) -> int:
+    """Scroll offset that keeps the selection visible (scroll-into-view)."""
+    if sel < off:
+        off = sel
+    elif sel >= off + view_h:
+        off = sel - view_h + 1
+    return _scroll_clamp(off, total, view_h)
+
+
+def _peer_panel_lines(n: dict, rate: "str | None" = None,
+                      lat: "str | None" = None) -> list:
+    """The read-only detail panel for one selected peer, rendered PURELY from
+    the per-node model dict (`_node_view` — the same one `--json` emits), so
+    the panel can never show a fact the machine contract doesn't carry. Aligned
+    label rows, same visual grammar as the header."""
+    def row(k, v):
+        return f"{k:<10}: {v}"
+
+    left = n["ttl_remaining_s"]
+    if left < 0:
+        cred = f"EXPIRED at {n['exp']}"
+    else:
+        h = left // 3600
+        cred = (f"issued {n['iat']} · expires {n['exp']} "
+                f"(in {f'{h}h' if h >= 1 else f'{left // 60}m'})")
+    lines = [
+        _rule(f"peer — {n['hostname']}"),
+        row("addr", n["addr"]),
+        row("id", n["id"][:16] + "…"),
+        row("roles", ", ".join(n["roles"]) or "(none)"),
+        row("caps", ", ".join(n["caps"]) or "(none)"),
+        row("cred", cred),
+        row("endpoints", ", ".join(n["endpoints"])
+            or "(none advertised — outbound-only, this side must be dialed)"),
+        row("reachable", f"{len(n['reachable'])} live link(s) self-reported"),
+    ]
+    if n["is_self"]:
+        lines.append(row("policy", "(this node)"))
+    else:
+        lines.append(row("policy", "✓ the grant table allows a tunnel with this node"
+                         if n["peer_expected"] else
+                         "✗ no grant connects this node with us — no tunnel by design"))
+        live = n.get("live")
+        if live and live.get("up"):
+            link = f"● up, handshake {_fmt_handshake_age(live['handshake_age_s'])} ago"
+            extras = " · ".join(x for x in (rate, lat) if x)
+            lines.append(row("link", link + (f" · {extras}" if extras else "")))
+        elif live and live.get("installed"):
+            lines.append(row("link", "○ installed, no fresh handshake"))
+        else:
+            lines.append(row("link", "not installed as a WireGuard peer"))
+    lines += ["", "(enter or q to close — this panel is read-only)"]
+    return lines
 
 
 def _color_enabled() -> bool:
@@ -781,6 +850,8 @@ def _paint(ln: str) -> str:
     back out must always yield the input line — color never changes content
     (there's a test holding that property)."""
     s = ln.strip()
+    if ln.startswith("▶ "):                     # selected peer row: reverse video
+        return _sgr("7", ln)
     if s.startswith("$"):                       # command echoes: dim whole line
         return _sgr("2", ln)
     if s.startswith("─"):                       # section rules: dim
@@ -801,7 +872,7 @@ def _paint(ln: str) -> str:
         return _sgr(code, m.group(0)) if code else m.group(0)
     ln = _LAT_RE.sub(_lat, ln)
 
-    i = ln.find("↑↓/")                          # footer key help: dim the tail
+    i = ln.find("↑↓")                           # footer key help: dim the tail
     if i >= 0:
         ln = ln[:i] + _sgr("2", ln[i:])
     return ln
@@ -842,6 +913,10 @@ class _WatchApp:
         self._up = 0                     # live-link count (for the footer)
         self._hidden = 0                 # expired records hidden (for the footer)
         self._color = _color_enabled()   # NO_COLOR / TERM=dumb opt out
+        self._sel = 0                    # selection cursor into the peer rows
+        self._nodes: list = []           # model dict per row (same order)
+        self._rates: dict = {}           # addr → rate string (for the panel)
+        self._panel: "dict | None" = None  # open peer panel: the node model
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -882,9 +957,22 @@ class _WatchApp:
         self._up = len(targets)
 
         grants = _load_policy_grants(self._cfg)
-        roster = _roster_lines(records, self._cfg, now, self._own_id, live, True,
-                               latency=self._prober.results, rates=rates,
-                               grants=grants, show_total=self._show_total)
+        # Build the node models FIRST and render from them (rather than via
+        # _roster_lines) so selection can map row index → model: row i below
+        # the separator IS nodes[i], which the peer panel renders from.
+        own_rec = next((r for r in records if r.id_pub.hex() == self._own_id), None)
+        own_caps = list(own_rec.cred.caps) if own_rec else list(self._cfg.caps)
+        nodes = [_node_view(r, self._cfg, now, now_epoch, self._own_id, own_caps,
+                            live, grants) for r in records]
+        roster = _render_roster(nodes, self._cfg, True, True,
+                                latency=self._prober.results, rates=rates,
+                                show_total=self._show_total)
+        self._nodes = nodes
+        self._rates = rates
+        self._sel = max(0, min(self._sel, len(nodes) - 1))
+        if self._panel is not None:      # refresh the open panel's model
+            self._panel = next((n for n in nodes
+                                if n["addr"] == self._panel["addr"]), None)
         # Roster chrome (title, column header, separator) pins with the header;
         # the per-peer rows below the separator are what scrolls.
         sep = next((i for i, ln in enumerate(roster) if "-+-" in ln), 2)
@@ -911,7 +999,10 @@ class _WatchApp:
         # Labeled rules seam the three sections; a host with no firewall story
         # gets no empty "firewall" section, just header → peers.
         fw_sec = (["", _rule("firewall")] + area) if area else []
-        return self._header + fw_sec + ["", _rule("peers")] + self._chrome
+        # Chrome gets the same 2-char gutter as the peer rows (see _compose),
+        # so the column headers stay aligned with the guttered rows below.
+        return (self._header + fw_sec + ["", _rule("peers")]
+                + ["  " + c for c in self._chrome])
 
     def _footer(self, view_h: int) -> str:
         now = dt.datetime.now(_UTC)
@@ -923,18 +1014,34 @@ class _WatchApp:
             pos = f"peers {off + 1}–{min(off + view_h, total)} of {total}"
         hidden = f" · {self._hidden} expired hidden" if self._hidden else ""
         tkey = "t rate" if self._show_total else "t total"
+        if self._panel is not None:
+            return (f"{now:%H:%M:%S}Z · peer detail — "
+                    f"{self._panel['hostname']} · ↑↓ enter/q close")
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
-                f"↑↓/PgUp/PgDn/g/G scroll · f firewall · {tkey} · q quit")
+                f"↑↓ select · enter details · f firewall · {tkey} · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
         """The full frame as a list of exactly term_h lines: pinned top, the
         scrolled peer window (padded so the footer stays at the bottom), footer.
-        Pure — no terminal I/O — so the scroll windowing is unit-testable."""
+        With a peer panel open, the panel replaces the peer window. Rows get a
+        2-char selection gutter ('▶ ' on the cursor row — content, not color,
+        so selection survives NO_COLOR; _paint adds reverse-video on top).
+        Pure — no terminal I/O — so the windowing is unit-testable."""
         top = self._top_lines()
         view_h = max(1, term_h - len(top) - 1)            # 1 row for the footer
-        self._off = _scroll_clamp(self._off, len(self._rows), view_h)
-        visible = self._rows[self._off:self._off + view_h]
+        if self._panel is not None:
+            panel = _peer_panel_lines(self._panel,
+                                      rate=self._rates.get(self._panel["addr"]),
+                                      lat=self._prober.results.get(self._panel["addr"])
+                                      if self._prober else None)
+            if len(panel) > view_h:               # tiny terminal: keep the
+                panel = panel[:view_h - 1] + [panel[-1]]   # close hint visible
+            body = panel + [""] * (view_h - len(panel))
+            return top + body + [self._footer(view_h)]
+        self._off = _follow_sel(self._off, self._sel, len(self._rows), view_h)
+        visible = [("▶ " if self._off + i == self._sel else "  ") + ln
+                   for i, ln in enumerate(self._rows[self._off:self._off + view_h])]
         body = visible + [""] * (view_h - len(visible))
         # When the peer list overflows the viewport, pin a 1-col scrollbar rail
         # to the right edge of the scrollable rows (only that region scrolls, so
@@ -969,6 +1076,37 @@ class _WatchApp:
         body = "\r\n".join("\x1b[K" + ln for ln in cells)
         return "\x1b[H" + body + "\x1b[J"
 
+    def _handle(self, action: "str | None") -> bool:
+        """Apply one key action; returns False when the app should exit.
+        Factored out of run() so the interaction rules are unit-testable:
+        with a panel open, quit/select CLOSE the panel (q must be pressed
+        again to exit — a panel is a mode, and modes need an exit that isn't
+        the app's); movement keys move the selection CURSOR, and the viewport
+        follows it in _compose."""
+        if action == "quit":
+            if self._panel is not None:
+                self._panel = None
+                return True
+            return False
+        if action == "select":
+            if self._panel is not None:
+                self._panel = None
+            elif 0 <= self._sel < len(self._nodes):
+                self._panel = self._nodes[self._sel]
+            return True
+        if action == "toggle_nft":
+            self._show_nft = not self._show_nft     # instant, next render shows it
+        elif action == "toggle_total":
+            # rate↔cumulative lives in the peer ROWS (built in _fetch), so
+            # rebuild them now for instant feedback rather than waiting a tick.
+            self._show_total = not self._show_total
+            self._fetch()
+        elif action and self._panel is None:
+            _, term_h = shutil.get_terminal_size((80, 24))
+            self._sel = _sel_move(action, self._sel, len(self._rows),
+                                  self._view_h(term_h))
+        return True
+
     def run(self, fd: int) -> None:
         last = -1e9
         while True:
@@ -976,20 +1114,8 @@ class _WatchApp:
                 self._fetch()
                 last = time.monotonic()
             self._render()
-            action = _read_action(fd, min(0.25, self._interval))
-            if action == "quit":
+            if not self._handle(_read_action(fd, min(0.25, self._interval))):
                 return
-            if action == "toggle_nft":
-                self._show_nft = not self._show_nft     # instant, next render shows it
-            elif action == "toggle_total":
-                # rate↔cumulative lives in the peer ROWS (built in _fetch), so
-                # rebuild them now for instant feedback rather than waiting a tick.
-                self._show_total = not self._show_total
-                self._fetch()
-            elif action:
-                _, term_h = shutil.get_terminal_size((80, 24))
-                self._off = _scroll_key(action, self._off, len(self._rows),
-                                        self._view_h(term_h))
 
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,

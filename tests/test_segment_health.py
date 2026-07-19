@@ -190,6 +190,11 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._show_nft = True
     app._hidden = 0
     app._show_total = False
+    app._sel = 0
+    app._nodes = [{"addr": f"fd8d::{i}", "hostname": r} for i, r in enumerate(rows)]
+    app._rates = {}
+    app._panel = None
+    app._prober = None
     return app
 
 
@@ -202,23 +207,28 @@ def test_compose_windows_rows_and_pins_footer():
     assert len(frame) == term_h                         # exactly fills the height
     assert frame[:len(top)] == top                      # pinned top
     body = frame[len(top):len(top) + view_h]
-    assert all(body[i].startswith(f"peer{i}") for i in range(view_h))   # rows, in order
+    assert all(body[i][2:].startswith(f"peer{i}") for i in range(view_h))  # rows, in order
+    assert body[0].startswith("▶ ")                     # selection gutter on the cursor row
+    assert all(b.startswith("  ") for b in body[1:])    # plain gutter elsewhere
     assert all(ln[-1] in ("░", "█") for ln in body)     # scrollbar rail on every row
     assert body[0][-1] == "█"                            # thumb at the top (off=0)
     assert f"of 50" in frame[-1]                        # footer scroll indicator
 
 
 def test_compose_clamps_offset_and_shows_tail():
+    # The viewport FOLLOWS the selection cursor: putting the cursor on the last
+    # row scrolls the tail into view (a raw _off is overridden by follow).
     app = _mk_app(["h1"], [f"peer{i}" for i in range(50)])
-    app._off = 999
+    app._sel = 49
     term_h = 24
     frame = app._compose(80, term_h)
     top = app._top_lines()
     view_h = term_h - len(top) - 1
-    assert app._off == 50 - view_h                      # clamped to total - view_h
+    assert app._off == 50 - view_h                      # followed to total - view_h
     body = frame[len(top):len(top) + view_h]
-    assert all(body[i].startswith(f"peer{50 - view_h + i}") for i in range(view_h))
-    assert body[-1][-1] == "█"                           # thumb at the bottom (scrolled to end)
+    assert all(body[i][2:].startswith(f"peer{50 - view_h + i}") for i in range(view_h))
+    assert body[-1].startswith("▶ ")                     # cursor on the last row
+    assert body[-1][-1] == "█"                           # thumb at the bottom
 
 
 def test_compose_all_fit_no_scroll_indicator():
@@ -489,3 +499,77 @@ def test_color_enabled_honors_opt_outs(monkeypatch):
     monkeypatch.delenv("NO_COLOR")
     monkeypatch.setenv("TERM", "dumb")
     assert not _color_enabled()
+
+
+# ---------------------------------------------------------------------------
+# gw watch live view — peer selection + detail panel (phase 1: read-only)
+# ---------------------------------------------------------------------------
+
+def _node(name="nas", **over):
+    n = {"id": "ab" * 32, "hostname": name, "addr": "fd8d::9",
+         "roles": ["nfs_srv"], "caps": ["tls"], "endpoints": ["[2001::1]:51900"],
+         "iat": "2026-07-19T00:00:00Z", "exp": "2026-07-20T00:00:00Z",
+         "expired": False, "ttl_remaining_s": 4 * 3600, "is_self": False,
+         "peer_expected": True, "reachable": ["fd8d::1"],
+         "live": {"installed": True, "up": True, "handshake_age_s": 46,
+                  "rx_bytes": 1, "tx_bytes": 2}}
+    n.update(over)
+    return n
+
+
+def test_sel_move_and_follow():
+    from greasewood.status import _sel_move, _follow_sel
+    assert _sel_move("down", 0, 5, 3) == 1
+    assert _sel_move("up", 0, 5, 3) == 0                # clamps
+    assert _sel_move("bottom", 0, 5, 3) == 4
+    assert _sel_move("pgdown", 0, 50, 10) == 10
+    assert _sel_move("down", 0, 0, 3) == 0              # empty list is safe
+    assert _follow_sel(0, 9, 50, 5) == 5                # scrolls down into view
+    assert _follow_sel(20, 3, 50, 5) == 3               # scrolls up into view
+    assert _follow_sel(2, 4, 50, 5) == 2                # already visible → unchanged
+
+
+def test_handle_selection_and_panel_modality():
+    app = _mk_app(["h1"], ["r1", "r2", "r3"])
+    app._nodes = [_node(f"n{i}") for i in range(3)]
+    assert app._handle("down") and app._sel == 1
+    assert app._handle("select") and app._panel is app._nodes[1]
+    # panel open: movement is inert, quit closes the PANEL not the app
+    assert app._handle("down") and app._sel == 1
+    assert app._handle("quit") and app._panel is None
+    assert app._handle("quit") is False                 # second quit exits the app
+
+
+def test_panel_replaces_rows_and_footer_says_so():
+    app = _mk_app(["h1"], ["r1", "r2"])
+    app._nodes = [_node("n0"), _node("nas")]
+    app._sel = 1
+    app._handle("select")
+    frame = app._compose(100, 24)
+    joined = "\n".join(frame)
+    assert "peer — nas" in joined                       # panel rule
+    assert "read-only" in joined
+    assert "  r1" not in joined                         # peer rows replaced
+    assert "peer detail — nas" in frame[-1]             # modal footer
+
+
+def test_panel_lines_render_the_model():
+    from greasewood.status import _peer_panel_lines
+    lines = "\n".join(_peer_panel_lines(_node(), rate="↓1K/s ↑2K/s", lat="1ms"))
+    assert "fd8d::9" in lines and "nfs_srv" in lines
+    assert "expires 2026-07-20T00:00:00Z (in 4h)" in lines
+    assert "✓ the grant table allows a tunnel" in lines
+    assert "● up, handshake 46s ago · ↓1K/s ↑2K/s · 1ms" in lines
+    # policy-denied + no-endpoint variants stay honest
+    lines2 = "\n".join(_peer_panel_lines(_node(peer_expected=False, endpoints=[],
+                                               live=None)))
+    assert "✗ no grant connects" in lines2
+    assert "outbound-only" in lines2
+    assert "not installed" in lines2
+
+
+def test_paint_reverses_selected_row_and_preserves_content():
+    from greasewood.status import _paint
+    ln = "▶  nas.home.internal fd8d::9 nfs_srv 4h │ ● up, 46s"
+    assert _paint(ln) == "\x1b[7m" + ln + "\x1b[0m"
+    assert _ANSI.sub("", _paint(ln)) == ln
