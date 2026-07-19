@@ -197,6 +197,17 @@ def _extract_token(text: str) -> str:
     raise AssertionError(f"no join token in invite output:\n{text}")
 
 
+def uniq_name(prefix: str) -> str:
+    """A per-ATTEMPT unique hostname for tests that enroll on the SESSION
+    anchor. CI reruns (pytest-rerunfailures) re-enter a failed test against
+    the same anchor, whose registry still holds the previous attempt's name —
+    a FIXED hostname then collides ("already in use by another node") and
+    converts any transient flake into a guaranteed rerun failure. A unique
+    name per call keeps every attempt clean. Tests that make_anchor() their
+    own anchor get a fresh registry per attempt and don't need this."""
+    return f"{prefix}-{uuid.uuid4().hex[:6]}"
+
+
 def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
     """Block until `iface` no longer exists in the container."""
     deadline = time.time() + timeout

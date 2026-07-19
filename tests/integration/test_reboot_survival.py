@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from .conftest import bring_up_node
+from .conftest import bring_up_node, uniq_name
 from .helpers import (
     pexec, podman, wait_for_control_plane, wait_for_hostname, wait_for_ping,
 )
@@ -44,7 +44,7 @@ def test_node_reconnects_after_reboot(gw_anchor, gw_image, gw_network):
     """A node reboots; it must rejoin the mesh from disk alone — no new token."""
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname="rebooter")
+        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname=uniq_name("rebooter"))
         assert wait_for_ping(node["cid"], gw_anchor["overlay"], timeout=40), \
             "mesh never formed before reboot"
 
@@ -74,7 +74,8 @@ def test_anchor_reconnects_after_reboot(gw_anchor, gw_image, gw_network):
     door routing, control plane) and the node link must recover."""
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname="anchorreb-node")
+        name = uniq_name("anchorreb")
+        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname=name)
         assert wait_for_ping(node["cid"], gw_anchor["overlay"], timeout=40), \
             "mesh never formed before reboot"
 
@@ -85,7 +86,7 @@ def test_anchor_reconnects_after_reboot(gw_anchor, gw_image, gw_network):
         assert wait_for_control_plane(gw_anchor["cid"], timeout=30), \
             "anchor control plane did not return after reboot"
         # ...the anchor still knows the node from its persisted directory cache...
-        assert wait_for_hostname(gw_anchor["cid"], "anchorreb-node", timeout=30)
+        assert wait_for_hostname(gw_anchor["cid"], name, timeout=30)
         # ...and the data-plane link recovers without operator action.
         assert wait_for_ping(node["cid"], gw_anchor["overlay"], timeout=45), \
             "node link did not recover after anchor reboot"
