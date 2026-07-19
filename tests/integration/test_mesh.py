@@ -51,11 +51,12 @@ def test_anchor_overlay_addr_in_directory(gw_anchor):
 
 def test_duplicate_hostname_refused(gw_anchor, gw_image, gw_network):
     """The anchor refuses to enroll a second node with a name already in use."""
-    from .conftest import bring_up_node, door_enroll_via
+    from .conftest import bring_up_node, door_enroll_via, uniq_name
 
     node = c2 = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname="dupename")
+        dup = uniq_name("dupename")
+        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname=dup)
         c2 = podman(
             "run", "-d", "--privileged", "--network", gw_network,
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
@@ -64,7 +65,7 @@ def test_duplicate_hostname_refused(gw_anchor, gw_image, gw_network):
         time.sleep(1)
         ipv6 = container_ipv6(c2, gw_network)
         j = door_enroll_via(gw_anchor["cid"], gw_anchor["ipv6"], c2, ipv6,
-                            hostname="dupename", check=False)
+                            hostname=dup, check=False)
         assert j.returncode != 0, "join should fail for a duplicate hostname"
         assert "already in use" in (j.stdout + j.stderr).lower(), \
             f"unexpected message:\n{j.stdout}\n{j.stderr}"
@@ -82,11 +83,12 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_anchor, gw_image, gw_network
     the re-enrollment.
     """
     from .helpers import container_ipv6, pexec, podman
-    from .conftest import bring_up_node, door_enroll
+    from .conftest import bring_up_node, door_enroll, uniq_name
 
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname="alpha")
+        name = uniq_name("alpha")
+        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname=name)
         id_pub_before = node["id_pub"]
         ipv6 = container_ipv6(node["cid"], gw_network)
 
@@ -105,7 +107,7 @@ def test_rejoin_reuses_keys_and_preserves_config(gw_anchor, gw_image, gw_network
 
         # 3. Prior hostname preserved (not reset to user@hostname).
         cfg = pexec(node["cid"], "sh", "-c", "cat /etc/greasewood_*.toml").stdout
-        assert 'hostname = "alpha"' in cfg, f"hostname not preserved:\n{cfg}"
+        assert f'hostname = "{name}"' in cfg, f"hostname not preserved:\n{cfg}"
     finally:
         if node:
             podman("rm", "-f", node["cid"], check=False)

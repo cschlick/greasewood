@@ -8,7 +8,7 @@ WireGuard handshake parsing.
 """
 import pytest
 
-from .conftest import bring_up_node
+from .conftest import bring_up_node, uniq_name
 from .helpers import pexec, podman, wait_for_ping
 
 pytestmark = pytest.mark.integration
@@ -17,7 +17,8 @@ pytestmark = pytest.mark.integration
 def test_diagnose_reports_linked(gw_anchor, gw_image, gw_network):
     node = None
     try:
-        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname="diagnode")
+        name = uniq_name("diagnode")
+        node = bring_up_node(gw_image, gw_network, gw_anchor, hostname=name)
         # Wait for the data plane to actually converge before diagnosing.
         assert wait_for_ping(node["cid"], gw_anchor["overlay"], timeout=40), \
             "node never reached the anchor overlay"
@@ -32,7 +33,7 @@ def test_diagnose_reports_linked(gw_anchor, gw_image, gw_network):
         # which on the anchor is just itself (the pairwise design) — so target
         # the node explicitly. It should show as LINKED there too.
         out_anchor = pexec(gw_anchor["cid"], "gw",
-                           "diagnose", "diagnode").stdout
+                           "diagnose", name).stdout
         assert "diagnode" in out_anchor, out_anchor
         assert "LINKED" in out_anchor, f"anchor should see node linked:\n{out_anchor}"
         assert out_anchor.count("●") == 1
