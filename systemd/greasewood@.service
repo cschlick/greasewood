@@ -17,8 +17,19 @@ StartLimitBurst=5
 Type=simple
 # gw run creates WireGuard interfaces and edits routing → runs as root.
 ExecStart=/usr/local/bin/gw -c /etc/greasewood_%i.toml run
-Restart=on-failure
+# always, not on-failure: a mesh daemon down is a node silently rotting toward
+# credential expiry, whatever stopped it. Seen in the field: a stray
+# `sudo killall python` cleanly SIGTERM'd the daemon, on-failure (correctly)
+# ignored the clean exit, and the node spent 20h dying politely. Restart=
+# never overrides an explicit `systemctl stop`, so deliberate stops still stick.
+Restart=always
 RestartSec=5
+# Liveness watchdog: gw run pings WATCHDOG=1 after every successful reconcile
+# (~5s cadence). A daemon that is alive but no longer reconciling — wedged in
+# a way no process supervisor can see — misses its pings and is killed +
+# restarted after 120s. Pings are a no-op running outside systemd.
+WatchdogSec=120
+NotifyAccess=main
 
 # --- sandboxing ---------------------------------------------------------
 # The daemon runs as root only for CAP_NET_ADMIN (WireGuard + routing). It
