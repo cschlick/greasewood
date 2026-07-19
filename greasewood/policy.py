@@ -136,6 +136,16 @@ ports = ["tcp/22"]
 #   from  = ["web", "worker"]
 #   to    = ["api"]
 #   ports = ["tcp/8000"]
+
+# --- Declarative role assignments (optional) --------------------------------
+# Add an [assign] table and this file also declares who HOLDS which roles —
+# `gw policy apply` reconciles listed hosts to it (with a preview), listed
+# hosts refuse imperative `gw set-roles`, and the `gw watch` role editor
+# writes this table. Unlisted hosts (and meshes without the section) keep
+# today's imperative flow. Full reference: grants.toml.example.
+#   [assign]
+#   nas = ["nfs_srv"]
+#   bb  = ["nfs_usr"]
 """
 
 
@@ -168,14 +178,109 @@ def parse_grants_toml(text: str) -> list:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"grants.toml: invalid TOML — {e}") from None
-    unknown = set(data) - {"grant"}
+    unknown = set(data) - {"grant", "assign"}
     if unknown:
         raise ValueError(f"grants.toml: unknown top-level key(s) {sorted(unknown)} "
-                         f"(only [[grant]] tables are allowed)")
+                         f"(only [[grant]] tables and an [assign] table are allowed)")
     raw = data.get("grant", [])
     if not isinstance(raw, list):
         raise ValueError("grants.toml: [[grant]] must be an array of tables")
     return [_validate_grant(g, i) for i, g in enumerate(raw)]
+
+
+def parse_assignments(text: str) -> "dict | None":
+    """The OPTIONAL [assign] table in grants.toml — declarative role
+    assignments, hostname → role list:
+
+        [assign]
+        nas = ["nfs_srv"]
+        bb  = ["nfs_usr", "web"]
+
+    Returns {hostname: [roles]}, or None when no [assign] section exists (its
+    absence is a mode: roles stay imperative, `gw set-roles`-style). Listed
+    hosts' roles are reconciled into the anchor registry at `gw policy apply`
+    (see apply_assignments); unlisted hosts are untouched. Raises ValueError,
+    line-addressable, on anything malformed — the same posture as grants."""
+    import tomllib
+    from .hosts import valid_label
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"grants.toml: invalid TOML — {e}") from None
+    if "assign" not in data:
+        return None
+    raw = data["assign"]
+    if not isinstance(raw, dict):
+        raise ValueError("grants.toml: [assign] must be a table of "
+                         "hostname = [roles]")
+    out = {}
+    for host, roles in raw.items():
+        if not valid_label(host):
+            raise ValueError(f"[assign]: {host!r} is not a DNS-safe hostname "
+                             f"label (use the name as `gw watch` shows it)")
+        if not isinstance(roles, list) or not all(
+                isinstance(r, str) and r for r in roles):
+            raise ValueError(f"[assign] {host}: roles must be a list of "
+                             f"role-name strings")
+        for r in roles:
+            if r in RESERVED_ROLES:
+                raise ValueError(f"[assign] {host}: {r!r} is reserved for the "
+                                 f"anchor and can never be assigned")
+            if ":" in r:
+                raise ValueError(f"[assign] {host}: {r!r} — a role name can't "
+                                 f"contain ':' (host: entries belong in grants, "
+                                 f"not assignments)")
+        out[host] = sorted(set(roles))
+    return out
+
+
+def rewrite_assignment(text: str, host: str, roles: list) -> str:
+    """Surgically set one host's line in grants.toml's [assign] table,
+    preserving everything else byte-for-byte (comments included): replace the
+    host's line if present, else append it to the section, else append a new
+    [assign] section. This is how the watch role editor writes — the FILE
+    stays the source of truth; the TUI is a hand on the same file."""
+    import json as _json
+    import re as _re
+    line = f"{host} = {_json.dumps(sorted(roles))}"   # a JSON str list is valid TOML
+    m = _re.search(r"(?m)^\[assign\]\s*$", text)
+    if m is None:
+        return text.rstrip("\n") + f"\n\n[assign]\n{line}\n"
+    nxt = _re.search(r"(?m)^\s*\[", text[m.end():])
+    end = m.end() + (nxt.start() if nxt else len(text) - m.end())
+    section = text[m.end():end]
+    hm = _re.search(rf"(?m)^\s*{_re.escape(host)}\s*=.*$", section)
+    if hm:
+        section = section[:hm.start()] + line + section[hm.end():]
+    else:
+        section = section.rstrip("\n") + f"\n{line}\n"
+        if nxt:
+            section += "\n"
+    return text[:m.end()] + section + text[end:]
+
+
+def apply_assignments(assignments: dict, ca) -> tuple:
+    """Reconcile the anchor registry to the [assign] table: for each listed
+    host with a current member, swap its role: caps to the declared set
+    (keeping tls/hostname-pinned/anything else). Idempotent. Returns
+    (changes, missing): changes as (host, old_roles, new_roles) for what
+    actually changed, missing as hostnames no member currently holds (they
+    reconcile on a later apply, once the machine joins)."""
+    changes, missing = [], []
+    for host, roles in sorted((assignments or {}).items()):
+        owner = ca.hostname_owner(host)
+        if owner is None:
+            missing.append(host)
+            continue
+        id_pub = bytes.fromhex(owner)
+        _, current = ca.node_info(id_pub)
+        old = sorted(c[len("role:"):] for c in current if c.startswith("role:"))
+        if old == list(roles):
+            continue
+        kept = [c for c in current if not c.startswith("role:")]
+        ca.set_caps(id_pub, kept + [f"role:{r}" for r in roles])
+        changes.append((host, old, list(roles)))
+    return changes, missing
 
 
 def _grant_connects(grant: dict, a_tags: set, b_tags: set) -> bool:
@@ -391,17 +496,24 @@ def sign_default_policy(data_dir: "Path", ca_keys) -> None:
 
 
 def tunnel_delta(records, old_grants: "list | None",
-                 new_grants: "list | None"):
+                 new_grants: "list | None", caps_override: "dict | None" = None):
     """(created, removed) tunnel pairs a policy change would cause, as
     (hostname_a, hostname_b) tuples — what `gw policy apply` shows before
-    asking. Compares peers_allowed over every record pair under both tables."""
+    asking. Compares peers_allowed over every record pair under both tables.
+    caps_override ({id_pub_hex: caps}) applies on the AFTER side only — how an
+    [assign] role change enters the same preview as a grant change."""
     created, removed = [], []
     recs = list(records)
+    over = caps_override or {}
+
+    def _after_caps(r):
+        return over.get(r.id_pub.hex(), r.cred.caps)
+
     for i, a in enumerate(recs):
         for b in recs[i + 1:]:
             before = peers_allowed(a.cred.caps, b.cred.caps, old_grants,
                                    a.cred.hostname, b.cred.hostname)
-            after = peers_allowed(a.cred.caps, b.cred.caps, new_grants,
+            after = peers_allowed(_after_caps(a), _after_caps(b), new_grants,
                                   a.cred.hostname, b.cred.hostname)
             if after and not before:
                 created.append((a.hostname, b.hostname))
@@ -410,13 +522,18 @@ def tunnel_delta(records, old_grants: "list | None",
     return created, removed
 
 
-def unmatched_tags(grants: list, records) -> set:
+def unmatched_tags(grants: list, records,
+                   caps_override: "dict | None" = None) -> set:
     """Grant tags that NO current node holds — usually a typo'd role or a
     `host:` name no member has. A grant naming one fails closed and silently,
-    so `gw policy apply` warns."""
+    so `gw policy apply` warns. caps_override ({id_pub_hex: caps}) counts an
+    [assign] re-role applied in the SAME apply as held — a role granted and
+    assigned together must not warn as a typo."""
+    over = caps_override or {}
     held = set()
     for r in records:
-        held |= node_tags(r.cred.caps, r.cred.hostname)
+        held |= node_tags(over.get(r.id_pub.hex(), r.cred.caps),
+                          r.cred.hostname)
     named = set()
     for g in grants:
         named |= set(g["from"]) | set(g["to"])

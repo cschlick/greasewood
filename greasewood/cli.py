@@ -2014,6 +2014,20 @@ def _request_fleet_renewal(cfg) -> "dt.datetime":
 def cmd_set_roles(args) -> int:
     cfg, ca = _load_anchor_ca(args, "set-roles")
     id_pub, name = _resolve_node(ca, cfg, args.node)
+    # Declarative mode: a host listed in grants.toml's [assign] table has its
+    # roles DECLARED there — an imperative edit would silently drift from the
+    # file (and be reverted by the next `gw policy apply`). Point at the file.
+    from .policy import parse_assignments, GRANTS_BASENAME
+    _gp = cfg.data_dir / GRANTS_BASENAME
+    try:
+        _assigns = parse_assignments(_gp.read_text()) if _gp.exists() else None
+    except ValueError:
+        _assigns = None                    # invalid file: apply will complain
+    if _assigns is not None and name in _assigns:
+        sys.exit(f"{name}'s roles are DECLARED in {_gp} ([assign] table) — "
+                 f"edit that entry and run `sudo gw policy apply` (or use the "
+                 f"gw watch role editor, which writes the same file). "
+                 f"set-roles would silently drift from the declared state.")
     _, current = ca.node_info(id_pub)
     # Replace only the role: tags; keep tls/hostname-pinned and anything else.
     kept = [c for c in current if not c.startswith("role:")]
@@ -3249,7 +3263,9 @@ def cmd_policy(args) -> int:
                 sys.exit(f"{editor[0]} exited {r.returncode} — {gpath} left "
                          f"as-is, nothing applied")
             try:
-                polmod.parse_grants_toml(gpath.read_text())
+                _text = gpath.read_text()
+                polmod.parse_grants_toml(_text)
+                polmod.parse_assignments(_text)   # the [assign] table too
                 break
             except ValueError as e:
                 print(f"  ✗ {e}")
@@ -3292,7 +3308,9 @@ def cmd_policy(args) -> int:
         sys.exit(f"no grants file at {grants_path} — write one (see "
                  f"grants.toml.example) or pass a path")
     try:
-        grants = polmod.parse_grants_toml(grants_path.read_text())
+        grants_text = grants_path.read_text()
+        grants = polmod.parse_grants_toml(grants_text)
+        assignments = polmod.parse_assignments(grants_text)
     except ValueError as e:
         sys.exit(str(e))
 
@@ -3307,7 +3325,31 @@ def cmd_policy(args) -> int:
     directory = Directory.load(cfg.dir_cache_path)
     records = directory.all()
 
-    for tag in sorted(polmod.unmatched_tags(grants, records)):
+    # Declarative role assignments ([assign]): compute role diffs up front —
+    # they feed the typo check (a role granted and assigned in the SAME apply
+    # is not a typo) and the tunnel delta (caps_override), and print with the
+    # grant diff so the whole change previews as one.
+    caps_override, assign_lines = {}, []
+    if assignments is not None:
+        by_host = {r.cred.hostname: r for r in records}
+        for host, roles in sorted(assignments.items()):
+            rec = by_host.get(host)
+            if rec is None:
+                assign_lines.append(
+                    f"  ⚠ [assign] names {host!r} but no current member has "
+                    f"that hostname — reconciles once it joins")
+                continue
+            cur = sorted(c[len('role:'):] for c in rec.cred.caps
+                         if c.startswith('role:'))
+            if cur != list(roles):
+                kept = [c for c in rec.cred.caps if not c.startswith("role:")]
+                caps_override[rec.id_pub.hex()] = \
+                    kept + [f"role:{r}" for r in roles]
+                assign_lines.append(
+                    f"  ~ roles  {host}: {', '.join(cur) or '(none)'} → "
+                    f"{', '.join(roles) or '(none)'}")
+
+    for tag in sorted(polmod.unmatched_tags(grants, records, caps_override)):
         if tag.startswith("host:"):
             print(f"  ⚠ grant names {tag!r} but NO current member has that "
                   f"hostname — typo, or a not-yet-joined machine? Until then it "
@@ -3342,8 +3384,12 @@ def cmd_policy(args) -> int:
     for g in added:
         print(f"  + grant  {_fmt(g)}")
 
+    for line in assign_lines:
+        print(line)
+
     # Tunnel-level effect (what actually connects/disconnects on the wire).
-    created, removed = polmod.tunnel_delta(records, old_grants or None, grants)
+    created, removed = polmod.tunnel_delta(records, old_grants or None, grants,
+                                           caps_override=caps_override)
     for a, b in created:
         print(f"  + tunnel {a} ↔ {b}")
     for a, b in removed:
@@ -3362,6 +3408,21 @@ def cmd_policy(args) -> int:
     atomic_write(cache, json.dumps(table.to_dict(), indent=2), mode=0o644)
     print(f"policy v{new_seq} applied — nodes adopt it on their next directory "
           f"sync; tunnels reconcile within a cycle.")
+
+    # Reconcile the registry to [assign] (idempotent — a no-change apply is
+    # silent). One fleet renew hint for the whole batch, so every re-roled
+    # node adopts its new credential within a poll interval.
+    if assignments is not None:
+        from .ca import CA as _CA
+        changed, _missing = polmod.apply_assignments(
+            assignments, _CA(ca_keys, cfg.data_dir, cfg.credential_ttl))
+        for host, old, new in changed:
+            print(f"  ~ roles {host}: {', '.join(old) or '(none)'} → "
+                  f"{', '.join(new) or '(none)'}")
+        if changed:
+            _request_fleet_renewal(cfg)
+            print(f"  {len(changed)} node(s) re-roled — fleet renewal "
+                  f"requested; they adopt live within a poll interval.")
     return 0
 
 
