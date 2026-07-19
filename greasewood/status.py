@@ -731,6 +731,69 @@ def _read_action(fd: int, timeout: float) -> "str | None":
     return _KEY_ACTIONS.get(data, "")
 
 
+def _color_enabled() -> bool:
+    """Color for the live watch view: on unless the user opted out (NO_COLOR,
+    the informal standard) or the terminal can't (TERM=dumb). The live view is
+    already tty-only, so no isatty check is needed here; --snapshot output
+    stays plain — it exists for piping/logging."""
+    return os.environ.get("NO_COLOR") is None and os.environ.get("TERM") != "dumb"
+
+
+def _sgr(code: str, s: str) -> str:
+    return f"\x1b[{code}m{s}\x1b[0m"
+
+
+_LAT_RE = re.compile(r"\b(\d{1,4})ms\b")
+
+# Token → SGR. Glyphs and single words only, painted in place — never a whole
+# column — so nothing here can disturb alignment.
+_PAINT_WORDS = (
+    ("✓", "32"),          # good: green
+    ("⚠", "33;1"),        # warn: bold yellow
+    ("✗", "31;1"),        # bad: bold red
+    ("EXPIRED", "31;1"),
+    ("BLOCKED", "31;1"),
+    ("UNREACHABLE", "31;1"),
+    ("MISSING", "33;1"),
+    ("<1h!", "33;1"),
+    ("never synced", "33"),
+    ("never reconciled", "33"),
+    ("(self)", "36"),     # this node's row marker: cyan
+)
+
+
+def _paint(ln: str) -> str:
+    """Colorize ONE frame line. MUST run after all padding/truncation: SGR
+    escapes are zero-width on screen but not in len(), so painting earlier
+    would corrupt the column math and the [:cols] clip. Stripping the escapes
+    back out must always yield the input line — color never changes content
+    (there's a test holding that property)."""
+    s = ln.strip()
+    if s.startswith("$"):                       # command echoes: dim whole line
+        return _sgr("2", ln)
+    if "-+-" in ln:                             # roster separator: dim
+        return _sgr("2", ln)
+    for word, code in _PAINT_WORDS:
+        if word in ln:
+            ln = ln.replace(word, _sgr(code, word))
+    ln = ln.replace("● up", _sgr("32", "●") + " up")
+    ln = ln.replace("○ no handshake", _sgr("2", "○ no handshake"))
+
+    def _lat(m):                                # latency heat: green fast, yellow slow
+        v = int(m.group(1))
+        code = "32" if v < 30 else ("33" if v >= 150 else None)
+        return _sgr(code, m.group(0)) if code else m.group(0)
+    ln = _LAT_RE.sub(_lat, ln)
+
+    for hint in ("(f for detail)", "(--firewall for detail)"):
+        if hint in ln:
+            ln = ln.replace(hint, _sgr("2", hint))
+    i = ln.find("↑↓/")                          # footer key help: dim the tail
+    if i >= 0:
+        ln = ln[:i] + _sgr("2", ln[i:])
+    return ln
+
+
 class _WatchApp:
     """Interactive `gw watch`: a scrollable dashboard over the mesh roster.
     Fixed header + enforcement block on top, a scrollable peer viewport in the
@@ -765,6 +828,7 @@ class _WatchApp:
         self._rows: list = []            # scrollable: one line per peer
         self._up = 0                     # live-link count (for the footer)
         self._hidden = 0                 # expired records hidden (for the footer)
+        self._color = _color_enabled()   # NO_COLOR / TERM=dumb opt out
 
     def _fetch(self) -> None:
         """Refresh the data snapshot (directory + live WireGuard state) and
@@ -868,17 +932,23 @@ class _WatchApp:
 
     def _render(self) -> None:
         cols, term_h = shutil.get_terminal_size((80, 24))
-        sys.stdout.write(self._frame(self._compose(cols, term_h), cols))
+        sys.stdout.write(self._frame(self._compose(cols, term_h), cols,
+                                     color=self._color))
         sys.stdout.flush()
 
     @staticmethod
-    def _frame(lines: list, cols: int) -> str:
+    def _frame(lines: list, cols: int, color: bool = False) -> str:
         """Assemble the redraw string. Clear each line to EOL BEFORE writing it
         (not after): nft output is tab-indented, and a tab moves the cursor over
         columns without erasing them, so a trailing clear leaves stale content
         in the indent. Tabs are expanded first so truncation counts real
-        columns. \\x1b[J at the end wipes anything below a now-shorter frame."""
-        body = "\r\n".join("\x1b[K" + ln.expandtabs()[:cols] for ln in lines)
+        columns; color (zero-width SGR escapes) is painted only AFTER the
+        truncation, so the clip never counts an escape or cuts one in half.
+        \\x1b[J at the end wipes anything below a now-shorter frame."""
+        cells = (ln.expandtabs()[:cols] for ln in lines)
+        if color:
+            cells = (_paint(ln) for ln in cells)
+        body = "\r\n".join("\x1b[K" + ln for ln in cells)
         return "\x1b[H" + body + "\x1b[J"
 
     def run(self, fd: int) -> None:
