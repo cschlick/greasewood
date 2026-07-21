@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <rect width="760" height="300" rx="8" fill="#1e2127"/>
+  <circle cx="24" cy="22" r="6" fill="#ff5f56"/>
+  <circle cx="44" cy="22" r="6" fill="#ffbd2e"/>
+  <circle cx="64" cy="22" r="6" fill="#27c93f"/>
+  <text x="380" y="26" fill="#8b93a1" font-size="12" text-anchor="middle">sudo gw watch</text>
+  <text x="24" y="70" fill="#5ec8c8" font-size="14">── router.home.internal ─────────────────────────────</text>
+  <text x="24" y="94" fill="#c8ccd4" font-size="14">role     : anchor      daemon : reconciled 2s ago</text>
+  <text x="24" y="118" fill="#8b93a1" font-size="14">── firewall ─────────────────────────────────────────</text>
+  <text x="24" y="142" fill="#c8ccd4" font-size="14">main firewall : udp/51900 + gw-* overlay allowed <tspan fill="#27c93f">✓</tspan></text>
+  <text x="24" y="166" fill="#8b93a1" font-size="14">── peers ────────────────────────────────────────────</text>
+  <text x="24" y="192" fill="#c8ccd4" font-size="14">   gp2.home.internal   nfs_usr   <tspan fill="#27c93f">●</tspan> up, 1m   <tspan fill="#27c93f">1ms</tspan></text>
+  <text x="24" y="214" fill="#c8ccd4" font-size="14">   nas.home.internal   nfs_srv   <tspan fill="#27c93f">●</tspan> up, 46s  <tspan fill="#27c93f">1ms</tspan></text>
+  <text x="24" y="236" fill="#c8ccd4" font-size="14">router.home.internal  *,anchor  (self)     <tspan fill="#8b93a1">0ms</tspan></text>
+  <text x="380" y="280" fill="#6b7280" font-size="13" text-anchor="middle">placeholder — record a live session (see below) to replace this</text>
+</svg>

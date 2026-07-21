@@ -1,0 +1,81 @@
+site_name: Greasewood
+site_description: A minimal, self-hosted, greasy WireGuard mesh network.
+site_url: https://cschlick.github.io/greasewood/
+repo_url: https://github.com/cschlick/greasewood
+repo_name: cschlick/greasewood
+copyright: MIT-licensed. Built to be easy to reason about.
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+
+# Cross-page anchor links carried over from the single-file README don't all
+# resolve yet (a follow-up cleanup); don't fail the build on them.
+validation:
+  links:
+    anchors: ignore
+
+nav:
+  - Home: index.md
+  - How it works: concepts.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - Live dashboard: watch.md
+  - Access control: access-control.md
+  - TLS certificates: tls.md
+  - File sharing (NFS): nfs.md
+  - Networking & names: networking.md
+  - Operations: operations.md
+  - Reference: reference.md
+  - Testing: testing.md
+  - Security: security.md

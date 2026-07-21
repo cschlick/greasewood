@@ -10,3 +10,6 @@ htmlcov/
 
 # Hypothesis example database (failing-example cache)
 .hypothesis/
+
+# MkDocs build output (published by .github/workflows/docs.yml)
+site/
