@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      monkey_steps:
+        description: chaos steps for the monkey job (0 = skip it)
+        default: '20'
+      monkey_seed:
+        description: monkey RNG seed (0 = time-derived)
+        default: '0'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -101,5 +109,39 @@ jobs:
           /tmp/venv/bin/python -m pytest tests/integration/ \
             --ignore=tests/integration/test_soak.py \
             --ignore=tests/integration/test_stress.py \
+            --ignore=tests/integration/test_monkey.py \
             --reruns 2 --reruns-delay 5 \
             -p no:cacheprovider -v --tb=short
+
+  # Randomized chaos test — manual only (workflow_dispatch). Spins up a
+  # many-container mesh and throws a seeded storm of disruptions at it, with
+  # the topology + port-filter oracle asserted after each. Not on push/PR
+  # (minutes-long, resource-heavy); trigger from the Actions tab with a step
+  # count, or set monkey_steps=0 to skip.
+  monkey:
+    name: monkey (chaos)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.monkey_steps != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GW_CONTAINER_ENGINE: docker
+    steps:
+      - uses: actions/checkout@v5
+      - name: host prereqs (WireGuard module + IPv6)
+        run: |
+          sudo modprobe wireguard \
+            || { echo "::error::no WireGuard kernel module on this runner"; exit 1; }
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
+      - name: python deps
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet -e . pytest hypothesis pytest-rerunfailures
+      - name: monkey test
+        env:
+          GW_MONKEY: '1'
+          GW_MONKEY_STEPS: ${{ github.event.inputs.monkey_steps }}
+          GW_MONKEY_SEED: ${{ github.event.inputs.monkey_seed }}
+        run: |
+          /tmp/venv/bin/python -m pytest tests/integration/test_monkey.py \
+            --reruns 1 --reruns-delay 5 \
+            -p no:cacheprovider -v -s --tb=short

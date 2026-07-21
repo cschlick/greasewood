@@ -18,7 +18,27 @@ python -m pytest tests/integration/
 # Scale tests — grow the mesh to many nodes and verify full convergence.
 # Gated behind GW_STRESS; knobs: GW_STRESS_N / _WAVES / _WORKERS.
 GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -s
+
+# Soak — hold a mesh up across many renewal cycles, sampling continuously.
+GW_SOAK=1 python -m pytest tests/integration/test_soak.py -v -s
+
+# Monkey / chaos — a many-container mesh under a seeded storm of disruptions
+# (killed daemons, deleted interfaces, revocations, role churn, policy
+# rewrites, new nodes), with a topology + port-filter ORACLE asserted after
+# every step and real service traffic (ssh/http/postgres/nfs ports) exercising
+# the filter. Deterministic: the same seed replays the exact sequence, and a
+# divergence prints the seed + a model-vs-reality diff.
+GW_MONKEY=1 GW_MONKEY_STEPS=20 python -m pytest tests/integration/test_monkey.py -v -s
 ```
+
+**The monkey test's oracle** (`tests/integration/chaos/model.py`) is a pure,
+*independent* reimplementation of greasewood's topology + port rules — not a
+call into `greasewood.policy`, so a bug there is caught, not mirrored. It's
+unit-tested and cross-checked against the real policy engine on 300 fuzzed
+meshes in `tests/test_chaos_model.py` (which runs in the fast suite), so the
+judge is proven correct before it judges. The chaos vocabulary is weighted
+toward what actually broke the real fleet: a killed daemon (the `killall
+python` incident), a deleted interface, stale/rejoined state.
 
 **Deep property tests** (`tests/deep/`, marker `deep`) are the exhaustive
 Hypothesis tier, kept out of the default run so it stays ~30s. They drive

@@ -58,5 +58,6 @@ markers = [
     "integration: requires podman + WireGuard kernel module (run with: pytest tests/integration/)",
     "stress: many-node scale tests, slow + resource-heavy (gated behind GW_STRESS=1)",
     "soak: long-running renewal-cycle endurance test (gated behind GW_SOAK=1)",
+    "monkey: randomized many-container chaos test with an oracle (gated behind GW_MONKEY=1)",
     "deep: exhaustive Hypothesis property runs, nightly-sized (run with: HYPOTHESIS_PROFILE=deep pytest tests/deep -m deep)",
 ]
