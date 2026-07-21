@@ -22,12 +22,11 @@ GW_STRESS=1 GW_STRESS_N=8 python -m pytest tests/integration/test_stress.py -v -
 # Soak — hold a mesh up across many renewal cycles, sampling continuously.
 GW_SOAK=1 python -m pytest tests/integration/test_soak.py -v -s
 
-# Monkey / chaos — a many-container mesh under a seeded storm of disruptions
-# (killed daemons, deleted interfaces, revocations, role churn, policy
-# rewrites, new nodes), with a topology + port-filter ORACLE asserted after
-# every step and real service traffic (ssh/http/postgres/nfs ports) exercising
-# the filter. Deterministic: the same seed replays the exact sequence, and a
-# divergence prints the seed + a model-vs-reality diff.
+# Monkey / chaos — a many-container mesh under a seeded storm of disruptions,
+# with a topology + port-filter ORACLE asserted after every step and real
+# service traffic (ssh/http/postgres/nfs ports) exercising the filter.
+# Deterministic: the same seed replays the exact sequence, and a divergence
+# prints the seed + a model-vs-reality diff.
 GW_MONKEY=1 GW_MONKEY_STEPS=20 python -m pytest tests/integration/test_monkey.py -v -s
 ```
 
@@ -36,9 +35,17 @@ GW_MONKEY=1 GW_MONKEY_STEPS=20 python -m pytest tests/integration/test_monkey.py
 call into `greasewood.policy`, so a bug there is caught, not mirrored. It's
 unit-tested and cross-checked against the real policy engine on 300 fuzzed
 meshes in `tests/test_chaos_model.py` (which runs in the fast suite), so the
-judge is proven correct before it judges. The chaos vocabulary is weighted
-toward what actually broke the real fleet: a killed daemon (the `killall
-python` incident), a deleted interface, stale/rejoined state.
+judge is proven correct before it judges. It models network reality too, not
+just policy: an injected **underlay partition** makes the oracle expect exactly
+that one tunnel to drop (direct-or-fail) while the rest stay up.
+
+The chaos vocabulary is weighted toward what actually broke the real fleet — a
+killed daemon (the `killall python` incident), a deleted interface, an
+`nft flush ruleset` wiping the port table — and adds partitions with heal,
+anchor kill (offline tolerance: the data plane must survive), corrupt-cache
+cold restarts, revoke/rejoin, role churn, and full policy rewrites. Each op
+mutates the live containers and the model identically, so a single missed
+tunnel or leaked port anywhere fails the step with a replayable seed.
 
 **Deep property tests** (`tests/deep/`, marker `deep`) are the exhaustive
 Hypothesis tier, kept out of the default run so it stays ~30s. They drive

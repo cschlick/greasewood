@@ -106,3 +106,33 @@ def test_oracle_agrees_with_policy_engine_on_fuzzed_meshes():
                     [f"role:{r}" for r in b.roles],
                     gw_grants, a.hostname, b.hostname)
                 assert mine == theirs, (a, b, table)
+
+
+def test_partition_blocks_a_policy_allowed_tunnel():
+    m = _mesh(Node("anchor", is_anchor=True), Node("a"), Node("b"), grants=None)
+    assert m.tunnel("a", "b")                            # flat mesh: allowed
+    m.partition("a", "b")
+    assert not m.tunnel("a", "b")                        # underlay cut: down
+    assert m.tunnel("anchor", "a")                       # others unaffected
+    assert m.expected_peer_count("a") == 1               # only the anchor now
+    m.heal("a", "b")
+    assert m.tunnel("a", "b")                            # restored
+
+
+def test_partition_forgotten_on_revoke_and_drop():
+    m = _mesh(Node("anchor", is_anchor=True), Node("a"), Node("b"), grants=None)
+    m.partition("a", "b")
+    m.revoke("a")
+    assert m.partitions == set()                         # no orphan partition
+    m2 = _mesh(Node("a"), Node("b"), grants=None)
+    m2.partition("a", "b")
+    m2.drop("b")
+    assert m2.partitions == set()
+
+
+def test_partition_and_policy_both_required():
+    g = [Grant(("web",), ("api",), ("*",))]
+    m = _mesh(Node("w", ("web",)), Node("p", ("api",)), grants=g)
+    m.partition("w", "p")
+    assert not m.tunnel("w", "p")                        # policy allows, path cut
+    assert not m.reachable("w", "p", 80)                 # no tunnel => no service
