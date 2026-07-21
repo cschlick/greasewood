@@ -103,7 +103,3 @@ tier are documented in **[docs/testing.md](docs/testing.md)**.
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## AI Disclaimer
-
-Greasewood is a greasy project, and was built with the assistance of SWE LLM agents.
