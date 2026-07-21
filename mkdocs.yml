@@ -47,6 +47,11 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      # GitHub-compatible heading slugs, so the anchors inherited from the
+      # single-file README (#some-heading) resolve on the site too.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.superfences
@@ -59,11 +64,12 @@ markdown_extensions:
 plugins:
   - search
 
-# Cross-page anchor links carried over from the single-file README don't all
-# resolve yet (a follow-up cleanup); don't fail the build on them.
+# Fail the build on any unresolved cross-reference or anchor — so a broken
+# link can never reach the published site.
 validation:
   links:
-    anchors: ignore
+    anchors: warn
+    unrecognized_links: warn
 
 nav:
   - Home: index.md

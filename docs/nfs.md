@@ -10,7 +10,7 @@ usually bolt on by hand (Kerberos, per-host exports, firewall rules per pair).
 
 **The one thing to understand: the grant table _is_ the share ACL.** NFSv4.1+
 speaks on a single port (`tcp/2049` — no rpcbind/portmapper dance), and the
-[port filter](#access-control-roles--grants) already decides, per role, who can
+[port filter](access-control.md#access-control-roles--grants) already decides, per role, who can
 reach that port over addresses that can't be spoofed (cryptokey routing pins
 address ↔ key). So the NFS config below is **static — written once, never
 edited as the fleet changes**. Export to the whole overlay /64 and let grants
@@ -68,7 +68,7 @@ sudo gw policy apply     # shows the grant diff + tunnel delta, asks to confirm
 ```
 
 **On each client** (any `role:worker` node) — one fstab line, using the mesh
-name (from the managed [hosts block](#names), so it resolves anchor-down too):
+name (from the managed [hosts block](networking.md#names), so it resolves anchor-down too):
 
 ```
 # /etc/fstab
@@ -86,7 +86,7 @@ instead of at boot (so boot never blocks on the mesh), and
 `x-systemd.requires=` pins the ordering to this mesh's daemon.
 
 **Honesty about failure.** NFS is the one place a mesh outage stops looking
-like [direct-or-fail](#direct-or-fail): a **hard mount** (the default above)
+like [direct-or-fail](concepts.md#direct-or-fail): a **hard mount** (the default above)
 never errors — processes touching the path when the server is unreachable
 block in uninterruptible sleep until it returns. That's the correct default
 for a read-write workspace (`soft` can corrupt writes that were in flight),
@@ -96,7 +96,7 @@ either way the `mount-timeout` above already keeps a *new* access from hanging
 a service forever when the tunnel is down.
 
 **The underlay is your job, as always.** greasewood [never touches your main
-firewall](#firewall), and `nfsd` listens on all addresses — so whether
+firewall](networking.md#firewall), and `nfsd` listens on all addresses — so whether
 `tcp/2049` is reachable from the *underlay* is decided by your own host
 firewall, exactly like SSH. Two things protect you meanwhile: the exports line
 admits only the overlay /64 (an underlay client is refused the mount), and the

@@ -1,6 +1,5 @@
 # Quickstart
 
-## Quickstart
 
 ### 1. Bootstrap the anchor
 
