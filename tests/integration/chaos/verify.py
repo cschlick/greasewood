@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 
 from .services import probe
-from ..helpers import ping_once, wg_peer_count, mesh_iface
+from ..helpers import ping_once, wg_peer_count
 
 
 def _peer_count(cid) -> int:
@@ -20,24 +20,67 @@ def _peer_count(cid) -> int:
 
 
 def wait_converge(fleet, timeout: int = 120) -> bool:
-    """Block until every effective node holds exactly its expected peer count.
-    Returns True on convergence, False on timeout (the caller then verifies and
-    reports the specific divergences)."""
+    """Block until the live mesh settles to the model: every effective node
+    holds its expected peer count, AND a sampled expected-up pair actually
+    pings (data-plane liveness — this is what waits out a partition HEAL, where
+    the peer stays configured so the count never moved but the handshake needs
+    to re-establish). Returns True on convergence, False on timeout."""
+    m = fleet.model
     deadline = time.time() + timeout
     while time.time() < deadline:
         ok = True
         for host in fleet._nonanchor() + ["chaosanchor"]:
-            n = fleet.model.nodes.get(host)
+            n = m.nodes.get(host)
             if n is None or not n.alive or n.revoked:
                 continue
-            want = fleet.model.expected_peer_count(host)
+            # A partitioned peer stays installed on the interface (wg set isn't
+            # removed), so it still counts toward the peer count — the partition
+            # kills the data path, not the peer entry. So the expected count is
+            # the policy peer count, partitions and all.
+            want = _policy_peer_count(m, host)
             if _peer_count(fleet.cids[host]) != want:
                 ok = False
                 break
+        if ok and not _uppair_pings(fleet):
+            ok = False
         if ok:
             return True
         time.sleep(2)
     return False
+
+
+def _policy_peer_count(m, host: str) -> int:
+    """Peers the interface should hold: everyone the POLICY connects (a
+    partition blocks the path but leaves the wg peer installed, so it still
+    counts). Distinct from model.expected_peer_count, which excludes partitions
+    for the data-plane oracle."""
+    others = [n.hostname for n in m.effective() if n.hostname != host]
+
+    def policy_link(a, b):
+        saved = set(m.partitions)
+        m.partitions = set()
+        try:
+            return m.tunnel(a, b)
+        finally:
+            m.partitions = saved
+    return sum(1 for o in others if policy_link(host, o))
+
+
+def _uppair_pings(fleet) -> bool:
+    """A sampled data-plane liveness gate: pick a few pairs the model expects
+    UP (tunnel True, partitions honored) and require at least one to ping — so
+    convergence waits out a re-handshake after a heal/restart rather than
+    verifying a still-settling mesh."""
+    m = fleet.model
+    up = [(a, b) for a, b in m.all_pairs() if m.tunnel(a, b)]
+    if not up:
+        return True
+    sample = fleet.rng.sample(up, min(3, len(up)))
+    for a, b in sample:
+        if not (ping_once(fleet.cids[a], fleet.overlays[b], timeout=2) or
+                ping_once(fleet.cids[b], fleet.overlays[a], timeout=2)):
+            return False
+    return True
 
 
 def verify(fleet, sample_ports=None) -> list:
@@ -70,40 +113,38 @@ def verify(fleet, sample_ports=None) -> list:
                 problems.append(f"TUNNEL LEAK {a}<->{b}: model forbids a tunnel "
                                 f"but a ping succeeded")
 
-    # 2. service reachability — sampled client/server/port triples
+    # 2. the PORT FILTER — sampled client/server/port triples.
+    #
+    # The filter's signature is REFUSED-vs-TIMEOUT, independent of whether a
+    # service actually listens: a GRANTED port is accepted, so the SYN reaches
+    # the host stack — OPEN if a listener answers, REFUSED (RST) if not; either
+    # way the packet ARRIVED. An UNGRANTED port is DROPPED, so the SYN never
+    # reaches the stack — TIMEOUT. So "did the packet reach the host?" is
+    # exactly what the filter decides, and testing that (not "is a service up")
+    # isolates greasewood's actual responsibility from the test's listeners.
     ports = sample_ports if sample_ports is not None \
-        else [22, 80, 5432, 2049, 8000]
+        else [22, 80, 443, 2049, 5432, 6379, 8000]
     hosts = fleet._nonanchor()
     rng = fleet.rng
     samples = []
-    for _ in range(min(24, len(hosts) * len(hosts))):
+    for _ in range(min(18, len(hosts) * len(hosts))):
         if len(hosts) < 2:
             break
         c, s = rng.sample(hosts, 2)
         samples.append((c, s, rng.choice(ports)))
     for c, s, port in samples:
-        got = probe(fleet.cids[c], fleet.overlays[s], port)
-        connected = got in ("OPEN", "EMPTY")
+        got = probe(fleet.cids[c], fleet.overlays[s], port, timeout=3.0)
+        reached = got in ("OPEN", "EMPTY", "REFUSED")   # SYN hit the host stack
         if m.reachable(c, s, port):
-            # granted + tunnel: must connect (REFUSED is ok only if the server
-            # isn't listening on that port — the model's service set decides)
-            listening = port in _listen_ports(fleet, s)
-            if listening and not connected:
-                problems.append(f"SERVICE BLOCKED {c}->{s}:{port} got {got}, "
-                                f"model grants it and {s} listens")
+            if not reached:                             # granted but DROPPED
+                problems.append(f"GRANTED PORT DROPPED {c}->{s}:{port} got {got}"
+                                f" — model grants it; the filter wrongly blocked it")
         elif m.tunnel(c, s):
-            # tunnel up but port ungranted → the filter must drop it (TIMEOUT)
-            if connected:
-                problems.append(f"PORT FILTER LEAK {c}->{s}:{port} got {got}, "
-                                f"model says ungranted on an existing tunnel")
+            if reached:                                 # ungranted but PASSED
+                problems.append(f"PORT FILTER LEAK {c}->{s}:{port} got {got}"
+                                f" — ungranted on an existing tunnel, filter let it through")
         else:
-            # no tunnel → certainly no service
-            if connected:
-                problems.append(f"NO-TUNNEL SERVICE {c}->{s}:{port} got {got}, "
-                                f"model forbids the tunnel entirely")
+            if reached:                                 # no tunnel but connected
+                problems.append(f"NO-TUNNEL SERVICE {c}->{s}:{port} got {got}"
+                                f" — model forbids the tunnel entirely")
     return problems
-
-
-def _listen_ports(fleet, host) -> set:
-    from .services import roles_to_ports
-    return set(roles_to_ports(fleet.model.nodes[host].roles))

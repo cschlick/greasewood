@@ -69,6 +69,13 @@ class MeshModel:
     """The declared state of the mesh and the oracle over it."""
     nodes: dict = field(default_factory=dict)      # hostname -> Node
     grants: "list | None" = None                   # None => flat mesh (no policy)
+    # Underlay partitions: unordered {a, b} pairs whose UNDERLAY path is blocked
+    # (an injected network fault, not a policy decision). Direct-or-fail means a
+    # partitioned pair cannot form a tunnel even when policy allows it — so the
+    # oracle must know about them or it would flag the (correct) missing tunnel
+    # as a bug. Modeling network reality, not just policy, is what lets the
+    # chaos test inject real partitions.
+    partitions: set = field(default_factory=set)   # of frozenset({a, b})
 
     # -- mutation (the chaos ops call these to keep the model in step) --
 
@@ -85,9 +92,23 @@ class MeshModel:
     def revoke(self, hostname: str) -> None:
         self.nodes[hostname] = replace(self.nodes[hostname], revoked=True,
                                        alive=False)
+        self._forget_partitions(hostname)
 
     def drop(self, hostname: str) -> None:
         self.nodes.pop(hostname, None)
+        self._forget_partitions(hostname)
+
+    def partition(self, a: str, b: str) -> None:
+        self.partitions.add(frozenset((a, b)))
+
+    def heal(self, a: str, b: str) -> None:
+        self.partitions.discard(frozenset((a, b)))
+
+    def _forget_partitions(self, hostname: str) -> None:
+        self.partitions = {p for p in self.partitions if hostname not in p}
+
+    def is_partitioned(self, a: str, b: str) -> bool:
+        return frozenset((a, b)) in self.partitions
 
     # -- the membership the data plane can actually act on --
 
@@ -119,6 +140,8 @@ class MeshModel:
             return False
         if not (na.alive and not na.revoked and nb.alive and not nb.revoked):
             return False
+        if self.is_partitioned(a, b):
+            return False                           # direct-or-fail: blocked underlay
         ta, tb = na.tags(), nb.tags()
         if "*" in ta or "*" in tb:
             return True

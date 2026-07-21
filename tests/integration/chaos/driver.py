@@ -16,7 +16,8 @@ import time
 from .model import RESERVED, Grant, MeshModel, Node
 from .services import probe, roles_to_ports, start_services
 from ..conftest import bring_up_node, make_anchor
-from ..helpers import (pexec, podman, wait_for_control_plane, wait_for_peer_count)
+from ..helpers import (container_addr, pexec, podman, ping_once,
+                       wait_for_control_plane, wait_for_peer_count)
 
 
 ROLE_POOL = ["web", "http", "api", "app", "db", "postgres", "worker",
@@ -34,6 +35,7 @@ class Fleet:
         self.model = MeshModel(grants=None)
         self.cids = {}                  # hostname -> container id
         self.overlays = {}              # hostname -> overlay addr
+        self.underlays = {}             # hostname -> underlay addr (for partitions)
         self.anchor = None
         self._n = 0
 
@@ -45,6 +47,7 @@ class Fleet:
         self.model.add(Node("chaosanchor", is_anchor=True))
         self.cids["chaosanchor"] = self.anchor["cid"]
         self.overlays["chaosanchor"] = self.anchor["overlay"]
+        self.underlays["chaosanchor"] = self.anchor["ipv6"]
         for _ in range(n_nodes):
             self.spawn()
 
@@ -61,6 +64,7 @@ class Fleet:
             return None
         self.cids[host] = node["cid"]
         self.overlays[host] = node["overlay"]
+        self.underlays[host] = container_addr(node["cid"], self.network)
         self.model.add(Node(host, tuple(sorted(roles))))
         self.log(f"  + node {host} roles={roles or ['(none)']}")
         return host
@@ -133,6 +137,41 @@ class Fleet:
         podman("exec", "-d", self.cids[host], "sh", "-c",
                "gw -v run >> /tmp/gw.log 2>&1")
 
+    # -- underlay partitions: a blackhole route to the peer's UNDERLAY /128 on
+    # each end kills the WireGuard path (single advertised endpoint per node, so
+    # no rotation escape) without touching nftables — no collision with
+    # greasewood's own table or the port filter. Both directions, since a
+    # handshake needs the round trip.
+
+    def _blackhole(self, on_host: str, target_host: str, add: bool) -> None:
+        addr = self.underlays.get(target_host)
+        if not addr:
+            return
+        verb = "add" if add else "del"
+        pexec(self.cids[on_host], "ip", "-6", "route", verb, "blackhole",
+              f"{addr}/128", check=False)
+
+    def inject_partition(self, a: str, b: str) -> None:
+        self._blackhole(a, b, add=True)
+        self._blackhole(b, a, add=True)
+        self.model.partition(a, b)
+
+    def heal_partition(self, a: str, b: str) -> None:
+        self._blackhole(a, b, add=False)
+        self._blackhole(b, a, add=False)
+        self.model.heal(a, b)
+
+    def active_partitions(self) -> list:
+        return [tuple(p) for p in self.model.partitions]
+
+    def _heal_involving(self, host: str) -> None:
+        """Drop any partition touching `host` (before revoke/remove) so no
+        blackhole route outlives the node it referenced."""
+        for p in list(self.model.partitions):
+            if host in p:
+                a, b = tuple(p)
+                self.heal_partition(a, b)
+
 
 # ---------------------------------------------------------------------------
 # chaos operations — each mutates the live mesh AND the model identically
@@ -173,9 +212,119 @@ def op_revoke(fleet: Fleet) -> str:
     if len(hosts) <= 1:
         return "revoke: too few nodes"
     h = fleet.rng.choice(hosts)
+    fleet._heal_involving(h)                          # no orphan blackhole routes
     pexec(fleet.anchor["cid"], "gw", "revoke", h, check=False)
     fleet.model.revoke(h)
     return f"revoke {h}"
+
+
+def op_partition(fleet: Fleet) -> str:
+    """Inject a real underlay partition between a pair the policy WOULD let
+    tunnel — direct-or-fail must then drop exactly that link and nothing else.
+    Waits until the data-plane path is actually dead before returning, so the
+    checkpoint sees the settled state."""
+    if len(fleet.active_partitions()) >= 2:
+        return "partition: at cap"
+    hosts = fleet._nonanchor()
+    candidates = [(a, b) for i, a in enumerate(hosts) for b in hosts[i + 1:]
+                  if fleet.model.tunnel(a, b)]      # only meaningful pairs
+    if not candidates:
+        return "partition: no connected pair to cut"
+    a, b = fleet.rng.choice(candidates)
+    fleet.inject_partition(a, b)
+    # confirm the cut actually took (blackhole drops packets immediately)
+    for _ in range(10):
+        if not ping_once(fleet.cids[a], fleet.overlays[b], timeout=2):
+            break
+        time.sleep(1)
+    return f"partition {a} <-x-> {b}"
+
+
+def op_heal(fleet: Fleet) -> str:
+    """Heal a random active partition and wait for the tunnel to actually come
+    back (keepalive + reconcile re-handshake) before returning."""
+    parts = fleet.active_partitions()
+    if not parts:
+        return "heal: nothing partitioned"
+    a, b = fleet.rng.choice(parts)
+    fleet.heal_partition(a, b)
+    for _ in range(30):
+        if fleet.model.tunnel(a, b) and (
+                ping_once(fleet.cids[a], fleet.overlays[b], timeout=2)):
+            break
+        time.sleep(2)
+    return f"heal {a} <-> {b}"
+
+
+def op_flush_nftables(fleet: Fleet) -> str:
+    """`nft flush ruleset` on a node — wipes greasewood's own table (as an
+    operator's `nft -f` with a leading flush would). The port filter must
+    reinstall on the next reconcile; the model is unchanged. Fail-open, then
+    recover — waits for the table to reappear."""
+    hosts = fleet._nonanchor()
+    if not hosts:
+        return "flush: no node"
+    h = fleet.rng.choice(hosts)
+    if pexec(fleet.cids[h], "sh", "-c",
+             "grep -q enforce_ports.*false /etc/greasewood_*.toml", check=False
+             ).returncode == 0:
+        return f"flush: {h} has enforcement off"
+    pexec(fleet.cids[h], "nft", "flush", "ruleset", check=False)
+    for _ in range(20):                               # wait for reinstall
+        if pexec(fleet.cids[h], "sh", "-c",
+                 "nft list tables 2>/dev/null | grep -q greasewood", check=False
+                 ).returncode == 0:
+            break
+        time.sleep(2)
+    return f"nft flush on {h}"
+
+
+def op_kill_anchor(fleet: Fleet) -> str:
+    """Kill and restart the ANCHOR's daemon. Offline tolerance: the anchor is
+    never in the data path, so every existing tunnel must survive the outage
+    (the kernel holds them); only renewal/sync/new-joins pause. The 2m TTL
+    outlasts the blip, so the oracle is unchanged throughout."""
+    fleet._kill("chaosanchor")
+    time.sleep(fleet.rng.uniform(2, 6))
+    fleet._start("chaosanchor")
+    wait_for_control_plane(fleet.anchor["cid"], timeout=30)
+    return "kill+restart ANCHOR"
+
+
+def op_corrupt_cache_and_restart(fleet: Fleet) -> str:
+    """Corrupt a node's on-disk POLICY cache (policy.json), then cold-restart
+    its daemon — it must tolerate a garbage cache at load and RE-SYNC the
+    signed policy from the anchor rather than crash-loop or run wide open.
+    Model unchanged; self-recovery is the invariant.
+
+    (Note: the directory cache is deliberately NOT the target. Corrupting
+    directory.json loses the anchor's own record — the node's only handle on
+    the control plane's overlay address — and a joined node's sole seed is
+    that same overlay URL, so it cannot self-recover; that needs re-enrollment.
+    directory.save is atomic, so the file can't be corrupted by a crash. The
+    chaos test exercises the recoverable cache; the directory-loss limitation
+    is a separate, documented finding.)"""
+    hosts = fleet._nonanchor()
+    if not hosts:
+        return "corrupt: no node"
+    h = fleet.rng.choice(hosts)
+    fleet._kill(h)
+    time.sleep(1)
+    pexec(fleet.cids[h], "sh", "-c",
+          "echo 'CORRUPT{not json' > \"$(ls -d /var/lib/greasewood_*)\"/policy.json",
+          check=False)
+    fleet._start(h)
+    return f"corrupt policy cache + restart {h}"
+
+
+def op_close_policy(fleet: Fleet) -> str:
+    """Slam the policy shut (default-closed: no grants). Everything but the
+    hardwired anchor links must drop. The model tracks it; a later
+    randomize/heal reopens."""
+    fleet.model.grants = []
+    fleet._write_and_apply_policy()
+    fleet.deploy_services()
+    return "policy -> CLOSED (0 grants)"
 
 
 def op_change_roles(fleet: Fleet) -> str:
@@ -210,15 +359,22 @@ def op_add_node(fleet: Fleet) -> str:
     return f"add node {h}"
 
 
-# weighted so the field-incident ops (kill, iface) fire often, and the
-# expensive ones (policy, add) less so.
+# Weighted so the field-incident ops (kill, iface, flush) fire often and the
+# expensive/rare ones less so. `heal` is light and paired with `partition` so
+# cuts don't accumulate to the cap and stall.
 CHAOS_OPS = [
     (op_kill_and_restart, 4),
     (op_delete_interface, 3),
+    (op_flush_nftables, 3),
     (op_change_roles, 3),
+    (op_partition, 3),
+    (op_heal, 3),
     (op_randomize_policy, 2),
     (op_revoke, 2),
     (op_add_node, 2),
+    (op_kill_anchor, 2),
+    (op_corrupt_cache_and_restart, 2),
+    (op_close_policy, 1),
 ]
 
 

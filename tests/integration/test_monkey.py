@@ -1,9 +1,20 @@
 """
 Monkey / chaos test: a live many-container greasewood mesh under a seeded,
-randomized storm of disruptions — killed daemons, deleted interfaces,
-revocations, role churn, policy rewrites, new nodes — with the full topology +
-port-filter oracle asserted after every step, and real service traffic
-(ssh/http/postgres/nfs/… ports) exercising the port filter throughout.
+randomized storm of disruptions, with the full topology + port-filter oracle
+asserted after every step and real service traffic (ssh/http/postgres/nfs/…
+ports) exercising the filter throughout.
+
+The chaos vocabulary (weighted; see driver.CHAOS_OPS):
+  - kill+restart a daemon        the `killall python` incident
+  - delete a node's interface    reconcile self-heal
+  - nft flush ruleset            wipes greasewood's table; must reinstall
+  - underlay partition / heal    a real network cut — direct-or-fail must drop
+                                 exactly that link (the oracle models it)
+  - kill+restart the ANCHOR      offline tolerance: data plane survives
+  - corrupt cache + cold restart must tolerate a garbage directory.json at load
+  - change roles                 set-roles + renew; topology + ports follow
+  - randomize / close the policy  full grant-table churn
+  - revoke a node / add a node   membership churn
 
 The point is brutal robustness: does the mesh always converge to exactly what
 the policy declares, no matter what order the chaos arrives in? A pure model

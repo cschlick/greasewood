@@ -14,16 +14,27 @@ from .model import SERVICE_PORTS
 from ..helpers import pexec, podman
 
 
-# A backgrounded multi-port TCP echo server, bound to the overlay address.
-# argv: <overlay-addr> <port> [<port> ...]. One accept loop per port thread;
-# it answers a banner so a probe distinguishes "connected" from "hung".
+# A backgrounded multi-port TCP echo server. Binds "::" (all v6), NOT the
+# overlay address: binding the overlay races the daemon assigning it (an early
+# bind fails EADDRNOTAVAIL and that port silently never opens — a flaky
+# listener). Binding :: is timing-independent, and the PORT FILTER — which
+# matches on the mesh interface + source, not the bound address — still governs
+# reachability, so this changes nothing the test observes except reliability.
+# argv[1] is accepted and ignored (was the overlay addr) for call compatibility.
+# Each port retries its bind so a transient failure self-heals.
 _LISTENER = r"""
-import socket, sys, threading
-addr = sys.argv[1]
+import socket, sys, threading, time
 def serve(port):
-    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((addr, port)); s.listen(8)
+    for _ in range(30):
+        try:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("::", port)); s.listen(16)
+            break
+        except OSError:
+            time.sleep(1)
+    else:
+        return
     while True:
         try:
             c, _ = s.accept()
