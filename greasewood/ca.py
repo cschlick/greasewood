@@ -141,7 +141,10 @@ class CA:
             if owner is not None and owner != id_pub.hex():
                 raise ValueError(
                     f"hostname {hostname!r} is already in use by another node "
-                    f"({owner[:16]}…); choose a different hostname"
+                    f"({owner[:16]}…). If that node isn't in `gw watch --all` on "
+                    f"the anchor, it's a stale/decommissioned entry still holding "
+                    f"the name — `sudo gw revoke {hostname}` on the anchor frees "
+                    f"it. Otherwise choose a different hostname."
                 )
 
             caps = self._cap_policy(caps)

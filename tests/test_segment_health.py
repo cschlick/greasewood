@@ -828,3 +828,80 @@ def test_help_overlay_shows_keys_and_commands_and_any_key_closes():
     app._apply_roles = lambda n, r: "✓"
     app._handle("help")
     assert "edit roles" in "\n".join(app._compose(110, 40))  # anchor: admin keys
+
+
+# ---------------------------------------------------------------------------
+# expired-node visibility (anchor shows them, dimmed, sorted last) + diagnose
+# leading with a stale/expired peer credential instead of the firewall
+# ---------------------------------------------------------------------------
+
+def _expired_rec(name, endpoints=("203.0.113.9:51900",)):
+    from greasewood.keys import NodeKeys as _NK, derive_addr as _da
+    from greasewood.wire import Credential as _C, NodeRecord as _NR
+    k = _NK.generate()
+    past = dt.datetime.now(_UTC).replace(microsecond=0) - dt.timedelta(hours=3)
+    cred = _C(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+              addr=_da(k.id_pub_bytes), hostname=name, caps=["role:db"],
+              iat=past - dt.timedelta(hours=24), exp=past).sign(CA.ca_priv)
+    return _NR(id_pub=k.id_pub_bytes, seq=1, endpoints=list(endpoints),
+               cred=cred).sign(k.id_priv)
+
+
+def test_expired_shown_by_default_is_anchor_only():
+    import types as _t
+    from greasewood.status import _expired_shown_by_default as f
+    assert f(_t.SimpleNamespace(role="anchor")) is True
+    assert f(_t.SimpleNamespace(role="node")) is False
+    assert f(_t.SimpleNamespace()) is False        # default: hide
+
+
+def test_roster_sort_key_sinks_expired():
+    from greasewood.status import _roster_sort_key
+    now = dt.datetime.now(_UTC)
+    recs = [_rec("zeta", ["1:51900"]), _expired_rec("alpha"),
+            _rec("beta", ["2:51900"])]
+    ordered = sorted(recs, key=_roster_sort_key(now))
+    names = [r.cred.hostname for r in ordered]
+    assert names == ["beta", "zeta", "alpha"]      # live first (a-z), expired last
+
+
+def test_paint_dims_an_expired_roster_row():
+    from greasewood.status import _paint
+    row = "bb.home.internal fd8d::9 nfs_usr EXPIRED │ ○ no handshake"
+    assert _paint(row) == "\x1b[2m" + row + "\x1b[0m"       # whole line dimmed
+    assert _ANSI.sub("", _paint(row)) == row               # content preserved
+
+
+def test_diagnose_resolves_to_the_live_twin_not_the_corpse():
+    """A hostname with a revoked/expired twin AND a live record must diagnose
+    the live one (freshest credential) — the dead-twin bug."""
+    import types as _t
+    from greasewood import status
+    me = _rec("nas", ["203.0.113.2:51900"])
+    dead_bb = _expired_rec("bb")
+    live_bb = _rec("bb", ["203.0.113.5:51900"])
+    directory = _t.SimpleNamespace(all=lambda: [me, dead_bb, live_bb])
+    cfg = _t.SimpleNamespace(mesh_domain="pm.internal", hostname="nas",
+                             role="node", root_url="")
+    args = _t.SimpleNamespace(nodes=["bb"])
+    picks = status._resolve_diag_columns(args, cfg, directory, me.id_pub, me)
+    bb_pick = next(r for lbl, r, _ in picks if lbl == "bb")
+    assert bb_pick.id_pub == live_bb.id_pub        # the live one, not the corpse
+
+
+def test_pair_verdict_leads_with_expired_credential_not_firewall(capsys):
+    import types as _t
+    from greasewood.status import _DiagnoseColumn, _print_pair_verdict
+    def col(label, is_self, credential):
+        rec = _t.SimpleNamespace(cred=_t.SimpleNamespace(hostname=label))
+        return _DiagnoseColumn(label=label, is_self=is_self, rec=rec, caps=[],
+                               roles="node", credential=credential,
+                               has_endpoint=True, endpoint="[fd::1]:51900")
+    nas = col("nas", True, "valid · 22h")
+    bb = col("bb", False, "✗ EXPIRED 4394m ago")
+    _print_pair_verdict(nas, bb, _t.SimpleNamespace(), 51900, grants=None)
+    out = capsys.readouterr().out
+    assert "credential in YOUR directory is EXPIRED" in out
+    assert "NOT the firewall" in out
+    assert "our host firewall" not in out          # firewall analysis suppressed
+    assert "re-sync" in out or "restarting" in out
