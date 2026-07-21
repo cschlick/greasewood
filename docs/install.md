@@ -67,7 +67,7 @@ checkout for pytest).
 
 After install the workflow is just setup/join → the daemon runs as a managed
 systemd service that `gw create`/`gw join` set up for you — see [Running as a
-service](#running-as-a-service). The Quickstart below
+service](quickstart.md#running-as-a-service). The Quickstart below
 runs it by hand with `gw run` to show the moving parts.
 
 ### First-run pitfalls

@@ -61,7 +61,7 @@ ports = ["tcp/9100"]
 
 A single grant can be a whole service: `worker -> files : tcp/2049` is a
 complete file share, with the grant table acting as the share's ACL — see the
-[NFS worked example](#worked-example-a-shared-directory-over-the-mesh-nfs).
+[NFS worked example](nfs.md#worked-example-a-shared-directory-over-the-mesh-nfs).
 
 ### Declarative role assignments (`[assign]`)
 

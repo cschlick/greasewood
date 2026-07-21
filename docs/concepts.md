@@ -38,7 +38,7 @@ highest sequence number, and cache them locally.
 
 Because trust is anchored to the CA *key* (not a machine), any node can become
 the anchor — restore the key onto a replacement, or stand up a new CA and re-point
-the fleet. See [Moving the anchor](#moving-the-anchor-re-root).
+the fleet. See [Moving the anchor](operations.md#moving-the-anchor-re-root).
 
 ## Direct-or-fail
 
@@ -54,7 +54,7 @@ derives from `id_pub`, check the revoke list, check the authorization policy —
 then installs or removes that peer with `wg set`. Membership changes,
 revocations, key rotations, and access policy all reduce to "add or remove a
 peer," computed locally with no coordinator. A link forms as long as at least one
-side is reachable (see [Reachability](#reachability)) two unreachable
+side is reachable (see [Reachability](networking.md#reachability)) two unreachable
 nodes can't pair.
 
 ## IPv6 overlay
@@ -93,7 +93,7 @@ Every node caches the directory on disk and keeps its tunnels running from that
 cache, so the **anchor can be down for up to one credential lifetime** and existing
 node↔node links are unaffected. The anchor is never in the data path. Only new
 enrollments and credential renewals need a reachable anchor. Restore or replace the
-anchor within that window (see [Moving the anchor](#moving-the-anchor-re-root) and the
+anchor within that window (see [Moving the anchor](operations.md#moving-the-anchor-re-root) and the
 [RUNBOOK](operations.md)) and nothing ever drops.
 
 ## Linux-only
@@ -208,7 +208,7 @@ narrative every change greasewood ever made to your kernel's network state.**
 
 ## Design notes & non-goals
 
-The [non-goals](#how-it-compares) — routing/relays, NAT traversal, IPv4 overlay,
+The [non-goals](index.md#prior-art) — routing/relays, NAT traversal, IPv4 overlay,
 cross-platform — aren't missing, they're the point. A few internal ideas are
 **deferred rather than overlooked** — named here with the *trigger* that would
 make them worth building:
@@ -220,7 +220,7 @@ make them worth building:
 - **Threshold CA** — if single-anchor-key compromise becomes unacceptable.
 - **CA cross-signing to smooth re-root** — let the old CA sign a short-lived,
   directory-distributed "also trust the new CA" delegation, so a graceful
-  [re-root](#moving-the-anchor-re-root) doesn't require pushing the new key into every
+  [re-root](operations.md#moving-the-anchor-re-root) doesn't require pushing the new key into every
   node's `trusted_pubs` up front (the config edit becomes a calm, batchable
   follow-up instead of a race against credential expiry). Trigger: re-root friction
   in practice. Would be opt-in, short-lived, and logged, since it loosens the
@@ -233,5 +233,5 @@ node.
 
 **CA trust is a set, not a single key.** The CA (and anchor) is moved by a
 re-root — trust the new key alongside the old during an overlap, then drop the
-old — don't move the private key to a new machine. See [Moving the anchor](#moving-the-anchor-re-root).
+old — don't move the private key to a new machine. See [Moving the anchor](operations.md#moving-the-anchor-re-root).
 
