@@ -162,6 +162,23 @@ def _live_and_hidden(records, now, show_all):
     return live, len(records) - len(live)
 
 
+def _expired_shown_by_default(cfg) -> bool:
+    """The anchor SHOWS expired nodes by default; plain nodes hide them.
+    Rationale: an expired node is only actionable where you can revoke it —
+    the anchor — and now that `gw watch` has a one-key revoke (x), a visible
+    expired node is a to-do item, not noise (and it makes a name-squatting
+    stale record obvious instead of an invisible 'already in use' surprise).
+    On a plain node an expired peer is both unreachable and un-revocable, so
+    it stays hidden. Either way `a` / `--all` toggles it."""
+    return getattr(cfg, "role", "node") == "anchor"
+
+
+def _roster_sort_key(now):
+    """Sort the roster by (live-first, hostname): expired records sink to the
+    bottom as a group, so they never interleave with the live mesh."""
+    return lambda r: (now >= r.cred.exp, r.hostname)
+
+
 # Reserved widths for the roster cells whose render CHANGES WIDTH over time —
 # so a rescaling rate/traffic, a filling-in latency, a counting-down exp, or a
 # flipping link state never shifts the table. Sizing these to the live value
@@ -1086,6 +1103,8 @@ def _paint(ln: str) -> str:
     s = ln.strip()
     if ln.startswith("▶ "):                     # selected peer row: reverse video
         return _sgr("7", ln)
+    if " │ " in ln and "EXPIRED" in ln:         # an expired peer row: recede the
+        return _sgr("2", ln)                    # whole line (dim), EXPIRED and all
     if s.startswith("$"):                       # command echoes: dim whole line
         return _sgr("2", ln)
     if s.startswith("─"):                       # section rules: dim
@@ -1167,7 +1186,7 @@ class _WatchApp:
         from . import wg as wgmod
         directory = Directory.load(self._cfg.dir_cache_path)
         now = dt.datetime.now(_UTC)
-        records = sorted(directory.all(), key=lambda r: r.hostname)
+        records = sorted(directory.all(), key=_roster_sort_key(now))
         records, self._hidden = _live_and_hidden(records, now, self._show_all)
         try:
             live = wgmod.get_peers(self._cfg.wg_interface) or {}
@@ -1812,7 +1831,7 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
         except Exception:
             policy = None
 
-    records = sorted(directory.all(), key=lambda r: r.hostname)
+    records = sorted(directory.all(), key=_roster_sort_key(now))
     own_rec = next((r for r in records if r.id_pub.hex() == own_id), None)
     own_caps = list(own_rec.cred.caps) if own_rec else list(cfg.caps)
 
@@ -1911,7 +1930,7 @@ def cmd_watch(args) -> int:
         # root for live WireGuard state — that's why the default wants sudo.
         return _watch_live(cfg, own_id, own_addr,
                             interval=max(1.0, getattr(args, "interval", 2.0) or 2.0),
-                            show_all=getattr(args, "all", False),
+                            show_all=getattr(args, "all", False) or _expired_shown_by_default(cfg),
                             show_total=getattr(args, "total", False),
                             show_fw=getattr(args, "firewall", False),
                             apply_roles=_make_role_applier(cfg),
@@ -1944,7 +1963,7 @@ def cmd_watch(args) -> int:
     print()
 
     now = dt.datetime.now(_UTC)
-    all_records = sorted(directory.all(), key=lambda r: r.hostname)
+    all_records = sorted(directory.all(), key=_roster_sort_key(now))
 
     if not all_records:
         print("directory is empty — run 'gw join <token>' then 'gw run'")
@@ -1952,7 +1971,7 @@ def cmd_watch(args) -> int:
 
     # Live mesh only, unless --all: expired records are hidden (a lapsed node is
     # not in the mesh — peers have evicted it — so it doesn't belong in the view).
-    show_all = getattr(args, "all", False)
+    show_all = getattr(args, "all", False) or _expired_shown_by_default(cfg)
     records, hidden = _live_and_hidden(all_records, now, show_all)
     if not records:
         print(f"no live nodes — {hidden} expired record(s) hidden "
@@ -2157,7 +2176,15 @@ def _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec) -> list:
         dom = sanitize("x." + cfg.mesh_domain)[1:]     # ".pm.internal", sanitized
         if want.endswith(dom):
             want = want[:-len(dom)]
-        return next((r for r in directory.all() if sanitize(r.hostname) == want), None)
+        matches = [r for r in directory.all() if sanitize(r.hostname) == want]
+        if not matches:
+            return None
+        # A hostname can resolve to MORE THAN ONE record: a node re-joined with
+        # the same name after a revoke leaves the revoked/expired twin lingering
+        # in the directory until it prunes. Diagnose the LIVE one — pick the
+        # record with the latest expiry (freshest credential), so we never
+        # diagnose a corpse when a live node of that name exists.
+        return max(matches, key=lambda r: r.cred.exp)
 
     requested = [n for n in (getattr(args, "nodes", None) or []) if n]
     picks = []                                  # list of (label, rec|None, is_self)
@@ -2320,6 +2347,22 @@ def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
     else:
         why = "a grant connects their roles"
     print(f"    policy: ✓ {why}")
+
+    # A peer whose credential is EXPIRED/REVOKED/untrusted in OUR directory
+    # can't be peered with — that, not a firewall, is why there's no tunnel.
+    # Lead with it (and the likely stale-record cause) before the reachability
+    # analysis, which would otherwise send the operator chasing nftables.
+    for peer in (c for c in (col_a, col_b)
+                 if not c.is_self and c.rec is not None
+                 and c.credential.startswith("✗")):
+        state = peer.credential.lstrip("✗ ")
+        print(f"    ✗ {peer.label}'s credential in YOUR directory is {state} — a "
+              f"node is never peered with on a bad credential, so no tunnel can "
+              f"form (this, NOT the firewall, is why there's no handshake).")
+        print(f"      If {peer.label} is actually up (run `gw diagnose` on it), "
+              f"you're holding a stale/superseded record — re-sync by restarting "
+              f"this node's daemon; if it's truly gone, it prunes on its own.")
+        return
 
     a_dials_b = col_b.has_endpoint     # a can dial b iff b listens with an endpoint
     b_dials_a = col_a.has_endpoint

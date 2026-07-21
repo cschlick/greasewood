@@ -34,7 +34,7 @@ Bare **`sudo gw`** in a terminal opens this view. Its layout, top to bottom:
 | `enter` | open the selected peer's detail panel |
 | `f` | expand/collapse the firewall area |
 | `t` | per-second rate ↔ cumulative traffic |
-| `a` | show/hide expired peers |
+| `a` | show/hide expired peers (shown by default **on the anchor**, where they're revocable; hidden on plain nodes) |
 | `r` | *(anchor, in panel)* edit a peer's roles |
 | `x` | *(anchor, in panel)* revoke a peer |
 | `?` | in-view help (keys + the everyday commands) |

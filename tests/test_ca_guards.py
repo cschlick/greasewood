@@ -114,8 +114,12 @@ def test_hostname_owner_and_collision(tmp_path):
     assert ca.hostname_owner("WEB1") == a.id_pub_bytes.hex()  # sanitized match
     assert ca.hostname_owner("free") is None
     # A different node can't take the name; the same node re-issuing it is fine.
-    with pytest.raises(ValueError, match="already in use"):
+    with pytest.raises(ValueError, match="already in use") as e:
         ca.issue(b.id_pub_bytes, b.wg_pub_bytes, "web1", ["mesh"])
+    # The rejection points at the self-service fix for a stale/decommissioned
+    # holder — the exact confusion of an "already in use" name absent from watch.
+    msg = str(e.value)
+    assert "gw watch --all" in msg and "gw revoke web1" in msg
     ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "web1", ["mesh"])
 
 
