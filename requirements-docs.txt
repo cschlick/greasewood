@@ -1,0 +1,4 @@
+# Docs site toolchain (dev-only — NOT a runtime dependency of greasewood).
+# Build locally:  pip install -r requirements-docs.txt && mkdocs serve
+# Pinned below 10: Material has announced a backward-incompatible MkDocs 2.0.
+mkdocs-material>=9.5,<10
