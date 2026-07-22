@@ -42,7 +42,11 @@
 #      the next machine the anchor lets claim it.
 #
 #  Built-in roles (CA-signed caps, assigned at invite / set-roles / set-caps):
-#      node    every ordinary member (the default role for new nodes)
+#      node    every ordinary member (the default role for new nodes). STICKY:
+#              `gw set-roles` keeps it and `gw invite --roles` adds it, even
+#              when unlisted — dropping it must be explicit (--exact, or
+#              unchecking it in the gw watch role editor), because fleet
+#              grants (the admin SSH below) target it.
 #      anchor  the single anchor host — RESERVED, never assignable to a joiner
 #              (the anchor is its sole member); address it as `to = ["anchor"]`
 #      admin   terminal access: hold it to SSH every node. The anchor holds it

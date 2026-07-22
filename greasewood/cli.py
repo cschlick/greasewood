@@ -854,6 +854,17 @@ def cmd_invite(args) -> int:
     if args.roles is not None:
         roles = [r.strip() for r in args.roles.split(",") if r.strip()]
         _reject_reserved_roles(roles, "--roles")
+        # --roles ADDS the class on top of the default membership role(s)
+        # ([anchor] default_roles, ships as 'node') rather than replacing them:
+        # a web box is still an ordinary member, and the fleet grants that
+        # target 'node' (the shipped admin ssh, ...) should keep covering it.
+        # --exact makes --roles the complete list.
+        if not getattr(args, "exact", False):
+            extra = [r for r in cfg.default_roles if r not in roles]
+            if extra:
+                roles += extra
+                print(f"roles: {args.roles} + default {','.join(extra)} "
+                      f"(--exact for exactly --roles)")
     elif allowed_roles:
         roles = []                                 # menu invite → no default role
     else:
@@ -2011,6 +2022,23 @@ def _request_fleet_renewal(cfg) -> "dt.datetime":
     return now
 
 
+def _grants_naming_role(cfg, role: str) -> str:
+    """Human lines for the active grants that name `role` — the concrete
+    coverage a host loses when it leaves that role. '' when there is no
+    policy cache, or none name it (display-only, like status's grant read)."""
+    from .policy import POLICY_BASENAME
+    from .wire import GrantTable
+    try:
+        grants = GrantTable.from_dict(json.loads(
+            (cfg.data_dir / POLICY_BASENAME).read_text())).grants
+    except Exception:
+        return ""
+    return "\n".join(
+        f"    {', '.join(g['from'])} -> {', '.join(g['to'])} : "
+        f"{', '.join(g['ports'])}"
+        for g in grants or [] if role in list(g["from"]) + list(g["to"]))
+
+
 def cmd_set_roles(args) -> int:
     cfg, ca = _load_anchor_ca(args, "set-roles")
     id_pub, name = _resolve_node(ca, cfg, args.node)
@@ -2033,6 +2061,21 @@ def cmd_set_roles(args) -> int:
     kept = [c for c in current if not c.startswith("role:")]
     names = [r.strip() for r in args.roles.split(",") if r.strip()] or ["node"]
     _reject_reserved_roles(names, "set-roles")
+    # role:node is STICKY. It's the default membership role, and fleet grants
+    # (the shipped admin -> node ssh, metrics scrapes, ...) target it — so a
+    # set-roles list that merely doesn't mention it must not silently seal the
+    # box out of that coverage. Keep it unless the operator says --exact, and
+    # under --exact show exactly which grants stop covering the host.
+    current_roles = [c[len("role:"):] for c in current if c.startswith("role:")]
+    if "node" in current_roles and "node" not in names:
+        if getattr(args, "exact", False):
+            refs = _grants_naming_role(cfg, "node")
+            print(f"⚠ --exact: {name} leaves role:node — grants targeting "
+                  f"'node' no longer cover it" + (":\n" + refs if refs else "."))
+        else:
+            names.append("node")
+            print("kept role:node — the default membership role; drop it "
+                  "explicitly with --exact")
     caps = kept + ["role:" + r for r in names]
     ca.set_caps(id_pub, caps)
     print(f"roles for {name} ({id_pub.hex()}) → {names}  (caps now {caps})")
@@ -4206,9 +4249,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--roles", default=None, metavar="R1,R2",
                     help="roles the invited node holds (comma-sep) — the grant-table "
                          "vocabulary (`gw policy`). The anchor decides this; the "
-                         "joiner cannot. Omitted → the anchor's [anchor] "
-                         "default_roles (ships as 'node'). With no policy applied "
+                         "joiner cannot. ADDS to the anchor's [anchor] "
+                         "default_roles (ships as 'node') unless --exact. "
+                         "Omitted → just the defaults. With no policy applied "
                          "every node peers regardless; grants reference these roles.")
+    sp.add_argument("--exact", action="store_true",
+                    help="--roles is the complete role list — don't add the "
+                         "default membership role(s) ([anchor] default_roles)")
     sp.add_argument("--caps", default=None,
                     help="ability caps granted to the invited node (comma-sep), "
                          "e.g. 'tls'. Omitted → the anchor's [anchor] default_caps "
@@ -4380,7 +4427,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "(effective next renewal)")
     sp.add_argument("node", help="node hostname (or its 64-char id_pub hex)")
     sp.add_argument("roles", help="comma-separated roles, e.g. 'web,worker' "
-                                  "(replaces role: tags; keeps tls; empty = mesh default)")
+                                  "(replaces role: tags; keeps tls; the default "
+                                  "'node' role is kept unless --exact; empty = "
+                                  "mesh default)")
+    sp.add_argument("--exact", action="store_true",
+                    help="use exactly this role list — allows dropping the "
+                         "default 'node' role, which is otherwise kept (fleet "
+                         "grants like `admin -> node : tcp/22` target it)")
     sp.add_argument("--now", action="store_true",
                     help="apply immediately — also request a fleet renewal (as "
                          "`gw renew-all` does) so the node adopts the new roles "
