@@ -91,3 +91,91 @@ def test_detect_picks_systemd_only_when_running(monkeypatch):
 def test_detect_honors_unit_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "systemd_available", lambda: True)
     assert service.detect(tmp_path).unit_dir == tmp_path
+
+
+# --- OpenRC backend --------------------------------------------------------
+
+def test_render_openrc_splits_command_and_args():
+    # interpreter-module launch form → command is the interpreter, args carry -m
+    s = service.render_openrc_script("/opt/py/bin/python3 -m greasewood")
+    assert 'command="/opt/py/bin/python3"' in s
+    assert 'command_args="-m greasewood -c /etc/greasewood_${mesh}.toml run"' in s
+    # bare gw → no args prefix
+    s2 = service.render_openrc_script("/usr/local/bin/gw")
+    assert 'command="/usr/local/bin/gw"' in s2
+    assert 'command_args="-c /etc/greasewood_${mesh}.toml run"' in s2
+    # supervise-daemon + a bounded respawn (the Restart=always / start-limit analog)
+    assert "supervisor=supervise-daemon" in s2
+    assert "respawn_max=5" in s2 and "respawn_period=120" in s2
+
+
+def test_openrc_manager_writes_executable_script(tmp_path, monkeypatch):
+    import os as _os
+    monkeypatch.setattr(_shutil, "which", _which({"rc-service": "/sbin/rc-service"}))
+    monkeypatch.setattr(service.sys, "executable", "/opt/py/bin/python3")
+    mgr = service.OpenRCManager(init_dir=tmp_path)
+    assert mgr.write_template() == "/sbin/rc-service"
+    script = tmp_path / "greasewood"
+    assert script.exists() and (_os.stat(script).st_mode & 0o111)   # executable
+    assert "openrc-run" in script.read_text()
+
+
+def test_openrc_manager_names_and_hints():
+    mgr = service.OpenRCManager()
+    assert mgr.name == "openrc"
+    assert mgr.unit_name("home") == "greasewood.home"
+    assert mgr.restart_hint("home") == "sudo rc-service greasewood.home restart"
+
+
+def test_enable_openrc_manual_without_base_script(tmp_path, monkeypatch):
+    monkeypatch.setattr(_shutil, "which", _which({"rc-service": "/sbin/rc-service"}))
+    assert service.OpenRCManager(init_dir=tmp_path).enable_now("prod") == "manual"
+
+
+def test_enable_openrc_links_enables_and_starts(tmp_path, monkeypatch):
+    (tmp_path / "greasewood").write_text("#!/sbin/openrc-run\n")
+    monkeypatch.setattr(_shutil, "which", _which({"rc-service": "/sbin/rc-service"}))
+    calls = []
+
+    def run(cmd, *a, **k):
+        calls.append(cmd)
+        # status reports "not started" (rc=3) so we proceed to enable+start
+        rc = 3 if cmd[:1] == ["rc-service"] and cmd[2:] == ["status"] else 0
+        return _subprocess.CompletedProcess(cmd, rc)
+    monkeypatch.setattr(service, "rc_run", run)
+    monkeypatch.setattr(service, "wait_openrc_started", lambda *a, **k: "active")
+    assert service.OpenRCManager(init_dir=tmp_path).enable_now("prod") == "active"
+    assert (tmp_path / "greasewood.prod").is_symlink()
+    assert ["rc-update", "add", "greasewood.prod", "default"] in calls
+    assert ["rc-service", "greasewood.prod", "start"] in calls
+
+
+def test_enable_openrc_short_circuits_when_already_started(tmp_path, monkeypatch):
+    (tmp_path / "greasewood").write_text("#!/sbin/openrc-run\n")
+    monkeypatch.setattr(_shutil, "which", _which({"rc-service": "/sbin/rc-service"}))
+    # status rc=0 → already running; never touches rc-update / start
+    monkeypatch.setattr(service, "rc_run",
+                        lambda cmd, *a, **k: _subprocess.CompletedProcess(cmd, 0))
+    assert service.OpenRCManager(init_dir=tmp_path).enable_now("prod") == "active"
+    assert not (tmp_path / "greasewood.prod").exists()
+
+
+def test_openrc_refresh_only_when_installed_and_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "service_exec", lambda: "/usr/local/bin/gw")
+    mgr = service.OpenRCManager(init_dir=tmp_path)
+    script = tmp_path / "greasewood"
+    assert mgr.refresh_template() is False           # none installed → never installs
+    assert not script.exists()
+    script.write_text("#!/sbin/openrc-run\n# stale\n")
+    assert mgr.refresh_template() is True             # differs → rewritten
+    assert "supervise-daemon" in script.read_text()
+    assert mgr.refresh_template() is False            # current → untouched
+
+
+def test_detect_falls_back_to_openrc(monkeypatch):
+    monkeypatch.setattr(service, "systemd_available", lambda: False)
+    monkeypatch.setattr(service, "openrc_available", lambda: True)
+    assert isinstance(service.detect(), service.OpenRCManager)
+
+    monkeypatch.setattr(service, "openrc_available", lambda: False)
+    assert service.detect() is None                  # neither → manual path

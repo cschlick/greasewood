@@ -232,6 +232,176 @@ def enable_systemd_now(unit_dir: Path, key: str, *,
     return settle(systemctl, unit)
 
 
+# ===========================================================================
+# OpenRC backend (Alpine and other non-systemd hosts)
+# ===========================================================================
+#
+# OpenRC has no template units. The idiom for many instances of one service is
+# a symlink to the base init script — /etc/init.d/greasewood.<mesh> -> greasewood
+# — from which OpenRC sets RC_SVCNAME and the script derives the mesh name (cf.
+# net.<iface>). supervise-daemon respawns on death (Restart=always); a wedged-
+# but-alive daemon self-exits via WedgeWatchdog (there's no NOTIFY_SOCKET here),
+# so death + wedge are both covered without an init-system-specific healthcheck.
+#
+# NOT reproducible on OpenRC: the systemd unit's exec sandbox (CAP_NET_ADMIN
+# bounding, ProtectSystem, RestrictAddressFamilies, syscall filters). The OpenRC
+# daemon therefore runs as unconfined root — a real posture difference the
+# operator-facing surface should state plainly, not hide.
+
+OPENRC_INIT_DIR = Path("/etc/init.d")
+
+# @COMMAND@ / @ARGS@ are substituted (not str.format — the script is full of
+# shell ${...} braces). @ARGS@ is "" for a bare `gw`, "-m greasewood " for the
+# interpreter-module launch form.
+OPENRC_SCRIPT = r"""#!/sbin/openrc-run
+# greasewood mesh daemon. ONE script serves every mesh membership: a symlink
+# /etc/init.d/greasewood.<mesh> -> greasewood, from which OpenRC sets RC_SVCNAME
+# and we derive the mesh name (the multi-instance idiom, cf. net.<iface>).
+# Installed and kept in sync by greasewood's OpenRC service backend.
+#
+# supervise-daemon respawns the daemon if it dies; a daemon that is alive but
+# wedged self-exits via greasewood's own watchdog (there's no systemd notify
+# socket here), so this one script covers BOTH death and wedge — the OpenRC
+# analog of Restart=always + WatchdogSec. respawn_max/period mirror the systemd
+# unit's StartLimitBurst/IntervalSec so a crash-loop gives up instead of
+# thrashing forever.
+
+mesh="${RC_SVCNAME#greasewood.}"
+description="greasewood mesh daemon (${mesh})"
+
+command="@COMMAND@"
+command_args="@ARGS@-c /etc/greasewood_${mesh}.toml run"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=5
+respawn_period=120
+pidfile="/run/greasewood.${mesh}.pid"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	if [ "${RC_SVCNAME}" = "greasewood" ]; then
+		eerror "start greasewood.<mesh>, not the base 'greasewood' service"
+		return 1
+	fi
+	if [ ! -f "/etc/greasewood_${mesh}.toml" ]; then
+		eerror "no config at /etc/greasewood_${mesh}.toml — run 'gw create' or 'gw join' first"
+		return 1
+	fi
+}
+"""
+
+
+def rc_run(argv, *, timeout: float = SYSTEMCTL_TIMEOUT,
+           **kwargs) -> subprocess.CompletedProcess:
+    """rc-service / rc-update with the same hard timeout guard as systemctl_run,
+    so a stuck OpenRC can't hang the CLI. rc=124 on timeout → manual fallback."""
+    try:
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        log.warning("'%s' gave no answer in %ss — OpenRC looks stuck; skipping "
+                    "it, run it yourself once it recovers.",
+                    " ".join(argv), timeout)
+        return subprocess.CompletedProcess(argv, 124, "", "")
+
+
+def openrc_available() -> bool:
+    """True only when OpenRC is actually managing services here — rc-service +
+    rc-update on PATH AND /run/openrc present (OpenRC's booted marker, the
+    analog of systemd's /run/systemd/system). A host with the binaries but a
+    different init returns False, so we fall back to the manual `gw run` line."""
+    return (shutil.which("rc-service") is not None
+            and shutil.which("rc-update") is not None
+            and Path("/run/openrc").is_dir())
+
+
+def render_openrc_script(exec_path: str) -> str:
+    """The init-script text for a given daemon launch command. Splits the launch
+    line into command + args (`/opt/py/bin/python3 -m greasewood` →
+    command=/opt/py/bin/python3, args prefix `-m greasewood `)."""
+    command, _, rest = exec_path.partition(" ")
+    args = f"{rest} " if rest else ""
+    return OPENRC_SCRIPT.replace("@COMMAND@", command).replace("@ARGS@", args)
+
+
+def write_openrc_script(init_dir: Path, exec_path: str) -> "str | None":
+    """Write the base /etc/init.d/greasewood script (idempotent, chmod 0755).
+    Returns the rc-service path (None if OpenRC's tools aren't present)."""
+    init_dir.mkdir(parents=True, exist_ok=True)
+    script = init_dir / "greasewood"
+    script.write_text(render_openrc_script(exec_path))
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+    return shutil.which("rc-service")
+
+
+def refresh_openrc_script(init_dir: Path, desired_exec: str) -> bool:
+    """Self-heal an installed base script to this version's text. Never installs
+    one where none exists (a host running `gw run` by hand stays unmanaged).
+    No reload needed — supervise-daemon picks it up on the next restart."""
+    script = init_dir / "greasewood"
+    try:
+        if not script.exists():
+            return False
+        if script.read_text() == render_openrc_script(desired_exec):
+            return False
+        write_openrc_script(init_dir, desired_exec)
+        log.info("OpenRC service script updated to this greasewood version "
+                 "(/etc/init.d/greasewood) — applies from each instance's next restart")
+        return True
+    except OSError as e:
+        log.debug("could not refresh the OpenRC script: %s", e)
+        return False
+
+
+def wait_openrc_started(svc: str, wait_secs: float = 6.0, *, run=None) -> str:
+    """Wait for `svc` to reach AND hold 'started' (rc-service status rc=0); the
+    OpenRC analog of the systemd settle re-check. Returns 'active' / 'failed'."""
+    run = run or rc_run
+
+    def _started() -> bool:
+        return run(["rc-service", svc, "status"], capture_output=True).returncode == 0
+
+    deadline = time.monotonic() + wait_secs
+    ok = _started()
+    while not ok and time.monotonic() < deadline:
+        time.sleep(0.5)
+        ok = _started()
+    if ok:
+        time.sleep(2.0)          # survive the fast-crash window
+        ok = _started()
+    return "active" if ok else "failed"
+
+
+def enable_openrc_now(init_dir: Path, key: str, *, runlevel: str = "default",
+                      run=None, settle=None) -> str:
+    """Symlink greasewood.<key> -> greasewood, add it to the boot runlevel, and
+    start it. Returns 'active' / 'failed' / 'manual'."""
+    run = run or rc_run
+    svc = f"greasewood.{key}"
+    if not shutil.which("rc-service") or not (init_dir / "greasewood").exists():
+        return "manual"
+    if run(["rc-service", svc, "status"], capture_output=True).returncode == 0:
+        return "active"                      # already running
+    link = init_dir / svc
+    if not link.exists():
+        try:
+            link.symlink_to("greasewood")    # relative symlink within init_dir
+        except OSError:
+            return "manual"
+    run(["rc-update", "add", svc, runlevel], capture_output=True)
+    if run(["rc-service", svc, "start"], capture_output=True).returncode != 0:
+        return "failed"
+    if settle is None:
+        settle = lambda s: wait_openrc_started(s, run=run)
+    return settle(svc)
+
+
 class ServiceManager(ABC):
     """An init-system backend for the per-mesh greasewood daemon. One
     implementation per init system (systemd today; OpenRC next). `detect()`
@@ -292,9 +462,40 @@ class SystemdManager(ServiceManager):
         return f"sudo systemctl restart greasewood@{key}"
 
 
+class OpenRCManager(ServiceManager):
+    name = "openrc"
+
+    def __init__(self, init_dir: Path = OPENRC_INIT_DIR,
+                 runlevel: str = "default") -> None:
+        self.init_dir = init_dir
+        self.runlevel = runlevel
+
+    def available(self) -> bool:
+        return openrc_available()
+
+    def write_template(self, exec_path: "str | None" = None) -> "str | None":
+        return write_openrc_script(self.init_dir, exec_path or service_exec())
+
+    def refresh_template(self) -> bool:
+        return refresh_openrc_script(self.init_dir, service_exec())
+
+    def enable_now(self, key: str) -> str:
+        return enable_openrc_now(self.init_dir, key, runlevel=self.runlevel)
+
+    def unit_name(self, key: str) -> str:
+        return f"greasewood.{key}"
+
+    def restart_hint(self, key: str) -> str:
+        return f"sudo rc-service greasewood.{key} restart"
+
+
 def detect(unit_dir: Path = SYSTEMD_UNIT_DIR) -> "ServiceManager | None":
     """The service backend for this host, or None when no supported init system
-    is managing services here (the operator supervises `gw run` themselves)."""
+    is managing services here (the operator supervises `gw run` themselves).
+    systemd wins when both are somehow present — it's the one greasewood's unit
+    and tests target."""
     if systemd_available():
         return SystemdManager(unit_dir)
+    if openrc_available():
+        return OpenRCManager()
     return None
