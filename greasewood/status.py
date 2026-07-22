@@ -421,9 +421,10 @@ class _LatencyProber:
     few seconds instead of stalling the first frame — and pings run ONLY while
     someone is watching the live view (the caller stops it on exit)."""
 
-    def __init__(self) -> None:
+    def __init__(self, interval: float = 2.0) -> None:
         self.results: dict = {}
         self._targets: list = []
+        self._interval = interval        # one probe round per display refresh
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._run, name="latency", daemon=True)
@@ -434,6 +435,7 @@ class _LatencyProber:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            start = time.monotonic()
             with self._lock:
                 tgts = list(self._targets)
             if not tgts:
@@ -443,6 +445,12 @@ class _LatencyProber:
                 if self._stop.is_set():
                     break
                 self.results[addr] = _ping_rtt(addr)
+            # Pace to one round per display interval. The display consumes
+            # results only at its own refresh, so probing faster is invisible —
+            # and on a HEALTHY mesh each ping returns in ~15ms, so an unpaced
+            # loop forks ~50+ ping processes/s (about half a core on a 1-vCPU
+            # node). Down peers self-pace via ping's -W 1 deadline either way.
+            self._stop.wait(max(0.0, self._interval - (time.monotonic() - start)))
 
     def start(self) -> None:
         self._t.start()
@@ -877,6 +885,12 @@ def _role_editor_lines(r: dict) -> list:
                  f"{'current':<10}: {', '.join(r['node']['roles']) or '(none)'}",
                  f"{'proposed':<10}: {', '.join(sorted(r['sel'])) or '(none)'}",
                  ""]
+        # Unchecking node here is the one EXPLICIT way to drop it — say what
+        # that means, since the loss (admin ssh etc.) surfaces far from here.
+        if "node" in r["node"]["roles"] and "node" not in r["sel"]:
+            lines += ["⚠ leaves role:node — the default membership role; "
+                      "grants targeting 'node' (admin ssh, ...) will no "
+                      "longer cover this host", ""]
         lines += [f"  + tunnel {name} ↔ {h}" for h in d["added"]]
         lines += [f"  - tunnel {name} ↔ {h}" for h in d["removed"]]
         if not d["added"] and not d["removed"]:
@@ -1507,14 +1521,24 @@ class _WatchApp:
 
     def run(self, fd: int) -> None:
         last = -1e9
+        dirty = True                      # force the first frame
+        size = shutil.get_terminal_size((80, 24))
         while True:
             if time.monotonic() - last >= self._interval:
                 self._fetch()
                 last = time.monotonic()
-            self._render()
+                dirty = True
+            cur = shutil.get_terminal_size((80, 24))
+            if cur != size:               # resize repaints without waiting a tick
+                size, dirty = cur, True
+            if dirty:
+                self._render()
+                dirty = False
             action, raw = _read_action(fd, min(0.25, self._interval))
             if not self._handle(action, raw):
                 return
+            if action is not None:        # a keypress (mapped or raw-typed)
+                dirty = True              # may have mutated UI state — repaint
 
 
 def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
@@ -1532,7 +1556,7 @@ def _watch_live(cfg, own_id, own_addr, interval: float = 2.0,
         sys.exit("gw watch needs root — it reads live WireGuard state "
                  "(wg show). Try: sudo gw watch  (or gw watch --snapshot "
                  "for a no-root static view)")
-    prober = _LatencyProber()
+    prober = _LatencyProber(max(0.5, interval))
     prober.start()
     app = _WatchApp(cfg, own_id, own_addr, prober, max(0.5, interval),
                     show_all, show_total, show_fw, apply_roles=apply_roles,

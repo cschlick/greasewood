@@ -26,9 +26,15 @@ The second one usually forces a decision about VM networking (NAT vs bridged).
 For a laptop it doesn't, because a laptop node's job is to **dial out** to a
 reliable peer (your anchor, a server), never to be cold-dialed. greasewood pins
 `PersistentKeepalive = 25` on healthy peers, so the outbound tunnel stays open
-through NAT indefinitely and WireGuard roaming lets the peer reply. **Lima's
-default user-mode NAT is exactly right** — no bridging, no `socket_vmnet`, no
-`sudoers` entry.
+through NAT indefinitely and WireGuard roaming lets the peer reply. **NAT is
+exactly right** — no bridging, no `socket_vmnet`, no `sudoers` entry.
+
+One wrinkle inside that decision: use `vzNAT` (Apple's vmnet NAT), *not* Lima's
+default user-mode network. The default carries **no IPv6 at all**, and on an
+IPv6-first mesh many peers advertise v6-only endpoints — undialable from a
+v4-only guest. The symptom is maddeningly quiet: `gw diagnose` shows the grant
+fine and the endpoint fine, `gw watch` just says *no handshake*. `vzNAT` NATs
+both families (NAT66 for v6) and needs no privileges either.
 
 The one thing NAT can't do is reach *another* NAT'd node directly — two nodes
 both behind NAT never handshake. As long as the peers this laptop talks to are
@@ -59,7 +65,7 @@ The choices that make it an appliance rather than a dev box:
 
 | Setting | Why |
 |---------|-----|
-| `networks: []` | The NAT-is-fine decision, encoded as *doing nothing*. |
+| `networks: [vzNAT]` | The NAT-is-fine decision — but Apple's NAT, not Lima's default user-mode net, which has no IPv6 and silently strands v6-only peer endpoints. |
 | `containerd: {system: false, user: false}` | Lima installs containerd/nerdctl by default; a node wants none of it. This is most of the "not a dev box" difference. |
 | `mounts: []` | The node is sealed — your Mac's files aren't exposed to a root daemon. Also a faster boot. |
 | `vmType: vz` | Apple's native hypervisor, no QEMU emulation. Fast on Apple Silicon *and* Intel. |
@@ -96,6 +102,12 @@ limactl shell greasewood-node sudo gw watch --snapshot
   re-join on reboot.
 - **A shell in it:** `limactl shell greasewood-node` (then any `gw` command with
   `sudo`).
+- **Or skip the shell entirely:** install [`gw-shim.sh`](examples/gw-shim.sh)
+  as a Mac command (`install -m 755 gw-shim.sh /opt/homebrew/bin/gw`) and
+  `gw watch`, `gw diagnose <peer>`, … work straight from the Mac terminal — no
+  `limactl shell`, no `sudo` (commands run as root inside the VM; typing
+  `sudo gw …` out of habit is handled — the shim drops the Lima leg back to
+  your user, since instances are per-user).
 - **Rebuild from scratch:** `limactl delete greasewood-node` then
   `limactl start greasewood-node.yaml` again. This is a *new* node — new keys,
   new overlay address; revoke the old one on the anchor and join fresh. To keep
@@ -107,6 +119,123 @@ limactl shell greasewood-node sudo gw watch --snapshot
     full re-enrollment — the same [directory-loss caveat](operations.md) as any
     node, just easier to trigger with a throwaway VM. `limactl stop` is safe;
     `limactl delete` is not.
+
+## Reach a peer from a Mac app
+
+`limactl shell` covers the command line, but a GUI app — a remote desktop
+client, a database browser — can't type that. It also can't dial overlay
+addresses directly: the mesh terminates inside the VM, macOS has no route to
+it, and [direct-or-fail](concepts.md) means nothing will relay for it.
+
+The missing piece is Lima itself: **any port the guest listens on is
+auto-forwarded to `127.0.0.1` on the Mac** (ports ≥1024 — Lima can't bind
+privileged ports on the host). So a small relay inside the VM puts a peer's
+service on localhost, where any Mac app can reach it.
+
+Ad-hoc — an ssh tunnel via Lima's own ssh config (`sshd` inside the VM
+resolves the mesh name, so the [hosts block](networking.md#names) works here
+too). RDP to a peer named `desktop`:
+
+```bash
+ssh -F ~/.lima/greasewood-node/ssh.config lima-greasewood-node \
+    -N -L 3389:desktop.mymesh.internal:3389
+```
+
+Persistent — a `socat` unit inside the VM (socat ships in the genericcloud
+image); Lima picks up the listener the moment it appears:
+
+```bash
+limactl shell greasewood-node -- sudo systemd-run --unit rdp-desktop \
+    socat TCP6-LISTEN:3389,fork,reuseaddr TCP6:desktop.mymesh.internal:3389
+```
+
+Point the app at `localhost:3389` either way. The Mac leg never leaves
+loopback; the peer leg is this node's ordinary WireGuard tunnel, so the relay
+reaches exactly what the node's grants allow — it widens nothing. A hang here
+is almost always a grant, not the relay: the peer must grant this node's role
+that port. Stop the unit with `sudo systemctl stop rdp-desktop`; `systemd-run`
+units are transient, so a VM restart clears them — re-run it, or promote it to
+a real unit file if a relay should survive reboots.
+
+## Route the whole Mac into the overlay
+
+The relay is the right default: one port, one peer, nothing widened. But if
+you want overlay addresses and mesh names to work from *every* Mac app with no
+per-service setup, the VM can be the Mac's **gateway into the mesh** — no
+bridged networking, no `socket_vmnet`; the `vzNAT` link already carries
+host↔guest traffic both ways.
+
+The trick is NAT66, and it's load-bearing: WireGuard's cryptokey routing means
+every peer accepts exactly one source address from this node — its own
+overlay `/128`. Routing the Mac's traffic in *unmasqueraded* would be silently
+dropped by every peer's WireGuard, and "fixing" that fleet-wide would mean a
+subnet-routes concept that collides with the `addr = hash(id_pub)` invariant.
+Masquerading to the node's own address sidesteps all of it: **to the fleet,
+the Mac is this node** — same identity, same grants, enforced at each
+receiving peer's input filter exactly as before.
+
+Three small files inside the VM (forwarding + NAT66 + MSS clamp for the
+1500→1420 MTU step — and note `accept_ra=2`, without which enabling forwarding
+would silently kill the VM's own SLAAC underlay):
+
+```nft
+--8<-- "examples/gw-mac-gateway.nft"
+```
+
+```ini
+--8<-- "examples/gw-mac-gateway.sysctl.conf"
+```
+
+```ini
+--8<-- "examples/gw-mac-gateway.service"
+```
+
+Install once:
+
+```bash
+limactl cp gw-mac-gateway.nft gw-mac-gateway.sysctl.conf gw-mac-gateway.service greasewood-node:/tmp/
+limactl shell greasewood-node -- sudo sh -c '
+  mv /tmp/gw-mac-gateway.nft /etc/ &&
+  mv /tmp/gw-mac-gateway.sysctl.conf /etc/sysctl.d/99-gw-mac-gateway.conf &&
+  mv /tmp/gw-mac-gateway.service /etc/systemd/system/ &&
+  chown root:root /etc/gw-mac-gateway.nft /etc/sysctl.d/99-gw-mac-gateway.conf /etc/systemd/system/gw-mac-gateway.service &&
+  sysctl --system >/dev/null && systemctl daemon-reload && systemctl enable --now gw-mac-gateway'
+```
+
+Then on the Mac, install [`gw-mac-net.sh`](examples/gw-mac-net.sh) as a
+command:
+
+```bash
+install -m 755 gw-mac-net.sh /opt/homebrew/bin/gw-mac
+```
+
+`gw-mac` (short for `gw-mac up`) starts the VM if it's stopped, installs the
+mesh `/64` route via the VM, and syncs the VM's managed hosts block into the
+Mac's `/etc/hosts` — idempotent, and it only asks for sudo when something
+actually needs changing. The VM half of the setup is permanent, but macOS
+routes are not files: the route dies with a Mac reboot or VM stop. So the
+whole day-to-day is:
+
+```bash
+gw-mac                   # after a reboot, or anytime — safe to re-run
+ssh gp2.mymesh.internal  # any app, any port the node's grants allow
+```
+
+`gw-mac down` removes the route and stops the VM; `gw-mac status` shows both
+layers at a glance.
+
+Know what you're trading:
+
+- **Per-port becomes whole-node.** The relay exposed one port; this hands
+  every Mac process the node's full identity and grant set. For a personal
+  laptop that's the same trust shape as any mesh VPN client on the host — but
+  it's a real widening; that's why the relay stays the default recipe.
+- **Outbound only.** NAT66 has no inbound mappings — the Mac still can't be
+  dialed from the mesh, which is the laptop posture anyway.
+- **Names go stale on the Mac.** The VM's hosts block updates every reconcile;
+  the Mac's copy updates when you run `gw-mac`. Rerun it after joins,
+  departures, or renames (resolution only — reachability and revocation are
+  still enforced live, at the peers).
 
 ## Leaner alternative: Alpine (OpenRC)
 
@@ -151,3 +280,10 @@ caveat) is the same.
     version/digest move over time. The YAML shows a representative line; copy the
     current one with `limactl start --dry-run template://alpine 2>&1 | grep -A8
     'images:'` and paste it in (with the digest) before `limactl start`.
+
+!!! note "The Mac-app sections above assume the Debian recipe"
+    *Reach a peer* and *Route the whole Mac* use systemd inside the VM
+    (`systemd-run`, a `gw-mac-gateway` unit). On Alpine the ideas carry
+    over unchanged — adapt the transient relay to `rc-service` and the
+    gateway to an OpenRC service (the same one-script/`supervise-daemon`
+    shape `gw` itself installs).
