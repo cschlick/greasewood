@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-19" "greasewood 0.1.2" "User Commands"
+.TH GW 1 "2026-07-22" "greasewood 0.1.0" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -73,7 +73,7 @@ don't maintain the managed /etc/hosts block (<name>.gw.internal \-> overlay addr
 \fB\-\-no\-service\fR
 don't set up the systemd service; print the manual 'gw run' line instead (for non\-systemd hosts)
 .SS gw invite
-\fBUsage:\fR gw invite [\-h] [\-\-hostname HOSTNAME] [\-\-roles R1,R2] [\-\-caps CAPS] [\-\-self\-roles R1,R2] [\-\-self\-roles\-from\-grants] [\-\-endpoint ADDR] [\-\-standing] [\-\-supersede] [\-q]
+\fBUsage:\fR gw invite [\-h] [\-\-hostname HOSTNAME] [\-\-roles R1,R2] [\-\-exact] [\-\-caps CAPS] [\-\-self\-roles R1,R2] [\-\-self\-roles\-from\-grants] [\-\-endpoint ADDR] [\-\-standing] [\-\-supersede] [\-q]
 .PP
 [sudo, anchor] open a 15\-min door window and print a single\-use join token
 .TP
@@ -84,7 +84,10 @@ show this help message and exit
 pin the invited node's mesh hostname (the anchor fixes it; the joiner can't choose or later `gw rename\-node` it). Omit to let the node name itself at join.
 .TP
 \fB\-\-roles\fR \fIR1,R2\fR
-roles the invited node holds (comma\-sep) \(em the grant\-table vocabulary (`gw policy`). The anchor decides this; the joiner cannot. Omitted \(-> the anchor's [anchor] default_roles (ships as 'node'). With no policy applied every node peers regardless; grants reference these roles.
+roles the invited node holds (comma\-sep) \(em the grant\-table vocabulary (`gw policy`). The anchor decides this; the joiner cannot. ADDS to the anchor's [anchor] default_roles (ships as 'node') unless \-\-exact. Omitted \(-> just the defaults. With no policy applied every node peers regardless; grants reference these roles.
+.TP
+\fB\-\-exact\fR
+\-\-roles is the complete role list \(em don't add the default membership role(s) ([anchor] default_roles)
 .TP
 \fB\-\-caps\fR \fICAPS\fR
 ability caps granted to the invited node (comma\-sep), e.g. 'tls'. Omitted \(-> the anchor's [anchor] default_caps (ships as 'tls'). Roles are set with \-\-roles.
@@ -236,7 +239,7 @@ node hostname (or its 64\-char id_pub hex)
 \fICAPS\fR
 comma\-separated full tag set, e.g. 'role:web,tls' (replaces the node's current caps)
 .SS gw set\-roles
-\fBUsage:\fR gw set\-roles [\-h] [\-\-now] node roles
+\fBUsage:\fR gw set\-roles [\-h] [\-\-exact] [\-\-now] node roles
 .PP
 [sudo, anchor] change an enrolled node's roles (effective next renewal)
 .TP
@@ -247,7 +250,10 @@ show this help message and exit
 node hostname (or its 64\-char id_pub hex)
 .TP
 \fIROLES\fR
-comma\-separated roles, e.g. 'web,worker' (replaces role: tags; keeps tls; empty = mesh default)
+comma\-separated roles, e.g. 'web,worker' (replaces role: tags; keeps tls; the default 'node' role is kept unless \-\-exact; empty = mesh default)
+.TP
+\fB\-\-exact\fR
+use exactly this role list \(em allows dropping the default 'node' role, which is otherwise kept (fleet grants like `admin \-> node : tcp/22` target it)
 .TP
 \fB\-\-now\fR
 apply immediately \(em also request a fleet renewal (as `gw renew\-all` does) so the node adopts the new roles live, no restart. Omit and it takes effect at the node's next natural renewal (~half TTL). Fleet\-wide, so for a batch prefer several set\-roles then one renew\-all.

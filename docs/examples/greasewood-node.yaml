@@ -21,7 +21,9 @@ mounts: []                   # do NOT share the Mac's filesystem in — the daem
 containerd:                  # Lima installs containerd/nerdctl by default; a node wants none of it
   system: false
   user: false
-networks: []                 # default user-mode NAT is exactly right: laptop dials out, keepalive=25 holds it
+networks:                    # NAT is right (laptop dials out, keepalive=25 holds it) — but vzNAT, not
+- vzNAT: true                # Lima's default user-mode net: the default has no IPv6, and v6-only peer
+                             # endpoints would be undialable (symptom: "no handshake", nothing else wrong)
 
 provision:
 - mode: system
