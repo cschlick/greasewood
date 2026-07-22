@@ -445,13 +445,17 @@ class ControlServer:
                 for srv in self._servers:       # close what we already bound
                     srv.server_close()
                 if e.errno == errno.EADDRINUSE:
+                    from . import service
+                    _mgr = service.detect()
+                    _stop = (_mgr.stop_hint("<name>") if _mgr
+                             else "sudo systemctl stop greasewood@<name>")
                     raise ControlPlaneAddrInUse(
                         f"control-plane address [{host}]:{port_str} is already in "
                         f"use — most likely another greasewood anchor daemon (a "
                         f"stale one, or a second mesh: the control port defaults "
                         f"to {port_str} on every anchor). Find it with: "
                         f"sudo ss -tlnp 'sport = :{port_str}'  — then stop that "
-                        f"daemon (sudo systemctl stop greasewood@<name>) or give "
+                        f"daemon ({_stop}) or give "
                         f"this mesh a different control port ([anchor] "
                         f"control_listen = ':<port>').") from e
                 raise

@@ -502,8 +502,8 @@ def cmd_create(args) -> int:
                 "is now invalid, enrolled nodes stop renewing (re-enroll them "
                 "or follow the re-root SOP in the RUNBOOK), and an "
                 "already-RUNNING daemon keeps signing with the OLD key until "
-                "restarted — run: sudo systemctl restart greasewood@%s, then "
-                "mint fresh invites.", args.name)
+                "restarted — run: %s, then "
+                "mint fresh invites.", _svc_restart_hint(args.name))
 
     # Door keypair (persistent across invites)
     load_or_generate_door_key(data_dir)
@@ -1147,11 +1147,9 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
         sys.exit(f"derived interface {mp['interface']!r} is already used by "
                  f"{clash} — rename to something whose first 12 chars differ")
 
-    systemctl = shutil.which("systemctl")
-    old_unit = f"greasewood@{old_key}.service"
-    if systemctl:
-        _systemctl_run([systemctl, "disable", "--now", old_unit],
-                       capture_output=True)
+    svc_mgr = _service_backend()
+    if svc_mgr is not None:
+        svc_mgr.disable_now(old_key)       # stop + de-boot the old instance
 
     # Data dir moves first (the new config points at it).
     new_data = mp["data_dir"]
@@ -1187,9 +1185,8 @@ def _migrate_membership(cfg_path: "Path", new_key: str,
     (new_data / "rename_grace.json").write_text(json.dumps(
         {"old_domain": cfg.mesh_domain, "until": until.isoformat()}))
 
-    if systemctl and (_UNIT_DIR / "greasewood@.service").exists():
-        _systemctl_run([systemctl, "enable", "--now",
-                        f"greasewood@{new_key}.service"], check=False)
+    if svc_mgr is not None and svc_mgr.template_installed():
+        svc_mgr.enable_now(new_key)        # symlink/enable + start the new instance
     return mp["config"]
 
 
@@ -1560,7 +1557,7 @@ def cmd_join(args) -> int:
             f"would blackhole this join (it hangs at 'connecting to enroll daemon'). "
             f"Join from a non-anchor host. To override for a one-off: "
             f"`sudo ip -6 rule del from {GUEST_DOOR_IP} lookup {DOOR_TABLE}`, run the "
-            f"join, then `sudo systemctl restart greasewood@{akey}` to restore it.")
+            f"join, then `{_svc_restart_hint(akey)}` to restore it.")
 
     # Roles the joiner self-selects (menu invite). Validate against the token's
     # menu client-side for a friendly early error — the anchor re-checks and is
@@ -2016,37 +2013,53 @@ def _unit_for_config(cfg_path) -> str:
     return f"greasewood@{m.group(1)}" if m else "greasewood@<name>"
 
 
+def _service_backend():
+    """The detected service backend for THIS host (systemd / OpenRC / None),
+    with the test-redirectable systemd unit dir wired in so create/join/purge
+    honour cli._UNIT_DIR."""
+    return service.detect(_UNIT_DIR)
+
+
+def _svc_restart_hint(key: str = "<mesh>") -> str:
+    """The backend-correct 'restart this mesh's daemon' command for THIS host —
+    rc-service on OpenRC, systemctl on systemd, systemctl-shaped as the fallback
+    when no service manager is detected (a bare `gw run` host)."""
+    mgr = _service_backend()
+    return mgr.restart_hint(key) if mgr else f"sudo systemctl restart greasewood@{key}"
+
+
 def _print_daemon_guidance(key: str, cfg_path, then: str = "",
                            no_service: bool = False) -> None:
     """Bring up (and report) this membership's daemon. By default create/join
-    install the systemd template + enable this mesh's instance so it's running
-    and boot-persistent with no extra command; --no-service skips systemd and
-    prints the manual `gw run` line. `then` is an optional trailing clause."""
+    install the host's native service (systemd unit / OpenRC script) and enable
+    this mesh's instance so it's running and boot-persistent with no extra
+    command; --no-service (or no service manager) prints the manual `gw run`
+    line. `then` is an optional trailing clause."""
     tail = f" — {then}" if then else ""
-    if no_service or not _systemd_available():
+    mgr = _service_backend()
+    if no_service or mgr is None:
         print(f"Start this mesh's daemon{tail}:")
         print(f"  sudo gw -c {cfg_path} run")
-        if no_service and _systemd_available():
-            print(f"  (or switch to systemd later: 'gw create/join' installs the "
-                  f"greasewood@ template — enable with 'systemctl enable --now "
-                  f"greasewood@{key}')")
+        if no_service and mgr is not None:
+            print(f"  (or let {mgr.name} manage it: 'gw create/join' installs the "
+                  f"service — enable with '{mgr.enable_hint(key)}')")
         return
 
-    _write_service_template()          # ensure the template exists, then enable
-    state = _membership_service(key)
+    mgr.write_template()               # ensure the service definition exists, then enable
+    state = mgr.enable_now(key)
+    unit = mgr.unit_name(key)
     if state == "active":
-        print(f"greasewood@{key} is running{tail} (and starts at boot).")
-        print(f"  status: systemctl status greasewood@{key}   "
-              f"logs: journalctl -u greasewood@{key} -f")
+        print(f"{unit} is running{tail} (and starts at boot).")
+        print(f"  {mgr.status_hint(key)}")
     elif state == "manual":
-        print(f"No systemd here — start this mesh's daemon{tail}:")
+        print(f"No service manager here — start this mesh's daemon{tail}:")
         print(f"  sudo gw -c {cfg_path} run")
     else:
-        # enabled, but it did NOT come up and stay up (Type=simple + a crash =
-        # a silent restart loop). Say so, and point at the journal.
-        print(f"⚠ greasewood@{key} is enabled but {state or 'not running'} — it "
-              f"is likely crashing at startup, so the mesh isn't up yet.")
-        print(f"  see why:  sudo journalctl -u greasewood@{key} -n 40 --no-pager")
+        # enabled, but it did NOT come up and stay up (a fast crash = a silent
+        # restart loop). Say so, and point at the logs.
+        print(f"⚠ {unit} is enabled but {state or 'not running'} — it is likely "
+              f"crashing at startup, so the mesh isn't up yet.")
+        print(f"  see why:  {mgr.logs_hint(key)}")
         print(f"  or run it in the foreground to watch:  sudo gw -c {cfg_path} run")
 
 
@@ -2465,7 +2478,7 @@ def cmd_cert_request(args) -> int:
                 print(f"  {lbl}.{own}")
             print("Restart the daemon to advertise them now "
                   "(else they propagate at the next renewal): "
-                  "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run).")
+                  f"{_svc_restart_hint()}  (or re-run sudo gw run).")
     return 0
 
 
@@ -2635,7 +2648,7 @@ def cmd_rename_node(args) -> int:
 
     print(f"renamed {cfg.hostname!r} -> {newname!r} (overlay addr unchanged)")
     print("Restart the daemon so it keeps advertising the new name: "
-          "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run)")
+          f"{_svc_restart_hint()}  (or re-run sudo gw run)")
     return 0
 
 
@@ -2757,9 +2770,12 @@ def cmd_run(args) -> int:
 
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
-    # Unit-template self-heal: pick up unit improvements shipped by upgrades
-    # (no-op when unchanged, on non-systemd hosts, or running by hand).
-    _refresh_service_template()
+    # Service-definition self-heal: pick up improvements shipped by upgrades
+    # (no-op when unchanged, on an unmanaged host, or running by hand). Backend
+    # of the host: systemd unit or OpenRC script.
+    _svc = _service_backend()
+    if _svc is not None:
+        _svc.refresh_template()
 
     # Roles are the grant-table vocabulary. With no policy applied everyone
     # peers regardless; once one exists, a node with no role: tag reaches only
@@ -3419,7 +3435,7 @@ def cmd_renew(args) -> int:
                         list(cred.caps), cfg_path)
 
     print("Restart the daemon to fully adopt it: "
-          "sudo systemctl restart greasewood@<name>  (or re-run sudo gw run)")
+          f"{_svc_restart_hint()}  (or re-run sudo gw run)")
     return 0
 
 
@@ -3799,7 +3815,9 @@ def cmd_purge(args) -> int:
     except Exception as e:
         sys.exit(f"can't read {cfg_path} ({e}) — pass -c <this mesh's config> "
                  f"(purge won't guess which mesh to destroy)")
-    unit = _unit_for_config(cfg_path)
+    key = membership_key(cfg.mesh_domain)
+    svc_mgr = _service_backend()
+    unit = svc_mgr.unit_name(key) if svc_mgr else _unit_for_config(cfg_path)
 
     if not args.yes:
         last = not [k for k, p in _memberships() if p.resolve() != cfg_path.resolve()]
@@ -3808,8 +3826,8 @@ def cmd_purge(args) -> int:
         print(f"  WireGuard interface : {iface}")
         print(f"  data directory      : {data_dir}  (keys, CA, credentials)")
         print(f"  config file         : {cfg_path}")
-        if last:
-            print(f"  systemd template    : greasewood@.service (last mesh → "
+        if last and svc_mgr is not None:
+            print(f"  service definition  : {svc_mgr.template_name()} (last mesh → "
                   f"full reset)")
         answer = input("Proceed? [y/N] ").strip().lower()
         if answer != "y":
@@ -3839,14 +3857,8 @@ def cmd_purge(args) -> int:
     # next mesh on this host: it keeps its stale CA and keys in memory, keeps
     # serving door enrollments, and its mesh interface is gone — so every join
     # against the re-created anchor fails with a peer-install error.
-    systemctl = shutil.which("systemctl")
-    if systemctl:
-        r = _systemctl_run([systemctl, "is-active", "--quiet", unit],
-                           capture_output=True)
-        if r.returncode == 0:
-            _systemctl_run([systemctl, "disable", "--now", unit],
-                           capture_output=True)
-            removed.append(f"stopped {unit}")
+    if svc_mgr is not None and svc_mgr.disable_now(key):
+        removed.append(f"stopped {unit}")
     # A stray daemon that survives the purge haunts the next mesh: it holds the
     # control port (the next create crash-loops on EADDRINUSE) and self-heals
     # its interface (recreating what we delete below). The systemd instance is
@@ -3892,8 +3904,7 @@ def cmd_purge(args) -> int:
     # across daemon stop by design (fail closed); purge is its explicit
     # teardown. Idempotent — a no-op if enforcement was never on.
     from .portfilter import table_name as _nft_table
-    from .config import membership_key
-    _tbl = _nft_table(membership_key(cfg.mesh_domain))
+    _tbl = _nft_table(key)                        # membership_key(cfg.mesh_domain)
     chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
     if chk.returncode == 0:
         subprocess.run(["nft", "delete", "table", "inet", _tbl], capture_output=True)
@@ -3927,18 +3938,14 @@ def cmd_purge(args) -> int:
     # if it was the LAST mesh on the host, remove the shared template unit too,
     # so `gw purge` on a single-mesh host is a true from-scratch reset. Other
     # meshes still need the template, so it stays while any remain.
-    if systemctl:
+    if svc_mgr is not None:
         remaining = _memberships()   # cfg_path is already unlinked above
         if not remaining:
-            tmpl = _UNIT_DIR / "greasewood@.service"
-            if tmpl.exists():
-                _systemctl_run([systemctl, "disable", unit], capture_output=True)
-                tmpl.unlink()
-                _systemctl_run([systemctl, "daemon-reload"], capture_output=True)
-                removed.append("systemd template greasewood@.service (last mesh)")
-        elif (_UNIT_DIR / "greasewood@.service").exists():
-            print(f"note: kept greasewood@.service — {len(remaining)} other mesh"
-                  f"{'es' if len(remaining) != 1 else ''} still use it "
+            if svc_mgr.remove_template():
+                removed.append(f"{svc_mgr.template_name()} (last mesh)")
+        elif svc_mgr.template_installed():
+            print(f"note: kept {svc_mgr.template_name()} — {len(remaining)} other "
+                  f"mesh{'es' if len(remaining) != 1 else ''} still use it "
                   f"({', '.join(k for k, _ in remaining)}).")
 
     for item in removed:
