@@ -276,6 +276,8 @@ respawn_delay=5
 respawn_max=5
 respawn_period=120
 pidfile="/run/greasewood.${mesh}.pid"
+output_log="/var/log/greasewood.${mesh}.log"
+error_log="/var/log/greasewood.${mesh}.log"
 
 depend() {
 	need net
@@ -436,6 +438,40 @@ class ServiceManager(ABC):
     def restart_hint(self, key: str) -> str:
         """A copy-pasteable command to restart this mesh's daemon."""
 
+    @abstractmethod
+    def status_hint(self, key: str) -> str:
+        """A one-line 'how to see status + follow logs' for this mesh."""
+
+    @abstractmethod
+    def logs_hint(self, key: str) -> str:
+        """A command to dump this mesh's recent logs (the crash 'see why')."""
+
+    @abstractmethod
+    def enable_hint(self, key: str) -> str:
+        """A command to install + enable this mesh's service at boot."""
+
+    @abstractmethod
+    def stop_hint(self, key: str) -> str:
+        """A command to stop this mesh's daemon."""
+
+    @abstractmethod
+    def disable_now(self, key: str) -> bool:
+        """Stop this mesh's instance and remove it from boot. Returns True if it
+        was running (so callers can report 'stopped X')."""
+
+    @abstractmethod
+    def remove_template(self) -> bool:
+        """Remove the shared service definition — the last-mesh full reset.
+        Returns True if one was present and removed."""
+
+    @abstractmethod
+    def template_name(self) -> str:
+        """Human name of the shared service definition, for purge messaging."""
+
+    @abstractmethod
+    def template_installed(self) -> bool:
+        """Whether the shared service definition is currently installed."""
+
 
 class SystemdManager(ServiceManager):
     name = "systemd"
@@ -460,6 +496,48 @@ class SystemdManager(ServiceManager):
 
     def restart_hint(self, key: str) -> str:
         return f"sudo systemctl restart greasewood@{key}"
+
+    def status_hint(self, key: str) -> str:
+        return (f"status: systemctl status greasewood@{key}   "
+                f"logs: journalctl -u greasewood@{key} -f")
+
+    def logs_hint(self, key: str) -> str:
+        return f"sudo journalctl -u greasewood@{key} -n 40 --no-pager"
+
+    def enable_hint(self, key: str) -> str:
+        return f"systemctl enable --now greasewood@{key}"
+
+    def stop_hint(self, key: str) -> str:
+        return f"sudo systemctl stop greasewood@{key}"
+
+    def disable_now(self, key: str) -> bool:
+        systemctl = shutil.which("systemctl")
+        if not systemctl:
+            return False
+        unit = f"greasewood@{key}.service"
+        was_active = systemctl_run(
+            [systemctl, "is-active", "--quiet", unit], capture_output=True).returncode == 0
+        systemctl_run([systemctl, "disable", "--now", unit], capture_output=True)
+        return was_active
+
+    def remove_template(self) -> bool:
+        tmpl = self.unit_dir / "greasewood@.service"
+        if not tmpl.exists():
+            return False
+        try:
+            tmpl.unlink()
+        except OSError:
+            return False
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            systemctl_run([systemctl, "daemon-reload"], check=False)
+        return True
+
+    def template_name(self) -> str:
+        return "greasewood@.service"
+
+    def template_installed(self) -> bool:
+        return (self.unit_dir / "greasewood@.service").exists()
 
 
 class OpenRCManager(ServiceManager):
@@ -487,6 +565,52 @@ class OpenRCManager(ServiceManager):
 
     def restart_hint(self, key: str) -> str:
         return f"sudo rc-service greasewood.{key} restart"
+
+    def status_hint(self, key: str) -> str:
+        return (f"status: rc-service greasewood.{key} status   "
+                f"logs: /var/log/greasewood.{key}.log")
+
+    def logs_hint(self, key: str) -> str:
+        return f"sudo tail -n 40 /var/log/greasewood.{key}.log"
+
+    def enable_hint(self, key: str) -> str:
+        return (f"rc-update add greasewood.{key} default && "
+                f"rc-service greasewood.{key} start")
+
+    def stop_hint(self, key: str) -> str:
+        return f"sudo rc-service greasewood.{key} stop"
+
+    def disable_now(self, key: str) -> bool:
+        if not shutil.which("rc-service"):
+            return False
+        svc = f"greasewood.{key}"
+        was_active = rc_run(
+            ["rc-service", svc, "status"], capture_output=True).returncode == 0
+        rc_run(["rc-service", svc, "stop"], capture_output=True)
+        rc_run(["rc-update", "del", svc], capture_output=True)   # from all runlevels
+        link = self.init_dir / svc
+        try:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+        except OSError:
+            pass
+        return was_active
+
+    def remove_template(self) -> bool:
+        base = self.init_dir / "greasewood"
+        if not base.exists():
+            return False
+        try:
+            base.unlink()
+            return True
+        except OSError:
+            return False
+
+    def template_name(self) -> str:
+        return str(self.init_dir / "greasewood")
+
+    def template_installed(self) -> bool:
+        return (self.init_dir / "greasewood").exists()
 
 
 def detect(unit_dir: Path = SYSTEMD_UNIT_DIR) -> "ServiceManager | None":

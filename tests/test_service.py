@@ -172,6 +172,48 @@ def test_openrc_refresh_only_when_installed_and_stale(tmp_path, monkeypatch):
     assert mgr.refresh_template() is False            # current → untouched
 
 
+def test_systemd_disable_and_remove_template(tmp_path, monkeypatch):
+    (tmp_path / "greasewood@.service").write_text("template")
+    monkeypatch.setattr(_shutil, "which", _which({"systemctl": "/bin/systemctl"}))
+    calls = []
+    # is-active rc=0 (was running) so disable_now reports True
+    monkeypatch.setattr(service, "systemctl_run",
+                        lambda cmd, *a, **k: calls.append(cmd)
+                        or _subprocess.CompletedProcess(cmd, 0))
+    mgr = service.SystemdManager(unit_dir=tmp_path)
+    assert mgr.template_installed() is True
+    assert mgr.disable_now("prod") is True
+    assert ["/bin/systemctl", "disable", "--now", "greasewood@prod.service"] in calls
+    assert mgr.remove_template() is True
+    assert not (tmp_path / "greasewood@.service").exists()
+    assert mgr.remove_template() is False            # already gone → nothing to do
+
+
+def test_openrc_disable_stops_deboots_and_unlinks(tmp_path, monkeypatch):
+    (tmp_path / "greasewood").write_text("#!/sbin/openrc-run\n")
+    (tmp_path / "greasewood.prod").symlink_to("greasewood")
+    monkeypatch.setattr(_shutil, "which", _which({"rc-service": "/sbin/rc-service"}))
+    calls = []
+    monkeypatch.setattr(service, "rc_run",
+                        lambda cmd, *a, **k: calls.append(cmd)
+                        or _subprocess.CompletedProcess(cmd, 0))
+    mgr = service.OpenRCManager(init_dir=tmp_path)
+    assert mgr.disable_now("prod") is True           # status rc=0 → was running
+    assert ["rc-service", "greasewood.prod", "stop"] in calls
+    assert ["rc-update", "del", "greasewood.prod"] in calls
+    assert not (tmp_path / "greasewood.prod").exists()   # instance symlink removed
+
+
+def test_openrc_remove_and_template_installed(tmp_path):
+    mgr = service.OpenRCManager(init_dir=tmp_path)
+    assert mgr.template_installed() is False
+    (tmp_path / "greasewood").write_text("#!/sbin/openrc-run\n")
+    assert mgr.template_installed() is True
+    assert mgr.template_name() == str(tmp_path / "greasewood")
+    assert mgr.remove_template() is True
+    assert not (tmp_path / "greasewood").exists()
+
+
 def test_detect_falls_back_to_openrc(monkeypatch):
     monkeypatch.setattr(service, "systemd_available", lambda: False)
     monkeypatch.setattr(service, "openrc_available", lambda: True)

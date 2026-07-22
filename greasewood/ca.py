@@ -111,10 +111,14 @@ class CA:
                       "(a re-create/re-root while the daemon was running?) — "
                       "refusing to sign with the stale in-memory key. Restart "
                       "the daemon, then mint fresh invites.", self._key_file)
+            from . import service
+            _mgr = service.detect()
+            _restart = (_mgr.restart_hint("<mesh>") if _mgr
+                        else "sudo systemctl restart greasewood@<mesh>")
             raise ValueError(
                 "anchor's CA key changed on disk after its daemon started (a "
-                "re-create?) — on the anchor: restart the daemon "
-                "(sudo systemctl restart greasewood@<mesh>) and mint a fresh invite")
+                f"re-create?) — on the anchor: restart the daemon ({_restart}) "
+                "and mint a fresh invite")
 
     def issue(
         self,

@@ -12,7 +12,7 @@ import subprocess as _subprocess
 
 import pytest
 
-from greasewood import cli
+from greasewood import cli, service
 
 
 @pytest.fixture
@@ -105,32 +105,66 @@ def test_membership_service_manual_without_template(units, monkeypatch):
     assert cli._membership_service("prod") == "manual"         # no template → nothing to do
 
 
-def test_guidance_default_installs_and_reports(units, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_systemd_available", lambda: True)   # hermetic vs the host
-    monkeypatch.setattr(cli, "_write_service_template", lambda *a: "/bin/systemctl")
-    monkeypatch.setattr(cli, "_membership_service", lambda key: "active")
+def _fake_systemd(monkeypatch, *, enable="active", record=None):
+    """A SystemdManager whose disk-touching methods are stubbed, wired in as the
+    detected backend. `record` (if given) collects a marker on write_template."""
+    mgr = service.SystemdManager()
+    monkeypatch.setattr(mgr, "write_template",
+                        lambda *a: (record.append("wrote") if record is not None else "/bin/systemctl"))
+    monkeypatch.setattr(mgr, "enable_now", lambda key: enable)
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: mgr)
+    return mgr
+
+
+def test_guidance_default_installs_and_reports(monkeypatch, capsys):
+    _fake_systemd(monkeypatch, enable="active")
     cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
     out = capsys.readouterr().out
-    assert "greasewood@prod is running" in out and "starts at boot" in out
+    assert "greasewood@prod.service is running" in out and "starts at boot" in out
 
 
-def test_guidance_reports_crash(units, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_systemd_available", lambda: True)   # hermetic vs the host
-    monkeypatch.setattr(cli, "_write_service_template", lambda *a: "/bin/systemctl")
-    monkeypatch.setattr(cli, "_membership_service", lambda key: "failed")
+def test_guidance_reports_crash(monkeypatch, capsys):
+    _fake_systemd(monkeypatch, enable="failed")
     cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
     out = capsys.readouterr().out
     assert "likely crashing" in out and "journalctl -u greasewood@prod" in out
 
 
-def test_guidance_no_service_skips_systemd(units, monkeypatch, capsys):
+def test_guidance_no_service_skips_install(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr(cli, "_write_service_template",
-                        lambda *a: calls.append("wrote"))
+    _fake_systemd(monkeypatch, record=calls)
     cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml", no_service=True)
     out = capsys.readouterr().out
     assert "sudo gw -c /etc/greasewood_prod.toml run" in out
-    assert not calls                                           # template NOT written
+    assert "systemctl enable --now greasewood@prod" in out      # switch-later hint
+    assert not calls                                            # service NOT written
+
+
+def test_guidance_manual_when_no_backend(monkeypatch, capsys):
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: None)
+    cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
+    out = capsys.readouterr().out
+    assert "sudo gw -c /etc/greasewood_prod.toml run" in out
+
+
+def test_guidance_openrc_backend_reports_rc_service(monkeypatch, capsys):
+    mgr = service.OpenRCManager()
+    monkeypatch.setattr(mgr, "write_template", lambda *a: "/sbin/rc-service")
+    monkeypatch.setattr(mgr, "enable_now", lambda key: "active")
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: mgr)
+    cli._print_daemon_guidance("prod", "/etc/greasewood_prod.toml")
+    out = capsys.readouterr().out
+    assert "greasewood.prod is running" in out
+    assert "rc-service greasewood.prod status" in out           # backend-correct status
+
+
+def test_svc_restart_hint_dispatches_on_backend(monkeypatch):
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: service.OpenRCManager())
+    assert cli._svc_restart_hint("home") == "sudo rc-service greasewood.home restart"
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: service.SystemdManager())
+    assert cli._svc_restart_hint("home") == "sudo systemctl restart greasewood@home"
+    monkeypatch.setattr(cli.service, "detect", lambda *a, **k: None)
+    assert cli._svc_restart_hint("home") == "sudo systemctl restart greasewood@home"
 
 
 def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
