@@ -64,7 +64,7 @@ The choices that make it an appliance rather than a dev box:
 | `mounts: []` | The node is sealed — your Mac's files aren't exposed to a root daemon. Also a faster boot. |
 | `vmType: vz` | Apple's native hypervisor, no QEMU emulation. Fast on Apple Silicon *and* Intel. |
 | the `command -v gw && exit 0` guard | Provisioning is idempotent, so reboots skip apt and the VM comes back in seconds. |
-| Debian, not Alpine | Alpine is smaller but it's OpenRC; the `greasewood@` unit is systemd. Debian genericcloud is the smallest thing that keeps systemd + kernel WireGuard. |
+| Debian, not Alpine | Both work — `gw join` installs a systemd unit on Debian, an OpenRC service on Alpine. Debian is the default here because systemd gives the daemon a kernel-enforced exec sandbox (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters) that OpenRC can't; on Alpine the daemon runs as unconfined root. Debian genericcloud is small enough that the sandbox is worth it. |
 | `PIPX_BIN_DIR=/usr/local/bin` | Lands `gw` where the unit's `ExecStart` looks for it, on old pipx or new (no reliance on `pipx install --global`). |
 
 ## Join the mesh
