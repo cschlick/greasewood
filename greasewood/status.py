@@ -885,6 +885,12 @@ def _role_editor_lines(r: dict) -> list:
                  f"{'current':<10}: {', '.join(r['node']['roles']) or '(none)'}",
                  f"{'proposed':<10}: {', '.join(sorted(r['sel'])) or '(none)'}",
                  ""]
+        # Unchecking node here is the one EXPLICIT way to drop it — say what
+        # that means, since the loss (admin ssh etc.) surfaces far from here.
+        if "node" in r["node"]["roles"] and "node" not in r["sel"]:
+            lines += ["⚠ leaves role:node — the default membership role; "
+                      "grants targeting 'node' (admin ssh, ...) will no "
+                      "longer cover this host", ""]
         lines += [f"  + tunnel {name} ↔ {h}" for h in d["added"]]
         lines += [f"  - tunnel {name} ↔ {h}" for h in d["removed"]]
         if not d["added"] and not d["removed"]:

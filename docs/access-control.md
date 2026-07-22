@@ -37,7 +37,14 @@ sudo gw join "$MENU" --roles worker --hostname worker1   # anchor signs iff 'wor
 ```
 
 **Defaults for new nodes** live in the anchor's config — `[anchor]
-default_roles` (`["node"]`) and `default_caps` (`["tls"]`). A
+default_roles` (`["node"]`) and `default_caps` (`["tls"]`). The default
+`node` role is **sticky**: `gw set-roles` keeps it even when your list omits
+it, and `gw invite --roles` adds it on top of the class you name — because
+fleet grants (the shipped `admin → node : tcp/22`) target it, and losing it
+by omission surfaces later as a "why can't admin SSH this box" mystery.
+Dropping it is always explicit: `--exact` on either command (which prints
+exactly which grants stop covering the host), or unchecking `node` in the
+`gw watch` role editor (which warns on the review screen). A
 plain `gw invite` uses them; the flags override per token; they're read fresh
 at each invite, so editing the config changes future enrollments with no
 restart.
