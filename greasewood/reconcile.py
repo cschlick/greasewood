@@ -538,6 +538,23 @@ def read_last_reconcile(data_dir) -> "str | None":
         return None
 
 
+def seconds_since_reconcile(data_dir) -> "float | None":
+    """Age in seconds of the last completed reconcile pass, or None if the
+    daemon has never stamped one (or the stamp is unreadable/garbled). This is
+    the backend-neutral liveness signal: systemd reads it via sd_notify's
+    WatchdogSec, a non-systemd supervisor via the WedgeWatchdog self-exit, and
+    an OpenRC healthcheck could stat the same file — one 'is reconcile actually
+    running' truth, three consumers."""
+    last = read_last_reconcile(data_dir)
+    if last is None:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(last)
+    except ValueError:
+        return None
+    return (dt.datetime.now(dt.timezone.utc) - t).total_seconds()
+
+
 # --- daemon death breadcrumb ----------------------------------------------
 # Counterpart to the liveness heartbeat above: when `gw run` dies on an
 # unrecoverable STARTUP condition (port in use, control plane can't bind, bad

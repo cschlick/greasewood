@@ -2981,6 +2981,21 @@ def cmd_run(args) -> int:
         endpoint_loop.start()
         log.info("endpoint auto-refresh on (re-advertise on address change)")
 
+    # Liveness watchdog. Under systemd, sd_notify + WatchdogSec owns wedge
+    # detection (a NOTIFY_SOCKET is present), so we stay out of its way. Off
+    # systemd there's no notify socket — arm the portable self-exit watchdog so
+    # a death-restart supervisor (OpenRC's supervise-daemon, runit, a bare
+    # respawn) can recover a wedged daemon the same way systemd would.
+    watchdog = None
+    if not os.environ.get("NOTIFY_SOCKET"):
+        from .loop import WedgeWatchdog
+        from .reconcile import seconds_since_reconcile
+        watchdog = WedgeWatchdog(
+            age_fn=lambda: seconds_since_reconcile(cfg.data_dir))
+        watchdog.start()
+        log.info("liveness watchdog on (self-exit if reconcile wedges; "
+                 "no systemd notify socket)")
+
     # Startup fully succeeded (interface up, control plane up, loops running) —
     # forget any death breadcrumb from a prior failed boot so `gw watch` stops
     # reporting a stale fatal reason.
@@ -3008,6 +3023,8 @@ def cmd_run(args) -> int:
         cert_renewal.stop()
     if endpoint_loop:
         endpoint_loop.stop()
+    if watchdog:
+        watchdog.stop()
     if door_watcher:
         door_watcher.stop()
     log.info("shutdown complete")
