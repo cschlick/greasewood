@@ -64,7 +64,7 @@ The choices that make it an appliance rather than a dev box:
 | `mounts: []` | The node is sealed — your Mac's files aren't exposed to a root daemon. Also a faster boot. |
 | `vmType: vz` | Apple's native hypervisor, no QEMU emulation. Fast on Apple Silicon *and* Intel. |
 | the `command -v gw && exit 0` guard | Provisioning is idempotent, so reboots skip apt and the VM comes back in seconds. |
-| Debian, not Alpine | Both work — `gw join` installs a systemd unit on Debian, an OpenRC service on Alpine. Debian is the default here because systemd gives the daemon a kernel-enforced exec sandbox (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters) that OpenRC can't; on Alpine the daemon runs as unconfined root. Debian genericcloud is small enough that the sandbox is worth it. |
+| Debian, not Alpine | Both work — `gw join` installs a systemd unit on Debian, an OpenRC service on Alpine. Debian is the default here because systemd gives the daemon a kernel-enforced exec sandbox (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters) that OpenRC can't; on Alpine the daemon runs as unconfined root. For the leaner, sandbox-free Alpine build see [below](#leaner-alternative-alpine-openrc). |
 | `PIPX_BIN_DIR=/usr/local/bin` | Lands `gw` where the unit's `ExecStart` looks for it, on old pipx or new (no reliance on `pipx install --global`). |
 
 ## Join the mesh
@@ -107,3 +107,47 @@ limactl shell greasewood-node sudo gw watch --snapshot
     full re-enrollment — the same [directory-loss caveat](operations.md) as any
     node, just easier to trigger with a throwaway VM. `limactl stop` is safe;
     `limactl delete` is not.
+
+## Leaner alternative: Alpine (OpenRC)
+
+If you're counting resources — an old Mac, a small SSD, or several node VMs —
+Alpine is the featherweight option. `gw join` installs an **OpenRC** service
+there just as automatically as it installs a systemd unit on Debian, so the
+workflow is identical; only the base OS and the service commands change.
+
+What it actually saves, and what it costs:
+
+- **Disk:** ~0.8 GB less (Alpine + Python + `cryptography` is ~400–500 MB used,
+  vs Debian's ~1.2–1.4 GB). Most of what remains is Python + `cryptography`,
+  which is the same on both — you can't shrink below that floor.
+- **RAM:** in practice a Debian node VM sits ~500–600 MB resident; an Alpine one
+  ~100–150 MB. Almost all of the difference is systemd + journald + page cache
+  that Alpine simply doesn't carry.
+- **The cost:** OpenRC can't apply the systemd unit's exec sandbox
+  (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters), so **the daemon
+  runs as unconfined root.** For a laptop that normally runs no firewall this is
+  a reasonable trade; it's still a real downgrade to weigh.
+
+Use [`greasewood-node-alpine.yaml`](examples/greasewood-node-alpine.yaml):
+
+```yaml
+--8<-- "examples/greasewood-node-alpine.yaml"
+```
+
+```bash
+limactl start greasewood-node-alpine.yaml
+# on your anchor:  sudo gw invite --hostname macbook
+limactl shell greasewood-node-alpine sudo gw join <token>
+```
+
+The only day-to-day difference is the service command — `rc-service
+greasewood.<mesh> {status,restart}` instead of `systemctl`/`journalctl`, and
+logs land in `/var/log/greasewood.<mesh>.log`. Everything else (identity
+survives rebuilds, `limactl stop` safe / `delete` not, the directory-loss
+caveat) is the same.
+
+!!! note "One image-line chore"
+    Alpine images for Lima come from the alpine-lima project and their
+    version/digest move over time. The YAML shows a representative line; copy the
+    current one with `limactl start --dry-run template://alpine 2>&1 | grep -A8
+    'images:'` and paste it in (with the digest) before `limactl start`.
