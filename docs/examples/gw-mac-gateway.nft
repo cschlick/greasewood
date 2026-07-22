@@ -1,0 +1,15 @@
+#!/usr/sbin/nft -f
+# greasewood mac-gateway: NAT the host Mac's traffic into the overlay as this
+# node (interface gw-<mesh> — match yours). Masquerade = to the fleet, the Mac IS this node (grants apply as-is,
+# enforced at each receiving peer). MSS clamp covers the 1500->1420 MTU step.
+destroy table ip6 gwmac
+table ip6 gwmac {
+    chain post {
+        type nat hook postrouting priority srcnat; policy accept;
+        iifname "lima0" oifname "gw-mymesh" masquerade
+    }
+    chain clamp {
+        type filter hook forward priority mangle; policy accept;
+        tcp flags syn tcp option maxseg size set rt mtu
+    }
+}
