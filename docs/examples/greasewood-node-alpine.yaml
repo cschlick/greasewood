@@ -1,0 +1,57 @@
+# greasewood-node-alpine.yaml — the leaner variant: Alpine + OpenRC.
+#   limactl start greasewood-node-alpine.yaml     # build + provision (once)
+#   limactl shell greasewood-node-alpine          # then join, see message below
+#
+# vs the Debian recipe (greasewood-node.yaml): ~0.8 GB less disk and, in
+# practice, a node VM that sits ~100-150 MB resident instead of ~500-600 MB.
+# The trade: OpenRC can't apply the systemd exec sandbox, so the daemon runs as
+# unconfined root. See docs/macos.md.
+vmType: "vz"
+
+images:
+  # Alpine images for Lima come from the alpine-lima project; the version + digest
+  # move over time. Copy the CURRENT images: block (with digests) from Lima's own
+  # alpine template rather than trusting the representative line below:
+  #   limactl start --dry-run template://alpine 2>&1 | grep -A8 'images:'
+  # (or https://github.com/lima-vm/lima/blob/master/templates/alpine.yaml)
+- location: "https://github.com/lima-vm/alpine-lima/releases/download/v1.1.0/alpine-lima-std-3.21.0-x86_64.iso"
+  arch: "x86_64"
+- location: "https://github.com/lima-vm/alpine-lima/releases/download/v1.1.0/alpine-lima-std-3.21.0-aarch64.iso"
+  arch: "aarch64"
+
+cpus: 1
+memory: "512MiB"             # Alpine idles ~40 MB; this is headroom for first-boot pip. Drop to 256 after.
+disk: "2GiB"                 # Alpine + Python + cryptography is ~400-500 MB used
+
+mounts: []                   # sealed node — the Mac's files are not exposed to a root daemon
+containerd:
+  system: false
+  user: false
+networks: []                 # default user-mode NAT: laptop dials out, keepalive=25 holds it
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    command -v gw >/dev/null 2>&1 && exit 0     # idempotent: skip on every reboot after the first
+    apk add --no-cache wireguard-tools iproute2 nftables pipx
+    # /usr/local/bin so `gw` is on PATH for interactive use. The OpenRC service
+    # launches the daemon by its absolute interpreter path, so it needs no PATH.
+    PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install greasewood
+    # If pipx can't find a cryptography wheel (very old pip), add build deps:
+    #   apk add gcc musl-dev python3-dev libffi-dev openssl-dev cargo
+
+probes:
+- description: "gw installed"
+  script: |
+    #!/bin/sh
+    command -v gw >/dev/null 2>&1 || exit 1
+  hint: "greasewood didn't install — limactl shell greasewood-node-alpine cat /var/log/messages"
+
+message: |
+  greasewood is installed; this node hasn't joined a mesh yet.
+    on your anchor:  sudo gw invite --hostname {{.Name}}
+    then here:       limactl shell {{.Name}} sudo gw join <token>
+  join enrolls the node AND enables the OpenRC service (greasewood.<mesh>) at boot.
+  manage it with:  sudo rc-service greasewood.<mesh> {status,restart}
