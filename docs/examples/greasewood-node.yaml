@@ -1,0 +1,49 @@
+# greasewood-node.yaml — barely-enough Linux to run one greasewood node.
+#   limactl start greasewood-node.yaml     # build + provision (once)
+#   limactl shell greasewood-node          # then join, see message below
+#
+# See docs/macos.md for the full walkthrough.
+vmType: "vz"                 # Apple Virtualization.framework; fast, no QEMU. (default on macOS 13+)
+
+images:
+  # Debian 13 — has systemd (the greasewood@ unit needs it) and kernel WireGuard.
+  # Pin a real digest for reproducibility; `latest` shown for brevity.
+- location: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+  arch: "x86_64"
+- location: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2"
+  arch: "aarch64"
+
+cpus: 1
+memory: "1GiB"               # daemon idles at a fraction; 1G just keeps first-boot apt off the OOM line
+disk: "4GiB"
+
+mounts: []                   # do NOT share the Mac's filesystem in — the daemon needs nothing from the host
+containerd:                  # Lima installs containerd/nerdctl by default; a node wants none of it
+  system: false
+  user: false
+networks: []                 # default user-mode NAT is exactly right: laptop dials out, keepalive=25 holds it
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    command -v gw >/dev/null 2>&1 && exit 0     # idempotent: skip on every reboot after the first
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends nftables wireguard-tools pipx
+    # /usr/local/bin so it matches the greasewood@ unit's ExecStart, old pipx or new.
+    PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install greasewood
+
+probes:
+- description: "gw installed"
+  script: |
+    #!/bin/sh
+    command -v gw >/dev/null 2>&1 || exit 1
+  hint: "greasewood didn't install — limactl shell greasewood-node sudo journalctl -b"
+
+message: |
+  greasewood is installed; this node hasn't joined a mesh yet.
+    on your anchor:  sudo gw invite --hostname {{.Name}}
+    then here:       limactl shell {{.Name}} sudo gw join <token>
+  join enrolls the node AND enables greasewood@<mesh> to start at boot.
