@@ -57,6 +57,10 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.inlinehilite
   - pymdownx.details
+  - pymdownx.snippets:
+      # so docs/macos.md can embed docs/examples/*.yaml verbatim (single source)
+      base_path: [docs]
+      check_paths: true
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
@@ -80,6 +84,7 @@ nav:
   - Access control: access-control.md
   - TLS certificates: tls.md
   - File sharing (NFS): nfs.md
+  - Node on macOS: macos.md
   - Networking & names: networking.md
   - Operations: operations.md
   - Reference: reference.md
