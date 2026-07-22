@@ -173,7 +173,10 @@ Notes:
   the service unit was written with. A reinstall that relocates `gw` leaves
   `ExecStart` pointing at the old path — re-point the unit, or reinstall in the
   original environment.
-- **Not on systemd?** Restart your `gw … run` process by hand; the interface
+- **On OpenRC (Alpine)?** `sudo rc-service greasewood.<mesh> restart` — the
+  daemon is managed the same way, just under `supervise-daemon` instead of
+  systemd (no exec sandbox there, so it runs as unconfined root).
+- **No supported init?** Restart your `gw … run` process by hand; the interface
   survives the same way.
 - Avoid upgrading the anchor while a `gw invite` window is open — the restart
   closes the door; re-invite afterward.

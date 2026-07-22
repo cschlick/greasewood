@@ -16,6 +16,22 @@ import pytest
 from greasewood import service
 
 
+def test_openrc_script_is_valid_posix_sh(tmp_path):
+    """The rendered init script must be valid POSIX sh. This test runs on every
+    CI distro leg, so on the alpine:latest leg it validates against busybox ash
+    — the shell the script actually runs under on Alpine — not just bash. Skips
+    the openrc-run shebang line, which is not a real sh interpreter."""
+    sh = _shutil.which("sh")
+    if sh is None:
+        pytest.skip("no sh on this host")
+    body = "\n".join(
+        service.render_openrc_script("/usr/local/bin/gw").splitlines()[1:])
+    script = tmp_path / "rc_body.sh"
+    script.write_text(body)
+    r = _subprocess.run([sh, "-n", str(script)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
 def _which(mapping):
     return lambda name: mapping.get(name)
 

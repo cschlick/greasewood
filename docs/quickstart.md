@@ -108,10 +108,17 @@ There is no separate install/uninstall step: the service lifecycle rides on the
 mesh lifecycle. **`gw purge`** removes a mesh's instance (and the shared
 template when it's the last mesh) providing a from-scratch reset in one command.
 
-- **Not on systemd, or want to run it yourself?** Pass `--no-service` to
-  `create`/`join`; they print the `sudo gw -c <config> run` line instead and
-  touch nothing under `/etc/systemd`. (A non-systemd host auto-falls-back to
-  this even without the flag.)
+- **On OpenRC (Alpine)** it's the same one-command story — `create`/`join`
+  install `/etc/init.d/greasewood`, symlink this mesh's instance
+  (`greasewood.<name>`), add it to the boot runlevel and start it under
+  `supervise-daemon`. Manage it with `rc-service greasewood.<name> {status,restart}`.
+  One caveat: OpenRC can't apply the systemd unit's exec sandbox
+  (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters), so the OpenRC
+  daemon runs as unconfined root.
+- **Neither systemd nor OpenRC, or want to run it yourself?** Pass `--no-service`
+  to `create`/`join`; they print the `sudo gw -c <config> run` line instead and
+  touch no init system. (A host with no supported init auto-falls-back to this
+  even without the flag.)
 - Instances run `gw run` as root (they manage WireGuard interfaces and
   routing). Don't also run `gw run` by hand while an instance is up,  both
   would fight over the interface.

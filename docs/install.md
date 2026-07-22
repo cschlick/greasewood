@@ -4,8 +4,9 @@ Requires Python 3.11+, the WireGuard userspace tools (`wireguard-tools`/`wg`),
 and `iproute2` (`ip`). The kernel WireGuard module is built into Linux 5.6+ and
 autoloads on first use.
 
-Two ways to install on a host that will run the daemon; both set up the managed
-systemd service.
+Two ways to install on a host that will run the daemon; both let `create`/`join`
+set up the managed service — a systemd unit, or an OpenRC service on Alpine and
+other non-systemd hosts.
 
 **With pipx (recommended on Linux)** — the standard way to install a Python
 application in its own isolated environment, straight from PyPI:

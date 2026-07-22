@@ -31,8 +31,11 @@ jobs:
   #
   # SCOPE: containers share the host kernel + LSM policy, so this does NOT cover
   # kernel WireGuard or AppArmor/SELinux confinement (the wg /dev/stdin class) —
-  # that needs a real per-distro VM tier. Ubuntu 22.04 is absent: it ships
-  # Python 3.10, below greasewood's >= 3.11 floor (24.04 has 3.12).
+  # that needs a real per-distro VM tier. Nor does it cover live service
+  # management (no init runs in the container): the alpine leg still validates
+  # the OpenRC backend via test_service.py — including `sh -n` of the rendered
+  # init script under busybox ash — but not a real rc-service start. Ubuntu
+  # 22.04 is absent: it ships Python 3.10, below greasewood's >= 3.11 floor.
   distro-test:
     name: ${{ matrix.distro }}
     runs-on: ubuntu-latest
