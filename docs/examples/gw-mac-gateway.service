@@ -1,0 +1,10 @@
+[Unit]
+Description=greasewood mac-gateway (NAT66 for the host Mac into the overlay)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/gw-mac-gateway.nft
+
+[Install]
+WantedBy=multi-user.target
