@@ -178,6 +178,5 @@ is yours to add (e.g. an `nftables` owner-match on the `gw-<mesh>` interface).
 
 ## Reporting
 
-This is a personal project. File issues on the GitHub repository (the
-GitLab copy is a read-only mirror). For the operational response to key loss or
-compromise, see [operations.md](operations.md).
+This is a personal project. File issues on the GitHub repository. For the
+operational response to key loss or compromise, see [operations.md](operations.md).
