@@ -12,7 +12,7 @@ class Greasewood < Formula
   desc "WireGuard mesh node on macOS — Lima VM appliance + Mac-side tooling"
   homepage "https://github.com/cschlick/greasewood"
   url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.1.3.tar.gz"
-  sha256 "RELEASE-ME"  # shasum -a 256 of the tagged tarball; filled at release
+  sha256 "d4c0330e9d0c60ab48353abeee6286b8c33e57ba313f9201533ba60255a9f2fc"
   license "MIT"
   head "https://github.com/cschlick/greasewood.git", branch: "main"
 
