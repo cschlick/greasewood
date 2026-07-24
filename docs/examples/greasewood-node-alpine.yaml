@@ -2,22 +2,24 @@
 #   limactl start greasewood-node-alpine.yaml     # build + provision (once)
 #   limactl shell greasewood-node-alpine          # then join, see message below
 #
-# vs the Debian recipe (greasewood-node.yaml): ~0.8 GB less disk and, in
-# practice, a node VM that sits ~100-150 MB resident instead of ~500-600 MB.
+# vs the Debian recipe (greasewood-node.yaml): ~0.8 GB less disk, a guest that
+# idles ~100 MB instead of ~250 MB, and a 512MiB ceiling (vs 1GiB) bounding
+# what the VM can ever pin on the host.
 # The trade: OpenRC can't apply the systemd exec sandbox, so the daemon runs as
 # unconfined root. See docs/macos.md.
 vmType: "vz"
 
 images:
-  # Alpine images for Lima come from the alpine-lima project; the version + digest
-  # move over time. Copy the CURRENT images: block (with digests) from Lima's own
-  # alpine template rather than trusting the representative line below:
-  #   limactl start --dry-run template://alpine 2>&1 | grep -A8 'images:'
-  # (or https://github.com/lima-vm/lima/blob/master/templates/alpine.yaml)
-- location: "https://github.com/lima-vm/alpine-lima/releases/download/v1.1.0/alpine-lima-std-3.21.0-x86_64.iso"
+  # Official Alpine cloud images, as pinned by Lima's own alpine template
+  # (Lima ≥2.0 uses these, not the old alpine-lima ISOs). Alpine point-releases
+  # move over time; refresh the block from Lima's current pin with:
+  #   limactl template copy template:_images/alpine-3.23 -
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.4-x86_64-uefi-cloudinit-r0.qcow2"
   arch: "x86_64"
-- location: "https://github.com/lima-vm/alpine-lima/releases/download/v1.1.0/alpine-lima-std-3.21.0-aarch64.iso"
+  digest: "sha512:849196e26640b33fb1f106d46cebdf341c715f7f49363564eacece8097464b6af7041618e94c4eb1a006394663252a86c0fb3158fee5d0ffb094899730679a71"
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.4-aarch64-uefi-cloudinit-r0.qcow2"
   arch: "aarch64"
+  digest: "sha512:737b0eb365944ffcf6da477c059c105bbde222942fd5a8380c07db088365b18dbc60a0f2824ea9a3904d57e194e0d05a7074302c3ebc104d0aecb6ddc6ffd91c"
 
 cpus: 1
 memory: "512MiB"             # Alpine idles ~40 MB; this is headroom for first-boot pip. Drop to 256 after.
