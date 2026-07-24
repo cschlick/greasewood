@@ -208,34 +208,45 @@ def endpoint_family(endpoint: str) -> int:
 def set_peer(
     iface: str,
     wg_pub_b64: str,
-    allowed_ip: str,
+    allowed_ips: "str | list[str]",
     endpoint: str | None = None,
     keepalive: int = 25,
 ) -> None:
     """
-    Add or update a single WireGuard peer. Idempotent.
-    allowed_ip is the peer's overlay address (will be installed as /128).
+    Add or update a WireGuard peer. Idempotent.
+    allowed_ips is the peer's overlay address — or a list of them. A single
+    address is the normal case (one peer, its own /128). A list is how the
+    ANCHOR peer carries extra /128s for peers relayed through it (see the relay
+    path in reconcile): AllowedIPs is the whole set, and each gets a kernel
+    route, so the node sends those peers' traffic into the anchor tunnel.
     endpoint is "host:port" (v4) or "[v6]:port", or None (peer must initiate).
     """
+    ips = [allowed_ips] if isinstance(allowed_ips, str) else list(allowed_ips)
+    allowed = ",".join(f"{ip}/128" for ip in ips)
     cmd = [
         "wg", "set", iface,
         "peer", wg_pub_b64,
-        "allowed-ips", f"{allowed_ip}/128",
+        "allowed-ips", allowed,          # wg REPLACES the set → pass it in full
         "persistent-keepalive", str(keepalive),
     ]
     if endpoint:
         cmd += ["endpoint", endpoint]
     _run(*cmd)
-    # wg set configures the peer but does NOT install a kernel route; do it explicitly.
-    _run("ip", "-6", "route", "replace", f"{allowed_ip}/128", "dev", iface)
-    log.debug("set peer ...%s  endpoint=%s  allowed=%s/128", wg_pub_b64[-8:], endpoint, allowed_ip)
+    # wg set configures the peer but does NOT install kernel routes; do it per /128.
+    for ip in ips:
+        _run("ip", "-6", "route", "replace", f"{ip}/128", "dev", iface)
+    log.debug("set peer ...%s  endpoint=%s  allowed=%s", wg_pub_b64[-8:], endpoint, allowed)
 
 
-def remove_peer(iface: str, wg_pub_b64: str, allowed_ip: str | None = None) -> None:
-    """Remove a single WireGuard peer from the live interface."""
+def remove_peer(iface: str, wg_pub_b64: str,
+                allowed_ips: "str | list[str] | None" = None) -> None:
+    """Remove a WireGuard peer + its kernel route(s). allowed_ips is the bare
+    overlay address(es) whose /128 route(s) to also delete (str, list, or None)."""
     _run("wg", "set", iface, "peer", wg_pub_b64, "remove")
-    if allowed_ip:
-        _run("ip", "-6", "route", "del", f"{allowed_ip}/128", "dev", iface, check=False)
+    if allowed_ips:
+        ips = [allowed_ips] if isinstance(allowed_ips, str) else list(allowed_ips)
+        for ip in ips:
+            _run("ip", "-6", "route", "del", f"{ip}/128", "dev", iface, check=False)
     log.debug("removed peer ...%s", wg_pub_b64[-8:])
 
 
@@ -243,11 +254,17 @@ def remove_peer(iface: str, wg_pub_b64: str, allowed_ip: str | None = None) -> N
 class LivePeer:
     wg_pub_b64: str
     endpoint: str      # empty string if none/unknown
-    allowed_ips: str
+    allowed_ips: str   # raw, comma-separated as `wg show` reports it
     latest_handshake: int = 0   # unix epoch seconds; 0 = never handshaked
     rx_bytes: int = 0
     tx_bytes: int = 0
     keepalive: int = 0          # persistent-keepalive secs (0 = off)
+
+    @property
+    def allowed_addrs(self) -> "frozenset[str]":
+        """The bare overlay addresses in AllowedIPs (prefix stripped) — a set, so
+        a peer carrying several /128s (the relay anchor) diffs cleanly."""
+        return frozenset(a.split("/")[0] for a in self.allowed_ips.split(",") if a)
 
 
 def destroy_interface(iface: str) -> None:
