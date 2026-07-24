@@ -110,7 +110,9 @@ then run gw-mac again to route this Mac into the overlay.
 EOF
         exit 0
     fi
-    vm_running || { echo "starting $VM…"; limactl start --tty=false "$VM"; }
+    # ${VM} braced: macOS /bin/sh (bash 3.2) parses a bare $VM followed by a
+    # multibyte char as part of the variable name — unbound under set -u.
+    vm_running || { echo "starting ${VM}…"; limactl start --tty=false "$VM"; }
     mesh_info
     if route_ok; then
         echo "route: $PREFIX via $VMADDR — already in place"
