@@ -249,9 +249,13 @@ What it actually saves, and what it costs:
 - **Disk:** ~0.8 GB less (Alpine + Python + `cryptography` is ~400–500 MB used,
   vs Debian's ~1.2–1.4 GB). Most of what remains is Python + `cryptography`,
   which is the same on both — you can't shrink below that floor.
-- **RAM:** in practice a Debian node VM sits ~500–600 MB resident; an Alpine one
-  ~100–150 MB. Almost all of the difference is systemd + journald + page cache
-  that Alpine simply doesn't carry.
+- **RAM:** inside the guest, an Alpine node idles around ~100 MB used vs
+  Debian's ~250 MB — systemd + journald + page cache Alpine simply doesn't
+  carry. What Activity Monitor shows on the Mac is a different (larger) number:
+  the VM process's footprint tracks the high-water mark of guest pages ever
+  touched, so it creeps toward the configured ceiling and doesn't come back
+  down (no memory balloon). The ceiling is the real lever, and Alpine's is
+  half: 512 MiB vs 1 GiB.
 - **The cost:** OpenRC can't apply the systemd unit's exec sandbox
   (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters), so **the daemon
   runs as unconfined root.** For a laptop that normally runs no firewall this is
@@ -276,10 +280,11 @@ survives rebuilds, `limactl stop` safe / `delete` not, the directory-loss
 caveat) is the same.
 
 !!! note "One image-line chore"
-    Alpine images for Lima come from the alpine-lima project and their
-    version/digest move over time. The YAML shows a representative line; copy the
-    current one with `limactl start --dry-run template://alpine 2>&1 | grep -A8
-    'images:'` and paste it in (with the digest) before `limactl start`.
+    The YAML pins the official Alpine cloud images at the point-release Lima
+    itself currently pins (Lima ≥2.0 uses these, not the old alpine-lima ISOs).
+    Alpine point-releases move over time; refresh the `images:` block from
+    Lima's current pin with `limactl template copy template:_images/alpine-3.23 -`
+    and paste it in (digests included) before `limactl start`.
 
 !!! note "The Mac-app sections above assume the Debian recipe"
     *Reach a peer* and *Route the whole Mac* use systemd inside the VM
