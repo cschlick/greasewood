@@ -50,6 +50,18 @@ networking instead — a different, heavier setup — but most laptop clients do
 
 ## Set it up
 
+The short way — Homebrew installs the whole Mac side (Lima, the `gw` and
+`gw-mac` commands, and the VM recipes), and `gw-mac` creates the VM on first
+run:
+
+```bash
+brew install cschlick/tap/greasewood
+gw-mac            # creates the VM, prints the invite/join steps
+```
+
+The rest of this section is the same setup by hand — read it to know what the
+formula is doing for you, or to customize the VM.
+
 Install Lima (`brew install lima`), then drop in
 [`greasewood-node.yaml`](examples/greasewood-node.yaml):
 
@@ -190,7 +202,8 @@ would silently kill the VM's own SLAAC underlay):
 --8<-- "examples/gw-mac-gateway.service"
 ```
 
-Install once:
+Install once (`gw-mac` does this automatically when it creates the VM — this
+is the manual path for a VM you built yourself):
 
 ```bash
 limactl cp gw-mac-gateway.nft gw-mac-gateway.sysctl.conf gw-mac-gateway.service greasewood-node:/tmp/
@@ -223,6 +236,21 @@ ssh gp2.mymesh.internal  # any app, any port the node's grants allow
 
 `gw-mac down` removes the route and stops the VM; `gw-mac status` shows both
 layers at a glance.
+
+Or stop thinking about it entirely — `up` is an idempotent reconciler, so it
+can run on a timer (brew install only):
+
+```bash
+sudo gw-mac install-autostart   # once: root helper + scoped sudoers rule
+brew services start greasewood  # runs 'gw-mac up' every 2 minutes at login
+```
+
+Root operations (the route, `/etc/hosts`) don't prompt after that: they go
+through a small audited helper installed root-owned at
+`/usr/local/libexec/gw-mac-priv` — outside the user-writable brew prefix, so
+the NOPASSWD rule covers exactly that file and nothing a non-root process can
+rewrite. The trade: your user can adjust the mesh route and hosts block
+without a password. `sudo gw-mac uninstall-autostart` undoes both.
 
 Know what you're trading:
 
@@ -286,9 +314,11 @@ caveat) is the same.
     Lima's current pin with `limactl template copy template:_images/alpine-3.23 -`
     and paste it in (digests included) before `limactl start`.
 
-!!! note "The Mac-app sections above assume the Debian recipe"
-    *Reach a peer* and *Route the whole Mac* use systemd inside the VM
-    (`systemd-run`, a `gw-mac-gateway` unit). On Alpine the ideas carry
-    over unchanged — adapt the transient relay to `rc-service` and the
-    gateway to an OpenRC service (the same one-script/`supervise-daemon`
-    shape `gw` itself installs).
+!!! note "The Mac-app sections above work here too"
+    *Route the whole Mac* carries over as-is: `gw-mac` detects the guest's
+    init system and installs the gateway as an OpenRC service
+    ([`gw-mac-gateway.initd`](examples/gw-mac-gateway.initd)) instead of a
+    systemd unit. Only the *Reach a peer* transient relay needs adapting —
+    `systemd-run` has no OpenRC analog, so write a small
+    `/etc/init.d/` script (the same shape `gw` itself installs) or run
+    `socat` under `nohup` for a one-off.
