@@ -1,6 +1,6 @@
-# Homebrew formula — the source of truth lives in the main repo; a release
-# workflow (or a human) copies it into the tap (cschlick/homebrew-tap) with
-# url + sha256 pointing at the tagged tarball.
+# Homebrew formula — the source of truth lives in the main repo; after
+# tagging a release, `sh scripts/release-brew.sh` pins the tag's tarball
+# sha256 here and pushes the copy the tap (cschlick/homebrew-tap) serves.
 #
 # greasewood has no macOS build, on purpose (see docs/macos.md): the daemon is
 # Linux-only, and a Mac joins a mesh via a minimal Lima VM. What brew installs
