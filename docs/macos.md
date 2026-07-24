@@ -99,6 +99,10 @@ sudo gw invite --hostname macbook
 limactl shell greasewood-node sudo gw join <token>
 ```
 
+(With the brew-installed `gw` shim, plain `gw join <token>` also names the
+node like Linux would — it claims the **Mac's** hostname, not the VM's
+Lima-internal one, unless you pass `--hostname` or the invite pinned a name.)
+
 `gw join` enrolls the node **and** enables `greasewood@<mesh>` to start at boot
 — nothing else to configure. Confirm it:
 

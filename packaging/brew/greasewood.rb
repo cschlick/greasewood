@@ -54,8 +54,8 @@ class Greasewood < Formula
 
       To join a mesh:
         gw-mac                                        # creates the VM
-        # on your anchor:  sudo gw invite --hostname greasewood-node
-        gw join <token>
+        # on your anchor:  sudo gw invite
+        gw join <token>     # the node claims this Mac's hostname (or pass --hostname)
         gw-mac                                        # routes the Mac in
 
       The mesh route is not persistent — rerun `gw-mac` after a reboot, or let

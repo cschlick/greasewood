@@ -102,10 +102,16 @@ up)
         echo "first run — creating $VM from $SHARE/greasewood-node.yaml (downloads a Debian image)…"
         limactl start --tty=false --name="$VM" "$SHARE/greasewood-node.yaml"
         install_gateway
+        # The node should carry the MAC's name, not the VM's — same default the
+        # gw shim applies at join time.
+        MACHOST=$( (hostname -s 2>/dev/null || scutil --get LocalHostName) \
+                   | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+        : "${MACHOST:=$VM}"
         cat <<EOF
 $VM created — it hasn't joined a mesh yet:
-  on your anchor:  sudo gw invite --hostname $VM
+  on your anchor:  sudo gw invite --hostname $MACHOST    # pinned (recommended)
   then here:       gw join <token>
+(a plain 'gw invite' works too — join then claims '$MACHOST', this Mac's name)
 then run gw-mac again to route this Mac into the overlay.
 EOF
         exit 0
