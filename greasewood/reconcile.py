@@ -359,12 +359,18 @@ def reconcile_once(
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", wg_pub[-8:], e)
 
+    # Addresses any DESIRED peer still routes — never delete their route when
+    # removing an old peer. This is what lets a /128 MOVE from a direct peer to
+    # the anchor peer (relay): the direct peer is removed, but its /128 is now in
+    # the anchor's AllowedIPs, so the route must survive.
+    desired_addrs = {a for want in desired.values() for a in want.allowed}
     for wg_pub in to_remove:
         try:
-            # Pass allowed addrs so the kernel route(s) are also removed
             have = live_peers[wg_pub]
+            stale_routes = [a for a in sorted(have.allowed_addrs)
+                            if a not in desired_addrs]
             with audit.context(f"reconcile: -peer {_who(wg_pub)}"):
-                wgmod.remove_peer(iface, wg_pub, sorted(have.allowed_addrs))
+                wgmod.remove_peer(iface, wg_pub, stale_routes)
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", wg_pub[-8:], e)
 
@@ -416,6 +422,7 @@ class ReconcileLoop(Loop):
         policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
+        republish_relay=None,   # callable(bool): anchor republishes own record.relay
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -463,6 +470,9 @@ class ReconcileLoop(Loop):
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
+        # Anchor relay: the loop reconciles own record.relay + forwarding to the
+        # marker file; this hook lets it republish the own record (a cli concern).
+        self._republish_relay = republish_relay
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -526,7 +536,7 @@ class ReconcileLoop(Loop):
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
         from .loop import sd_watchdog_ping
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
-        self._reconcile_relay_forwarding()
+        self._reconcile_relay()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -543,20 +553,32 @@ class ReconcileLoop(Loop):
             except Exception as e:
                 log.error("hosts sync error: %s", e)
 
-    def _reconcile_relay_forwarding(self) -> None:
-        """On the anchor, keep IPv6 forwarding matched to our OWN record.relay
-        each cycle — the record is the declarative source of truth, forwarding is
-        reconciled to it. Cheap: an unaudited read, a write only on mismatch. A
-        no-op on plain nodes (no role:*) and when the flag already agrees."""
-        if "*" not in _roles(self._local_caps):
+    def _reconcile_relay(self) -> None:
+        """On the anchor, reconcile relay state to the marker file (the declarative
+        source of truth, toggled by `gw relay on/off`). The DAEMON is the sole
+        writer of its own record, so the command never republishes it — that
+        avoids a seq-collision race where the command's relay=True gets clobbered
+        by the daemon's carried-forward relay=False. Each cycle:
+          1. own record.relay tracks the marker (republish via the injected hook),
+          2. IPv6 forwarding tracks the marker.
+        A no-op on plain nodes and when everything already agrees (cheap: a
+        marker stat + an unaudited sysctl read, writes only on mismatch)."""
+        if "*" not in _roles(self._local_caps) or self._data_dir is None:
             return
+        desired = relay_marker_enabled(self._data_dir)
         own = self._directory.get(self._local_id_pub.hex())
-        want_fwd = bool(own and own.relay)
+        if own is not None and own.relay != desired and self._republish_relay is not None:
+            log.info("relay: marker=%s but own record.relay=%s — republishing",
+                     desired, own.relay)
+            try:
+                self._republish_relay(desired)
+            except Exception as e:
+                log.warning("could not republish relay flag: %s", e)
         try:
-            if wgmod.ipv6_forwarding_enabled() != want_fwd:
-                log.info("relay: reconciling IPv6 forwarding → %s "
-                         "(own record.relay=%s)", "on" if want_fwd else "off", want_fwd)
-                wgmod.set_ipv6_forwarding(want_fwd)
+            if wgmod.ipv6_forwarding_enabled() != desired:
+                log.info("relay: reconciling IPv6 forwarding → %s (marker)",
+                         "on" if desired else "off")
+                wgmod.set_ipv6_forwarding(desired)
         except Exception as e:
             log.warning("could not reconcile IPv6 forwarding: %s", e)
 
@@ -603,6 +625,22 @@ def stamp_reconcile_path(data_dir) -> "Path":
     """Where the last-completed-reconcile timestamp lives (the daemon-liveness
     heartbeat, parallel to sync's last_sync)."""
     return Path(data_dir) / "last_reconcile"
+
+
+def relay_marker_path(data_dir) -> "Path":
+    """The relay opt-in marker (present = on). `gw relay on/off` toggles it; the
+    anchor's reconcile loop reconciles its own record.relay + IPv6 forwarding to
+    it. This declarative file — not the command — is the source of truth, so the
+    daemon stays the sole writer of its own record (no republish race) and the
+    choice survives a restart."""
+    return Path(data_dir) / "relay"
+
+
+def relay_marker_enabled(data_dir) -> bool:
+    try:
+        return relay_marker_path(data_dir).exists()
+    except OSError:
+        return False
 
 
 def read_last_reconcile(data_dir) -> "str | None":

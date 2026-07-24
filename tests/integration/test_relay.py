@@ -17,7 +17,7 @@ import uuid
 import pytest
 
 from .conftest import door_enroll, make_anchor, overlay_addr_from_id_pub
-from .helpers import container_addr, pexec, podman, wait_for_ping
+from .helpers import container_addr, mesh_iface, pexec, podman, wait_for_ping
 
 pytestmark = pytest.mark.integration
 
@@ -60,7 +60,7 @@ def _bring_up_outbound_only(gw_image, net, anchor, hostname):
 
 def test_relay_connects_peers_that_cant_go_direct(gw_image):
     net = f"gw-relay-{uuid.uuid4().hex[:8]}"
-    podman("network", "create", "--ipv6", "--subnet", "fd00:relay::/64", net)
+    podman("network", "create", "--ipv6", "--subnet", "fd00:5e1a::/64", net)
     cids = []
     try:
         anchor = make_anchor(gw_image, net, hostname="relayanchor")
@@ -76,8 +76,20 @@ def test_relay_connects_peers_that_cant_go_direct(gw_image):
         assert wait_for_ping(b["cid"], anchor["overlay"], timeout=60), \
             "B can't reach the anchor"
 
-        # …but with relay OFF they can't reach each other: neither advertises an
-        # endpoint, so neither can dial the other, and nothing relays.
+        # Both A and B briefly advertised an endpoint at enrollment (join
+        # --endpoint), so they may have formed a direct A<->B tunnel that
+        # WireGuard roaming keeps alive even after they went endpoint-less.
+        # Delete their mesh interface: the reconcile self-heal rebuilds peers
+        # from the now endpoint-less records, so A and B end up reachable ONLY
+        # via the anchor — the state a true v4-only/v6-only split starts in.
+        for n in (a, b):
+            pexec(n["cid"], "ip", "link", "del", mesh_iface(n["cid"]), check=False)
+        time.sleep(20)  # interface self-heals + reconverges (no direct A<->B)
+        assert wait_for_ping(a["cid"], anchor["overlay"], timeout=60), \
+            "A didn't reconverge to the anchor after the interface flush"
+
+        # …but with relay OFF, A and B can't reach each other: neither advertises
+        # an endpoint, so neither can dial the other, and nothing relays.
         assert not wait_for_ping(a["cid"], b["overlay"], timeout=20), \
             "A reached B with relay off — expected no direct path (both outbound-only)"
 
@@ -91,8 +103,10 @@ def test_relay_connects_peers_that_cant_go_direct(gw_image):
         assert wait_for_ping(b["cid"], a["overlay"], timeout=60), \
             "B can't reach A with relay on"
 
-        # Turn it off → the relayed path drops.
+        # Turn it off → the relayed path drops. Give the fleet a few cycles to
+        # pick up relay=False (else wait_for_ping catches the still-up tail).
         pexec(anchor["cid"], "gw", "relay", "off")
+        time.sleep(20)
         assert not wait_for_ping(a["cid"], b["overlay"], timeout=40), \
             "A still reached B after relay off"
     finally:

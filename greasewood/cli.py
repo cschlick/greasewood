@@ -1315,17 +1315,19 @@ def cmd_relay(args) -> int:
     from .directory import Directory
     from .keys import NodeKeys
     from . import wg as wgmod
+    from . import reconcile as rmod
 
     cfg = load_config(Path(args.config))
     keys = NodeKeys.load_or_generate(cfg.data_dir)
     directory = Directory.load(cfg.dir_cache_path)
     own = directory.get(keys.id_pub_hex)
+    marker = rmod.relay_marker_path(cfg.data_dir)
 
     if args.action == "status":
-        cur = bool(own and own.relay)
-        print(f"relay:           {'ON' if cur else 'off'}")
-        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}"
-              f"{'' if own else '   (no local record yet)'}")
+        print(f"relay:           {'ON' if marker.exists() else 'off'}  (marker: {marker})")
+        print(f"advertised:      {'yes' if (own and own.relay) else 'no'}"
+              "   (own record — set by the daemon from the marker)")
+        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}")
         return 0
 
     _require_root("relay")
@@ -1341,10 +1343,15 @@ def cmd_relay(args) -> int:
               "of peers it relays,\n  so it can see (and could tamper with) that "
               "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
               "and per-role port grants still apply. Undo: sudo gw relay off\n")
+        marker.write_text("on\n")
+    else:
+        marker.unlink(missing_ok=True)
+    # Toggle forwarding immediately for instant effect; the running daemon
+    # reconciles both forwarding AND its own record.relay to the marker each
+    # cycle (the daemon is the sole record-writer — no republish race).
     wgmod.set_ipv6_forwarding(want)
-    _republish_own_record(cfg, keys, directory, relay=want, push_to=cfg.seeds)
-    print(f"relay {'ENABLED' if want else 'disabled'} — advertised to the fleet "
-          f"on the next sync cycle (no daemon restart needed).")
+    print(f"relay {'ENABLED' if want else 'disabled'} — the daemon advertises the "
+          f"change to the fleet within a sync cycle (no restart needed).")
     return 0
 
 
@@ -2892,13 +2899,6 @@ def cmd_run(args) -> int:
     # `gw relay on`, persisted in the record), re-assert IPv6 forwarding at start
     # so it survives reboots without editing /etc/sysctl.d. The record is the
     # single declarative source of truth; forwarding is reconciled to it.
-    _own = directory.get(keys.id_pub_hex)
-    if _own is not None and _own.relay:
-        from . import wg as _wg
-        _wg.set_ipv6_forwarding(True)
-        log.info("relay is ON (from own record) — IPv6 forwarding enabled; this "
-                 "anchor forwards between peers that can't connect directly")
-
     # Trust is static, straight from config: the trusted CA set, the seeds to
     # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
@@ -2996,6 +2996,11 @@ def cmd_run(args) -> int:
         port_enforcer=port_enforcer,
         policy_refresh=grant_policy.refresh_from_cache,
         local_hostname=cfg.hostname,
+        # Anchor relay: republish our own record with relay=<marker> when they
+        # drift. The daemon is the sole writer of its own record, so this never
+        # races an out-of-process `gw relay` command.
+        republish_relay=lambda on: _republish_own_record(
+            cfg, keys, directory, relay=on, push_to=cfg.seeds, quiet_push=True),
     )
     recon.start()
 
