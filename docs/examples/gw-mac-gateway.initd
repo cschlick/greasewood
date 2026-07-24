@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# gw-mac-gateway (OpenRC variant of gw-mac-gateway.service) — load the NAT66 +
+# MSS-clamp ruleset that turns this node VM into the Mac's overlay gateway.
+# Installed to /etc/init.d/gw-mac-gateway by gw-mac when it creates an Alpine
+# VM; pairs with /etc/gw-mac-gateway.nft and the sysctl.d forwarding config.
+description="greasewood mac-gateway: NAT66 masquerade + MSS clamp"
+
+depend() {
+    need net
+    after firewall
+}
+
+start() {
+    ebegin "Loading gw-mac gateway nftables ruleset"
+    /usr/sbin/nft -f /etc/gw-mac-gateway.nft
+    eend $?
+}
+
+stop() {
+    ebegin "Removing gw-mac gateway nftables ruleset"
+    /usr/sbin/nft delete table ip6 gwmac 2>/dev/null
+    eend 0
+}
