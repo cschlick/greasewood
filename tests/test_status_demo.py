@@ -37,7 +37,11 @@ def _rec(node, cred, endpoints=()):
                       cred=cred).sign(node.id_priv)
 
 
-def test_nodes_full_directory(tmp_path, capsys):
+def test_nodes_full_directory(tmp_path, capsys, monkeypatch):
+    # Pin the no-backend fallback so the 'logs :' line is host-independent
+    # (a systemd/OpenRC host would otherwise show its backend's hint).
+    from greasewood import service as _svc
+    monkeypatch.setattr(_svc, "detect", lambda *a, **kw: None)
     ca = CAKeys.generate()
     me = NodeKeys.load_or_generate(tmp_path)                 # this node = api1
     (tmp_path / "gw.toml").write_text(f"""[node]

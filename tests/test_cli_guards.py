@@ -220,6 +220,9 @@ def test_invite_preflight_requires_mesh_interface(tmp_path, monkeypatch):
     interface NOW — not let the joiner discover it as a cryptic rejection."""
     _as_root(monkeypatch)
     monkeypatch.setattr("greasewood.wg.interface_exists", lambda iface: False)
+    # Pin the no-backend fallback so the start hint is host-independent
+    # (a systemd/OpenRC host would otherwise show its backend's command).
+    monkeypatch.setattr(cli, "_service_backend", lambda: None)
     with pytest.raises(SystemExit) as e:
         cli.cmd_invite(_anchor_cfg(tmp_path))
     msg = str(e.value)

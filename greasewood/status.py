@@ -480,9 +480,13 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     if degraded:
         lines.append(f"enforce  : ⚠ port enforcement DOWN — running UNFILTERED "
                      f"(enforce_ports=true but nftables unusable: {degraded['reason']})")
-    # Where to look when the daemon line above is unhappy: the journal (what the
-    # daemon logged) and the audit file (every ip/wg/nft command it ran).
-    lines.append(f"logs     : journalctl -eu greasewood@{membership_key(cfg.mesh_domain)}")
+    # Where to look when the daemon line above is unhappy: the daemon log —
+    # journal or file, whichever this host's service backend writes — and the
+    # audit file (every ip/wg/nft command it ran).
+    from .service import detect as _svc_detect
+    _key = membership_key(cfg.mesh_domain)
+    _mgr = _svc_detect()
+    lines.append(f"logs     : {_mgr.logs_hint(_key) if _mgr else f'journalctl -eu greasewood@{_key}'}")
     if getattr(cfg, "audit_log", None):
         lines.append(f"audit    : {cfg.audit_log}  (ip/wg/nft commands + "
                      f"'grep event=' for topology/policy changes)")
