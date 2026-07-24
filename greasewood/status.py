@@ -1754,6 +1754,21 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
                  f"anchor {cfg.root_url or '(none configured)'}")
 
+    # Relay posture. On the anchor: a loud reminder that it decrypt-and-forwards
+    # (so it SEES) the traffic of peers it relays. On a node: a quiet note that
+    # the anchor will carry peers this node can't reach directly.
+    if self_rec is not None and self_rec.relay:
+        lines.append(f"{'relay':<9}: ⚠ ON — this anchor forwards traffic between "
+                     f"peers that can't connect directly, so it SEES that traffic "
+                     f"(sudo gw relay off to stop)")
+    else:
+        offerer = next((r for r in directory.all()
+                        if r.relay and "role:*" in r.cred.caps
+                        and r.id_pub.hex() != (own_id or "")), None)
+        if offerer is not None:
+            lines.append(f"{'relay':<9}: available — the anchor forwards peers you "
+                         f"can't reach directly (it sees that relayed traffic)")
+
     # (Sync freshness is shown prominently at the top of `gw watch` instead —
     # see _sync_freshness — so the segment/roster view's staleness is obvious.)
 

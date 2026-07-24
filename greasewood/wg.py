@@ -250,6 +250,25 @@ def remove_peer(iface: str, wg_pub_b64: str,
     log.debug("removed peer ...%s", wg_pub_b64[-8:])
 
 
+def ipv6_forwarding_enabled() -> bool:
+    """Current net.ipv6.conf.all.forwarding. Read-only and NOT audited — the
+    anchor polls it every reconcile cycle, so it must stay out of the command
+    trail. Best-effort: False on any error."""
+    try:
+        r = subprocess.run(["sysctl", "-n", "net.ipv6.conf.all.forwarding"],
+                           capture_output=True, text=True)
+        return (r.stdout or "").strip() == "1"
+    except OSError:
+        return False
+
+
+def set_ipv6_forwarding(on: bool) -> None:
+    """Set net.ipv6.conf.all.forwarding (the anchor's relay switch). Audited (a
+    data-plane mutation); the caller only invokes it on an actual change."""
+    _run("sysctl", "-w", f"net.ipv6.conf.all.forwarding={'1' if on else '0'}",
+         check=False)
+
+
 @dataclass
 class LivePeer:
     wg_pub_b64: str

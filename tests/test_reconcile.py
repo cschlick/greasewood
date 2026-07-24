@@ -701,3 +701,70 @@ class TestRelay:
                        [ca.ca_pub_bytes], set(), local_families={4, 6})
         assert b_pub in fake.peers                            # now a direct peer
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}  # route withdrawn
+
+
+class TestRelayReachableAndForwarding:
+    """The two edges of the relay feature: relayed peers show as reachable while
+    the anchor link is live (segment-health view), and the anchor keeps IPv6
+    forwarding matched to its own record.relay each cycle."""
+
+    def _scene(self):
+        r = TestRelay()
+        return r._scene(anchor_relay=True)
+
+    def test_relayed_peer_reachable_only_while_anchor_live(self, monkeypatch):
+        import time
+        from greasewood.wg import LivePeer
+        ca, A, anchor, B, d = self._scene()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+
+        # anchor link live → B (relayed) counts as reachable
+        fake = _FakeWg()
+        fake.peers[anchor_pub] = LivePeer(
+            wg_pub_b64=anchor_pub, endpoint="1.2.3.4:51900",
+            allowed_ips=f"{anchor.addr}/128", latest_handshake=int(time.time()))
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        _, reachable = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                                      [ca.ca_pub_bytes], set(), local_families={4})
+        assert B.addr in reachable
+
+        # anchor never handshaked → no path yet → B not reachable
+        fake2 = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake2)
+        _, reachable2 = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                                       [ca.ca_pub_bytes], set(), local_families={4})
+        assert B.addr not in reachable2
+
+    def _loop(self, directory, local_id_pub, caps, ca):
+        return ReconcileLoop("gw-test", directory, local_id_pub, caps,
+                             lambda: [ca.ca_pub_bytes], lambda: set())
+
+    def test_anchor_reconciles_forwarding_to_own_relay_flag(self, monkeypatch):
+        ca, A, anchor, B, d = self._scene()  # anchor's own record has relay=True
+
+        class _FakeFwd:
+            def __init__(self, cur): self.cur, self.sets = cur, []
+            def ipv6_forwarding_enabled(self): return self.cur
+            def set_ipv6_forwarding(self, on): self.sets.append(on); self.cur = on
+
+        fake = _FakeFwd(cur=False)               # forwarding currently OFF
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        loop = self._loop(d, anchor.id_pub_bytes, ["role:*"], ca)
+        loop._reconcile_relay_forwarding()
+        assert fake.sets == [True]               # turned ON to match record.relay
+        loop._reconcile_relay_forwarding()
+        assert fake.sets == [True]               # already matches → no second write
+
+    def test_non_anchor_never_touches_forwarding(self, monkeypatch):
+        ca, A, anchor, B, d = self._scene()
+
+        class _FakeFwd:
+            def __init__(self): self.sets = []
+            def ipv6_forwarding_enabled(self): return False
+            def set_ipv6_forwarding(self, on): self.sets.append(on)
+
+        fake = _FakeFwd()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        loop = self._loop(d, A.id_pub_bytes, ["segment:mesh"], ca)  # no role:*
+        loop._reconcile_relay_forwarding()
+        assert fake.sets == []

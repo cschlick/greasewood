@@ -381,12 +381,19 @@ def reconcile_once(
     # edges are up — an unreachable segment-mate (firewalled) shows as a missing
     # edge from both ends. Session-existence, not direction (a working tunnel is
     # bidirectional regardless of who dialed).
-    reachable = sorted(
+    reachable_set = {
         want.addr for wg_pub, want in desired.items()
         if (live_peer := live_peers.get(wg_pub)) and live_peer.latest_handshake
         and (now - live_peer.latest_handshake) <= _LIVE_LINK_SECS
-    )
-    return ReconcileResult(trusted, reachable)
+    }
+    # Relayed peers ride the anchor tunnel, so they have no handshake of their
+    # own — count them reachable while the anchor link is live, so the fleet's
+    # segment-health view shows the edge (via relay) instead of a false gap.
+    if relay_anchor_pub and relay_anchor_pub in desired:
+        alp = live_peers.get(relay_anchor_pub)
+        if alp and alp.latest_handshake and (now - alp.latest_handshake) <= _LIVE_LINK_SECS:
+            reachable_set |= set(desired[relay_anchor_pub].extra_routes)
+    return ReconcileResult(trusted, sorted(reachable_set))
 
 
 class ReconcileLoop(Loop):
@@ -519,6 +526,7 @@ class ReconcileLoop(Loop):
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
         from .loop import sd_watchdog_ping
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
+        self._reconcile_relay_forwarding()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -534,6 +542,23 @@ class ReconcileLoop(Loop):
                 self._rename_grace(trusted, hosts)
             except Exception as e:
                 log.error("hosts sync error: %s", e)
+
+    def _reconcile_relay_forwarding(self) -> None:
+        """On the anchor, keep IPv6 forwarding matched to our OWN record.relay
+        each cycle — the record is the declarative source of truth, forwarding is
+        reconciled to it. Cheap: an unaudited read, a write only on mismatch. A
+        no-op on plain nodes (no role:*) and when the flag already agrees."""
+        if "*" not in _roles(self._local_caps):
+            return
+        own = self._directory.get(self._local_id_pub.hex())
+        want_fwd = bool(own and own.relay)
+        try:
+            if wgmod.ipv6_forwarding_enabled() != want_fwd:
+                log.info("relay: reconciling IPv6 forwarding → %s "
+                         "(own record.relay=%s)", "on" if want_fwd else "off", want_fwd)
+                wgmod.set_ipv6_forwarding(want_fwd)
+        except Exception as e:
+            log.warning("could not reconcile IPv6 forwarding: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show

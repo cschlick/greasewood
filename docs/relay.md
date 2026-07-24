@@ -1,0 +1,78 @@
+# Relay: connecting peers that can't reach each other directly
+
+greasewood is **direct-or-fail** by default: every pair of nodes forms its own
+WireGuard tunnel, end-to-end, and if they can't reach each other, they simply
+don't connect. That's the right default — no middlemen, no traffic funnels, full
+end-to-end privacy. But some pairs *can't* go direct no matter what:
+
+- an **IPv4-only** node (public wifi, no IPv6) and a node reachable **only over
+  IPv6** (a GUA, no public v4) share no underlay address family — a direct
+  tunnel is impossible, not just inconvenient;
+- two nodes each behind their own NAT, with no reachable endpoint on either side.
+
+The symptom is quiet: `gw diagnose` shows the grant fine and the endpoint fine,
+and `gw watch` just says *no handshake*. There's nothing to fix at either end —
+they have no common ground.
+
+**Relay gives them one: the anchor.** When enabled, the anchor forwards traffic
+between two peers that can each reach *it* but not each other. Because the
+overlay is uniformly IPv6 (every address is `hash(id_pub)`), and the anchor
+terminates each leg, it transparently bridges the underlay families too — the
+IPv4-only node reaches the anchor over v4, the anchor reaches the v6-only node
+over v6, and the overlay packet flows straight through. It's ordinary WireGuard
+hub-and-spoke; the kernel forwards, there's no relay daemon.
+
+## Off by default, opt-in live
+
+Relay is **off until you turn it on**, and turning it on needs **no rebuild and
+no re-enrollment** — you flip it on a running mesh:
+
+```bash
+# on the anchor
+sudo gw relay on
+```
+
+That enables IPv6 forwarding and flips a self-signed `relay` flag on the
+anchor's own record. The fleet picks it up within one sync cycle; nodes that
+can't reach a granted peer directly then route that peer through the anchor
+automatically. No per-node configuration.
+
+```bash
+sudo gw relay off       # stop relaying; nodes fall back to direct-or-fail
+gw relay status         # show whether relay is on + IPv6 forwarding state
+```
+
+!!! warning "The anchor sees relayed traffic"
+    Relay is **decrypt-and-forward**, not an opaque bounce: the anchor
+    terminates both WireGuard tunnels, so it can **see (and could tamper with)**
+    the traffic of pairs it relays. Direct tunnels stay end-to-end private;
+    relayed ones are visible to the anchor. Anything *inside* (SSH, TLS) is
+    still protected by its own encryption, and per-role **port grants are still
+    enforced** end-to-end (the receiving node sees the real source and filters
+    on it) — but the WireGuard-layer privacy guarantee does not hold for relayed
+    flows. It's your anchor, holding the CA; decide if that trust is acceptable
+    for the traffic in question. For a pair that otherwise *cannot connect at
+    all*, it usually is.
+
+## What it does and doesn't change
+
+- **Grants are unchanged.** Relay only carries pairs a grant *already* allows;
+  it never widens access. The receiving node still enforces its per-role port
+  filter against the real source address.
+- **It falls back cleanly.** The moment a pair *can* go direct again (a node
+  gains IPv6, an endpoint becomes reachable), they drop the relay and form a
+  direct tunnel on the next cycle.
+- **`gw watch` shows the edge.** A relayed peer counts as reachable while the
+  anchor link is live, so the segment-health view shows the connection (via
+  relay) rather than a false gap.
+- **The anchor is a funnel + single point of failure** for relayed flows —
+  all their traffic goes through it. Fine for a laptop reaching a home server;
+  think twice before relaying high-bandwidth or latency-sensitive pairs.
+
+## Rollout note
+
+`relay` is a new field on the node record. A relay-**off** record is byte-for-
+byte identical to before (the field is omitted), so mixed-version fleets
+interoperate fine while relay is off. But an old node can't verify a record that
+*carries* the field. So: **upgrade the fleet's binaries first, then run
+`gw relay on`.** (Same rule as any record-format addition.)

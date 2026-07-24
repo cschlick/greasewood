@@ -1305,24 +1305,6 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
     return record
 
 
-def _read_sysctl(key: str) -> "str | None":
-    r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True)
-    return (r.stdout or "").strip() if r.returncode == 0 else None
-
-
-def _set_ipv6_forwarding(on: bool) -> bool:
-    """Toggle net.ipv6.conf.all.forwarding (the anchor's relay switch). Runtime
-    only — the anchor re-asserts it at daemon start from its own record.relay, so
-    it survives reboots without editing /etc/sysctl.d. Returns True on success."""
-    val = "1" if on else "0"
-    r = subprocess.run(["sysctl", "-w", f"net.ipv6.conf.all.forwarding={val}"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        log.warning("could not set IPv6 forwarding=%s: %s", val, (r.stderr or "").strip())
-        return False
-    return True
-
-
 def cmd_relay(args) -> int:
     """[sudo, anchor] Toggle whether this anchor forwards between peers that
     can't reach each other directly (e.g. an IPv4-only node and an IPv6-only
@@ -1332,6 +1314,7 @@ def cmd_relay(args) -> int:
     from .config import load_config
     from .directory import Directory
     from .keys import NodeKeys
+    from . import wg as wgmod
 
     cfg = load_config(Path(args.config))
     keys = NodeKeys.load_or_generate(cfg.data_dir)
@@ -1340,9 +1323,8 @@ def cmd_relay(args) -> int:
 
     if args.action == "status":
         cur = bool(own and own.relay)
-        fwd = _read_sysctl("net.ipv6.conf.all.forwarding")
         print(f"relay:           {'ON' if cur else 'off'}")
-        print(f"IPv6 forwarding: {'on' if fwd == '1' else 'off'}"
+        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}"
               f"{'' if own else '   (no local record yet)'}")
         return 0
 
@@ -1359,7 +1341,7 @@ def cmd_relay(args) -> int:
               "of peers it relays,\n  so it can see (and could tamper with) that "
               "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
               "and per-role port grants still apply. Undo: sudo gw relay off\n")
-    _set_ipv6_forwarding(want)
+    wgmod.set_ipv6_forwarding(want)
     _republish_own_record(cfg, keys, directory, relay=want, push_to=cfg.seeds)
     print(f"relay {'ENABLED' if want else 'disabled'} — advertised to the fleet "
           f"on the next sync cycle (no daemon restart needed).")
@@ -2912,7 +2894,8 @@ def cmd_run(args) -> int:
     # single declarative source of truth; forwarding is reconciled to it.
     _own = directory.get(keys.id_pub_hex)
     if _own is not None and _own.relay:
-        _set_ipv6_forwarding(True)
+        from . import wg as _wg
+        _wg.set_ipv6_forwarding(True)
         log.info("relay is ON (from own record) — IPv6 forwarding enabled; this "
                  "anchor forwards between peers that can't connect directly")
 
