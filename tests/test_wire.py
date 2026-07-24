@@ -499,3 +499,42 @@ def test_record_allow_expired_still_enforces_revocation():
     with pytest.raises(ValueError, match="expired"):
         rec.verify([ca.ca_pub_bytes], set())
 
+
+
+# ---------------------------------------------------------------------------
+# NodeRecord.relay — the anchor's live relay opt-in
+# ---------------------------------------------------------------------------
+
+class TestRelayFlag:
+    def _cred(self, node, ca):
+        return make_cred(node, ca, hostname="n")
+
+    def test_relay_true_round_trips_and_verifies(self):
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = NodeRecord(id_pub=node.id_pub_bytes, seq=1,
+                         endpoints=["1.2.3.4:51820"], cred=self._cred(node, ca),
+                         relay=True).sign(node.id_priv)
+        rec.verify_structural()                       # self-sig covers relay
+        back = NodeRecord.from_dict(rec.to_dict())
+        assert back.relay is True
+        back.verify_structural()
+
+    def test_relay_false_is_omitted_from_the_body(self):
+        # The compat guarantee: a relay-off record's signed body is byte-for-byte
+        # what it was before the field existed (no "relay" key), so an old node
+        # re-serializing it still verifies the self-signature.
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = NodeRecord(id_pub=node.id_pub_bytes, seq=1,
+                         endpoints=["1.2.3.4:51820"], cred=self._cred(node, ca),
+                         relay=False).sign(node.id_priv)
+        assert "relay" not in rec._body_dict()
+        assert "relay" not in rec.to_dict()
+        assert NodeRecord.from_dict(rec.to_dict()).relay is False
+
+    def test_missing_relay_key_defaults_false(self):
+        # An old-format record (dict without "relay") loads as relay=False.
+        ca, node = CAKeys.generate(), NodeKeys.generate()
+        rec = make_record(node, self._cred(node, ca))
+        d = rec.to_dict()
+        assert "relay" not in d
+        assert NodeRecord.from_dict(d).relay is False

@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-22" "greasewood 0.1.0" "User Commands"
+.TH GW 1 "2026-07-24" "greasewood 0.1.2" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -225,6 +225,16 @@ show this help message and exit
 .TP
 \fINODE\fR
 the node: its hostname, its <host>.<mesh_domain> mesh name, or its 64\-char id_pub hex
+.SS gw relay
+\fBUsage:\fR gw relay [\-h] {on,off,status}
+.PP
+[sudo, anchor] forward traffic between peers that can't connect directly (opt\-in, live)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fI{on,off,status}\fR
+on: this anchor relays unreachable pairs (it will see that traffic); off: stop; status: show current state
 .SS gw set\-caps
 \fBUsage:\fR gw set\-caps [\-h] node caps
 .PP

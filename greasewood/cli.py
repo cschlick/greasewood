@@ -1262,7 +1262,7 @@ def cmd_rename_mesh(args) -> int:
 
 
 def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
-                          aliases=None, reachable=None, push_to=(),
+                          aliases=None, reachable=None, relay=None, push_to=(),
                           quiet_push=False):
     """Re-sign this node's record (seq+1) carrying forward whatever isn't
     overridden, save the cache, and best-effort push. Renewal, rename,
@@ -1288,6 +1288,11 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         cred=cred if cred is not None else existing.cred,
         aliases=carry(aliases, "aliases", _config_aliases(cfg)),
         reachable=carry(reachable, "reachable", []),
+        # relay is a bool, not a list — carry the existing flag forward unless a
+        # caller (gw relay on/off) sets it explicitly, so a renewal/endpoint
+        # refresh never drops it.
+        relay=(bool(relay) if relay is not None
+               else (existing.relay if existing else False)),
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -1298,6 +1303,67 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
             (log.debug if quiet_push else log.warning)(
                 "published locally but push to %s failed (will sync): %s", url, e)
     return record
+
+
+def _read_sysctl(key: str) -> "str | None":
+    r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True)
+    return (r.stdout or "").strip() if r.returncode == 0 else None
+
+
+def _set_ipv6_forwarding(on: bool) -> bool:
+    """Toggle net.ipv6.conf.all.forwarding (the anchor's relay switch). Runtime
+    only — the anchor re-asserts it at daemon start from its own record.relay, so
+    it survives reboots without editing /etc/sysctl.d. Returns True on success."""
+    val = "1" if on else "0"
+    r = subprocess.run(["sysctl", "-w", f"net.ipv6.conf.all.forwarding={val}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        log.warning("could not set IPv6 forwarding=%s: %s", val, (r.stderr or "").strip())
+        return False
+    return True
+
+
+def cmd_relay(args) -> int:
+    """[sudo, anchor] Toggle whether this anchor forwards between peers that
+    can't reach each other directly (e.g. an IPv4-only node and an IPv6-only
+    one — which can never form a direct tunnel). Opt-in, live: no rebuild, no
+    re-enrollment. `on` flips a self-signed flag on the anchor's own record and
+    enables IPv6 forwarding; the fleet picks it up within a sync cycle."""
+    from .config import load_config
+    from .directory import Directory
+    from .keys import NodeKeys
+
+    cfg = load_config(Path(args.config))
+    keys = NodeKeys.load_or_generate(cfg.data_dir)
+    directory = Directory.load(cfg.dir_cache_path)
+    own = directory.get(keys.id_pub_hex)
+
+    if args.action == "status":
+        cur = bool(own and own.relay)
+        fwd = _read_sysctl("net.ipv6.conf.all.forwarding")
+        print(f"relay:           {'ON' if cur else 'off'}")
+        print(f"IPv6 forwarding: {'on' if fwd == '1' else 'off'}"
+              f"{'' if own else '   (no local record yet)'}")
+        return 0
+
+    _require_root("relay")
+    if own is None:
+        sys.exit("no local record yet — enroll and start the daemon first.")
+    if "role:*" not in own.cred.caps:
+        sys.exit("gw relay is an anchor feature — this host isn't the anchor "
+                 "(its credential has no role:*).")
+
+    want = (args.action == "on")
+    if want:
+        print("⚠ Enabling relay: this anchor will DECRYPT-AND-FORWARD the traffic "
+              "of peers it relays,\n  so it can see (and could tamper with) that "
+              "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
+              "and per-role port grants still apply. Undo: sudo gw relay off\n")
+    _set_ipv6_forwarding(want)
+    _republish_own_record(cfg, keys, directory, relay=want, push_to=cfg.seeds)
+    print(f"relay {'ENABLED' if want else 'disabled'} — advertised to the fleet "
+          f"on the next sync cycle (no daemon restart needed).")
+    return 0
 
 
 def _enroll_over_door(*args, **kwargs):
@@ -2840,6 +2906,16 @@ def cmd_run(args) -> int:
 
     directory = Directory.load(cfg.dir_cache_path)
 
+    # Relay self-heal: if this anchor's own record says relay is ON (set live by
+    # `gw relay on`, persisted in the record), re-assert IPv6 forwarding at start
+    # so it survives reboots without editing /etc/sysctl.d. The record is the
+    # single declarative source of truth; forwarding is reconciled to it.
+    _own = directory.get(keys.id_pub_hex)
+    if _own is not None and _own.relay:
+        _set_ipv6_forwarding(True)
+        log.info("relay is ON (from own record) — IPv6 forwarding enabled; this "
+                 "anchor forwards between peers that can't connect directly")
+
     # Trust is static, straight from config: the trusted CA set, the seeds to
     # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
@@ -4295,6 +4371,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("node", help="the node: its hostname, its <host>.<mesh_domain> "
                     "mesh name, or its 64-char id_pub hex")
     sp.set_defaults(fn=cmd_revoke)
+
+    # relay (anchor) — opt in/out of forwarding between peers that can't reach
+    # each other directly (e.g. IPv4-only ↔ IPv6-only). Live, no rebuild.
+    sp = sub.add_parser("relay",
+                        help="[sudo, anchor] forward traffic between peers that "
+                             "can't connect directly (opt-in, live)")
+    sp.add_argument("action", choices=["on", "off", "status"],
+                    help="on: this anchor relays unreachable pairs (it will see "
+                         "that traffic); off: stop; status: show current state")
+    sp.set_defaults(fn=cmd_relay)
 
     # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",
