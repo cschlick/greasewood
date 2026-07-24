@@ -282,8 +282,10 @@ What it actually saves, and what it costs:
   carry. What Activity Monitor shows on the Mac is a different (larger) number:
   the VM process's footprint tracks the high-water mark of guest pages ever
   touched, so it creeps toward the configured ceiling and doesn't come back
-  down (no memory balloon). The ceiling is the real lever, and Alpine's is
-  half: 512 MiB vs 1 GiB.
+  down (no memory balloon). The ceiling is the real lever, and Alpine's is a
+  quarter: 256 MiB vs 1 GiB. What makes 256 safe is the recipe's in-guest
+  swapfile — pip's install-time bursts (the VM's only hungry moment) spill to
+  the virtual disk instead of needing RAM ceiling held in reserve for them.
 - **The cost:** OpenRC can't apply the systemd unit's exec sandbox
   (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters), so **the daemon
   runs as unconfined root.** For a laptop that normally runs no firewall this is
