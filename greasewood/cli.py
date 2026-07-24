@@ -684,14 +684,20 @@ def cmd_invite(args) -> int:
     # enroll server) with its mesh interface present (it installs the joiner as
     # a peer). Catch both NOW, when the operator can act — not minutes later as
     # a cryptic rejection on the joining node.
+    _mgr = _service_backend()
+    _key = membership_key(cfg.mesh_domain)
+    _start = (_mgr.restart_hint(_key) if _mgr
+              else f"sudo systemctl start {_unit_for_config(args.config)}")
+    _logs = (_mgr.logs_hint(_key) if _mgr
+             else f"journalctl -u {_unit_for_config(args.config)} -n 20")
     if not wgmod.interface_exists(cfg.wg_interface):
         sys.exit(f"the anchor's mesh interface {cfg.wg_interface!r} doesn't exist — "
                  f"the daemon isn't running (or the interface was deleted under "
                  f"it). A joiner would be rejected at enrollment. Start the "
-                 f"daemon first: sudo systemctl start {_unit_for_config(args.config)}   "
+                 f"daemon first: {_start}   "
                  f"(or: sudo gw -c {args.config} run)\n"
                  f"If you already started it and this persists, it's crashing on "
-                 f"startup — look at: journalctl -u {_unit_for_config(args.config)} -n 20")
+                 f"startup — look at: {_logs}")
     import urllib.request as _url
     try:
         _url.urlopen(f"http://[::1]:{_control_port(cfg)}/directory", timeout=3)
@@ -699,7 +705,7 @@ def cmd_invite(args) -> int:
         sys.exit(f"the anchor daemon isn't answering on loopback (port "
                  f"{_control_port(cfg)}) — it hosts the enroll server, so this "
                  f"token could never be redeemed. Start it first: "
-                 f"sudo systemctl start {_unit_for_config(args.config)}   "
+                 f"{_start}   "
                  f"(or: sudo gw -c {args.config} run)")
 
     data_dir = cfg.data_dir
