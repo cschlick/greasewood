@@ -1731,8 +1731,21 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     network, so `status` stays instant. Live/reach-out checks (clock skew, live
     links) stay in `gw diagnose`."""
     from . import sync as syncmod
+    from . import reconcile as _rec
+    from . import service
     lines = []
-    lines.append(f"{'version':<9}: {_version()}")
+    # Version, plus a drift warning: the daemon stamps the version it's actually
+    # running at startup, so an upgrade that wasn't followed by a restart (the
+    # daemon keeps the OLD code in memory) is visible here — with the
+    # backend-correct restart command (systemctl vs rc-service).
+    installed = _version()
+    running = _rec.read_daemon_version(cfg.data_dir)
+    if running and running != installed:
+        restart = service.restart_hint(membership_key(cfg.mesh_domain))
+        lines.append(f"{'version':<9}: {installed}  ⚠ the daemon is still running "
+                     f"{running} — upgraded but not restarted; apply it: {restart}")
+    else:
+        lines.append(f"{'version':<9}: {installed}")
 
     self_rec = directory.get(own_id) if own_id else None
     if self_rec is not None:

@@ -627,6 +627,30 @@ def stamp_reconcile_path(data_dir) -> "Path":
     return Path(data_dir) / "last_reconcile"
 
 
+def daemon_version_path(data_dir) -> "Path":
+    """Where the running daemon stamps its greasewood version at startup. `gw
+    watch` compares it to the installed version to catch an upgrade that hasn't
+    been followed by a restart (the daemon keeps the OLD code in memory)."""
+    return Path(data_dir) / "daemon_version"
+
+
+def write_daemon_version(data_dir, version: str) -> None:
+    """Record the version the daemon is actually running (called once at start).
+    Best-effort — a stamp we can't write just means no drift warning."""
+    try:
+        daemon_version_path(data_dir).write_text(version.strip() + "\n")
+    except OSError:
+        pass
+
+
+def read_daemon_version(data_dir) -> "str | None":
+    """The version the running daemon stamped, or None if it never did."""
+    try:
+        return daemon_version_path(data_dir).read_text().strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def relay_marker_path(data_dir) -> "Path":
     """The relay opt-in marker (present = on). `gw relay on/off` toggles it; the
     anchor's reconcile loop reconciles its own record.relay + IPv6 forwarding to

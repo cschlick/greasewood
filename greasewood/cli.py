@@ -2120,10 +2120,8 @@ def _service_backend():
 
 def _svc_restart_hint(key: str = "<mesh>") -> str:
     """The backend-correct 'restart this mesh's daemon' command for THIS host —
-    rc-service on OpenRC, systemctl on systemd, systemctl-shaped as the fallback
-    when no service manager is detected (a bare `gw run` host)."""
-    mgr = _service_backend()
-    return mgr.restart_hint(key) if mgr else f"sudo systemctl restart greasewood@{key}"
+    rc-service on OpenRC, systemctl on systemd (systemctl-shaped fallback)."""
+    return service.restart_hint(key, _UNIT_DIR)
 
 
 def _print_daemon_guidance(key: str, cfg_path, then: str = "",
@@ -2867,6 +2865,12 @@ def cmd_run(args) -> int:
             log.info("data-plane command audit → %s", cfg.audit_log)
 
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
+
+    # Stamp the version we're actually running, so `gw watch` can warn if the
+    # package was upgraded but the daemon wasn't restarted (it keeps the OLD
+    # code in memory until then). Rewritten each start → matches after a restart.
+    from . import reconcile as _rmod
+    _rmod.write_daemon_version(cfg.data_dir, _version())
 
     # Service-definition self-heal: pick up improvements shipped by upgrades
     # (no-op when unchanged, on an unmanaged host, or running by hand). Backend
