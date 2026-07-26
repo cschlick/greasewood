@@ -283,10 +283,20 @@ What it actually saves, and what it costs:
   which is the same on both — you can't shrink below that floor.
 - **RAM:** inside the guest, an Alpine node idles around ~100 MB used vs
   Debian's ~250 MB — systemd + journald + page cache Alpine simply doesn't
-  carry. What Activity Monitor shows on the Mac is a different (larger) number:
-  the VM process's footprint tracks the high-water mark of guest pages ever
-  touched, so it creeps toward the configured ceiling and doesn't come back
-  down (no memory balloon). The ceiling is the real lever, and Alpine's is a
+  carry. What Activity Monitor shows on the Mac is a different (larger) number,
+  and it's the least meaningful one: the "Memory" column is *physical
+  footprint*, which tracks the high-water mark of guest pages ever touched —
+  Linux fills its RAM with page cache during boot alone, so the figure sits
+  pinned at the configured ceiling forever and never comes back down. It does
+  **not** mean that much of your RAM is occupied. Guest RAM under
+  Virtualization.framework is ordinary pageable memory, and macOS's compressor
+  quietly reclaims the cold pages (a running node typically has a third or more
+  of its writable pages compressed or swapped out — check with
+  `vmmap --summary <pid>`); footprint counts those reclaimed pages as if they
+  were still resident. There's no memory balloon in the Lima/vz stack and none
+  is needed — the compressor already does that job, guest cooperation not
+  required. Real steady-state cost is on the order of 100–150 MB, less under
+  host memory pressure. The ceiling is still the real lever, and Alpine's is a
   quarter: 256 MiB vs 1 GiB. What makes 256 safe is the recipe's in-guest
   swapfile — pip's install-time bursts (the VM's only hungry moment) spill to
   the virtual disk instead of needing RAM ceiling held in reserve for them.
