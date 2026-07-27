@@ -1735,8 +1735,21 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     network, so `status` stays instant. Live/reach-out checks (clock skew, live
     links) stay in `gw diagnose`."""
     from . import sync as syncmod
+    from . import reconcile as _rec
+    from . import service
     lines = []
-    lines.append(f"{'version':<9}: {_version()}")
+    # Version, plus a drift warning: the daemon stamps the version it's actually
+    # running at startup, so an upgrade that wasn't followed by a restart (the
+    # daemon keeps the OLD code in memory) is visible here — with the
+    # backend-correct restart command (systemctl vs rc-service).
+    installed = _version()
+    running = _rec.read_daemon_version(cfg.data_dir)
+    if running and running != installed:
+        restart = service.restart_hint(membership_key(cfg.mesh_domain))
+        lines.append(f"{'version':<9}: {installed}  ⚠ the daemon is still running "
+                     f"{running} — upgraded but not restarted; apply it: {restart}")
+    else:
+        lines.append(f"{'version':<9}: {installed}")
 
     self_rec = directory.get(own_id) if own_id else None
     if self_rec is not None:
@@ -1757,6 +1770,21 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     n = len(cfg.ca_pubs_hex)
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
                  f"anchor {cfg.root_url or '(none configured)'}")
+
+    # Relay posture. On the anchor: a loud reminder that it decrypt-and-forwards
+    # (so it SEES) the traffic of peers it relays. On a node: a quiet note that
+    # the anchor will carry peers this node can't reach directly.
+    if self_rec is not None and self_rec.relay:
+        lines.append(f"{'relay':<9}: ⚠ ON — this anchor forwards traffic between "
+                     f"peers that can't connect directly, so it SEES that traffic "
+                     f"(sudo gw relay off to stop)")
+    else:
+        offerer = next((r for r in directory.all()
+                        if r.relay and "role:*" in r.cred.caps
+                        and r.id_pub.hex() != (own_id or "")), None)
+        if offerer is not None:
+            lines.append(f"{'relay':<9}: available — the anchor forwards peers you "
+                         f"can't reach directly (it sees that relayed traffic)")
 
     # (Sync freshness is shown prominently at the top of `gw watch` instead —
     # see _sync_freshness — so the segment/roster view's staleness is obvious.)

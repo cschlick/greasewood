@@ -655,3 +655,11 @@ def detect(unit_dir: Path = SYSTEMD_UNIT_DIR) -> "ServiceManager | None":
     if openrc_available():
         return OpenRCManager()
     return None
+
+
+def restart_hint(key: str = "<mesh>", unit_dir: Path = SYSTEMD_UNIT_DIR) -> str:
+    """The backend-correct 'restart this mesh's daemon' command for THIS host —
+    rc-service on OpenRC, systemctl on systemd, systemctl-shaped as the fallback
+    when no init system is managing services here."""
+    mgr = detect(unit_dir)
+    return mgr.restart_hint(key) if mgr else f"sudo systemctl restart greasewood@{key}"

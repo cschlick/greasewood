@@ -42,10 +42,13 @@ the fleet. See [Moving the anchor](operations.md#moving-the-anchor-re-root).
 
 ## Direct-or-fail
 
-There is no routing, no multi-hop, no relays, and no NAT traversal. Two nodes
+There is no routing, no multi-hop, and no NAT traversal. Two nodes
 either form a **direct** WireGuard tunnel or the link fails. It never
-silently falls back to relaying through a third party, so there's no hidden path
-to reason about.
+*silently* falls back to relaying through a third party, so there's no hidden
+path to reason about. (The one exception is explicit and off by default:
+[relay](relay.md) lets you opt the anchor in to forwarding pairs that can't
+connect directly — e.g. an IPv4-only node and an IPv6-only one — with a loud
+note that the anchor then sees that traffic.)
 
 The only logic that modifies a normal wireguard configuration is the **reconcile loop**: 
 every few seconds each node walks the directory and, per peer, runs seven checks: verify

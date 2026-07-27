@@ -472,3 +472,61 @@ def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
     grants.write_text('[[grant]]\nfrom=["web"]\nto=["api"]\nports=["tcp/8000"]\n')
     cli.cmd_create(ns)
     assert "web" in grants.read_text()          # not clobbered
+
+
+def _health_cfg(tmp_path, ca):
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "n1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+seeds = []
+mesh_domain = "test.internal"
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    from greasewood.config import load_config
+    return load_config(tmp_path / "gw.toml")
+
+
+def test_version_drift_warns_with_backend_restart(tmp_path, monkeypatch):
+    """The daemon stamped an older version than what's installed → gw watch warns
+    'upgraded but not restarted' with the host's backend-correct restart command."""
+    from greasewood import status, service, reconcile
+    from greasewood.keys import CAKeys, NodeKeys
+    from greasewood.directory import Directory
+    keys = NodeKeys.load_or_generate(tmp_path)
+    ca = CAKeys.generate()
+    cfg = _health_cfg(tmp_path, ca)
+    reconcile.write_daemon_version(tmp_path, "0.0.1-old")   # daemon on an old build
+
+    # systemd host → systemctl restart
+    monkeypatch.setattr(service, "systemd_available", lambda: True)
+    monkeypatch.setattr(service, "openrc_available", lambda: False)
+    joined = "\n".join(status._self_health_lines(cfg, Directory(), keys.id_pub_hex))
+    assert "still running 0.0.1-old" in joined and "upgraded but not restarted" in joined
+    assert "sudo systemctl restart greasewood@test" in joined
+
+    # OpenRC host → rc-service restart (the customized message)
+    monkeypatch.setattr(service, "systemd_available", lambda: False)
+    monkeypatch.setattr(service, "openrc_available", lambda: True)
+    joined = "\n".join(status._self_health_lines(cfg, Directory(), keys.id_pub_hex))
+    assert "sudo rc-service greasewood.test restart" in joined
+    assert "systemctl" not in joined
+
+
+def test_no_drift_warning_when_versions_match(tmp_path):
+    from greasewood import status, reconcile
+    from greasewood.status import _version
+    from greasewood.keys import CAKeys, NodeKeys
+    from greasewood.directory import Directory
+    keys = NodeKeys.load_or_generate(tmp_path)
+    cfg = _health_cfg(tmp_path, CAKeys.generate())
+    reconcile.write_daemon_version(tmp_path, _version())     # daemon == installed
+    joined = "\n".join(status._self_health_lines(cfg, Directory(), keys.id_pub_hex))
+    assert "upgraded but not restarted" not in joined
+
+    # And no stamp at all (daemon never started) → no warning either.
+    reconcile.daemon_version_path(tmp_path).unlink()
+    joined = "\n".join(status._self_health_lines(cfg, Directory(), keys.id_pub_hex))
+    assert "upgraded but not restarted" not in joined

@@ -217,6 +217,14 @@ class NodeRecord:
     # interop). Rides the existing directory sync so `gw watch` can render
     # fleet-wide per-segment connectivity without any new channel.
     reachable: list[str] = field(default_factory=list)
+    # Anchor-only, self-asserted: "I will forward between peers that can't reach
+    # each other directly" (e.g. IPv4-only ↔ IPv6-only, which can never go
+    # direct). Nodes only act on it when the SAME record also carries a CA-signed
+    # role:* (the anchor), so a non-anchor can't attract traffic by claiming it.
+    # Omitted from the signed body when False — a relay-off record is byte-for-
+    # byte a normal record, so old/new interop — and toggled live by republishing
+    # (like reachable), so relay turns on/off on a running mesh with no re-issue.
+    relay: bool = False
     sig: bytes = field(default=b"", repr=False)
 
     @property
@@ -240,6 +248,8 @@ class NodeRecord:
             d["aliases"] = sorted(self.aliases)
         if self.reachable:                       # live link set (optional)
             d["reachable"] = sorted(self.reachable)
+        if self.relay:                           # anchor relay offer (optional)
+            d["relay"] = True
         return d
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "NodeRecord":
@@ -318,6 +328,7 @@ class NodeRecord:
             cred=Credential.from_dict(d["cred"]),
             aliases=_str_list(d.get("aliases", []), "aliases"),
             reachable=_str_list(d.get("reachable", []), "reachable"),
+            relay=bool(d.get("relay", False)),
             sig=_b64d(d["sig"]),
         )
 

@@ -86,6 +86,7 @@ nav:
   - File sharing (NFS): nfs.md
   - Node on macOS: macos.md
   - Networking & names: networking.md
+  - Relay: relay.md
   - Operations: operations.md
   - Reference: reference.md
   - Testing: testing.md

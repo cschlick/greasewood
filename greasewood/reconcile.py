@@ -51,6 +51,15 @@ class _Desired(NamedTuple):
     addr: str                   # the peer's overlay /128
     endpoint: "str | None"      # underlay endpoint to pin (None: peer initiates)
     keepalive: int              # 25, or 0 when backed off (dead endpoint)
+    # Extra overlay /128s to route THROUGH this peer. Only ever set on the anchor
+    # peer, to carry peers this node can't reach directly (relay). Empty for a
+    # normal peer, whose AllowedIPs is just its own addr.
+    extra_routes: tuple = ()
+
+    @property
+    def allowed(self) -> tuple:
+        """The full AllowedIPs set for this peer: its own addr + any relayed."""
+        return (self.addr, *self.extra_routes)
 
 
 class ReconcileResult(NamedTuple):
@@ -182,6 +191,7 @@ def reconcile_once(
     local_families: "set[int] | None" = None,
     endpoint_tracker: "_EndpointTracker | None" = None,
     local_hostname: "str | None" = None,
+    allow_relay: bool = True,
 ) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
@@ -228,6 +238,13 @@ def reconcile_once(
     # a stale node stays out of the mesh until the anchor recertifies it.
     is_anchor = "*" in _roles(local_caps)
 
+    # Relay state, resolved after the pass. relay_anchor_pub is the peer we CAN
+    # reach that offers relay (CA-signed role:* AND self-asserted record.relay);
+    # unreachable holds granted peers we have no direct underlay path to (e.g. an
+    # IPv4-only node facing an IPv6-only one — no shared family, never direct).
+    relay_anchor_pub: "str | None" = None
+    unreachable: list = []          # (wg_pub_b64, addr, keepalive)
+
     for record in directory.all():
         try:
             record.verify(ca_pubs, revoked, allow_expired=is_anchor)
@@ -253,6 +270,15 @@ def reconcile_once(
 
         wg_pub_b64 = base64.b64encode(record.cred.wg_pub).decode()
         candidates = _endpoint_candidates(record.endpoints, local_families)
+        reachable_directly = bool(candidates)
+
+        # The relay anchor: reachable, CA-signed reach-all, and offering relay.
+        # role:* is CA-attested so only the real anchor qualifies; record.relay is
+        # its live, self-signed opt-in. First match wins (one anchor).
+        if (allow_relay and reachable_directly and relay_anchor_pub is None
+                and record.relay and "*" in _roles(record.cred.caps)):
+            relay_anchor_pub = wg_pub_b64
+
         keepalive = _KEEPALIVE
         if endpoint_tracker is not None:
             live_peer = live_peers.get(wg_pub_b64)
@@ -263,11 +289,34 @@ def reconcile_once(
                 keepalive = 0          # dead endpoint: stop the futile 25s poke
         else:
             endpoint = candidates[0] if candidates else None
-        desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
         # Context for the audit trail: name + segments, so every peer command
         # says WHO and WHY, not just a bare pubkey.
         roles = ",".join(sorted(_roles(record.cred.caps))) or "-"
         context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] roles={roles}"
+
+        if allow_relay and not reachable_directly:
+            # No direct underlay path. Defer: relay via the anchor if we found
+            # one, else fall back below to an endpoint-less direct peer (the old
+            # direct-or-fail behaviour — it simply never handshakes).
+            unreachable.append((wg_pub_b64, record.cred.addr, keepalive))
+            continue
+        desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
+
+    # Fold unreachable-but-granted peers into the relay anchor's AllowedIPs so
+    # their traffic leaves through the anchor tunnel (the anchor forwards). With
+    # no relay anchor (relay off / none advertised), they stay endpoint-less
+    # direct peers — unchanged direct-or-fail.
+    if relay_anchor_pub and relay_anchor_pub in desired and unreachable:
+        anchor_addr = desired[relay_anchor_pub].addr
+        routes = tuple(addr for _, addr, _ in unreachable if addr != anchor_addr)
+        desired[relay_anchor_pub] = desired[relay_anchor_pub]._replace(
+            extra_routes=desired[relay_anchor_pub].extra_routes + routes)
+        for wg_pub_b64, addr, _ in unreachable:
+            if addr != anchor_addr:
+                context[wg_pub_b64] = context.get(wg_pub_b64, addr) + " (relayed via anchor)"
+    else:
+        for wg_pub_b64, addr, keepalive in unreachable:
+            desired[wg_pub_b64] = _Desired(addr, None, keepalive)
 
     # The three-way diff, named by intent: authorized-but-absent get installed,
     # present get their endpoint/route/keepalive re-checked, no-longer-authorized
@@ -284,7 +333,7 @@ def reconcile_once(
         want = desired[wg_pub]
         try:
             with audit.context(f"reconcile: +peer {_who(wg_pub)}"):
-                wgmod.set_peer(iface, wg_pub, want.addr, want.endpoint,
+                wgmod.set_peer(iface, wg_pub, list(want.allowed), want.endpoint,
                                keepalive=want.keepalive)
         except Exception as e:
             log.warning("add peer ...%s failed: %s", wg_pub[-8:], e)
@@ -296,25 +345,32 @@ def reconcile_once(
         # endpoint on any authenticated packet anyway, and clearing one would
         # require remove+re-add — tearing down a working session for no gain.
         endpoint_changed = want.endpoint and have.endpoint != want.endpoint
-        route_missing = not have.allowed_ips or want.addr not in have.allowed_ips
+        # AllowedIPs set differs → re-set (covers a plain missing /128 AND a
+        # relay route added to / removed from the anchor peer).
+        allowed_changed = have.allowed_addrs != frozenset(want.allowed)
         keepalive_changed = have.keepalive != want.keepalive  # dead↔alive flips 25↔0
-        if endpoint_changed or route_missing or keepalive_changed:
+        if endpoint_changed or allowed_changed or keepalive_changed:
             try:
                 why = ("endpoint" if endpoint_changed else
                        "keepalive" if keepalive_changed else "route")
                 with audit.context(f"reconcile: ~peer {_who(wg_pub)} ({why})"):
-                    wgmod.set_peer(iface, wg_pub, want.addr, want.endpoint,
+                    wgmod.set_peer(iface, wg_pub, list(want.allowed), want.endpoint,
                                    keepalive=want.keepalive)
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", wg_pub[-8:], e)
 
+    # Addresses any DESIRED peer still routes — never delete their route when
+    # removing an old peer. This is what lets a /128 MOVE from a direct peer to
+    # the anchor peer (relay): the direct peer is removed, but its /128 is now in
+    # the anchor's AllowedIPs, so the route must survive.
+    desired_addrs = {a for want in desired.values() for a in want.allowed}
     for wg_pub in to_remove:
         try:
-            # Pass allowed_ip so the kernel route is also removed
             have = live_peers[wg_pub]
-            peer_ip = have.allowed_ips.split("/")[0] if have.allowed_ips else None
+            stale_routes = [a for a in sorted(have.allowed_addrs)
+                            if a not in desired_addrs]
             with audit.context(f"reconcile: -peer {_who(wg_pub)}"):
-                wgmod.remove_peer(iface, wg_pub, peer_ip)
+                wgmod.remove_peer(iface, wg_pub, stale_routes)
         except Exception as e:
             log.warning("remove peer ...%s failed: %s", wg_pub[-8:], e)
 
@@ -331,12 +387,19 @@ def reconcile_once(
     # edges are up — an unreachable segment-mate (firewalled) shows as a missing
     # edge from both ends. Session-existence, not direction (a working tunnel is
     # bidirectional regardless of who dialed).
-    reachable = sorted(
+    reachable_set = {
         want.addr for wg_pub, want in desired.items()
         if (live_peer := live_peers.get(wg_pub)) and live_peer.latest_handshake
         and (now - live_peer.latest_handshake) <= _LIVE_LINK_SECS
-    )
-    return ReconcileResult(trusted, reachable)
+    }
+    # Relayed peers ride the anchor tunnel, so they have no handshake of their
+    # own — count them reachable while the anchor link is live, so the fleet's
+    # segment-health view shows the edge (via relay) instead of a false gap.
+    if relay_anchor_pub and relay_anchor_pub in desired:
+        alp = live_peers.get(relay_anchor_pub)
+        if alp and alp.latest_handshake and (now - alp.latest_handshake) <= _LIVE_LINK_SECS:
+            reachable_set |= set(desired[relay_anchor_pub].extra_routes)
+    return ReconcileResult(trusted, sorted(reachable_set))
 
 
 class ReconcileLoop(Loop):
@@ -359,6 +422,7 @@ class ReconcileLoop(Loop):
         policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
+        republish_relay=None,   # callable(bool): anchor republishes own record.relay
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -406,6 +470,9 @@ class ReconcileLoop(Loop):
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
+        # Anchor relay: the loop reconciles own record.relay + forwarding to the
+        # marker file; this hook lets it republish the own record (a cli concern).
+        self._republish_relay = republish_relay
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -469,6 +536,7 @@ class ReconcileLoop(Loop):
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
         from .loop import sd_watchdog_ping
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
+        self._reconcile_relay()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -484,6 +552,35 @@ class ReconcileLoop(Loop):
                 self._rename_grace(trusted, hosts)
             except Exception as e:
                 log.error("hosts sync error: %s", e)
+
+    def _reconcile_relay(self) -> None:
+        """On the anchor, reconcile relay state to the marker file (the declarative
+        source of truth, toggled by `gw relay on/off`). The DAEMON is the sole
+        writer of its own record, so the command never republishes it — that
+        avoids a seq-collision race where the command's relay=True gets clobbered
+        by the daemon's carried-forward relay=False. Each cycle:
+          1. own record.relay tracks the marker (republish via the injected hook),
+          2. IPv6 forwarding tracks the marker.
+        A no-op on plain nodes and when everything already agrees (cheap: a
+        marker stat + an unaudited sysctl read, writes only on mismatch)."""
+        if "*" not in _roles(self._local_caps) or self._data_dir is None:
+            return
+        desired = relay_marker_enabled(self._data_dir)
+        own = self._directory.get(self._local_id_pub.hex())
+        if own is not None and own.relay != desired and self._republish_relay is not None:
+            log.info("relay: marker=%s but own record.relay=%s — republishing",
+                     desired, own.relay)
+            try:
+                self._republish_relay(desired)
+            except Exception as e:
+                log.warning("could not republish relay flag: %s", e)
+        try:
+            if wgmod.ipv6_forwarding_enabled() != desired:
+                log.info("relay: reconciling IPv6 forwarding → %s (marker)",
+                         "on" if desired else "off")
+                wgmod.set_ipv6_forwarding(desired)
+        except Exception as e:
+            log.warning("could not reconcile IPv6 forwarding: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show
@@ -528,6 +625,46 @@ def stamp_reconcile_path(data_dir) -> "Path":
     """Where the last-completed-reconcile timestamp lives (the daemon-liveness
     heartbeat, parallel to sync's last_sync)."""
     return Path(data_dir) / "last_reconcile"
+
+
+def daemon_version_path(data_dir) -> "Path":
+    """Where the running daemon stamps its greasewood version at startup. `gw
+    watch` compares it to the installed version to catch an upgrade that hasn't
+    been followed by a restart (the daemon keeps the OLD code in memory)."""
+    return Path(data_dir) / "daemon_version"
+
+
+def write_daemon_version(data_dir, version: str) -> None:
+    """Record the version the daemon is actually running (called once at start).
+    Best-effort — a stamp we can't write just means no drift warning."""
+    try:
+        daemon_version_path(data_dir).write_text(version.strip() + "\n")
+    except OSError:
+        pass
+
+
+def read_daemon_version(data_dir) -> "str | None":
+    """The version the running daemon stamped, or None if it never did."""
+    try:
+        return daemon_version_path(data_dir).read_text().strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def relay_marker_path(data_dir) -> "Path":
+    """The relay opt-in marker (present = on). `gw relay on/off` toggles it; the
+    anchor's reconcile loop reconciles its own record.relay + IPv6 forwarding to
+    it. This declarative file — not the command — is the source of truth, so the
+    daemon stays the sole writer of its own record (no republish race) and the
+    choice survives a restart."""
+    return Path(data_dir) / "relay"
+
+
+def relay_marker_enabled(data_dir) -> bool:
+    try:
+        return relay_marker_path(data_dir).exists()
+    except OSError:
+        return False
 
 
 def read_last_reconcile(data_dir) -> "str | None":

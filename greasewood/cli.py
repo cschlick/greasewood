@@ -1282,7 +1282,7 @@ def cmd_rename_mesh(args) -> int:
 
 
 def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
-                          aliases=None, reachable=None, push_to=(),
+                          aliases=None, reachable=None, relay=None, push_to=(),
                           quiet_push=False):
     """Re-sign this node's record (seq+1) carrying forward whatever isn't
     overridden, save the cache, and best-effort push. Renewal, rename,
@@ -1308,6 +1308,11 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         cred=cred if cred is not None else existing.cred,
         aliases=carry(aliases, "aliases", _config_aliases(cfg)),
         reachable=carry(reachable, "reachable", []),
+        # relay is a bool, not a list — carry the existing flag forward unless a
+        # caller (gw relay on/off) sets it explicitly, so a renewal/endpoint
+        # refresh never drops it.
+        relay=(bool(relay) if relay is not None
+               else (existing.relay if existing else False)),
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -1318,6 +1323,56 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
             (log.debug if quiet_push else log.warning)(
                 "published locally but push to %s failed (will sync): %s", url, e)
     return record
+
+
+def cmd_relay(args) -> int:
+    """[sudo, anchor] Toggle whether this anchor forwards between peers that
+    can't reach each other directly (e.g. an IPv4-only node and an IPv6-only
+    one — which can never form a direct tunnel). Opt-in, live: no rebuild, no
+    re-enrollment. `on` flips a self-signed flag on the anchor's own record and
+    enables IPv6 forwarding; the fleet picks it up within a sync cycle."""
+    from .config import load_config
+    from .directory import Directory
+    from .keys import NodeKeys
+    from . import wg as wgmod
+    from . import reconcile as rmod
+
+    cfg = load_config(Path(args.config))
+    keys = NodeKeys.load_or_generate(cfg.data_dir)
+    directory = Directory.load(cfg.dir_cache_path)
+    own = directory.get(keys.id_pub_hex)
+    marker = rmod.relay_marker_path(cfg.data_dir)
+
+    if args.action == "status":
+        print(f"relay:           {'ON' if marker.exists() else 'off'}  (marker: {marker})")
+        print(f"advertised:      {'yes' if (own and own.relay) else 'no'}"
+              "   (own record — set by the daemon from the marker)")
+        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}")
+        return 0
+
+    _require_root("relay")
+    if own is None:
+        sys.exit("no local record yet — enroll and start the daemon first.")
+    if "role:*" not in own.cred.caps:
+        sys.exit("gw relay is an anchor feature — this host isn't the anchor "
+                 "(its credential has no role:*).")
+
+    want = (args.action == "on")
+    if want:
+        print("⚠ Enabling relay: this anchor will DECRYPT-AND-FORWARD the traffic "
+              "of peers it relays,\n  so it can see (and could tamper with) that "
+              "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
+              "and per-role port grants still apply. Undo: sudo gw relay off\n")
+        marker.write_text("on\n")
+    else:
+        marker.unlink(missing_ok=True)
+    # Toggle forwarding immediately for instant effect; the running daemon
+    # reconciles both forwarding AND its own record.relay to the marker each
+    # cycle (the daemon is the sole record-writer — no republish race).
+    wgmod.set_ipv6_forwarding(want)
+    print(f"relay {'ENABLED' if want else 'disabled'} — the daemon advertises the "
+          f"change to the fleet within a sync cycle (no restart needed).")
+    return 0
 
 
 def _enroll_over_door(*args, **kwargs):
@@ -2094,10 +2149,8 @@ def _service_backend():
 
 def _svc_restart_hint(key: str = "<mesh>") -> str:
     """The backend-correct 'restart this mesh's daemon' command for THIS host —
-    rc-service on OpenRC, systemctl on systemd, systemctl-shaped as the fallback
-    when no service manager is detected (a bare `gw run` host)."""
-    mgr = _service_backend()
-    return mgr.restart_hint(key) if mgr else f"sudo systemctl restart greasewood@{key}"
+    rc-service on OpenRC, systemctl on systemd (systemctl-shaped fallback)."""
+    return service.restart_hint(key, _UNIT_DIR)
 
 
 def _service_restart(key: str, *, why: str = "to apply the change") -> bool:
@@ -2864,6 +2917,12 @@ def cmd_run(args) -> int:
 
     log.info("starting — role=%s hostname=%s", cfg.role, cfg.hostname)
 
+    # Stamp the version we're actually running, so `gw watch` can warn if the
+    # package was upgraded but the daemon wasn't restarted (it keeps the OLD
+    # code in memory until then). Rewritten each start → matches after a restart.
+    from . import reconcile as _rmod
+    _rmod.write_daemon_version(cfg.data_dir, _version())
+
     # Service-definition self-heal: pick up improvements shipped by upgrades
     # (no-op when unchanged, on an unmanaged host, or running by hand). Backend
     # of the host: systemd unit or OpenRC script.
@@ -2891,6 +2950,10 @@ def cmd_run(args) -> int:
 
     directory = Directory.load(cfg.dir_cache_path)
 
+    # Relay self-heal: if this anchor's own record says relay is ON (set live by
+    # `gw relay on`, persisted in the record), re-assert IPv6 forwarding at start
+    # so it survives reboots without editing /etc/sysctl.d. The record is the
+    # single declarative source of truth; forwarding is reconciled to it.
     # Trust is static, straight from config: the trusted CA set, the seeds to
     # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
@@ -2988,6 +3051,11 @@ def cmd_run(args) -> int:
         port_enforcer=port_enforcer,
         policy_refresh=grant_policy.refresh_from_cache,
         local_hostname=cfg.hostname,
+        # Anchor relay: republish our own record with relay=<marker> when they
+        # drift. The daemon is the sole writer of its own record, so this never
+        # races an out-of-process `gw relay` command.
+        republish_relay=lambda on: _republish_own_record(
+            cfg, keys, directory, relay=on, push_to=cfg.seeds, quiet_push=True),
     )
     recon.start()
 
@@ -4522,6 +4590,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("node", help="the node: its hostname, its <host>.<mesh_domain> "
                     "mesh name, or its 64-char id_pub hex")
     sp.set_defaults(fn=cmd_revoke)
+
+    # relay (anchor) — opt in/out of forwarding between peers that can't reach
+    # each other directly (e.g. IPv4-only ↔ IPv6-only). Live, no rebuild.
+    sp = sub.add_parser("relay",
+                        help="[sudo, anchor] forward traffic between peers that "
+                             "can't connect directly (opt-in, live)")
+    sp.add_argument("action", choices=["on", "off", "status"],
+                    help="on: this anchor relays unreachable pairs (it will see "
+                         "that traffic); off: stop; status: show current state")
+    sp.set_defaults(fn=cmd_relay)
 
     # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",

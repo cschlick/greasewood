@@ -11,6 +11,7 @@ WireGuard peers AND the /etc/hosts name block — must pass FULL verification
 records into the cache. A revoked node loses its tunnel; its name must not
 keep resolving either.
 """
+import base64
 import datetime as dt
 
 from greasewood import reconcile
@@ -188,23 +189,35 @@ class _FakeWg:
 
     def __init__(self):
         self.peers: dict[str, object] = {}
+        self.routes: set[str] = set()      # bare addrs with an installed /128 route
         self.set_calls = 0
         self.remove_calls = 0
 
     def get_peers(self, iface):
         return dict(self.peers)
 
-    def set_peer(self, iface, wg_pub_b64, allowed_ip, endpoint=None, keepalive=25):
+    def set_peer(self, iface, wg_pub_b64, allowed_ips, endpoint=None, keepalive=25):
         from greasewood.wg import LivePeer
         self.set_calls += 1
+        ips = [allowed_ips] if isinstance(allowed_ips, str) else list(allowed_ips)
+        # wg REPLACES a peer's allowed-ips, moving any addr away from whatever
+        # peer held it before (mirror that so allowed-ips stay disjoint).
+        for other in self.peers.values():
+            other.allowed_ips = ",".join(
+                a for a in other.allowed_ips.split(",")
+                if a and a.split("/")[0] not in ips)
         self.peers[wg_pub_b64] = LivePeer(
             wg_pub_b64=wg_pub_b64, endpoint=endpoint or "",
-            allowed_ips=f"{allowed_ip}/128", keepalive=keepalive,
+            allowed_ips=",".join(f"{ip}/128" for ip in ips), keepalive=keepalive,
         )
+        self.routes |= set(ips)            # set_peer installs a route per /128
 
-    def remove_peer(self, iface, wg_pub_b64, allowed_ip=None):
+    def remove_peer(self, iface, wg_pub_b64, allowed_ips=None):
         self.remove_calls += 1
         self.peers.pop(wg_pub_b64, None)
+        if allowed_ips:
+            ips = [allowed_ips] if isinstance(allowed_ips, str) else list(allowed_ips)
+            self.routes -= set(ips)
 
 
 class TestReconcileTrustGate:
@@ -619,3 +632,193 @@ def test_read_daemon_fatal_tolerates_garbage(tmp_path):
     reconcile.daemon_fatal_path(tmp_path).write_text("{not json")
     assert reconcile.read_daemon_fatal(tmp_path) is None
     reconcile.clear_daemon_fatal(tmp_path)   # idempotent even when absent already
+
+
+class TestRelay:
+    """Anchor relay: an IPv4-only node A and an IPv6-only-endpoint node B can
+    never form a direct tunnel (no shared underlay family). When the anchor
+    self-asserts `relay` (and carries CA-signed role:*), A routes B's /128
+    through the anchor peer instead of installing a dead direct peer."""
+
+    def _cred(self, node, ca, hostname, caps, ttl=3600):
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        return Credential(
+            id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes, addr=node.addr,
+            hostname=hostname, caps=caps, iat=now,
+            exp=now + dt.timedelta(seconds=ttl),
+        ).sign(ca.ca_priv)
+
+    def _rec(self, node, cred, endpoints, relay=False):
+        return NodeRecord(id_pub=node.id_pub_bytes, seq=1, endpoints=endpoints,
+                          cred=cred, relay=relay).sign(node.id_priv)
+
+    def _scene(self, *, anchor_relay):
+        ca = CAKeys.generate()
+        A = NodeKeys.generate()        # local: IPv4-only underlay
+        anchor = NodeKeys.generate()   # dual-stack, offers relay
+        B = NodeKeys.generate()        # advertises only a v6 endpoint
+        d = Directory()
+        d.put(self._rec(A, self._cred(A, ca, "a", ["segment:mesh"]),
+                        ["9.9.9.9:51900"]))
+        d.put(self._rec(anchor, self._cred(anchor, ca, "anchor",
+                                           ["role:*", "segment:mesh"]),
+                        ["1.2.3.4:51900"], relay=anchor_relay))
+        d.put(self._rec(B, self._cred(B, ca, "b", ["segment:mesh"]),
+                        ["[2001:db8::9]:51900"]))
+        return ca, A, anchor, B, d
+
+    def _run(self, ca, A, d, monkeypatch, **kw):
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), local_families={4}, **kw)
+        return fake
+
+    def test_unreachable_peer_folds_into_relay_anchor(self, monkeypatch):
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        fake = self._run(ca, A, d, monkeypatch)
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        assert b_pub not in fake.peers                       # no dead direct peer
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+
+    def test_no_relay_when_anchor_does_not_offer(self, monkeypatch):
+        ca, A, anchor, B, d = self._scene(anchor_relay=False)
+        fake = self._run(ca, A, d, monkeypatch)
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        # direct-or-fail: B is an endpoint-less peer, anchor carries only its own
+        assert b_pub in fake.peers and fake.peers[b_pub].endpoint == ""
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+    def test_allow_relay_false_forces_direct_or_fail(self, monkeypatch):
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)   # anchor offers…
+        fake = self._run(ca, A, d, monkeypatch, allow_relay=False)  # …node opts out
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        assert b_pub in fake.peers                            # back to dead direct peer
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+    def test_direct_to_relay_transition_keeps_the_route(self, monkeypatch):
+        # Regression: B starts as a direct (dead) peer with relay off; when the
+        # anchor turns relay on, B folds into the anchor peer. The old direct
+        # peer is removed the SAME cycle — its /128 route must survive (it now
+        # rides the anchor), or A has no route to B and can't reach it.
+        ca, A, anchor, B, d = self._scene(anchor_relay=False)  # relay off first
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+
+        def run():
+            reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                           [ca.ca_pub_bytes], set(), local_families={4})
+
+        run()                                                  # B is a direct dead peer
+        assert b_pub in fake.peers and B.addr in fake.routes
+
+        # anchor turns relay on (re-sign its record with relay=True, higher seq)
+        r = TestRelay()
+        d.put(NodeRecord(id_pub=anchor.id_pub_bytes, seq=2,
+                         endpoints=["1.2.3.4:51900"],
+                         cred=r._cred(anchor, ca, "anchor", ["role:*", "segment:mesh"]),
+                         relay=True).sign(anchor.id_priv))
+        run()
+        assert b_pub not in fake.peers                         # direct peer gone
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+        assert B.addr in fake.routes                           # route SURVIVED the move
+
+    def test_relay_route_withdrawn_when_peer_becomes_reachable(self, monkeypatch):
+        # B relayed first; then A gains IPv6 (families {4,6}) → B is directly
+        # reachable, so it leaves the anchor's AllowedIPs and gets its own peer.
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        fake = self._run(ca, A, d, monkeypatch)
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+        # second pass, now dual-stack
+        reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), local_families={4, 6})
+        assert b_pub in fake.peers                            # now a direct peer
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}  # route withdrawn
+
+
+class TestRelayReachableAndForwarding:
+    """The two edges of the relay feature: relayed peers show as reachable while
+    the anchor link is live (segment-health view), and the anchor keeps IPv6
+    forwarding matched to its own record.relay each cycle."""
+
+    def _scene(self):
+        r = TestRelay()
+        return r._scene(anchor_relay=True)
+
+    def test_relayed_peer_reachable_only_while_anchor_live(self, monkeypatch):
+        import time
+        from greasewood.wg import LivePeer
+        ca, A, anchor, B, d = self._scene()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+
+        # anchor link live → B (relayed) counts as reachable
+        fake = _FakeWg()
+        fake.peers[anchor_pub] = LivePeer(
+            wg_pub_b64=anchor_pub, endpoint="1.2.3.4:51900",
+            allowed_ips=f"{anchor.addr}/128", latest_handshake=int(time.time()))
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        _, reachable = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                                      [ca.ca_pub_bytes], set(), local_families={4})
+        assert B.addr in reachable
+
+        # anchor never handshaked → no path yet → B not reachable
+        fake2 = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake2)
+        _, reachable2 = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                                       [ca.ca_pub_bytes], set(), local_families={4})
+        assert B.addr not in reachable2
+
+    class _FakeFwd:
+        def __init__(self, cur=False): self.cur, self.sets = cur, []
+        def ipv6_forwarding_enabled(self): return self.cur
+        def set_ipv6_forwarding(self, on): self.sets.append(on); self.cur = on
+
+    def _loop(self, directory, local_id_pub, caps, ca, data_dir, republished):
+        return ReconcileLoop("gw-test", directory, local_id_pub, caps,
+                             lambda: [ca.ca_pub_bytes], lambda: set(),
+                             data_dir=data_dir,
+                             republish_relay=lambda on: republished.append(on))
+
+    def _anchor_dir(self, relay=False):
+        r = TestRelay()
+        ca, anchor = CAKeys.generate(), NodeKeys.generate()
+        d = Directory()
+        d.put(r._rec(anchor, r._cred(anchor, ca, "anchor", ["role:*"]),
+                     ["1.2.3.4:51900"], relay=relay))
+        return ca, anchor, d
+
+    def test_anchor_reconciles_forwarding_and_record_to_marker(self, tmp_path, monkeypatch):
+        ca, anchor, d = self._anchor_dir(relay=False)  # own record not yet advertising
+        fake = self._FakeFwd(cur=False)
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        pub, rep = [], []
+        loop = self._loop(d, anchor.id_pub_bytes, ["role:*"], ca, tmp_path, rep)
+
+        # No marker → desired off, own already off → nothing changes.
+        loop._reconcile_relay()
+        assert rep == [] and fake.sets == []
+
+        # Marker present → republish relay=True AND turn forwarding on.
+        reconcile.relay_marker_path(tmp_path).write_text("on\n")
+        loop._reconcile_relay()
+        assert rep == [True]                     # daemon (sole writer) republishes
+        assert fake.sets == [True]               # forwarding follows the marker
+
+    def test_non_anchor_ignores_relay_marker(self, tmp_path, monkeypatch):
+        ca, anchor, d = self._anchor_dir(relay=False)
+        reconcile.relay_marker_path(tmp_path).write_text("on\n")   # marker set…
+        fake = self._FakeFwd()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        rep = []
+        # …but this loop is a plain node (no role:*) → never touches relay.
+        node = NodeKeys.generate()
+        loop = self._loop(d, node.id_pub_bytes, ["segment:mesh"], ca, tmp_path, rep)
+        loop._reconcile_relay()
+        assert rep == [] and fake.sets == []
