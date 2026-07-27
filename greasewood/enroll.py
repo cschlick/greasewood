@@ -518,6 +518,9 @@ class DoorWatcher(Loop):
         self._door_port = door_port
         self._enroll: EnrollServer | None = None
         self._lock = threading.Lock()
+        # Fingerprint of the door window file we are currently serving, so a
+        # superseding `gw invite` (e.g. single-use → --standing) causes a rebind.
+        self._window_fp: "str | None" = None
         super().__init__(poll_interval, "door-watcher")
 
     # run()/start() come from Loop; stop() also downs the live enroll server.
@@ -528,12 +531,13 @@ class DoorWatcher(Loop):
                 self._enroll.stop()
 
     def _tick(self) -> None:
-        """Absent window → clean up; expired → close; live and not yet served →
-        start an EnrollServer for it (_start_server)."""
+        """Absent window → clean up; expired → close; live window changed or
+        not yet served → start/rebind an EnrollServer for it."""
         window_path = self._data_dir / "door_window.json"
 
         if not window_path.exists():
             self._clear_enroll()
+            self._window_fp = None
             return
 
         try:
@@ -546,9 +550,14 @@ class DoorWatcher(Loop):
             log.debug("door_window.json malformed; ignoring")
             return
 
+        # Canonical fingerprint so a superseding `gw invite` invalidates the
+        # in-memory server and the new door/status is picked up immediately.
+        new_fp = json.dumps(data, sort_keys=True, separators=(",", ":"))
+
         if not win.live():
             log.info("door window expired, cleaning up")
             self._clear_enroll()
+            self._window_fp = None
             window_path.unlink(missing_ok=True)
             try:
                 door.mark_door_closed(self._data_dir, "expired")
@@ -556,7 +565,12 @@ class DoorWatcher(Loop):
                 log.debug("door status update failed: %s", e)
             return
 
+        if self._enroll is not None and new_fp != self._window_fp:
+            log.info("door window superseded; restarting enroll server")
+            self._stop_server()
+
         self._start_server(win, window_path)
+        self._window_fp = new_fp
 
     def _start_server(self, win: "door.Window", window_path: Path) -> None:
         """Start the EnrollServer for a live window (no-op if one is running).
@@ -637,6 +651,15 @@ class DoorWatcher(Loop):
             else:
                 log.info("door window detected, enroll server started (%.0fs remaining)",
                          remaining)
+
+    def _stop_server(self) -> None:
+        """Stop the running EnrollServer without tearing down the door interface.
+        Used when the window file is superseded (new `gw invite`) and the new
+        interface is already in place from the invite path."""
+        with self._lock:
+            if self._enroll:
+                self._enroll.stop()
+                self._enroll = None
 
     def _clear_enroll(self) -> None:
         with self._lock:
