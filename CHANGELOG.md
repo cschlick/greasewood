@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Podman integration tests covering failover setup, activation, and re-invite flows.
 - `gw` shim on macOS now names the node after the Mac hostname, matching Linux behavior.
 - Managed-daemon auto-restart: `gw` now restarts systemd/OpenRC directly after `renew`, `rename-node`, `anchor-activate`, `anchor-promote`, `cert-request` (when SAN aliases are published), and `invite --force` CA re-key, falling back to the previous hints only when no service manager is present.
+- `scripts/admin-upgrade.sh`: explicit, interactive, fault-tolerant SSH-based upgrade tool for rolling out package updates across mesh peers one host at a time (dry-run, per-host confirm, customizable command, never auto-updates silently).
 
 ### Changed
 
