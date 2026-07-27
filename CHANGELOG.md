@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-26
+
+### Added
+
+- `gw-admin-upgrade --from-mesh --user <user>`: build the SSH host list directly from the local `gw watch --json` snapshot, so fleet upgrades no longer require a manual `jq` pipeline and a host file.
+
 ## [0.2.1] - 2026-07-26
 
 ### Added
