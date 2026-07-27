@@ -220,6 +220,12 @@ class _FakeWg:
             self.routes -= set(ips)
 
 
+def _relay_ok(*_a, **_k):
+    """Stands in for a grant table carrying `relay = true` for the pair. Relay
+    is opt-in per grant, so every relay test has to say so explicitly."""
+    return True
+
+
 class TestReconcileTrustGate:
     def _mesh(self):
         """A local node plus three peers: valid, revoked, and expired."""
@@ -670,6 +676,7 @@ class TestRelay:
     def _run(self, ca, A, d, monkeypatch, **kw):
         fake = _FakeWg()
         monkeypatch.setattr(reconcile, "wgmod", fake)
+        kw.setdefault("relay_policy", _relay_ok)
         reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
                        [ca.ca_pub_bytes], set(), local_families={4}, **kw)
         return fake
@@ -690,6 +697,42 @@ class TestRelay:
         # direct-or-fail: B is an endpoint-less peer, anchor carries only its own
         assert b_pub in fake.peers and fake.peers[b_pub].endpoint == ""
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+    def test_no_relay_grant_means_no_relay(self, monkeypatch):
+        # THE OPT-IN. The anchor offers relay and B is genuinely unreachable —
+        # and still nothing is relayed, because no grant said this pair may be.
+        # Relay is decrypt-and-forward; it is named in the policy, never
+        # inferred from a pair failing to connect.
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        fake = self._run(ca, A, d, monkeypatch, relay_policy=None)
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        assert b_pub in fake.peers                            # direct-or-fail
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+    def test_relay_grant_is_consulted_per_pair(self, monkeypatch):
+        # The grant names WHO may relay to WHOM, so a table that opts one pair
+        # in doesn't quietly opt in every other unreachable pair.
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        seen = []
+
+        def only_b(local_caps, peer_caps, local_host=None, peer_host=None):
+            seen.append(peer_host)
+            return peer_host == "b"
+
+        fake = self._run(ca, A, d, monkeypatch, relay_policy=only_b,
+                         local_hostname="a")
+        assert "b" in seen                                    # asked about the pair
+        assert b_pub not in fake.peers                        # granted → relayed
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+
+        # Same scene, same anchor, but the grant names someone else.
+        fake2 = self._run(ca, A, d, monkeypatch,
+                          relay_policy=lambda *a, **k: False, local_hostname="a")
+        assert b_pub in fake2.peers                           # not granted → direct
+        assert fake2.peers[anchor_pub].allowed_addrs == {anchor.addr}
 
     def test_allow_relay_false_forces_direct_or_fail(self, monkeypatch):
         ca, A, anchor, B, d = self._scene(anchor_relay=True)   # anchor offers…
@@ -712,7 +755,8 @@ class TestRelay:
 
         def run():
             reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                           [ca.ca_pub_bytes], set(), local_families={4})
+                           [ca.ca_pub_bytes], set(), local_families={4},
+                           relay_policy=_relay_ok)
 
         run()                                                  # B is a direct dead peer
         assert b_pub in fake.peers and B.addr in fake.routes
@@ -738,7 +782,8 @@ class TestRelay:
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
         # second pass, now dual-stack
         reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                       [ca.ca_pub_bytes], set(), local_families={4, 6})
+                       [ca.ca_pub_bytes], set(), local_families={4, 6},
+                       relay_policy=_relay_ok)
         assert b_pub in fake.peers                            # now a direct peer
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}  # route withdrawn
 
@@ -758,7 +803,8 @@ class TestRelay:
             allowed_ips=f"{B.addr}/128", latest_handshake=int(time.time()))
         monkeypatch.setattr(reconcile, "wgmod", fake)
         reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                       [ca.ca_pub_bytes], set(), local_families={4})
+                       [ca.ca_pub_bytes], set(), local_families={4},
+                       relay_policy=_relay_ok)
         assert b_pub in fake.peers                                     # link survives
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}   # not relayed
 
@@ -777,7 +823,8 @@ class TestRelay:
             latest_handshake=int(time.time()) - 4000)   # long past _LIVE_LINK_SECS
         monkeypatch.setattr(reconcile, "wgmod", fake)
         reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                       [ca.ca_pub_bytes], set(), local_families={4})
+                       [ca.ca_pub_bytes], set(), local_families={4},
+                       relay_policy=_relay_ok)
         assert b_pub not in fake.peers
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
 
@@ -804,14 +851,16 @@ class TestRelayReachableAndForwarding:
             allowed_ips=f"{anchor.addr}/128", latest_handshake=int(time.time()))
         monkeypatch.setattr(reconcile, "wgmod", fake)
         _, reachable = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                                      [ca.ca_pub_bytes], set(), local_families={4})
+                                      [ca.ca_pub_bytes], set(), local_families={4},
+                                      relay_policy=_relay_ok)
         assert B.addr in reachable
 
         # anchor never handshaked → no path yet → B not reachable
         fake2 = _FakeWg()
         monkeypatch.setattr(reconcile, "wgmod", fake2)
         _, reachable2 = reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                                       [ca.ca_pub_bytes], set(), local_families={4})
+                                       [ca.ca_pub_bytes], set(), local_families={4},
+                                       relay_policy=_relay_ok)
         assert B.addr not in reachable2
 
     class _FakeFwd:

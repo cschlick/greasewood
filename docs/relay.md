@@ -22,10 +22,12 @@ IPv4-only node reaches the anchor over v4, the anchor reaches the v6-only node
 over v6, and the overlay packet flows straight through. It's ordinary WireGuard
 hub-and-spoke; the kernel forwards, there's no relay daemon.
 
-## Off by default, opt-in live
+## Two switches, both explicit
 
-Relay is **off until you turn it on**, and turning it on needs **no rebuild and
-no re-enrollment** — you flip it on a running mesh:
+Relaying a pair takes **two independent yeses**. Either one missing means no
+relaying, and neither implies the other.
+
+**1. The anchor offers relay at all.** Live, no rebuild, no re-enrollment:
 
 ```bash
 # on the anchor
@@ -33,9 +35,30 @@ sudo gw relay on
 ```
 
 That enables IPv6 forwarding and flips a self-signed `relay` flag on the
-anchor's own record. The fleet picks it up within one sync cycle; nodes that
-can't reach a granted peer directly then route that peer through the anchor
-automatically. No per-node configuration.
+anchor's own record, which the fleet picks up within one sync cycle.
+
+**2. A grant names the pair.** In `grants.toml`, `relay = true` says *these two*
+may fall back to the anchor:
+
+```toml
+[[grant]]
+from  = ["host:laptop"]
+to    = ["host:nas"]
+ports = ["tcp/2049"]
+relay = true
+```
+
+Then `sudo gw policy apply`, as with any policy change.
+
+This is deliberate. Relay is decrypt-and-forward (see the warning below), so
+which traffic the anchor is allowed to see is a decision you write down — never
+one inferred from a pair happening to fail to connect. **A pair with no
+`relay = true` grant is never relayed**, however unreachable it is and however
+enabled the anchor is; it stays direct-or-fail. A mesh running with no policy at
+all gets no relaying either, since there's no grant to carry the opt-in.
+
+Relay changes nothing for pairs that *can* go direct — they always do,
+regardless of what the grant says.
 
 ```bash
 sudo gw relay off       # stop relaying; nodes fall back to direct-or-fail
@@ -64,9 +87,10 @@ gw relay status         # show whether relay is on + IPv6 forwarding state
 
 ## What it does and doesn't change
 
-- **Grants are unchanged.** Relay only carries pairs a grant *already* allows;
-  it never widens access. The receiving node still enforces its per-role port
-  filter against the real source address.
+- **Grants are unchanged.** Relay only carries pairs a grant *already* allows,
+  and only those that additionally say `relay = true`; it never widens access.
+  The receiving node still enforces its per-role port filter against the real
+  source address.
 - **It falls back cleanly.** The moment a pair *can* go direct again (a node
   gains IPv6, an endpoint becomes reachable), they drop the relay and form a
   direct tunnel on the next cycle.

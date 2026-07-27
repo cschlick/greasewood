@@ -192,6 +192,7 @@ def reconcile_once(
     endpoint_tracker: "_EndpointTracker | None" = None,
     local_hostname: "str | None" = None,
     allow_relay: bool = True,
+    relay_policy: "Policy | None" = None,
 ) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
@@ -302,7 +303,15 @@ def reconcile_once(
         roles = ",".join(sorted(_roles(record.cred.caps))) or "-"
         context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] roles={roles}"
 
-        if allow_relay and not reachable_directly and not has_live_link:
+        # Relaying this pair takes THREE independent yeses: this node hasn't
+        # opted out (allow_relay), the anchor offers relay at all (checked when
+        # we pick relay_anchor_pub), and a grant names this pair as relayable.
+        # The last one is the point: relay is decrypt-and-forward, so it is
+        # granted per pair, never inferred from a pair merely failing to
+        # connect. No relay policy supplied → no relaying (opt-in, not opt-out).
+        may_relay = bool(relay_policy) and relay_policy(
+            local_caps, record.cred.caps, local_hostname, record.cred.hostname)
+        if allow_relay and may_relay and not reachable_directly and not has_live_link:
             # No direct underlay path AND no live session to fall back on.
             # Defer: relay via the anchor if we found one, else fall back below
             # to an endpoint-less direct peer (the old direct-or-fail behaviour
@@ -422,6 +431,7 @@ class ReconcileLoop(Loop):
         get_revoked: "Callable[[], set[str]]",
         interval: float = 5.0,
         policy: Policy = default_policy,
+        relay_policy: "Policy | None" = None,
         hosts_domain: str | None = None,
         get_local_families: "Callable[[], set[int] | None] | None" = None,
         ensure_iface: "Callable[[], None] | None" = None,
@@ -467,6 +477,8 @@ class ReconcileLoop(Loop):
         self._get_ca_pubs = get_ca_pubs
         self._get_revoked = get_revoked
         self._policy = policy
+        # Per-pair relay opt-in, read from the same grant table as _policy.
+        self._relay_policy = relay_policy
         # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
         self._hosts_domain = hosts_domain
         # Per-peer endpoint fallback state, persisted across cycles (a no-op for
@@ -542,6 +554,7 @@ class ReconcileLoop(Loop):
                 self._get_local_families() if self._get_local_families else None,
                 endpoint_tracker=self._endpoint_tracker,
                 local_hostname=self._local_hostname,
+                relay_policy=self._relay_policy,
             )
         except Exception as e:
             log.error("reconcile error: %s", e)

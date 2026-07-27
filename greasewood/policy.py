@@ -137,6 +137,23 @@ ports = ["tcp/22"]
 #   to    = ["api"]
 #   ports = ["tcp/8000"]
 
+# --- Relay (optional, off unless BOTH switches are on) ----------------------
+# `relay = true` says this pair may fall back to the anchor when no direct
+# tunnel can form (one is IPv4-only and the other IPv6-only; both are behind
+# NAT with no reachable endpoint). It changes nothing for pairs that CAN go
+# direct — they always do.
+#
+# Relaying is DECRYPT-AND-FORWARD: the anchor terminates both tunnels, so it
+# can read (and could alter) the traffic of pairs it relays. That's why it's
+# named here per pair rather than inferred from a pair failing to connect, and
+# why it takes two switches: this grant, AND `sudo gw relay on` on the anchor.
+# Either one absent means no relaying.
+#   [[grant]]
+#   from  = ["host:laptop"]
+#   to    = ["host:nas"]
+#   ports = ["tcp/2049"]
+#   relay = true
+
 # --- Declarative role assignments (optional) --------------------------------
 # Add an [assign] table and this file also declares who HOLDS which roles —
 # `gw policy apply` reconciles listed hosts to it (with a preview), listed
@@ -317,6 +334,33 @@ def peers_allowed(local_caps: list, peer_caps: list,
                for g in grants)
 
 
+def relay_allowed(local_caps: list, peer_caps: list,
+                  grants: "list | None",
+                  local_hostname: "str | None" = None,
+                  peer_hostname: "str | None" = None) -> bool:
+    """May this pair fall back to relaying through the anchor?
+
+    Strongly opt-in, and deliberately NOT implied by anything else. Relay is
+    decrypt-and-forward — the anchor terminates both tunnels and can read what
+    passes — so it is named per grant (`relay = true`) rather than inferred
+    from a pair happening to fail. Two independent gates must both be open: the
+    anchor offering relay at all (`gw relay on`), and a grant here saying THESE
+    two may use it.
+
+    Unlike :func:`peers_allowed`, nothing is hardwired open. No table means no
+    relay: a flat mesh has no grant to carry the opt-in, and silently relaying
+    everything is exactly what this is meant to prevent. Traffic to the anchor
+    itself is never relayed — it's the relay.
+    """
+    if grants is None:
+        return False
+    local = node_tags(local_caps, local_hostname)
+    peer = node_tags(peer_caps, peer_hostname)
+    return any(g.get("relay")
+               and (_grant_connects(g, local, peer) or _grant_connects(g, peer, local))
+               for g in grants)
+
+
 class GrantPolicy:
     """The daemon's live view of the grant table: a thread-safe holder that is
     ALSO reconcile's policy callable. The sync loop offers newly-pulled tables
@@ -342,6 +386,16 @@ class GrantPolicy:
                  peer_hostname: "str | None" = None) -> bool:
         table = self.table
         return peers_allowed(local_caps, peer_caps,
+                             table.grants if table else None,
+                             local_hostname, peer_hostname)
+
+    def relay(self, local_caps: list, peer_caps: list,
+              local_hostname: "str | None" = None,
+              peer_hostname: "str | None" = None) -> bool:
+        """The relay opt-in for this pair, read from the same live table (see
+        :func:`relay_allowed`). Passed to reconcile as its relay policy."""
+        table = self.table
+        return relay_allowed(local_caps, peer_caps,
                              table.grants if table else None,
                              local_hostname, peer_hostname)
 

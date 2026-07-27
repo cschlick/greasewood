@@ -477,13 +477,20 @@ def _validate_grant(g: dict, i: int) -> dict:
     silently change the fleet's topology)."""
     if not isinstance(g, dict):
         raise ValueError(f"grant #{i}: must be a table of from/to/ports")
-    unknown = set(g) - {"from", "to", "ports"}
+    unknown = set(g) - {"from", "to", "ports", "relay"}
     if unknown:
         raise ValueError(f"grant #{i}: unknown key(s) {sorted(unknown)} "
-                         f"(allowed: from, to, ports)")
+                         f"(allowed: from, to, ports, relay)")
     src = _str_list(g.get("from"), f"grant #{i} from")
     dst = _str_list(g.get("to"), f"grant #{i} to")
     ports = _str_list(g.get("ports", ["*"]), f"grant #{i} ports")
+    # relay: may this pair fall back to the anchor when no direct tunnel can
+    # form? Default FALSE — relaying is decrypt-and-forward, so it is named
+    # explicitly per grant, never inferred from a pair merely failing to connect.
+    relay = g.get("relay", False)
+    if not isinstance(relay, bool):
+        raise ValueError(f"grant #{i}: relay must be true or false, "
+                         f"not {relay!r}")
     if not src or not dst:
         raise ValueError(f"grant #{i}: from and to must be non-empty")
     # Entry vocabulary: '*', a role name, or 'host:<name>'. A host entry's name
@@ -514,7 +521,13 @@ def _validate_grant(g: dict, i: int) -> dict:
                 or not (1 <= int(num) <= 65535):
             raise ValueError(f"grant #{i}: bad port {p!r} "
                              f"(want 'tcp/5432', 'udp/51900', or '*')")
-    return {"from": sorted(src), "to": sorted(dst), "ports": sorted(ports)}
+    out = {"from": sorted(src), "to": sorted(dst), "ports": sorted(ports)}
+    if relay:
+        # Omitted when false, so a table that opts nobody into relaying is
+        # byte-identical to one written before the key existed (old nodes keep
+        # verifying it, and the signed bytes don't churn).
+        out["relay"] = True
+    return out
 
 
 @dataclass
