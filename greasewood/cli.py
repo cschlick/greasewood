@@ -1354,7 +1354,11 @@ def cmd_relay(args) -> int:
         print(f"relay:           {'ON' if marker.exists() else 'off'}  (marker: {marker})")
         print(f"advertised:      {'yes' if (own and own.relay) else 'no'}"
               "   (own record — set by the daemon from the marker)")
-        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}")
+        owned = rmod.relay_forwarding_owned_path(cfg.data_dir).exists()
+        whose = ("greasewood turned it on, and will turn it off again" if owned
+                 else "not greasewood's — left as found, either way")
+        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}"
+              f"   ({whose})")
         return 0
 
     _require_root("relay")
@@ -1375,10 +1379,14 @@ def cmd_relay(args) -> int:
         marker.unlink(missing_ok=True)
     # Toggle forwarding immediately for instant effect; the running daemon
     # reconciles both forwarding AND its own record.relay to the marker each
-    # cycle (the daemon is the sole record-writer — no republish race).
-    wgmod.set_ipv6_forwarding(want)
+    # cycle (the daemon is the sole record-writer — no republish race). Same
+    # guarded path the daemon uses: greasewood never turns off forwarding it
+    # didn't turn on, so `relay off` can't take a router's LAN down.
+    note = rmod.apply_relay_forwarding(cfg.data_dir, want)
     print(f"relay {'ENABLED' if want else 'disabled'} — the daemon advertises the "
           f"change to the fleet within a sync cycle (no restart needed).")
+    if note:
+        print(f"note: {note}")
     return 0
 
 

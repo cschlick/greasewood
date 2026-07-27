@@ -279,10 +279,18 @@ def reconcile_once(
                 and record.relay and "*" in _roles(record.cred.caps)):
             relay_anchor_pub = wg_pub_b64
 
+        live_peer = live_peers.get(wg_pub_b64)
+        last_handshake = live_peer.latest_handshake if live_peer else 0
+        # A LIVE SESSION IS A DIRECT PATH, whatever the record advertises. An
+        # outbound-only peer (behind NAT/CGNAT, a laptop) publishes no endpoint
+        # we can dial, but it dials US and WireGuard roams to the learned
+        # address — that tunnel is up and direct. Relaying it would tear down a
+        # working link to route it the long way; see the relay fold below.
+        has_live_link = bool(last_handshake
+                             and (now - last_handshake) <= _LIVE_LINK_SECS)
+
         keepalive = _KEEPALIVE
         if endpoint_tracker is not None:
-            live_peer = live_peers.get(wg_pub_b64)
-            last_handshake = live_peer.latest_handshake if live_peer else 0
             endpoint = endpoint_tracker.choose(wg_pub_b64, candidates,
                                                last_handshake, now)
             if endpoint_tracker.is_backoff(wg_pub_b64):
@@ -294,10 +302,11 @@ def reconcile_once(
         roles = ",".join(sorted(_roles(record.cred.caps))) or "-"
         context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] roles={roles}"
 
-        if allow_relay and not reachable_directly:
-            # No direct underlay path. Defer: relay via the anchor if we found
-            # one, else fall back below to an endpoint-less direct peer (the old
-            # direct-or-fail behaviour — it simply never handshakes).
+        if allow_relay and not reachable_directly and not has_live_link:
+            # No direct underlay path AND no live session to fall back on.
+            # Defer: relay via the anchor if we found one, else fall back below
+            # to an endpoint-less direct peer (the old direct-or-fail behaviour
+            # — it simply never handshakes).
             unreachable.append((wg_pub_b64, record.cred.addr, keepalive))
             continue
         desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
@@ -475,6 +484,8 @@ class ReconcileLoop(Loop):
         # marker file; this hook lets it republish the own record (a cli concern).
         self._republish_relay = republish_relay
         self._republish_version = republish_version
+        # Say "leaving forwarding alone" once per run, not once per cycle.
+        self._forwarding_left_alone = False
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -578,12 +589,18 @@ class ReconcileLoop(Loop):
             except Exception as e:
                 log.warning("could not republish relay flag: %s", e)
         try:
-            if wgmod.ipv6_forwarding_enabled() != desired:
-                log.info("relay: reconciling IPv6 forwarding → %s (marker)",
-                         "on" if desired else "off")
-                wgmod.set_ipv6_forwarding(desired)
+            self._reconcile_forwarding(desired)
         except Exception as e:
             log.warning("could not reconcile IPv6 forwarding: %s", e)
+
+    def _reconcile_forwarding(self, desired: bool) -> None:
+        """Track IPv6 forwarding to the relay marker (see
+        :func:`apply_relay_forwarding` for why it only ever turns it on)."""
+        note = apply_relay_forwarding(self._data_dir, desired)
+        if note and not self._forwarding_left_alone:
+            # Once per daemon run — this is steady state, not an event.
+            log.info("relay: %s", note)
+            self._forwarding_left_alone = True
 
     def _reconcile_version(self) -> None:
         """Re-publish the running daemon's version in our own record so the
@@ -680,6 +697,54 @@ def relay_marker_path(data_dir) -> "Path":
     daemon stays the sole writer of its own record (no republish race) and the
     choice survives a restart."""
     return Path(data_dir) / "relay"
+
+
+def apply_relay_forwarding(data_dir, desired: bool) -> "str | None":
+    """Bring IPv6 forwarding in line with the relay marker — but only ever turn
+    it ON. Shared by the daemon's reconcile and `gw relay on/off`, so the live
+    command and the loop can't disagree.
+
+    `net.ipv6.conf.all.forwarding` is a global, machine-wide switch that
+    greasewood does not own. An anchor is very often the site router, where that
+    sysctl IS the router: forcing it off — which relay=off, the default, used to
+    do on every cycle — black-holes IPv6 for every LAN client behind it. Joining
+    a mesh must never be able to take the house offline.
+
+    So ownership is explicit and durable: forwarding may be turned off only if
+    greasewood turned it on, recorded by a marker written when it flipped it.
+    Forwarding that was already on belongs to somebody else and is left exactly
+    as found.
+
+    Returns a human-readable note when it deliberately declined to turn
+    forwarding off, else None.
+    """
+    owned = relay_forwarding_owned_path(data_dir)
+    current = wgmod.ipv6_forwarding_enabled()
+    if desired and not current:
+        log.info("relay: enabling IPv6 forwarding (marker on)")
+        wgmod.set_ipv6_forwarding(True)
+        owned.write_text("greasewood enabled net.ipv6.conf.all.forwarding\n")
+    elif not desired and current:
+        if owned.exists():
+            log.info("relay: disabling IPv6 forwarding (we enabled it)")
+            wgmod.set_ipv6_forwarding(False)
+            owned.unlink()
+        else:
+            return ("IPv6 forwarding was already on before greasewood — left "
+                    "alone. This host forwards for something else; on an anchor "
+                    "that is also the site router, turning it off would break "
+                    "the LAN.")
+    elif not desired and not current and owned.exists():
+        owned.unlink()      # someone turned it off for us; drop the stale claim
+    return None
+
+
+def relay_forwarding_owned_path(data_dir) -> "Path":
+    """Marker: greasewood is the one that turned IPv6 forwarding on, so it may
+    turn it back off. Absent means forwarding predates us (the anchor forwards
+    for its own reasons — very often it IS the site router) and is not ours to
+    touch. See :meth:`ReconcileLoop._reconcile_forwarding`."""
+    return Path(data_dir) / "relay-forwarding-owned"
 
 
 def relay_marker_enabled(data_dir) -> bool:

@@ -42,6 +42,14 @@ sudo gw relay off       # stop relaying; nodes fall back to direct-or-fail
 gw relay status         # show whether relay is on + IPv6 forwarding state
 ```
 
+!!! note "If your anchor is also your router"
+    `net.ipv6.conf.all.forwarding` is machine-wide, and on a site router it is
+    what makes the box a router. greasewood therefore only ever turns it **on**,
+    and turns it back off only if greasewood was the one that enabled it (it
+    records that in `relay-forwarding-owned` in the data dir). Forwarding that
+    was already on when you enabled relay is left exactly as found — `gw relay
+    off` will not take your LAN offline.
+
 !!! warning "The anchor sees relayed traffic"
     Relay is **decrypt-and-forward**, not an opaque bounce: the anchor
     terminates both WireGuard tunnels, so it can **see (and could tamper with)**
@@ -62,6 +70,12 @@ gw relay status         # show whether relay is on + IPv6 forwarding state
 - **It falls back cleanly.** The moment a pair *can* go direct again (a node
   gains IPv6, an endpoint becomes reachable), they drop the relay and form a
   direct tunnel on the next cycle.
+- **A live tunnel is never relayed.** Reachability is judged from the live
+  session first, the advertised endpoint second. An outbound-only peer (behind
+  NAT/CGNAT, or a laptop) advertises no endpoint you can dial, but if it dialled
+  *you*, that tunnel is up and direct — relay leaves it alone. Only once the
+  session has been dead longer than the live-link window does the pair fold into
+  the anchor.
 - **`gw watch` shows the edge.** A relayed peer counts as reachable while the
   anchor link is live, so the segment-health view shows the connection (via
   relay) rather than a false gap.

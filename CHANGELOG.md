@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An anchor that is also a router no longer loses IPv6 forwarding.** The relay reconcile forced the machine-wide `net.ipv6.conf.all.forwarding` sysctl to match the relay marker every cycle, so with relay off (the default) it set it to `0` — black-holing IPv6 for every LAN client behind an anchor that was also the site router, and re-doing it within a cycle of any manual fix. greasewood now only ever turns forwarding **on**, and turns it off only if it was the one that enabled it (tracked by a `relay-forwarding-owned` marker in the data dir). Forwarding that predates greasewood is left exactly as found.
+- **Turning relay on no longer severs working direct tunnels.** A peer was classified "unreachable" — and so routed through the anchor — purely from the endpoints its record advertised. An outbound-only peer (behind NAT/CGNAT, or a laptop) advertises none, but dials out and roams, so its tunnel is up and direct; relaying it removed the direct peer and tore that tunnel down. Reachability now consults the live session first: a peer with a recent handshake stays direct, and only a session dead longer than the live-link window folds into the relay.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added

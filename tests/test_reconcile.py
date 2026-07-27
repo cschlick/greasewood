@@ -742,6 +742,45 @@ class TestRelay:
         assert b_pub in fake.peers                            # now a direct peer
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}  # route withdrawn
 
+    def test_a_live_session_is_a_direct_path_and_is_never_relayed(self, monkeypatch):
+        # Regression: B advertises no endpoint A can dial (outbound-only — behind
+        # NAT/CGNAT, or a laptop), but B dialled A and the tunnel is UP, roamed to
+        # the learned address. Judging reachability from the record alone relayed
+        # it anyway, which removed the direct peer and tore down a working link.
+        import time
+        from greasewood.wg import LivePeer
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        fake = _FakeWg()
+        fake.peers[b_pub] = LivePeer(
+            wg_pub_b64=b_pub, endpoint="[2001:db8::9]:41000",   # roamed, learned
+            allowed_ips=f"{B.addr}/128", latest_handshake=int(time.time()))
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), local_families={4})
+        assert b_pub in fake.peers                                     # link survives
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}   # not relayed
+
+    def test_a_stale_session_still_folds_into_the_relay(self, monkeypatch):
+        # The other side of the same guard: once the session is genuinely dead,
+        # relaying is right again — the live-link check must not disable relay.
+        import time
+        from greasewood.wg import LivePeer
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        fake = _FakeWg()
+        fake.peers[b_pub] = LivePeer(
+            wg_pub_b64=b_pub, endpoint="[2001:db8::9]:41000",
+            allowed_ips=f"{B.addr}/128",
+            latest_handshake=int(time.time()) - 4000)   # long past _LIVE_LINK_SECS
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), local_families={4})
+        assert b_pub not in fake.peers
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+
 
 class TestRelayReachableAndForwarding:
     """The two edges of the relay feature: relayed peers show as reachable while
@@ -822,3 +861,52 @@ class TestRelayReachableAndForwarding:
         loop = self._loop(d, node.id_pub_bytes, ["segment:mesh"], ca, tmp_path, rep)
         loop._reconcile_relay()
         assert rep == [] and fake.sets == []
+
+    def test_relay_off_never_disables_forwarding_it_did_not_enable(self, tmp_path,
+                                                                   monkeypatch):
+        # THE ROUTER BUG: an anchor is very often the site router, where
+        # net.ipv6.conf.all.forwarding=1 predates greasewood and IS the router.
+        # Relay off (the default) used to force it to 0 every cycle, black-holing
+        # IPv6 for every LAN client behind it. Joining a mesh must never be able
+        # to take the house offline.
+        ca, anchor, d = self._anchor_dir(relay=False)
+        fake = self._FakeFwd(cur=True)          # forwarding was already on
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        loop = self._loop(d, anchor.id_pub_bytes, ["role:*"], ca, tmp_path, [])
+        for _ in range(3):                      # every cycle, not just the first
+            loop._reconcile_relay()
+        assert fake.sets == [] and fake.cur is True
+        assert not reconcile.relay_forwarding_owned_path(tmp_path).exists()
+
+    def test_relay_off_disables_forwarding_it_enabled_itself(self, tmp_path,
+                                                             monkeypatch):
+        # The guard is ownership, not "never turn it off": what we switched on,
+        # we still clean up.
+        ca, anchor, d = self._anchor_dir(relay=False)
+        fake = self._FakeFwd(cur=False)         # off before greasewood
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        loop = self._loop(d, anchor.id_pub_bytes, ["role:*"], ca, tmp_path, [])
+        reconcile.relay_marker_path(tmp_path).write_text("on\n")
+        loop._reconcile_relay()
+        assert fake.sets == [True]
+        assert reconcile.relay_forwarding_owned_path(tmp_path).exists()   # claimed
+        reconcile.relay_marker_path(tmp_path).unlink()
+        loop._reconcile_relay()
+        assert fake.sets == [True, False]                                 # ours to undo
+        assert not reconcile.relay_forwarding_owned_path(tmp_path).exists()
+
+    def test_enabling_relay_on_a_router_claims_nothing_to_undo(self, tmp_path,
+                                                               monkeypatch):
+        # Turning relay ON where forwarding is already on is a no-op — and must
+        # NOT claim it, or turning relay off again would break the router.
+        ca, anchor, d = self._anchor_dir(relay=False)
+        fake = self._FakeFwd(cur=True)          # the router's own setting
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        loop = self._loop(d, anchor.id_pub_bytes, ["role:*"], ca, tmp_path, [])
+        reconcile.relay_marker_path(tmp_path).write_text("on\n")
+        loop._reconcile_relay()
+        assert fake.sets == []                                    # nothing to change
+        assert not reconcile.relay_forwarding_owned_path(tmp_path).exists()
+        reconcile.relay_marker_path(tmp_path).unlink()
+        loop._reconcile_relay()
+        assert fake.sets == [] and fake.cur is True               # still the router's
