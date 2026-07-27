@@ -60,6 +60,16 @@ all gets no relaying either, since there's no grant to carry the opt-in.
 Relay changes nothing for pairs that *can* go direct — they always do,
 regardless of what the grant says.
 
+### It's a standing permission, not a mode
+
+You write the grant once. Nothing is toggled per trip: a laptop that grows a
+`relay = true` grant to the home NAS goes direct on the home LAN, falls back to
+the anchor from IPv4-only cafe wifi, and returns to a direct tunnel on the next
+5-second cycle when it walks back in — all from that one line, with no anchor
+login at either end. The pair is re-evaluated every cycle from what each node
+currently publishes, so "prefer direct, relay only when stuck" is continuous,
+not a state you enter and leave.
+
 ```bash
 sudo gw relay off       # stop relaying; nodes fall back to direct-or-fail
 gw relay status         # show whether relay is on + IPv6 forwarding state
@@ -100,6 +110,17 @@ gw relay status         # show whether relay is on + IPv6 forwarding state
   *you*, that tunnel is up and direct — relay leaves it alone. Only once the
   session has been dead longer than the live-link window does the pair fold into
   the anchor.
+- **A peer that can still dial you is never relayed either.** "I can't dial it"
+  is only half the question; relaying is right only when *neither* direction can
+  open the tunnel. A NATed node advertises no endpoint whether it's on the same
+  LAN or on cafe wifi, so nodes publish the underlay families they can originate
+  on (`families` on the record, like `version`). A laptop that still has IPv6
+  will dial your v6 endpoint, so it stays a direct peer; the same laptop on
+  IPv4-only wifi facing a v6-only host can't, and folds into the anchor. This
+  matters because folding REPLACES the direct peer: relay a peer that could have
+  dialled you and its handshakes arrive at a node that no longer knows its key,
+  which is worse than not relaying at all. A peer that publishes no families (an
+  older node) is given the benefit of the doubt and stays direct.
 - **`gw watch` shows the edge.** A relayed peer counts as reachable while the
   anchor link is live, so the segment-health view shows the connection (via
   relay) rather than a false gap.

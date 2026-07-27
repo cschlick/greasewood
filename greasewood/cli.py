@@ -1283,7 +1283,7 @@ def cmd_rename_mesh(args) -> int:
 
 def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
                           aliases=None, reachable=None, relay=None, version=None,
-                          push_to=(), quiet_push=False):
+                          families=None, push_to=(), quiet_push=False):
     """Re-sign this node's record (seq+1) carrying forward whatever isn't
     overridden, save the cache, and best-effort push. Renewal, rename,
     config-refresh, and the reachable-set publish ALL go through here — the
@@ -1320,6 +1320,11 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         relay=(bool(relay) if relay is not None
                else (existing.relay if existing else False)),
         version=version or "",
+        # Which underlay families we can ORIGINATE on. Re-detected rather than
+        # carried, so a laptop that moves from dual-stack home wifi to an
+        # IPv4-only cafe republishes the truth — that change is precisely what
+        # tells peers whether they can still expect us to dial them.
+        families=sorted(families if families is not None else _local_families()),
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -3216,6 +3221,10 @@ def cmd_run(args) -> int:
         # _body_dict) so older peers that don't parse it still verify.
         republish_version=lambda ver: _republish_own_record(
             cfg, keys, directory, version=ver, push_to=cfg.seeds, quiet_push=True),
+        # Underlay families we can originate on — republished when they change
+        # (roaming), so peers can tell "will dial me" from "can't reach me".
+        republish_families=lambda fams: _republish_own_record(
+            cfg, keys, directory, families=fams, push_to=cfg.seeds, quiet_push=True),
     )
     recon.start()
 

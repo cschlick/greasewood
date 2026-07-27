@@ -677,8 +677,9 @@ class TestRelay:
         fake = _FakeWg()
         monkeypatch.setattr(reconcile, "wgmod", fake)
         kw.setdefault("relay_policy", _relay_ok)
+        kw.setdefault("local_families", {4})
         reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
-                       [ca.ca_pub_bytes], set(), local_families={4}, **kw)
+                       [ca.ca_pub_bytes], set(), **kw)
         return fake
 
     def test_unreachable_peer_folds_into_relay_anchor(self, monkeypatch):
@@ -733,6 +734,89 @@ class TestRelay:
                           relay_policy=lambda *a, **k: False, local_hostname="a")
         assert b_pub in fake2.peers                           # not granted → direct
         assert fake2.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+    def _roaming(self, laptop_families):
+        """nas advertises a v6 endpoint; the laptop is behind NAT and advertises
+        NOTHING either way — the only thing that changes when it roams is which
+        families it can originate on."""
+        ca = CAKeys.generate()
+        nas, anchor, laptop = NodeKeys.generate(), NodeKeys.generate(), NodeKeys.generate()
+        d = Directory()
+        d.put(self._rec(nas, self._cred(nas, ca, "nas", ["segment:mesh"]),
+                        ["[2601:db8::7]:51900"]))
+        d.put(self._rec(anchor, self._cred(anchor, ca, "anchor",
+                                           ["role:*", "segment:mesh"]),
+                        ["1.2.3.4:51900", "[2001:db8::1]:51900"], relay=True))
+        rec = NodeRecord(id_pub=laptop.id_pub_bytes, seq=1, endpoints=[],
+                         cred=self._cred(laptop, ca, "laptop", ["segment:mesh"]),
+                         families=laptop_families).sign(laptop.id_priv)
+        d.put(rec)
+        return ca, nas, anchor, laptop, d
+
+    def test_at_home_the_natted_peer_stays_direct(self, monkeypatch):
+        # The laptop is downstairs on the same LAN: it advertises no endpoint,
+        # so nas can't dial it — but it has v6 and will dial nas. Relaying here
+        # would REPLACE its direct peer, and its handshakes would then land on a
+        # node that no longer knows its key. It must stay a direct peer.
+        ca, nas, anchor, laptop, d = self._roaming(laptop_families=[6])
+        fake = self._run(ca, nas, d, monkeypatch, local_families={6})
+        l_pub = base64.b64encode(laptop.wg_pub_bytes).decode()
+        a_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        assert l_pub in fake.peers                                # direct, endpoint-less
+        assert fake.peers[l_pub].endpoint == ""                   # it dials us
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr}   # not relayed
+
+    def test_at_the_cafe_the_same_peer_is_relayed(self, monkeypatch):
+        # Same laptop, same grant, nothing edited: now it only has IPv4 and nas
+        # is v6-only, so neither direction can open a tunnel. THIS is relay's job.
+        ca, nas, anchor, laptop, d = self._roaming(laptop_families=[4])
+        fake = self._run(ca, nas, d, monkeypatch, local_families={6})
+        l_pub = base64.b64encode(laptop.wg_pub_bytes).decode()
+        a_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        assert l_pub not in fake.peers
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr, laptop.addr}
+
+    def test_coming_home_withdraws_the_relay_with_no_operator_action(self, monkeypatch):
+        # The round trip, on one standing grant: relayed at the cafe, direct
+        # again once it republishes v6. Nobody edits anything.
+        ca, nas, anchor, laptop, d = self._roaming(laptop_families=[4])
+        fake = self._run(ca, nas, d, monkeypatch, local_families={6})
+        l_pub = base64.b64encode(laptop.wg_pub_bytes).decode()
+        a_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr, laptop.addr}
+        # …walks in the door: republishes families=[6] (seq+1)
+        d.put(NodeRecord(id_pub=laptop.id_pub_bytes, seq=2, endpoints=[],
+                         cred=self._cred(laptop, ca, "laptop", ["segment:mesh"]),
+                         families=[6]).sign(laptop.id_priv))
+        reconcile_once("gw-test", d, nas.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), local_families={6},
+                       relay_policy=_relay_ok)
+        assert l_pub in fake.peers                                # direct again
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr}   # route withdrawn
+
+    def test_an_old_peer_without_families_is_given_the_benefit_of_the_doubt(self, monkeypatch):
+        # A node predating the field advertises nothing and says nothing. Assume
+        # it can still dial us — that's the behaviour before the field existed,
+        # so an un-upgraded peer is never made worse off.
+        ca, nas, anchor, laptop, d = self._roaming(laptop_families=[])
+        fake = self._run(ca, nas, d, monkeypatch, local_families={6})
+        l_pub = base64.b64encode(laptop.wg_pub_bytes).decode()
+        a_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        assert l_pub in fake.peers
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr}
+
+    def test_a_peer_that_cannot_reach_us_at_all_is_relayed(self, monkeypatch):
+        # We publish nothing dialable ourselves → nobody can reach us, so a peer
+        # we also can't dial is stuck both ways however capable it is.
+        ca, nas, anchor, laptop, d = self._roaming(laptop_families=[4, 6])
+        d.put(NodeRecord(id_pub=nas.id_pub_bytes, seq=2, endpoints=[],
+                         cred=self._cred(nas, ca, "nas", ["segment:mesh"]),
+                         families=[6]).sign(nas.id_priv))   # nas goes NAT'd too
+        fake = self._run(ca, nas, d, monkeypatch, local_families={6})
+        l_pub = base64.b64encode(laptop.wg_pub_bytes).decode()
+        a_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        assert l_pub not in fake.peers
+        assert fake.peers[a_pub].allowed_addrs == {anchor.addr, laptop.addr}
 
     def test_allow_relay_false_forces_direct_or_fail(self, monkeypatch):
         ca, A, anchor, B, d = self._scene(anchor_relay=True)   # anchor offers…

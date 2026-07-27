@@ -110,6 +110,41 @@ def _select_endpoint(endpoints: list[str],
     return candidates[0] if candidates else None
 
 
+def _stuck_both_ways(record, local_endpoints: list, local_families) -> bool:
+    """We can't dial this peer — but can it still dial US? Relay is only right
+    when NEITHER direction can open the tunnel.
+
+    The distinction endpoints alone can't make: a node behind NAT advertises no
+    endpoint whether it's downstairs on the same LAN or on IPv4-only cafe wifi.
+    In the first case it will dial us in a moment and a direct tunnel forms; in
+    the second it can't reach us at all. Relaying the first case is actively
+    destructive — the fold REPLACES its direct peer, so its handshakes arrive at
+    a node that no longer knows its key, and it can never get in to prove it was
+    fine. Hence the peer's self-reported `families` (see wire.NodeRecord).
+
+    It can dial us if we publish an endpoint in a family it can originate on.
+    Unknown families (an older node, or detection failed) means assume it CAN —
+    the same benefit of the doubt as before this field existed, so an old peer
+    is never worse off.
+    """
+    if not local_endpoints:
+        return True          # we publish nothing to dial; nobody can reach us
+    peer_families = set(record.families or ())
+    if not peer_families:
+        # No explicit field (an older node): fall back to what its endpoints
+        # imply — advertising a v6 endpoint means it holds a v6 address. Only a
+        # peer that advertises NOTHING and predates the field is truly unknown.
+        peer_families = {6 if ep.startswith("[") else 4 for ep in record.endpoints}
+    if not peer_families:
+        return False         # unknown → assume it can dial us; stay direct
+    our_families = {6 if ep.startswith("[") else 4 for ep in local_endpoints}
+    # Restrict to families we could actually originate on ourselves — an
+    # endpoint we advertise but can't source from is no use to either side.
+    if local_families:
+        our_families &= set(local_families)
+    return not (our_families & peer_families)
+
+
 @dataclass
 class _PeerEndpoint:
     """One peer's endpoint-fallback state, carried across reconcile cycles."""
@@ -246,6 +281,12 @@ def reconcile_once(
     relay_anchor_pub: "str | None" = None
     unreachable: list = []          # (wg_pub_b64, addr, keepalive)
 
+    # What WE publish, for the "can this peer still dial us?" half of the relay
+    # decision (see _stuck_both_ways). Read from our own directory record, so
+    # it's the same set the fleet sees rather than local guesswork.
+    own_record = directory.get(local_id_pub.hex())
+    local_endpoints = list(own_record.endpoints) if own_record is not None else []
+
     for record in directory.all():
         try:
             record.verify(ca_pubs, revoked, allow_expired=is_anchor)
@@ -311,10 +352,11 @@ def reconcile_once(
         # connect. No relay policy supplied → no relaying (opt-in, not opt-out).
         may_relay = bool(relay_policy) and relay_policy(
             local_caps, record.cred.caps, local_hostname, record.cred.hostname)
-        if allow_relay and may_relay and not reachable_directly and not has_live_link:
-            # No direct underlay path AND no live session to fall back on.
-            # Defer: relay via the anchor if we found one, else fall back below
-            # to an endpoint-less direct peer (the old direct-or-fail behaviour
+        if allow_relay and may_relay and not reachable_directly and not has_live_link \
+                and _stuck_both_ways(record, local_endpoints, local_families):
+            # Neither side can open this tunnel, and there's no live session to
+            # fall back on. Defer: relay via the anchor if we found one, else
+            # fall back below to a direct peer (the old direct-or-fail behaviour
             # — it simply never handshakes).
             unreachable.append((wg_pub_b64, record.cred.addr, keepalive))
             continue
@@ -442,7 +484,8 @@ class ReconcileLoop(Loop):
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
         republish_relay=None,   # callable(bool): anchor republishes own record.relay
-        republish_version=None,  # callable(str): republish own record.version
+        republish_version=None,
+        republish_families=None,  # callable(list[int]): republish own record.families
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -496,6 +539,7 @@ class ReconcileLoop(Loop):
         # marker file; this hook lets it republish the own record (a cli concern).
         self._republish_relay = republish_relay
         self._republish_version = republish_version
+        self._republish_families = republish_families
         # Say "leaving forwarding alone" once per run, not once per cycle.
         self._forwarding_left_alone = False
 
@@ -564,6 +608,7 @@ class ReconcileLoop(Loop):
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
         self._reconcile_relay()
         self._reconcile_version()
+        self._reconcile_families()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -633,6 +678,33 @@ class ReconcileLoop(Loop):
                 self._republish_version(desired)
             except Exception as e:
                 log.warning("could not republish version: %s", e)
+
+    def _reconcile_families(self) -> None:
+        """Re-publish which underlay families we can originate on when they
+        change — a laptop moving from dual-stack wifi to an IPv4-only cafe, or
+        home again.
+
+        This is what lets a peer tell "it can't be dialled but will dial me"
+        from "it genuinely can't reach me", which endpoints alone can't say: a
+        NATed node advertises none in either case. Relay hangs off that
+        difference, and the change often comes with NO endpoint change at all
+        (a node behind NAT publishes nothing before or after), so it needs its
+        own trigger rather than riding endpoint auto-refresh."""
+        if self._republish_families is None or self._get_local_families is None:
+            return
+        try:
+            desired = sorted(self._get_local_families() or [])
+        except Exception as e:
+            log.warning("could not detect local families: %s", e)
+            return
+        own = self._directory.get(self._local_id_pub.hex())
+        if own is not None and sorted(own.families) != desired:
+            log.info("families: record=%s but host has %s — republishing",
+                     sorted(own.families) or "(none)", desired)
+            try:
+                self._republish_families(desired)
+            except Exception as e:
+                log.warning("could not republish families: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show

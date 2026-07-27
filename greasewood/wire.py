@@ -230,6 +230,17 @@ class NodeRecord:
     # mixed-version fleets interoperate while the new column still works. Omitted
     # from the wire when empty; a tampered version only affects display.
     version: str = ""
+    # Underlay address families this node can ORIGINATE from ([4], [6], [4, 6]).
+    # Self-observed and self-asserted, for peers to answer a question endpoints
+    # can't: a node behind NAT advertises no endpoint at all, so "it can't be
+    # dialled" says nothing about whether IT can dial US. A roaming laptop on
+    # IPv4-only wifi and the same laptop at home look identical without this —
+    # and that difference is exactly when relay should engage vs stay out of the
+    # way. Like `version`, NOT covered by the self-signature (omitted from
+    # _body_dict) so mixed-version fleets interoperate; empty means "unknown",
+    # which callers must treat as "assume it can reach us" (the pre-existing
+    # behaviour, so an old peer is never worse off than before).
+    families: list[int] = field(default_factory=list)
     sig: bytes = field(default=b"", repr=False)
 
     @property
@@ -324,6 +335,8 @@ class NodeRecord:
         d["sig"] = _b64e(self.sig)
         if self.version:
             d["version"] = self.version
+        if self.families:
+            d["families"] = sorted(self.families)
         return d
 
     @classmethod
@@ -337,6 +350,7 @@ class NodeRecord:
             reachable=_str_list(d.get("reachable", []), "reachable"),
             relay=bool(d.get("relay", False)),
             version=_str(d.get("version", ""), "version"),
+            families=sorted({int(f) for f in d.get("families", []) if f in (4, 6)}),
             sig=_b64d(d["sig"]),
         )
 
