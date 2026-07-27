@@ -423,6 +423,7 @@ class ReconcileLoop(Loop):
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
         republish_relay=None,   # callable(bool): anchor republishes own record.relay
+        republish_version=None,  # callable(str): republish own record.version
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -473,6 +474,7 @@ class ReconcileLoop(Loop):
         # Anchor relay: the loop reconciles own record.relay + forwarding to the
         # marker file; this hook lets it republish the own record (a cli concern).
         self._republish_relay = republish_relay
+        self._republish_version = republish_version
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -537,6 +539,7 @@ class ReconcileLoop(Loop):
         from .loop import sd_watchdog_ping
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
         self._reconcile_relay()
+        self._reconcile_version()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -581,6 +584,25 @@ class ReconcileLoop(Loop):
                 wgmod.set_ipv6_forwarding(desired)
         except Exception as e:
             log.warning("could not reconcile IPv6 forwarding: %s", e)
+
+    def _reconcile_version(self) -> None:
+        """Re-publish the running daemon's version in our own record so the
+        fleet can see it in `gw watch`. The version is an unsigned display field
+        (omitted from _body_dict), so older peers that don't parse it still
+        verify the self-signature. A no-op once the record matches."""
+        if self._data_dir is None or self._republish_version is None:
+            return
+        desired = read_daemon_version(self._data_dir)
+        if not desired:
+            return
+        own = self._directory.get(self._local_id_pub.hex())
+        if own is not None and own.version != desired:
+            log.info("version: record=%s but daemon=%s — republishing",
+                     own.version or "(none)", desired)
+            try:
+                self._republish_version(desired)
+            except Exception as e:
+                log.warning("could not republish version: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show

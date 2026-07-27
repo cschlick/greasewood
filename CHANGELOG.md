@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
+### Added
+
+- `gw watch` now shows a `ver` column with each node's self-reported running greasewood version, so you can see at a glance which peers still need to be upgraded. The version is an unsigned display field on the directory record, so older nodes that don't parse it still verify the self-signature.
+
+### Removed
+
+- `gw-admin-upgrade` and the bundled `admin-upgrade.sh` script. Fleet-wide SSH upgrades were too fragile across heterogeneous `pipx`/`ssh`/`sudo` setups; the version column in `gw watch` now shows the operator what to update by hand.
+
 ## [0.2.2] - 2026-07-26
 
 ### Added

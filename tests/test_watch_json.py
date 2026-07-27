@@ -172,5 +172,5 @@ def test_text_peer_column_tracks_json_peer_expected(tmp_path):
             config=str(cfg.dir_cache_path.parent / "gw.toml"), all=True))
     rows = {ln.split(".")[0]: ln for ln in buf.getvalue().splitlines()
             if ln.startswith(("api1.", "old1."))}
-    assert rows["api1"].rstrip().endswith("yes")     # peer? column ← peer_expected True
-    assert rows["old1"].rstrip().endswith("no")      # peer? column ← peer_expected False
+    assert rows["api1"].split()[-2] == "yes"         # peer? column ← peer_expected True
+    assert rows["old1"].split()[-2] == "no"          # peer? column ← peer_expected False

@@ -191,6 +191,7 @@ _W_LINK    = len("● up, 999d ago")            # widest link string
 _W_LAT     = len("1000ms")                    # ping -W1 deadline caps RTT ~1s
 _W_TRAFFIC = len("↓1023.9G ↑1023.9G")         # widest cumulative ↓rx ↑tx
 _W_RATE    = len("↓1023.9K/s ↑1023.9K/s")     # widest per-second ↓ ↑
+_W_VER     = len("00.00.0")                   # widest version string
 
 
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
@@ -235,41 +236,44 @@ def _render_roster(nodes, cfg, have_live, is_root,
         is_self, peers, live = n["is_self"], n["peer_expected"], n.get("live")
         installed = bool(live and live.get("installed"))
         up = bool(live and live.get("up"))
-        if is_live:                             # link · rate · latency
+        ver = n["version"]
+        if is_live:                             # link · rate · latency · ver
             if is_self:
-                return ("(self)", "", latency.get(n["addr"], "…"))
+                return ("(self)", "", latency.get(n["addr"], "…"), ver)
             if not peers:
-                return ("— not a peer", "", "")
+                return ("— not a peer", "", "", ver)
             if not installed:
-                return ("not installed", "", "")
+                return ("not installed", "", "", ver)
             if up:
                 # middle column: cumulative traffic (steady) or per-second rate.
                 middle = (f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}"
                           if show_total else (rates or {}).get(n["addr"], ""))
                 return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])}",
                         middle,
-                        latency.get(n["addr"], "…"))   # … = ping in flight
-            return ("○ no handshake", "", "—")
+                        latency.get(n["addr"], "…"),   # … = ping in flight
+                        ver)
+            return ("○ no handshake", "", "—", ver)
         if not have_live:                       # policy only (no root)
-            return ("self" if is_self else ("yes" if peers else "no"),)
+            return ("self" if is_self else ("yes" if peers else "no"), ver)
         if is_self:
-            return ("(self)", "")
+            return ("(self)", "", ver)
         if not peers:
-            return ("— not a peer", "")
+            return ("— not a peer", "", ver)
         if not installed:
-            return ("not installed", "")
+            return ("not installed", "", ver)
         if up:
             return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])} ago",
-                    f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}")
-        return ("○ no handshake", "")
+                    f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}",
+                    ver)
+        return ("○ no handshake", "", ver)
 
     left_hdr = ("name", "addr", "roles", "exp")
     if is_live:
-        right_hdr = ("link", "traffic" if show_total else "rate", "latency")
+        right_hdr = ("link", "traffic" if show_total else "rate", "latency", "ver")
     elif have_live:
-        right_hdr = ("link", "traffic")
+        right_hdr = ("link", "traffic", "ver")
     else:
-        right_hdr = ("peer?",)
+        right_hdr = ("peer?", "ver")
 
     left_rows, right_rows = [], []
     for n in nodes:
@@ -283,11 +287,11 @@ def _render_roster(nodes, cfg, have_live, is_root,
     # data). left: only `exp` is dynamic. right depends on mode.
     left_reserve = (0, 0, 0, _W_EXP)              # name, addr, roles, exp
     if is_live:
-        right_reserve = (_W_LINK, _W_TRAFFIC if show_total else _W_RATE, _W_LAT)
+        right_reserve = (_W_LINK, _W_TRAFFIC if show_total else _W_RATE, _W_LAT, _W_VER)
     elif have_live:
-        right_reserve = (_W_LINK, _W_TRAFFIC)
+        right_reserve = (_W_LINK, _W_TRAFFIC, _W_VER)
     else:
-        right_reserve = (0,)                      # peer? — small + static
+        right_reserve = (0, _W_VER)               # peer? — small + static
 
     def _col_width(header, i, rows, reserve):
         # max with the live values too, so an under-estimate degrades to today's
@@ -1822,7 +1826,9 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
     the renderer only ever formats these primitives — never reaches back into a
     NodeRecord. `live` is present only when wg state was readable (root)."""
     from .policy import peers_allowed
+    from . import reconcile as _rmod
     caps = list(r.cred.caps)
+    is_self = r.id_pub.hex() == own_id
     entry = {
         "id": r.id_pub.hex(),
         "hostname": r.hostname,
@@ -1834,11 +1840,20 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
         "exp": _iso_z(r.cred.exp),
         "expired": now >= r.cred.exp,
         "ttl_remaining_s": int((r.cred.exp - now).total_seconds()),
-        "is_self": r.id_pub.hex() == own_id,
+        "is_self": is_self,
         "peer_expected": peers_allowed(own_caps, caps, grants,
                                        cfg.hostname, r.cred.hostname),
         "reachable": sorted(r.reachable) if r.reachable else [],
     }
+    # Self-reported running version. For this node, prefer the stamped daemon
+    # version (it may not have republished yet); for peers, use what's in the
+    # directory record. Empty/missing shows as "?" in the roster.
+    data_dir = getattr(cfg, "data_dir", None)
+    if is_self:
+        running = _rmod.read_daemon_version(data_dir) if data_dir else None
+        entry["version"] = running or _version()
+    else:
+        entry["version"] = r.version or "?"
     if live_peers is not None:
         lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
         if lp:

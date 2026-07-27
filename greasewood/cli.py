@@ -1282,8 +1282,8 @@ def cmd_rename_mesh(args) -> int:
 
 
 def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
-                          aliases=None, reachable=None, relay=None, push_to=(),
-                          quiet_push=False):
+                          aliases=None, reachable=None, relay=None, version=None,
+                          push_to=(), quiet_push=False):
     """Re-sign this node's record (seq+1) carrying forward whatever isn't
     overridden, save the cache, and best-effort push. Renewal, rename,
     config-refresh, and the reachable-set publish ALL go through here — the
@@ -1292,6 +1292,7 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
     record and no fresh credential supplied)."""
     from .wire import NodeRecord
     from .sync import push_record
+    from . import reconcile as _rmod
     existing = directory.get(keys.id_pub_hex)
     if existing is None and cred is None:
         return None
@@ -1300,6 +1301,11 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         if override is not None:
             return list(override)
         return list(getattr(existing, attr)) if existing else default
+
+    if version is None:
+        version = _rmod.read_daemon_version(cfg.data_dir)
+        if not version and existing is not None:
+            version = existing.version
 
     record = NodeRecord(
         id_pub=keys.id_pub_bytes,
@@ -1313,6 +1319,7 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         # refresh never drops it.
         relay=(bool(relay) if relay is not None
                else (existing.relay if existing else False)),
+        version=version or "",
     ).sign(keys.id_priv)
     directory.put(record)
     directory.save(cfg.dir_cache_path)
@@ -3056,6 +3063,10 @@ def cmd_run(args) -> int:
         # races an out-of-process `gw relay` command.
         republish_relay=lambda on: _republish_own_record(
             cfg, keys, directory, relay=on, push_to=cfg.seeds, quiet_push=True),
+        # Self-reported running version for `gw watch`. Not signed (omitted from
+        # _body_dict) so older peers that don't parse it still verify.
+        republish_version=lambda ver: _republish_own_record(
+            cfg, keys, directory, version=ver, push_to=cfg.seeds, quiet_push=True),
     )
     recon.start()
 

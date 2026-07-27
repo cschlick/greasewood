@@ -225,6 +225,11 @@ class NodeRecord:
     # byte a normal record, so old/new interop — and toggled live by republishing
     # (like reachable), so relay turns on/off on a running mesh with no re-issue.
     relay: bool = False
+    # Running greasewood version, self-asserted for `gw watch` fleet version
+    # visibility. NOT covered by the self-signature (omitted from _body_dict) so
+    # mixed-version fleets interoperate while the new column still works. Omitted
+    # from the wire when empty; a tampered version only affects display.
+    version: str = ""
     sig: bytes = field(default=b"", repr=False)
 
     @property
@@ -317,6 +322,8 @@ class NodeRecord:
     def to_dict(self) -> dict[str, Any]:
         d = self._body_dict()
         d["sig"] = _b64e(self.sig)
+        if self.version:
+            d["version"] = self.version
         return d
 
     @classmethod
@@ -329,6 +336,7 @@ class NodeRecord:
             aliases=_str_list(d.get("aliases", []), "aliases"),
             reachable=_str_list(d.get("reachable", []), "reachable"),
             relay=bool(d.get("relay", False)),
+            version=_str(d.get("version", ""), "version"),
             sig=_b64d(d["sig"]),
         )
 
