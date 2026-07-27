@@ -94,6 +94,7 @@ class EnrollServer:
         allowed_roles: "list[str] | None" = None,
         pinned_hostname: "str | None" = None,
         standing: bool = False,
+        failover_blob: "str | None" = None,
     ) -> None:
         # Mesh-scoped state (see EnrollContext). mesh_domain is advertised to
         # joiners so every member mounts the mesh under the SAME suffix; data_dir
@@ -114,6 +115,7 @@ class EnrollServer:
         # accept. It ends only via stop() (daemon shutdown, `gw close-door`, or
         # a superseding invite clearing the window).
         self._standing = standing
+        self._failover_blob = failover_blob
         self._on_done = on_done
         self._timeout = timeout_secs
         self._max_attempts = max_attempts
@@ -419,7 +421,8 @@ class EnrollServer:
     def _send_credential(self, conn, cred) -> None:
         """The success reply: the credential + the anchor's own NodeRecord, so
         the new node can pre-seed its directory and configure seeds using the
-        overlay address."""
+        overlay address. If this window carried a failover blob, hand it to the
+        new standby now."""
         anchor_record = self._directory.get(self._node_keys.id_pub_hex)
         reply = {
             "v": 1,
@@ -430,7 +433,8 @@ class EnrollServer:
         }
         if self._mesh_domain:
             reply["mesh_domain"] = self._mesh_domain
-        # Ship the current signed policy so the joining node has it from t=0 —
+        if self._failover_blob:
+            reply["failover_blob"] = self._failover_blob
         # its very first daemon run enforces the real grant table, with no
         # implicit-open window before its first directory sync.
         if self._data_dir is not None:
@@ -617,6 +621,7 @@ class DoorWatcher(Loop):
                 allowed_roles=window_menu,
                 pinned_hostname=window_hostname,
                 standing=standing,
+                failover_blob=win.failover_blob,
             )
             try:
                 door.mark_door_opened(self._data_dir, expires_str, caps=window_caps,

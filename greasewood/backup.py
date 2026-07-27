@@ -162,6 +162,26 @@ def collect_anchor_state(data_dir, ca_key_file) -> dict[str, bytes]:
     return files
 
 
+def collect_failover_state(data_dir, ca_key_file) -> dict[str, bytes]:
+    """The subset of anchor state a failover standby needs to activate:
+    the CA key (and its public half), the TLS CA cert, the door key, and the
+    revoke list.  Excludes the anchor's node identity and the nodes/ registry
+    (the registry is rebuilt from the directory cache on activation)."""
+    data_dir = Path(data_dir)
+    files: dict[str, bytes] = {}
+    ca_key_file = Path(ca_key_file)
+    if ca_key_file.exists():
+        files["ca.key"] = ca_key_file.read_bytes()
+    pub_path = ca_key_file.with_suffix(".pub")
+    if pub_path.exists():
+        files["ca.key.pub"] = pub_path.read_bytes()
+    for rel in ["ca.cert.pem", "door.key", "revoked.json"]:
+        p = data_dir / rel
+        if p.exists():
+            files[rel] = p.read_bytes()
+    return files
+
+
 def restore_files(data_dir, files: dict[str, bytes]) -> list[str]:
     """Write extracted files under data_dir at 0600, creating parents. Refuses
     any archive name that would escape data_dir (path traversal). Returns the

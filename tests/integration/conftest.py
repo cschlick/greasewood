@@ -222,13 +222,14 @@ def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6:
                     hostname: str | None = None, caps: str | None = None,
                     roles: str | None = None,
                     invite_hostname: str | None = None,
-                    check: bool = True):
+                    check: bool = True, env: "dict[str, str] | None" = None):
     """
     Run one `gw invite` (on anchor_cid) → `gw join` (on node_cid) door enrollment.
     `anchor_ipv6` is the anchor's underlay address (the door endpoint). Generalized
     over the anchor so a test can enroll via a successor anchor, not just the original one.
     `invite_hostname` pins the name at invite (`gw invite --hostname`), which
     overrides any node-side `--hostname` and locks rename.
+    `env` is passed to the `gw invite` command (e.g. for GW_FAILOVER_PASSPHRASE).
     Returns the `gw join` CompletedProcess.
     """
     # caps/roles are decided by the anchor at invite (no self-assertion);
@@ -247,7 +248,8 @@ def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6:
     with _ENROLL_LOCK:
         # invite --endpoint takes a BARE address; the door port is fixed and the
         # token carries only the host.
-        res = pexec(anchor_cid, "gw", "invite", "--endpoint", anchor_ipv6, *invite_extra)
+        res = pexec(anchor_cid, "gw", "invite", "--endpoint", anchor_ipv6,
+                    *invite_extra, env=env)
         token = _extract_token(res.stdout + "\n" + res.stderr)
 
         j = pexec(node_cid, "gw", "join", token,
@@ -277,7 +279,7 @@ def door_enroll(gw_anchor, node_cid: str, node_ipv6: str, *,
                 hostname: str | None = None, caps: str | None = None,
                 roles: str | None = None,
                 invite_hostname: str | None = None,
-                check: bool = True):
+                check: bool = True, env: "dict[str, str] | None" = None):
     """Enroll an existing node container via the anchor (see door_enroll_via).
     `hostname`/`caps`/`roles` are passed only when given, so omitting
     them exercises join's "keep existing config" behavior. `invite_hostname` pins
@@ -285,14 +287,15 @@ def door_enroll(gw_anchor, node_cid: str, node_ipv6: str, *,
     return door_enroll_via(
         gw_anchor["cid"], gw_anchor["ipv6"], node_cid, node_ipv6,
         hostname=hostname, caps=caps, roles=roles,
-        invite_hostname=invite_hostname, check=check,
+        invite_hostname=invite_hostname, check=check, env=env,
     )
 
 
 def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
                   caps: str | None = None, roles: str | None = None,
                   invite_hostname: str | None = None,
-                  run_args: "list[str] | None" = None) -> dict:
+                  run_args: "list[str] | None" = None,
+                  env: "dict[str, str] | None" = None) -> dict:
     """
     Create, enroll (via the door), and start a single node container.
 
@@ -316,7 +319,7 @@ def bring_up_node(gw_image, gw_network, gw_anchor, hostname: str | None = None,
 
     ipv6 = container_addr(cid, gw_network)
     door_enroll(gw_anchor, cid, ipv6, hostname=hostname, caps=caps, roles=roles,
-                invite_hostname=invite_hostname)
+                invite_hostname=invite_hostname, env=env)
 
     id_pub = pexec(cid, "sh", "-c", "cat /var/lib/greasewood_*/id_pub.hex").stdout.strip()
     run_cmd = "gw -v run " + " ".join(run_args or []) + " >> /tmp/gw.log 2>&1"

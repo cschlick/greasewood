@@ -23,8 +23,13 @@ def podman(*args: str, check: bool = True, input: str | None = None) -> subproce
     )
 
 
-def pexec(container: str, *args: str, check: bool = True, input: str | None = None) -> subprocess.CompletedProcess:
-    return podman("exec", container, *args, check=check, input=input)
+def pexec(container: str, *args: str, check: bool = True, input: str | None = None,
+          env: "dict[str, str] | None" = None) -> subprocess.CompletedProcess:
+    env_args = []
+    if env:
+        for k, v in env.items():
+            env_args += ["-e", f"{k}={v}"]
+    return podman("exec", *env_args, container, *args, check=check, input=input)
 
 
 def container_ipv6(container: str, network: str) -> str:

@@ -299,6 +299,7 @@ class Window:
     hostname: "str | None"           # pinned at invite, or None
     guest_pub: "str | None"          # standing only: door re-erection material
     psk: "str | None"
+    failover_blob: "str | None" = None  # base64-encrypted standby blob for the failover cap
 
     def live(self, now: "dt.datetime | None" = None) -> bool:
         if self.standing:
@@ -323,7 +324,8 @@ def parse_window(data: dict) -> "Window | None":
                   caps=list(data.get("caps") or ["role:node"]),
                   allowed_roles=list(data.get("allowed_roles") or []),
                   hostname=data.get("hostname"),
-                  guest_pub=data.get("guest_pub"), psk=data.get("psk"))
+                  guest_pub=data.get("guest_pub"), psk=data.get("psk"),
+                  failover_blob=data.get("failover_blob"))
 
 
 def read_window(data_dir: Path) -> "dict | None":
