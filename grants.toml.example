@@ -136,3 +136,35 @@ ports = ["tcp/22"]
 # #      the share's ACL — NFSv4 is single-port, so the exports file stays
 # #      static (scoped to the overlay /64) and membership in role:worker
 # #      decides who can mount. Full recipe: the README's NFS worked example.
+
+# --- Relay: letting a pair fall back to the anchor ---------------------------
+# Some pairs cannot form a direct tunnel no matter what — one is IPv4-only and
+# the other reachable only over IPv6, or both sit behind NAT with no dialable
+# endpoint on either side. `relay = true` lets THAT pair route through the
+# anchor instead of simply failing.
+#
+# It takes two switches, and both must be on:
+#   1. this grant, saying which pair may relay, and
+#   2. `sudo gw relay on` on the anchor, saying it will carry relayed traffic.
+# Neither implies the other. A pair with no relay grant is never relayed,
+# however unreachable it is; a mesh with no policy file gets no relaying at all.
+#
+# Relaying is DECRYPT-AND-FORWARD: the anchor terminates both WireGuard tunnels,
+# so it can see (and could alter) the traffic of pairs it relays. Direct tunnels
+# stay end-to-end private. That is exactly why this is written down per pair
+# rather than inferred from a pair happening not to connect — the anchor holds
+# the CA already, but "can read this pair's packets" is a separate decision, and
+# it should be one you made on purpose.
+#
+# Nothing changes for pairs that CAN go direct: they always do, relay grant or
+# not, and a relayed pair drops back to direct as soon as one becomes possible.
+#
+# [[grant]]
+# from  = ["host:laptop"]
+# to    = ["host:nas"]
+# ports = ["tcp/2049"]
+# relay = true
+# # why: the laptop roams onto IPv4-only cafe wifi; the NAS is v6-only at home.
+# #      They share no underlay family there, so without this they simply don't
+# #      connect. NFS traffic is worth relaying through the anchor; note that
+# #      the anchor can read it, unlike on the direct tunnel used at home.
