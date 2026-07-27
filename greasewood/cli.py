@@ -1418,6 +1418,33 @@ def _pipx_install_env() -> "tuple[Path, Path] | None":
     return home, bin_dir
 
 
+def _prune_dangling_apps(bin_dir: Path, venv: Path) -> list:
+    """Remove app symlinks in PIPX_BIN_DIR that point into this venv but no
+    longer resolve — entry points the package USED to declare.
+
+    pipx never prunes these: `gw-admin-upgrade` was dropped in 0.3.0, and its
+    symlink sat in /usr/local/bin afterwards, dangling, with pipx cheerfully
+    re-announcing it as "globally available" on every install. Deliberately
+    narrow — only BROKEN links, and only ones pointing inside our own venv.
+    """
+    pruned = []
+    try:
+        entries = sorted(bin_dir.iterdir())
+    except OSError:
+        return pruned
+    for p in entries:
+        if not p.is_symlink() or p.exists():
+            continue                      # live link (or not a link at all)
+        target = Path(os.readlink(p))
+        if target.is_absolute() and venv in target.parents:
+            try:
+                p.unlink()
+                pruned.append(p.name)
+            except OSError as e:
+                log.warning("could not remove stale app link %s: %s", p, e)
+    return pruned
+
+
 def cmd_upgrade(args) -> int:
     """[sudo] Reinstall greasewood in place, then restart this mesh's daemon.
 
@@ -1480,6 +1507,10 @@ def cmd_upgrade(args) -> int:
             sys.exit(f"\n'{' '.join(step)}' failed (exit {r.returncode}).\n"
                      f"greasewood may be uninstalled right now — recover with:\n"
                      f"  sudo {prefix} pipx install {spec}")
+
+    stale = _prune_dangling_apps(bin_dir, home / "venvs" / "greasewood")
+    if stale:
+        print(f"\nremoved stale app link(s) pipx left behind: {', '.join(stale)}")
 
     gw = bin_dir / "gw"
     if gw.exists():

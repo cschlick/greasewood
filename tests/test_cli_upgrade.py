@@ -156,6 +156,38 @@ def test_a_failed_install_names_the_recovery_command(tmp_path, monkeypatch,
     assert "may be uninstalled" in msg and "pipx install greasewood" in msg
 
 
+def test_prunes_app_links_for_entry_points_the_package_dropped(tmp_path, monkeypatch,
+                                                               pipx_layout, capsys):
+    # Field report: pipx kept announcing 'gw-admin-upgrade' as globally
+    # available on every install, long after 0.3.0 removed that entry point.
+    # The venv's bin was clean; a DANGLING symlink in PIPX_BIN_DIR wasn't.
+    home, bin_dir = pipx_layout
+    venv = home / "venvs" / "greasewood"
+    (bin_dir / "gw-admin-upgrade").symlink_to(venv / "bin" / "gw-admin-upgrade")
+    assert (bin_dir / "gw-admin-upgrade").is_symlink()
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    cli.cmd_upgrade(_args(tmp_path))
+    assert not (bin_dir / "gw-admin-upgrade").is_symlink()   # pruned
+    assert (bin_dir / "gw").exists()                         # live app untouched
+    assert "gw-admin-upgrade" in capsys.readouterr().out
+
+
+def test_pruning_leaves_live_links_and_other_packages_alone(tmp_path, monkeypatch,
+                                                            pipx_layout):
+    # Narrow on purpose: PIPX_BIN_DIR is shared (/usr/local/bin), so a broken
+    # link belonging to some OTHER package is none of our business.
+    home, bin_dir = pipx_layout
+    other = tmp_path / "opt" / "pipx" / "venvs" / "somethingelse"
+    (bin_dir / "other-tool").symlink_to(other / "bin" / "other-tool")
+    (bin_dir / "plain-file").write_text("#!/bin/sh\n")
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    cli.cmd_upgrade(_args(tmp_path))
+    assert (bin_dir / "other-tool").is_symlink()      # broken, but not ours
+    assert (bin_dir / "plain-file").exists()
+
+
 def test_non_root_is_refused_before_anything_runs(tmp_path, monkeypatch,
                                                   pipx_layout):
     runs = _Runs()
