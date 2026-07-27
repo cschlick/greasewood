@@ -18,7 +18,7 @@ host-firewall port check — diagnose, narrate, config), administer nodes on the
 anchor (invite/close-door, revoke, set-caps,
 set-roles, renew-all), maintain this node (renew, rename-node, rename-mesh,
 purge), TLS service certs (cert-request/-profiles/-status/-remove), and anchor
-lifecycle (anchor-promote, anchor-backup, anchor-restore).
+lifecycle (anchor-promote, anchor-backup, anchor-restore, anchor-activate).
 """
 from __future__ import annotations
 
@@ -847,6 +847,15 @@ def cmd_invite(args) -> int:
              f"; self-select roles from {allowed_roles}" if allowed_roles else "",
              f"; hostname pinned to {pinned_hostname!r}" if pinned_hostname else "")
 
+    failover_blob = None
+    if "failover" in caps:
+        from . import backup as bak
+        fpass = _failover_passphrase(confirm=True)
+        fblob = bak.pack(
+            bak.collect_failover_state(data_dir, cfg.ca_key_file), fpass)
+        failover_blob = base64.b64encode(fblob).decode()
+        log.info("packing encrypted failover blob for this standby")
+
     seed = generate_seed()
     params = derive_door_params(seed)
 
@@ -891,6 +900,7 @@ def cmd_invite(args) -> int:
             "guest_pub": params.guest_pub_b64,
             "psk": params.psk_b64,
             "token": token,
+            "failover_blob": failover_blob,
         }), mode=0o600)
         log.info("STANDING door opened — this token enrolls any number of "
                  "nodes until: sudo gw close-door")
@@ -907,6 +917,7 @@ def cmd_invite(args) -> int:
             "caps": caps,
             "allowed_roles": allowed_roles,   # menu: roles a joiner may self-select
             "hostname": pinned_hostname,   # None → joiner names itself (unpinned)
+            "failover_blob": failover_blob,
         }), mode=0o600)
 
     print(token)
@@ -1680,6 +1691,15 @@ def cmd_join(args) -> int:
         log.info("anchor assigned hostname %r (requested %r)", cred.hostname, hostname)
     hostname = cred.hostname
     log.info("anchor assigned caps=%s", caps)
+    if "failover" in caps:
+        fblob = resp.get("failover_blob")
+        if not fblob:
+            wgmod.destroy_interface("gw-door")
+            sys.exit("failover capability granted but no encrypted blob was received")
+        from .keys import atomic_write
+        atomic_write(data_dir / "failover_anchor.gwbk",
+                     base64.b64decode(fblob), mode=0o600)
+        log.info("stored encrypted failover blob for later anchor-activate")
     if cred.id_pub != node_keys.id_pub_bytes:
         wgmod.destroy_interface("gw-door")
         sys.exit("credential id_pub mismatch — something went wrong")
@@ -3532,6 +3552,21 @@ def _backup_passphrase(confirm: bool) -> bytes:
     return pw.encode()
 
 
+def _failover_passphrase(confirm: bool) -> bytes:
+    """Passphrase for the encrypted failover blob. From $GW_FAILOVER_PASSPHRASE
+    if set, else prompted — confirmed when packing at invite time."""
+    import getpass
+    env = os.environ.get("GW_FAILOVER_PASSPHRASE")
+    if env:
+        return env.encode()
+    pw = getpass.getpass("Failover passphrase: ")
+    if not pw:
+        sys.exit("empty passphrase — aborting")
+    if confirm and getpass.getpass("Confirm passphrase: ") != pw:
+        sys.exit("passphrases did not match — aborting")
+    return pw.encode()
+
+
 def cmd_anchor_backup(args) -> int:
     """Write a single encrypted archive of this anchor's trust state (CA key, the
     nodes/ registry, revoke list, door key). Restoring the same key onto a new
@@ -3607,6 +3642,114 @@ def cmd_anchor_restore(args) -> int:
     print("Next: write /etc/greasewood.toml pointing ca_key_file at "
           f"{data_dir / 'ca.key'} (role = anchor), then `sudo gw run`. Because the "
           "CA key is unchanged, existing nodes keep trusting it — no re-root.")
+    return 0
+
+
+def cmd_anchor_activate(args) -> int:
+    """[sudo] Promote a failover standby node to anchor.  Decrypts the CA blob
+    received at enrollment, rebuilds the node registry from the cached
+    directory, and rewrites this node's config to role=anchor.  Run `gw run`
+    afterwards to start serving control plane + door.  Refuses if the existing
+    anchor still looks reachable."""
+    _require_root("anchor-activate")
+    from .config import load_config, _parse_duration
+    from .keys import CAKeys, NodeKeys, atomic_write
+    from .ca import CA
+    from .directory import Directory
+    from . import backup as bak
+
+    cfg = load_config(Path(args.config))
+    if cfg.role == "anchor" and not args.force:
+        sys.exit("this node is already configured as an anchor; "
+                 "pass --force to re-activate anyway")
+    if "failover" not in cfg.caps:
+        sys.exit("this node does not hold the 'failover' capability — "
+                 "re-enroll it with `gw invite --caps failover`")
+    failover_path = cfg.data_dir / "failover_anchor.gwbk"
+    if not failover_path.exists():
+        sys.exit(f"no failover blob at {failover_path} — "
+                 "was this node enrolled with --caps failover?")
+
+    passphrase = _failover_passphrase(confirm=False)
+    try:
+        files = bak.unpack(failover_path.read_bytes(), passphrase)
+    except bak.BackupError as e:
+        sys.exit(f"failed to decrypt failover blob: {e}")
+    if "ca.key" not in files:
+        sys.exit("failover blob is missing the CA key")
+
+    # Refuse if the current anchor is still reachable.
+    urls_to_try = [cfg.root_url] if cfg.root_url else cfg.seeds
+    import urllib.request
+    for url in urls_to_try:
+        if not url:
+            continue
+        try:
+            urllib.request.urlopen(f"{url.rstrip('/')}/health", timeout=3)
+        except Exception:
+            continue
+        sys.exit(
+            "a live anchor is still reachable — refusing to activate a standby "
+            "while the current anchor appears up. If the URL is stale, remove/"
+            "repoint [network] root_url before running this command."
+        )
+
+    data_dir = cfg.data_dir
+    ca_key_path = data_dir / "ca.key"
+    written = []
+    for name in ["ca.key", "ca.key.pub", "ca.cert.pem", "door.key", "revoked.json"]:
+        if name in files:
+            dest = data_dir / name
+            if dest == ca_key_path and dest.exists() and not args.force:
+                sys.exit(f"{dest} already exists — pass --force to overwrite")
+            atomic_write(dest, files[name])
+            written.append(name)
+    if not ca_key_path.exists():
+        sys.exit("CA key was not written from the failover blob")
+
+    # Rebuild the anchor's nodes/ registry from the cached directory.
+    ca_keys = CAKeys.load(ca_key_path)
+    ca = CA(ca_keys, data_dir, credential_ttl=_parse_duration(args.credential_ttl))
+    directory = Directory.load(cfg.dir_cache_path)
+    node_keys = NodeKeys.load_or_generate(data_dir)
+    for rec in directory.all():
+        caps = list(rec.cred.caps)
+        if rec.id_pub == node_keys.id_pub_bytes:
+            # This node is becoming the anchor; ensure it has the anchor roles.
+            for c in ("role:*", "role:anchor"):
+                if c not in caps:
+                    caps.append(c)
+        ca._save_node_caps(rec.id_pub, rec.cred.hostname, caps,
+                           exp=rec.cred.exp, iat=rec.cred.iat)
+
+    # Rewrite this node's config as an anchor.
+    control_port = args.control_port
+    door_port = args.door_port
+    ca_pub_hex = ca_keys.ca_pub_bytes.hex()
+    cfg_path = Path(args.config)
+    anchor_caps = list(cfg.caps)
+    for c in ("role:*", "role:anchor"):
+        if c not in anchor_caps:
+            anchor_caps.append(c)
+    cfg_path.write_text(render_config(
+        hostname=cfg.hostname, data_dir=data_dir, role="anchor", caps=anchor_caps,
+        endpoints=cfg.endpoints, interface=cfg.wg_interface,
+        listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
+        seeds=[], root_url=f"http://[::1]:{control_port}",
+        hosts_sync=cfg.hosts_sync, mesh_domain=cfg.mesh_domain,
+        trusted_pubs=[ca_pub_hex], enforce_ports=cfg.enforce_ports,
+        endpoint_auto=cfg.endpoint_auto,
+        anchor={"ca_key_file": ca_key_path, "control_port": control_port,
+                "credential_ttl": args.credential_ttl,
+                "door_port": door_port}))
+    log.info("rewrote %s for role=anchor", cfg_path)
+    print("\nStandby activated as anchor.")
+    print(f"  CA pub key   : {ca_pub_hex}")
+    print(f"  control URL  : http://[{node_keys.addr}]:{control_port}")
+    print(f"  files written: {', '.join(written)}")
+    print(f"  registry     : {directory.size()} node(s) rebuilt from {cfg.dir_cache_path}")
+    print("\nStart the daemon to serve the control plane:")
+    print(f"  sudo gw -c {cfg_path} run")
     return 0
 
 
@@ -4487,6 +4630,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true",
                     help="overwrite an existing ca.key in the target dir")
     sp.set_defaults(fn=cmd_anchor_restore)
+
+    # anchor-activate (failover standby -> anchor)
+    sp = sub.add_parser("anchor-activate",
+                        help="[sudo, failover standby] decrypt the escrowed CA blob, "
+                             "rebuild the registry from the directory cache, and "
+                             "rewrite this node as the anchor")
+    sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
+    sp.add_argument("--door-port", dest="door_port", type=int, default=51901)
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite an existing ca.key / config")
+    sp.set_defaults(fn=cmd_anchor_activate)
 
     # anchor-transfer
     sp = sub.add_parser("anchor-transfer",
