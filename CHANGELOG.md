@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gw upgrade`** — upgrade a node in place, from PyPI (`--from pypi`, the default) or straight from the git repo (`--from github [--ref <branch|tag|commit>]`, for running a fix that isn't released yet). It does a clean `pipx uninstall` + `pipx install` rather than `pipx upgrade`, which has left the previous version's `__pycache__` behind in the venv, and it targets the `PIPX_HOME`/`PIPX_BIN_DIR` this install actually came from (fleet nodes use `/opt/pipx`, not pipx's default) instead of guessing. The exact commands are printed and confirmed before anything runs — the uninstall step briefly removes `gw` from a machine you may be connected through — and a failed install names the recovery command. Finishes by restarting the mesh's daemon. `--yes` skips the prompt.
+
 ### Fixed
 
 - **An anchor that is also a router no longer loses IPv6 forwarding.** The relay reconcile forced the machine-wide `net.ipv6.conf.all.forwarding` sysctl to match the relay marker every cycle, so with relay off (the default) it set it to `0` — black-holing IPv6 for every LAN client behind an anchor that was also the site router, and re-doing it within a cycle of any manual fix. greasewood now only ever turns forwarding **on**, and turns it off only if it was the one that enabled it (tracked by a `relay-forwarding-owned` marker in the data dir). Forwarding that predates greasewood is left exactly as found.

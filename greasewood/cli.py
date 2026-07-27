@@ -1390,6 +1390,107 @@ def cmd_relay(args) -> int:
     return 0
 
 
+_REPO_URL = "https://github.com/cschlick/greasewood"
+
+
+def _pipx_install_env() -> "tuple[Path, Path] | None":
+    """Where pipx put THIS install: ``(PIPX_HOME, PIPX_BIN_DIR)``, or None if we
+    aren't running from a pipx venv.
+
+    Read off the running interpreter rather than assumed: a pipx venv lives at
+    ``<PIPX_HOME>/venvs/<package>``, and the app symlink that launched us sits
+    in PIPX_BIN_DIR. Fleet installs deliberately use a non-default PIPX_HOME
+    (``/opt/pipx``, so root's install isn't buried in a user's home) — guessing
+    the default would install a SECOND copy elsewhere while the service kept
+    running the old one, which is exactly the confusion this command exists to
+    end.
+    """
+    venv = Path(sys.prefix)
+    if venv.parent.name != "venvs":
+        return None                      # apt/rpm, a dev checkout, or a venv we don't own
+    home = venv.parent.parent
+    exe = shutil.which("gw") or sys.argv[0]
+    bin_dir = Path(exe).parent if os.path.isabs(exe) else Path("/usr/local/bin")
+    # If PATH found the venv's own bin, that's not the shared bin dir pipx links
+    # into — fall back rather than point PIPX_BIN_DIR inside the venv.
+    if home in bin_dir.parents or bin_dir == venv / "bin":
+        bin_dir = Path("/usr/local/bin")
+    return home, bin_dir
+
+
+def cmd_upgrade(args) -> int:
+    """[sudo] Reinstall greasewood in place, then restart this mesh's daemon.
+
+    A clean uninstall+install, not ``pipx upgrade``: upgrading in place has been
+    seen to leave the previous version's ``__pycache__`` behind in the venv, so
+    the running code doesn't always match what was installed. Two sources — the
+    published PyPI release (default) or the git repo (``--from github``), the
+    latter for running a fix that isn't released yet.
+
+    Always prints the exact commands and asks before running any of them: the
+    uninstall step briefly removes ``gw`` from a machine you may well be
+    connected through.
+    """
+    from .config import load_config
+
+    env = _pipx_install_env()
+    if env is None:
+        sys.exit("'gw upgrade' only manages a pipx install, and this greasewood "
+                 f"isn't one (running from {sys.prefix}).\n"
+                 "A distro package upgrades with your package manager; a dev "
+                 "checkout with 'pip install -e .'.")
+    home, bin_dir = env
+    _require_root("upgrade", "it reinstalls the package and restarts the service")
+
+    if args.source == "github":
+        if not shutil.which("git"):
+            sys.exit("installing from the repo needs git, which isn't installed.\n"
+                     "Try: sudo apt install git   # or: sudo apk add git")
+        ref = args.ref or "main"
+        spec = f"git+{_REPO_URL}@{ref}"
+        origin = f"the repo @ {ref}"
+    else:
+        spec = f"greasewood=={args.ref}" if args.ref else "greasewood"
+        origin = f"PyPI {args.ref}" if args.ref else "PyPI (latest release)"
+
+    pipx_env = {"PIPX_HOME": str(home), "PIPX_BIN_DIR": str(bin_dir)}
+    prefix = " ".join(f"{k}={v}" for k, v in pipx_env.items())
+    steps = [["pipx", "uninstall", "greasewood"], ["pipx", "install", spec]]
+
+    cfg = load_config(Path(args.config))
+    key = membership_key(cfg.mesh_domain)
+
+    print(f"greasewood {_version()}  →  reinstall from {origin}\n")
+    for step in steps:
+        print(f"  {prefix} {' '.join(step)}")
+    print(f"\nthen: restart the daemon for '{key}'\n")
+    print("The uninstall step removes 'gw' until the install finishes. If the "
+          "install fails\n(no network, bad ref), recover by re-running the "
+          "install line above by hand.\n")
+
+    if not args.yes and input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("cancelled — nothing changed.")
+        return 1
+
+    run_env = {**os.environ, **pipx_env}
+    for step in steps:
+        print(f"\n$ {' '.join(step)}")
+        r = subprocess.run(step, env=run_env)
+        if r.returncode != 0:
+            sys.exit(f"\n'{' '.join(step)}' failed (exit {r.returncode}).\n"
+                     f"greasewood may be uninstalled right now — recover with:\n"
+                     f"  sudo {prefix} pipx install {spec}")
+
+    gw = bin_dir / "gw"
+    if gw.exists():
+        v = subprocess.run([str(gw), "--version"], capture_output=True, text=True)
+        if v.returncode == 0:
+            print(f"\ninstalled: {v.stdout.strip()}")
+    if not _service_restart(key, why="to run the new code"):
+        print(f"restart the daemon to run the new code:\n  {_svc_restart_hint(key)}")
+    return 0
+
+
 def _enroll_over_door(*args, **kwargs):
     """Crash guard around the door dance: the inner function's graceful
     refusals tear gw-door down themselves before sys.exit, but a CRASH path
@@ -4619,6 +4720,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="on: this anchor relays unreachable pairs (it will see "
                          "that traffic); off: stop; status: show current state")
     sp.set_defaults(fn=cmd_relay)
+
+    # upgrade — clean pipx reinstall of this node, from PyPI or the repo.
+    sp = sub.add_parser("upgrade",
+                        help="[sudo] reinstall greasewood (PyPI or the repo) and "
+                             "restart this mesh's daemon — shows the commands "
+                             "and asks first")
+    sp.add_argument("--from", dest="source", choices=["pypi", "github"],
+                    default="pypi",
+                    help="pypi: the published release (default); github: the git "
+                         "repo, for running a fix that isn't released yet")
+    sp.add_argument("--ref",
+                    help="which one: a git ref (branch/tag/commit, default main) "
+                         "with --from github, or an exact version with --from "
+                         "pypi (default: latest)")
+    sp.add_argument("--yes", "-y", action="store_true",
+                    help="skip the confirmation prompt")
+    sp.set_defaults(fn=cmd_upgrade)
 
     # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",

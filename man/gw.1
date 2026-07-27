@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-27" "greasewood 0.1.4" "User Commands"
+.TH GW 1 "2026-07-27" "greasewood 0.1.0" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -235,6 +235,22 @@ show this help message and exit
 .TP
 \fI{on,off,status}\fR
 on: this anchor relays unreachable pairs (it will see that traffic); off: stop; status: show current state
+.SS gw upgrade
+\fBUsage:\fR gw upgrade [\-h] [\-\-from {pypi,github}] [\-\-ref REF] [\-\-yes]
+.PP
+[sudo] reinstall greasewood (PyPI or the repo) and restart this mesh's daemon \(em shows the commands and asks first
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-from\fR \fI{pypi,github}\fR
+pypi: the published release (default); github: the git repo, for running a fix that isn't released yet
+.TP
+\fB\-\-ref\fR \fIREF\fR
+which one: a git ref (branch/tag/commit, default main) with \-\-from github, or an exact version with \-\-from pypi (default: latest)
+.TP
+\fB\-\-yes\fR, \fB\-y\fR
+skip the confirmation prompt
 .SS gw set\-caps
 \fBUsage:\fR gw set\-caps [\-h] node caps
 .PP
