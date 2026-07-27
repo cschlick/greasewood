@@ -37,6 +37,11 @@ def _isolate_system(monkeypatch, tmp_path):
     # systemd-managed purge path; a container without systemd would skip it).
     monkeypatch.setattr(cli.shutil, "which",
                         lambda name: "/bin/systemctl" if name == "systemctl" else None)
+    # Pin the backend too: service.detect() checks /run/systemd/system, so on a
+    # non-systemd host (macOS dev box) purge would see no backend at all.
+    from greasewood import service as _service
+    monkeypatch.setattr(cli, "_service_backend",
+                        lambda: _service.SystemdManager(units))
     return units
 
 

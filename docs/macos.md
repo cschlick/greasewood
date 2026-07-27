@@ -50,6 +50,18 @@ networking instead — a different, heavier setup — but most laptop clients do
 
 ## Set it up
 
+The short way — Homebrew installs the whole Mac side (Lima, the `gw` and
+`gw-mac` commands, and the VM recipes), and `gw-mac` creates the VM on first
+run:
+
+```bash
+brew install cschlick/tap/greasewood
+gw-mac            # creates the VM, prints the invite/join steps
+```
+
+The rest of this section is the same setup by hand — read it to know what the
+formula is doing for you, or to customize the VM.
+
 Install Lima (`brew install lima`), then drop in
 [`greasewood-node.yaml`](examples/greasewood-node.yaml):
 
@@ -86,6 +98,10 @@ sudo gw invite --hostname macbook
 # then, on the Mac
 limactl shell greasewood-node sudo gw join <token>
 ```
+
+(With the brew-installed `gw` shim, plain `gw join <token>` also names the
+node like Linux would — it claims the **Mac's** hostname, not the VM's
+Lima-internal one, unless you pass `--hostname` or the invite pinned a name.)
 
 `gw join` enrolls the node **and** enables `greasewood@<mesh>` to start at boot
 — nothing else to configure. Confirm it:
@@ -190,7 +206,8 @@ would silently kill the VM's own SLAAC underlay):
 --8<-- "examples/gw-mac-gateway.service"
 ```
 
-Install once:
+Install once (`gw-mac` does this automatically when it creates the VM — this
+is the manual path for a VM you built yourself):
 
 ```bash
 limactl cp gw-mac-gateway.nft gw-mac-gateway.sysctl.conf gw-mac-gateway.service greasewood-node:/tmp/
@@ -224,6 +241,21 @@ ssh gp2.mymesh.internal  # any app, any port the node's grants allow
 `gw-mac down` removes the route and stops the VM; `gw-mac status` shows both
 layers at a glance.
 
+Or stop thinking about it entirely — `up` is an idempotent reconciler, so it
+can run on a timer (brew install only):
+
+```bash
+sudo gw-mac install-autostart   # once: root helper + scoped sudoers rule
+brew services start greasewood  # runs 'gw-mac up' every 2 minutes at login
+```
+
+Root operations (the route, `/etc/hosts`) don't prompt after that: they go
+through a small audited helper installed root-owned at
+`/usr/local/libexec/gw-mac-priv` — outside the user-writable brew prefix, so
+the NOPASSWD rule covers exactly that file and nothing a non-root process can
+rewrite. The trade: your user can adjust the mesh route and hosts block
+without a password. `sudo gw-mac uninstall-autostart` undoes both.
+
 Know what you're trading:
 
 - **Per-port becomes whole-node.** The relay exposed one port; this hands
@@ -249,9 +281,25 @@ What it actually saves, and what it costs:
 - **Disk:** ~0.8 GB less (Alpine + Python + `cryptography` is ~400–500 MB used,
   vs Debian's ~1.2–1.4 GB). Most of what remains is Python + `cryptography`,
   which is the same on both — you can't shrink below that floor.
-- **RAM:** in practice a Debian node VM sits ~500–600 MB resident; an Alpine one
-  ~100–150 MB. Almost all of the difference is systemd + journald + page cache
-  that Alpine simply doesn't carry.
+- **RAM:** inside the guest, an Alpine node idles around ~100 MB used vs
+  Debian's ~250 MB — systemd + journald + page cache Alpine simply doesn't
+  carry. What Activity Monitor shows on the Mac is a different (larger) number,
+  and it's the least meaningful one: the "Memory" column is *physical
+  footprint*, which tracks the high-water mark of guest pages ever touched —
+  Linux fills its RAM with page cache during boot alone, so the figure sits
+  pinned at the configured ceiling forever and never comes back down. It does
+  **not** mean that much of your RAM is occupied. Guest RAM under
+  Virtualization.framework is ordinary pageable memory, and macOS's compressor
+  quietly reclaims the cold pages (a running node typically has a third or more
+  of its writable pages compressed or swapped out — check with
+  `vmmap --summary <pid>`); footprint counts those reclaimed pages as if they
+  were still resident. There's no memory balloon in the Lima/vz stack and none
+  is needed — the compressor already does that job, guest cooperation not
+  required. Real steady-state cost is on the order of 100–150 MB, less under
+  host memory pressure. The ceiling is still the real lever, and Alpine's is a
+  quarter: 256 MiB vs 1 GiB. What makes 256 safe is the recipe's in-guest
+  swapfile — pip's install-time bursts (the VM's only hungry moment) spill to
+  the virtual disk instead of needing RAM ceiling held in reserve for them.
 - **The cost:** OpenRC can't apply the systemd unit's exec sandbox
   (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters), so **the daemon
   runs as unconfined root.** For a laptop that normally runs no firewall this is
@@ -276,14 +324,17 @@ survives rebuilds, `limactl stop` safe / `delete` not, the directory-loss
 caveat) is the same.
 
 !!! note "One image-line chore"
-    Alpine images for Lima come from the alpine-lima project and their
-    version/digest move over time. The YAML shows a representative line; copy the
-    current one with `limactl start --dry-run template://alpine 2>&1 | grep -A8
-    'images:'` and paste it in (with the digest) before `limactl start`.
+    The YAML pins the official Alpine cloud images at the point-release Lima
+    itself currently pins (Lima ≥2.0 uses these, not the old alpine-lima ISOs).
+    Alpine point-releases move over time; refresh the `images:` block from
+    Lima's current pin with `limactl template copy template:_images/alpine-3.23 -`
+    and paste it in (digests included) before `limactl start`.
 
-!!! note "The Mac-app sections above assume the Debian recipe"
-    *Reach a peer* and *Route the whole Mac* use systemd inside the VM
-    (`systemd-run`, a `gw-mac-gateway` unit). On Alpine the ideas carry
-    over unchanged — adapt the transient relay to `rc-service` and the
-    gateway to an OpenRC service (the same one-script/`supervise-daemon`
-    shape `gw` itself installs).
+!!! note "The Mac-app sections above work here too"
+    *Route the whole Mac* carries over as-is: `gw-mac` detects the guest's
+    init system and installs the gateway as an OpenRC service
+    ([`gw-mac-gateway.initd`](examples/gw-mac-gateway.initd)) instead of a
+    systemd unit. Only the *Reach a peer* transient relay needs adapting —
+    `systemd-run` has no OpenRC analog, so write a small
+    `/etc/init.d/` script (the same shape `gw` itself installs) or run
+    `socat` under `nohup` for a one-off.
