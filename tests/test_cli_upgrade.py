@@ -165,9 +165,18 @@ def test_prunes_app_links_for_entry_points_the_package_dropped(tmp_path, monkeyp
     venv = home / "venvs" / "greasewood"
     (bin_dir / "gw-admin-upgrade").symlink_to(venv / "bin" / "gw-admin-upgrade")
     assert (bin_dir / "gw-admin-upgrade").is_symlink()
+    seen = []
     runs = _Runs()
-    _patch_run(monkeypatch, runs)
+    real = runs.__call__
+
+    def spy(cmd, *a, **kw):             # what the bin dir looks like TO pipx
+        seen.append(sorted(p.name for p in bin_dir.iterdir()))
+        return real(cmd, *a, **kw)
+
+    _patch_run(monkeypatch, spy)
     cli.cmd_upgrade(_args(tmp_path))
+    # Pruned BEFORE pipx ran, so pipx never sees it and never announces it.
+    assert "gw-admin-upgrade" not in seen[0]
     assert not (bin_dir / "gw-admin-upgrade").is_symlink()   # pruned
     assert (bin_dir / "gw").exists()                         # live app untouched
     assert "gw-admin-upgrade" in capsys.readouterr().out

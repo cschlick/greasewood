@@ -1499,6 +1499,13 @@ def cmd_upgrade(args) -> int:
         print("cancelled — nothing changed.")
         return 1
 
+    venv = home / "venvs" / "greasewood"
+    # BEFORE pipx runs, not just after: a stale link left by an older version is
+    # still there when pipx links the new install, and pipx announces it as
+    # "globally available" — the confusing line this is meant to stop. Only
+    # broken links go, so the live `gw` is untouched.
+    stale = _prune_dangling_apps(bin_dir, venv)
+
     run_env = {**os.environ, **pipx_env}
     for step in steps:
         print(f"\n$ {' '.join(step)}")
@@ -1508,7 +1515,8 @@ def cmd_upgrade(args) -> int:
                      f"greasewood may be uninstalled right now — recover with:\n"
                      f"  sudo {prefix} pipx install {spec}")
 
-    stale = _prune_dangling_apps(bin_dir, home / "venvs" / "greasewood")
+    # Again afterwards: this install may itself have dropped an entry point.
+    stale += [n for n in _prune_dangling_apps(bin_dir, venv) if n not in stale]
     if stale:
         print(f"\nremoved stale app link(s) pipx left behind: {', '.join(stale)}")
 
