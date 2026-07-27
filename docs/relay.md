@@ -121,9 +121,15 @@ gw relay status         # show whether relay is on + IPv6 forwarding state
   dialled you and its handshakes arrive at a node that no longer knows its key,
   which is worse than not relaying at all. A peer that publishes no families (an
   older node) is given the benefit of the doubt and stays direct.
-- **`gw watch` shows the edge.** A relayed peer counts as reachable while the
-  anchor link is live, so the segment-health view shows the connection (via
-  relay) rather than a false gap.
+- **`gw watch` shows the edge, and says it's relayed.** The `via` column gives
+  each live link as `ip6`/`ip4` when it's a direct tunnel and `ip6R`/`ip4R` when
+  it rides the anchor — read from live WireGuard state, not from policy, so an
+  unexpected fold is visible at a glance instead of needing `wg show`. A relayed
+  peer counts as up while the anchor link is live (its liveness *is* the
+  anchor's), so the segment-health view shows the connection rather than a false
+  gap. `gw diagnose` adds a `can dial out` row — the families a node can
+  originate on, which is what separates "it can't be dialled but will dial you"
+  from "it can't reach you at all".
 - **The anchor is a funnel + single point of failure** for relayed flows —
   all their traffic goes through it. Fine for a laptop reaching a home server;
   think twice before relaying high-bandwidth or latency-sensitive pairs.

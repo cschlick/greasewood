@@ -192,6 +192,7 @@ _W_LAT     = len("1000ms")                    # ping -W1 deadline caps RTT ~1s
 _W_TRAFFIC = len("↓1023.9G ↑1023.9G")         # widest cumulative ↓rx ↑tx
 _W_RATE    = len("↓1023.9K/s ↑1023.9K/s")     # widest per-second ↓ ↑
 _W_VER     = len("00.00.0")                   # widest version string
+_W_VIA     = len("ip4R")                      # ip6 / ip4 / ip6R / ip4R
 
 
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
@@ -237,41 +238,53 @@ def _render_roster(nodes, cfg, have_live, is_root,
         installed = bool(live and live.get("installed"))
         up = bool(live and live.get("up"))
         ver = n["version"]
-        if is_live:                             # link · rate · latency · ver
+        # How the traffic travels: ip6 / ip4 direct, ip6R / ip4R via the anchor.
+        # Only meaningful for a live link — a dash elsewhere keeps the column
+        # from implying a path that doesn't exist.
+        via = (live or {}).get("via") or "—"
+        # Relayed: no peer entry of its own, but a real path through the anchor.
+        # Treat it as present for display, minus byte counters we can't attribute.
+        relayed = bool(live and live.get("relayed"))
+        if is_live:                             # link · via · rate · latency · ver
             if is_self:
-                return ("(self)", "", latency.get(n["addr"], "…"), ver)
+                return ("(self)", "—", "", latency.get(n["addr"], "…"), ver)
             if not peers:
-                return ("— not a peer", "", "", ver)
-            if not installed:
-                return ("not installed", "", "", ver)
+                return ("— not a peer", "—", "", "", ver)
+            if not installed and not relayed:
+                return ("not installed", "—", "", "", ver)
             if up:
                 # middle column: cumulative traffic (steady) or per-second rate.
-                middle = (f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}"
-                          if show_total else (rates or {}).get(n["addr"], ""))
+                middle = "" if relayed else (
+                    f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}"
+                    if show_total else (rates or {}).get(n["addr"], ""))
                 return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])}",
+                        via,
                         middle,
                         latency.get(n["addr"], "…"),   # … = ping in flight
                         ver)
-            return ("○ no handshake", "", "—", ver)
+            return ("○ no handshake", via, "", "—", ver)
         if not have_live:                       # policy only (no root)
             return ("self" if is_self else ("yes" if peers else "no"), ver)
         if is_self:
-            return ("(self)", "", ver)
+            return ("(self)", "—", "", ver)
         if not peers:
-            return ("— not a peer", "", ver)
-        if not installed:
-            return ("not installed", "", ver)
+            return ("— not a peer", "—", "", ver)
+        if not installed and not relayed:
+            return ("not installed", "—", "", ver)
         if up:
             return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])} ago",
+                    via,
+                    "" if relayed else
                     f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}",
                     ver)
-        return ("○ no handshake", "", ver)
+        return ("○ no handshake", via, "", ver)
 
     left_hdr = ("name", "addr", "roles", "exp")
     if is_live:
-        right_hdr = ("link", "traffic" if show_total else "rate", "latency", "ver")
+        right_hdr = ("link", "via", "traffic" if show_total else "rate",
+                     "latency", "ver")
     elif have_live:
-        right_hdr = ("link", "traffic", "ver")
+        right_hdr = ("link", "via", "traffic", "ver")
     else:
         right_hdr = ("peer?", "ver")
 
@@ -287,9 +300,10 @@ def _render_roster(nodes, cfg, have_live, is_root,
     # data). left: only `exp` is dynamic. right depends on mode.
     left_reserve = (0, 0, 0, _W_EXP)              # name, addr, roles, exp
     if is_live:
-        right_reserve = (_W_LINK, _W_TRAFFIC if show_total else _W_RATE, _W_LAT, _W_VER)
+        right_reserve = (_W_LINK, _W_VIA, _W_TRAFFIC if show_total else _W_RATE,
+                         _W_LAT, _W_VER)
     elif have_live:
-        right_reserve = (_W_LINK, _W_TRAFFIC, _W_VER)
+        right_reserve = (_W_LINK, _W_VIA, _W_TRAFFIC, _W_VER)
     else:
         right_reserve = (0, _W_VER)               # peer? — small + static
 
@@ -1818,6 +1832,39 @@ def _iso_z(t) -> "str | None":
     return t.astimezone(_UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _via(addr: str, wg_pub_b64: str, live_peers: dict, now_epoch: int):
+    """How this peer's traffic actually travels, as ``(via, carrier)``:
+    ``ip6``/``ip4`` for a live direct tunnel, ``ip6R``/``ip4R`` when it rides the
+    anchor (relay), ``""`` when there is no path at all.
+
+    Both halves are OBSERVED from live WireGuard state, not inferred from policy:
+    the family is whichever endpoint the tunnel is really using, and the ``R`` is
+    the relay fold itself — the peer has no entry of its own and its /128 sits in
+    another peer's AllowedIPs. A relayed link is one the anchor can read
+    (decrypt-and-forward), so it should be visible without reading `wg show`.
+
+    A configured-but-dead endpoint reports nothing: this column describes the
+    path traffic takes, and naming a family for a peer that has never handshaked
+    would imply a working path that isn't there. ``carrier`` is the peer whose
+    tunnel carries a relayed link (its liveness IS this link's liveness), else
+    None.
+
+    getattr throughout: a partial peer object (an older wg parse, a stub) must
+    degrade to a blank cell, never take the whole roster down with it.
+    """
+    lp = live_peers.get(wg_pub_b64)
+    endpoint = getattr(lp, "endpoint", "") if lp is not None else ""
+    if endpoint and _handshake_fresh(lp, now_epoch):
+        return f"ip{6 if endpoint.startswith('[') else 4}", None
+    for pub, other in live_peers.items():
+        if pub == wg_pub_b64:
+            continue                      # its own entry is not a relay carrier
+        carrier = getattr(other, "endpoint", "")
+        if carrier and addr in getattr(other, "allowed_addrs", ()):
+            return f"ip{6 if carrier.startswith('[') else 4}R", other
+    return "", None
+
+
 def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> dict:
     """One directory record as the JSON-native per-node dict — the SINGLE model
     both `--json` and the text roster render from, so a per-node column can't
@@ -1855,10 +1902,13 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
     else:
         entry["version"] = r.version or "?"
     if live_peers is not None:
-        lp = live_peers.get(base64.b64encode(r.cred.wg_pub).decode())
+        wg_pub_b64 = base64.b64encode(r.cred.wg_pub).decode()
+        lp = live_peers.get(wg_pub_b64)
+        via, carrier = _via(r.cred.addr, wg_pub_b64, live_peers, now_epoch)
         if lp:
             entry["live"] = {
                 "installed": True,
+                "via": via,
                 "up": _handshake_fresh(lp, now_epoch),
                 "last_handshake": (_iso_z(dt.datetime.fromtimestamp(
                     lp.latest_handshake, _UTC)) if lp.latest_handshake else None),
@@ -1867,8 +1917,18 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
                 "rx_bytes": lp.rx_bytes,
                 "tx_bytes": lp.tx_bytes,
             }
+        elif carrier is not None:
+            # Relayed: it has no peer entry of its own, so its liveness is the
+            # anchor tunnel's. Byte counters stay out — the carrier's totals are
+            # every relayed peer's traffic, not this one's.
+            entry["live"] = {
+                "installed": False, "relayed": True, "via": via,
+                "up": _handshake_fresh(carrier, now_epoch),
+                "handshake_age_s": ((now_epoch - carrier.latest_handshake)
+                                    if carrier.latest_handshake else None),
+            }
         else:
-            entry["live"] = {"installed": False}
+            entry["live"] = {"installed": False, "via": via}
     return entry
 
 
@@ -2232,6 +2292,7 @@ class _DiagnoseColumn:
     scope_note: str = ""                   # set iff the endpoint isn't globally reachable
     handshake_age: "int | None" = None     # secs since last handshake, or None
     firewall: str = ""                     # this-host verdict / inferred / "???"
+    families: list = field(default_factory=list)   # families it can ORIGINATE on
 
 
 def _resolve_diag_columns(args, cfg, directory, own_id_bytes, own_rec) -> list:
@@ -2350,7 +2411,11 @@ def _build_diag_facts(columns, cfg, own_addr, ca_pubs, revoked,
             has_endpoint=has_endpoint,
             endpoint=v6 if v6 != "-" else (v4 if v4 != "-" else "—"),
             scope_note=_endpoint_scope_note(v6, v4),
-            handshake_age=age, firewall=firewall))
+            handshake_age=age, firewall=firewall,
+            # For SELF, detect live rather than trusting our own record — it may
+            # not have republished since the network changed under us.
+            families=(sorted(_diag_local_families()) if is_self
+                      else sorted(getattr(rec, "families", []) or []) if rec else [])))
     return facts
 
 
@@ -2372,6 +2437,26 @@ def _print_diag_header(cfg, own_addr, port, ca_pubs) -> None:
     print()
 
 
+def _diag_local_families() -> set:
+    """This host's originate-capable families, detected now (cli owns the
+    detector; imported lazily to keep status independent of cli import order)."""
+    try:
+        from .cli import _local_families
+        return _local_families()
+    except Exception:                      # pragma: no cover - defensive
+        return set()
+
+
+def _fmt_families(families) -> str:
+    """A node's self-reported originate-capable families, for diagnose. Empty
+    means the node predates the field (or detection failed) — say so rather than
+    implying it can reach nothing."""
+    fams = sorted(families or ())
+    if not fams:
+        return "unknown (older node)"
+    return "/".join(f"ip{f}" for f in fams)
+
+
 def _print_diag_table(facts, port) -> None:
     """The comparison table: one column per node, one row per fact."""
     heads = [f"{col.label}{' (self)' if col.is_self else ''}" for col in facts]
@@ -2381,6 +2466,12 @@ def _print_diag_table(facts, port) -> None:
             ("reachable", ["no (outbound-only)" if not col.has_endpoint
                            else f"yes, but {col.scope_note}" if col.scope_note
                            else "yes (advertises endpoint)" for col in facts]),
+            # The other half of reachability, and the one 'reachable' can't
+            # express: an outbound-only node can't be DIALLED, but these are the
+            # families it can dial OUT on. A pair with no family in common here
+            # can never form a direct tunnel in either direction — which is the
+            # difference between "it'll connect in a second" and "it never will".
+            ("can dial out", [_fmt_families(col.families) for col in facts]),
             ("roles", [col.roles or "-" for col in facts]),
             ("credential", [col.credential for col in facts]),
             (f"firewall udp/{port}", [col.firewall for col in facts])]

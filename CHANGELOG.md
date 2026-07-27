@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Node records publish `families` — the underlay address families that node can originate on (`[4]`, `[6]`, `[4, 6]`), re-detected and republished when it changes. It answers a question endpoints cannot: a node behind NAT advertises no endpoint whether it's on the same LAN or on IPv4-only cafe wifi, so peers had no way to tell "it will dial me in a second" from "it genuinely cannot reach me". Unsigned and optional (like `version`), so mixed-version fleets interoperate.
 
+- `gw watch` gains a `via` column: how each live link actually travels — `ip6`/`ip4` for a direct tunnel, `ip6R`/`ip4R` when it rides the anchor. Both halves are observed from live WireGuard state (the family is the endpoint in use; the `R` is the peer's /128 sitting in the anchor's AllowedIPs), so a relayed link — one the anchor can read — is visible without reading `wg show`. A relayed peer now also shows as up, on the anchor tunnel's liveness, instead of reporting no handshake.
+- `gw diagnose` gains a `can dial out` row: the underlay families each node can originate on. It answers what `reachable` cannot — an outbound-only node can't be dialled, but that says nothing about whether it can dial you.
+
 ### Changed
 
 - **Relay no longer replaces a direct peer that could still dial you.** Folding a peer into the anchor removes its direct peer entry, so relaying a NATed-but-capable peer sent its handshakes to a node that no longer knew its key — breaking the one path that worked and leaving no way to recover, since it could never get in to prove otherwise. Relay now requires both directions to be impossible, decided from the peer's published `families` against the endpoints we publish. A peer that publishes no families is given the benefit of the doubt and stays direct, so un-upgraded peers are never worse off than before.
