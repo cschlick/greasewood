@@ -22,3 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Alpine install recipe updated to 256 MiB RAM + an in-guest swapfile, reflecting field-tested numbers.
 - Homebrew formula pinned to the v0.1.4 tarball SHA256.
 - Documentation: Activity Monitor's VM number is explained as footprint, not occupancy.
+
+### Fixed
+
+- `DoorWatcher` now rebinds the `EnrollServer` when `door_window.json` is superseded by a new `gw invite`, so `gw watch` reports the correct door type (e.g. `OPEN (standing)`) and the retrievable token instead of continuing to show the previous single-use window.
