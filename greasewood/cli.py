@@ -835,7 +835,7 @@ def cmd_invite(args) -> int:
         # names are still checked at enroll, where the node can retry a new one.
         from .ca import CA as _CA
         owner = _CA(ca_keys, data_dir).hostname_owner(pinned_hostname)
-        if owner is not None:
+        if owner is not None and not getattr(args, "allow_existing_hostname", False):
             sys.exit(
                 f"hostname {pinned_hostname!r} is already in use (node {owner[:16]}…). "
                 "Free it first (revoke + remove the old node on the anchor) or pin a "
@@ -3753,6 +3753,55 @@ def cmd_anchor_activate(args) -> int:
     return 0
 
 
+def cmd_anchor_standby(args) -> int:
+    """[sudo, anchor] Re-enroll an existing node so it can pick up new caps
+    (e.g. `failover`) and the matching encrypted blob. The node reuses its
+    existing identity keys and runs `gw join <token>` like a normal enrollment."""
+    _require_root("anchor-standby")
+    from .config import load_config
+    from .keys import CAKeys
+    from .ca import CA
+    import argparse
+
+    cfg = load_config(Path(args.config))
+    if cfg.role != "anchor":
+        sys.exit("gw anchor-standby must be run on the anchor (role = anchor)")
+    if cfg.ca_key_file is None:
+        sys.exit("anchor-standby requires ca_key_file in [anchor]")
+
+    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    ca = CA(ca_keys, cfg.data_dir)
+
+    hostname = args.hostname
+    owner_hex = ca.hostname_owner(hostname)
+    if owner_hex is None:
+        sys.exit(f"no enrolled node named {hostname!r} — use `gw invite` for a new node")
+    rec = ca._read_node(bytes.fromhex(owner_hex))
+    if rec is None:
+        sys.exit(f"registry record missing for {hostname!r}")
+
+    current_caps = list(rec.get("caps", []))
+    extras = [c.strip() for c in args.caps.split(",") if c.strip()] if args.caps else []
+    new_caps = list(dict.fromkeys(current_caps + extras + ["failover"]))
+
+    inv_args = argparse.Namespace(
+        config=args.config,
+        hostname=hostname,
+        caps=",".join(new_caps),
+        roles="",
+        exact=True,
+        self_roles=None,
+        self_roles_from_grants=False,
+        endpoint=getattr(args, "endpoint", None),
+        standing=False,
+        supersede=False,
+        quiet=False,
+        allow_existing_hostname=True,
+    )
+    log.info("re-issuing invite for %s with caps=%s", hostname, new_caps)
+    return cmd_invite(inv_args)
+
+
 def _dest_is_overlay(dest: str, cfg) -> bool:
     """Best-effort: does this SSH destination point INTO the mesh overlay? The
     transfer must ride the underlay (out-of-band) — an overlay dest is a footgun
@@ -4642,6 +4691,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true",
                     help="overwrite an existing ca.key / config")
     sp.set_defaults(fn=cmd_anchor_activate)
+
+    # anchor-standby (re-enroll an existing node to give it failover/updated caps)
+    sp = sub.add_parser("anchor-standby",
+                        help="[sudo, anchor] re-enroll an existing node so it can "
+                             "receive updated caps (e.g. failover) and the encrypted blob")
+    sp.add_argument("hostname", help="the existing node's hostname")
+    sp.add_argument("--caps", default=None, metavar="C1,C2",
+                    help="additional caps to add for this re-enrollment (failover is "
+                         "always added)")
+    sp.add_argument("--endpoint", default=None, metavar="ADDR",
+                    help="underlay address to embed in the token (auto-detected if omitted)")
+    sp.set_defaults(fn=cmd_anchor_standby)
 
     # anchor-transfer
     sp = sub.add_parser("anchor-transfer",

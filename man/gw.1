@@ -454,6 +454,22 @@ show this help message and exit
 .TP
 \fB\-\-force\fR
 overwrite an existing ca.key / config
+.SS gw anchor\-standby
+\fBUsage:\fR gw anchor\-standby [\-h] [\-\-caps C1,C2] [\-\-endpoint ADDR] hostname
+.PP
+[sudo, anchor] re\-enroll an existing node so it can receive updated caps (e.g. failover) and the encrypted blob
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fIHOSTNAME\fR
+the existing node's hostname
+.TP
+\fB\-\-caps\fR \fIC1,C2\fR
+additional caps to add for this re\-enrollment (failover is always added)
+.TP
+\fB\-\-endpoint\fR \fIADDR\fR
+underlay address to embed in the token (auto\-detected if omitted)
 .SS gw anchor\-transfer
 \fBUsage:\fR gw anchor\-transfer [\-h] [\-\-ssh\-opts SSH_OPTS] [\-\-force] [\-\-yes] [user@]host
 .PP
