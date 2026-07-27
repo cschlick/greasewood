@@ -431,6 +431,12 @@ class ServiceManager(ABC):
         ('active' / 'failed' / 'manual')."""
 
     @abstractmethod
+    def restart_now(self, key: str) -> bool:
+        """Restart this mesh's daemon and wait for it to settle.
+        Returns True if it restarted successfully and is active; False if the
+        backend isn't available or the restart failed."""
+
+    @abstractmethod
     def unit_name(self, key: str) -> str:
         """The service name for mesh `key` (e.g. greasewood@home.service)."""
 
@@ -490,6 +496,20 @@ class SystemdManager(ServiceManager):
 
     def enable_now(self, key: str) -> str:
         return enable_systemd_now(self.unit_dir, key)
+
+    def restart_now(self, key: str) -> bool:
+        if not self.available():
+            return False
+        systemctl = shutil.which("systemctl")
+        if not systemctl:
+            return False
+        self.refresh_template()
+        unit = self.unit_name(key)
+        systemctl_run([systemctl, "daemon-reload"], capture_output=True, check=False)
+        if systemctl_run([systemctl, "restart", unit],
+                         capture_output=True).returncode != 0:
+            return False
+        return wait_systemd_settled(systemctl, unit, run=systemctl_run) == "active"
 
     def unit_name(self, key: str) -> str:
         return f"greasewood@{key}.service"
@@ -559,6 +579,18 @@ class OpenRCManager(ServiceManager):
 
     def enable_now(self, key: str) -> str:
         return enable_openrc_now(self.init_dir, key, runlevel=self.runlevel)
+
+    def restart_now(self, key: str) -> bool:
+        if not self.available():
+            return False
+        if not shutil.which("rc-service"):
+            return False
+        self.refresh_template()
+        svc = self.unit_name(key)
+        if rc_run(["rc-service", svc, "restart"],
+                  capture_output=True).returncode != 0:
+            return False
+        return wait_openrc_started(svc, run=rc_run) == "active"
 
     def unit_name(self, key: str) -> str:
         return f"greasewood.{key}"

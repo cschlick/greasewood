@@ -501,9 +501,12 @@ def cmd_create(args) -> int:
                 "--force replaced the CA key: every outstanding invite token "
                 "is now invalid, enrolled nodes stop renewing (re-enroll them "
                 "or follow the re-root SOP in the RUNBOOK), and an "
-                "already-RUNNING daemon keeps signing with the OLD key until "
-                "restarted — run: %s, then "
-                "mint fresh invites.", _svc_restart_hint(args.name))
+                "already-RUNNING daemon was signing with the OLD key until "
+                "restarted.")
+            if not _service_restart(args.name, why="to sign with the new CA key"):
+                print("Restart the daemon to sign with the new CA key:")
+                print(f"  {_svc_restart_hint(args.name)}")
+                print("Then re-run `gw invite` to mint fresh invites.")
 
     # Door keypair (persistent across invites)
     load_or_generate_door_key(data_dir)
@@ -2097,6 +2100,22 @@ def _svc_restart_hint(key: str = "<mesh>") -> str:
     return mgr.restart_hint(key) if mgr else f"sudo systemctl restart greasewood@{key}"
 
 
+def _service_restart(key: str, *, why: str = "to apply the change") -> bool:
+    """Restart the managed daemon for this mesh if a service backend is present.
+    Returns True if the restart succeeded (and the daemon settled active); False
+    if there is no manager or the restart failed. Prints status on success."""
+    mgr = _service_backend()
+    if mgr is None:
+        return False
+    try:
+        if mgr.restart_now(key):
+            print(f"daemon restarted ({mgr.unit_name(key)}) {why}.")
+            return True
+    except Exception as e:
+        log.warning("managed daemon restart failed: %s", e)
+    return False
+
+
 def _print_daemon_guidance(key: str, cfg_path, then: str = "",
                            no_service: bool = False) -> None:
     """Bring up (and report) this membership's daemon. By default create/join
@@ -2205,7 +2224,9 @@ def cmd_anchor_promote(args) -> int:
     print(f"  2. Repoint nodes' root_url + seeds to this anchor: {endpoint}")
     print("  3. Once every node has renewed here, drop the old CA pub from")
     print("     trusted_pubs fleet-wide. Then decommission the old anchor.")
-    print("Start the daemon here:  sudo gw run")
+    if not _service_restart(membership_key(cfg.mesh_domain),
+                          why="to begin serving as anchor"):
+        print("Start the daemon here:  sudo gw run")
     print()
     from . import firewall as _fw
     _fw.check(_fw.anchor_rules(cfg.listen_port, control_port, cfg.wg_interface), log)
@@ -2545,9 +2566,11 @@ def cmd_cert_request(args) -> int:
             print("published name(s) so peers can resolve this service on the mesh:")
             for lbl in added:
                 print(f"  {lbl}.{own}")
-            print("Restart the daemon to advertise them now "
-                  "(else they propagate at the next renewal): "
-                  f"{_svc_restart_hint()}  (or re-run sudo gw run).")
+            if not _service_restart(membership_key(cfg.mesh_domain),
+                                  why="so peers can resolve the new names"):
+                print("Restart the daemon to advertise them now "
+                      "(else they propagate at the next renewal): "
+                      f"{_svc_restart_hint()}  (or re-run sudo gw run).")
     return 0
 
 
@@ -2716,8 +2739,10 @@ def cmd_rename_node(args) -> int:
         log.warning("could not update hostname in %s — edit it by hand", cfg_path)
 
     print(f"renamed {cfg.hostname!r} -> {newname!r} (overlay addr unchanged)")
-    print("Restart the daemon so it keeps advertising the new name: "
-          f"{_svc_restart_hint()}  (or re-run sudo gw run)")
+    if not _service_restart(membership_key(cfg.mesh_domain),
+                          why="so it keeps advertising the new name"):
+        print("Restart the daemon so it keeps advertising the new name: "
+              f"{_svc_restart_hint()}  (or re-run sudo gw run)")
     return 0
 
 
@@ -3503,8 +3528,10 @@ def cmd_renew(args) -> int:
             log.warning("anchor changed caps to %s but couldn't update %s — edit by hand",
                         list(cred.caps), cfg_path)
 
-    print("Restart the daemon to fully adopt it: "
-          f"{_svc_restart_hint()}  (or re-run sudo gw run)")
+    if not _service_restart(membership_key(cfg.mesh_domain),
+                          why="to fully adopt the renewed credential"):
+        print("Restart the daemon to fully adopt it: "
+              f"{_svc_restart_hint()}  (or re-run sudo gw run)")
     return 0
 
 
@@ -3754,8 +3781,10 @@ def cmd_anchor_activate(args) -> int:
     print(f"  control URL  : http://[{node_keys.addr}]:{control_port}")
     print(f"  files written: {', '.join(written)}")
     print(f"  registry     : {directory.size()} node(s) rebuilt from {cfg.dir_cache_path}")
-    print("\nStart the daemon to serve the control plane:")
-    print(f"  sudo gw -c {cfg_path} run")
+    if not _service_restart(membership_key(cfg.mesh_domain),
+                          why="to serve the control plane + door"):
+        print("\nStart the daemon to serve the control plane:")
+        print(f"  sudo gw -c {cfg_path} run")
     return 0
 
 
