@@ -38,6 +38,7 @@ Issues = "https://github.com/cschlick/greasewood/issues"
 
 [project.scripts]
 gw = "greasewood.cli:main"
+gw-admin-upgrade = "greasewood.admin_upgrade:main"
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -49,7 +50,7 @@ build-backend = "setuptools.build_meta"
 packages = ["greasewood"]
 
 [tool.setuptools.package-data]
-greasewood = ["profiles/*.toml"]
+greasewood = ["profiles/*.toml", "scripts/admin-upgrade.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
