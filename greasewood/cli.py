@@ -1379,6 +1379,10 @@ def cmd_relay(args) -> int:
               "of peers it relays,\n  so it can see (and could tamper with) that "
               "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
               "and per-role port grants still apply. Undo: sudo gw relay off\n")
+        print("For relayed peers to reach each other, the anchor's forward chain must "
+              "allow traffic between gw-* interfaces, e.g.\n"
+              '    iifname "gw-*" oifname "gw-*" accept\n'
+              "(without this, peers can ping the anchor but not each other.)\n")
         marker.write_text("on\n")
     else:
         marker.unlink(missing_ok=True)

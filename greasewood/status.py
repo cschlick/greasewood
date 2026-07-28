@@ -1256,9 +1256,7 @@ class _WatchApp:
                 continue
             key = _wg_key(r)
             lp = live.get(key)
-            if not lp:
-                continue
-            if _handshake_fresh(lp, now_epoch):
+            if lp and _handshake_fresh(lp, now_epoch):
                 targets.append(r.cred.addr)
                 p = self._prev.get(key)
                 if p and mono > p[2]:
@@ -1266,7 +1264,13 @@ class _WatchApp:
                     rates[r.cred.addr] = (
                         f"↓{_fmt_rate((lp.rx_bytes - p[0]) / dts)} "
                         f"↑{_fmt_rate((lp.tx_bytes - p[1]) / dts)}")
-            self._prev[key] = (lp.rx_bytes, lp.tx_bytes, mono)
+                self._prev[key] = (lp.rx_bytes, lp.tx_bytes, mono)
+                continue
+            # Relayed peers have no live entry of their own, but their traffic
+            # rides a live anchor tunnel. Probe them too, so latency isn't blank.
+            _, carrier = _via(r.cred.addr, key, live, now_epoch)
+            if carrier and _handshake_fresh(carrier, now_epoch):
+                targets.append(r.cred.addr)
         self._prober.set_targets(targets)
         self._up = len(targets)
 
