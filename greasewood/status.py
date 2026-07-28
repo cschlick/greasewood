@@ -150,6 +150,17 @@ def _load_policy_grants(cfg) -> "list | None":
         return None
 
 
+def _load_revoked(cfg) -> set[str]:
+    """The local revoke list (anchor state), if readable. Empty set otherwise."""
+    rev_path = cfg.data_dir / "revoked.json"
+    if not rev_path.exists():
+        return set()
+    try:
+        return set(json.loads(rev_path.read_text()).get("revoked", []))
+    except (OSError, ValueError, KeyError):
+        return set()
+
+
 def _live_and_hidden(records, now, show_all):
     """`gw watch` shows only the LIVE mesh: records whose credential hasn't
     expired (now < cred.exp) — the same predicate peers use to accept a node, so
@@ -196,7 +207,8 @@ _W_VIA     = len("ip4R")                      # ip6 / ip4 / ip6R / ip4R
 
 
 def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
-                  latency=None, rates=None, grants=None, show_total=False) -> list:
+                  latency=None, rates=None, grants=None, show_total=False,
+                  revoked=None) -> list:
     """Thin wrapper: build the per-node model (the same dicts `--json` emits) from
     the records, then render. Kept so the live view and existing callers/tests
     pass records; the actual rendering lives in _render_roster, which only ever
@@ -204,7 +216,9 @@ def _roster_lines(records, cfg, now, own_id, live_peers, is_root,
     own_rec = next((r for r in records if r.id_pub.hex() == own_id), None)
     own_caps = list(own_rec.cred.caps) if own_rec else list(cfg.caps)
     now_epoch = int(now.timestamp())
-    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants)
+    revoked = revoked or set()
+    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers,
+                        grants, revoked=revoked)
              for r in records]
     return _render_roster(nodes, cfg, live_peers is not None, is_root,
                           latency=latency, rates=rates, show_total=show_total)
@@ -225,6 +239,8 @@ def _render_roster(nodes, cfg, have_live, is_root,
     is_live = latency is not None
 
     def _exp(n):
+        if n.get("revoked"):
+            return "REVOKED"
         left = n["ttl_remaining_s"]
         if left < 0:
             return "EXPIRED"
@@ -814,7 +830,9 @@ def _peer_panel_lines(n: dict, rate: "str | None" = None,
         return f"{k:<10}: {v}"
 
     left = n["ttl_remaining_s"]
-    if left < 0:
+    if n.get("revoked"):
+        cred = f"REVOKED (was valid until {n['exp']})"
+    elif left < 0:
         cred = f"EXPIRED at {n['exp']}"
     else:
         h = left // 3600
@@ -1139,8 +1157,8 @@ def _paint(ln: str) -> str:
     s = ln.strip()
     if ln.startswith("▶ "):                     # selected peer row: reverse video
         return _sgr("7", ln)
-    if " │ " in ln and "EXPIRED" in ln:         # an expired peer row: recede the
-        return _sgr("2", ln)                    # whole line (dim), EXPIRED and all
+    if " │ " in ln and ("EXPIRED" in ln or "REVOKED" in ln):
+        return _sgr("2", ln)                    # whole line (dim) for expired/revoked
     if s.startswith("$"):                       # command echoes: dim whole line
         return _sgr("2", ln)
     if s.startswith("─"):                       # section rules: dim
@@ -1253,13 +1271,14 @@ class _WatchApp:
         self._up = len(targets)
 
         grants = _load_policy_grants(self._cfg)
+        revoked = _load_revoked(self._cfg)
         # Build the node models FIRST and render from them (rather than via
         # _roster_lines) so selection can map row index → model: row i below
         # the separator IS nodes[i], which the peer panel renders from.
         own_rec = next((r for r in records if r.id_pub.hex() == self._own_id), None)
         own_caps = list(own_rec.cred.caps) if own_rec else list(self._cfg.caps)
         nodes = [_node_view(r, self._cfg, now, now_epoch, self._own_id, own_caps,
-                            live, grants) for r in records]
+                            live, grants, revoked=revoked) for r in records]
         roster = _render_roster(nodes, self._cfg, True, True,
                                 latency=self._prober.results, rates=rates,
                                 show_total=self._show_total)
@@ -1865,7 +1884,8 @@ def _via(addr: str, wg_pub_b64: str, live_peers: dict, now_epoch: int):
     return "", None
 
 
-def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> dict:
+def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants,
+               revoked=None) -> dict:
     """One directory record as the JSON-native per-node dict — the SINGLE model
     both `--json` and the text roster render from, so a per-node column can't
     exist in one without the other. Everything the roster shows is derived HERE
@@ -1874,6 +1894,7 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
     NodeRecord. `live` is present only when wg state was readable (root)."""
     from .policy import peers_allowed
     from . import reconcile as _rmod
+    revoked = revoked or set()
     caps = list(r.cred.caps)
     is_self = r.id_pub.hex() == own_id
     entry = {
@@ -1891,6 +1912,7 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants) -> 
         "peer_expected": peers_allowed(own_caps, caps, grants,
                                        cfg.hostname, r.cred.hostname),
         "reachable": sorted(r.reachable) if r.reachable else [],
+        "revoked": r.id_pub.hex() in revoked,
     }
     # Self-reported running version. For this node, prefer the stamped daemon
     # version (it may not have republished yet); for peers, use what's in the
@@ -1941,7 +1963,7 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
     node, the node's advertised `reachable` set, and live WireGuard stats when run
     as root) — as a STABLE contract (the `schema` field is versioned) so monitors
     and jq pipelines don't scrape the human view. Expired records are INCLUDED and
-    flagged (`expired: true`); tooling filters as it sees fit."""
+    flagged (`expired: true`); revoked records are flagged (`revoked: true`)."""
     from .directory import Directory
     from .policy import peers_allowed, POLICY_BASENAME
     from .wire import GrantTable
@@ -1952,6 +1974,7 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
     now_epoch = int(now.timestamp())
     directory = Directory.load(cfg.dir_cache_path)
     grants = _load_policy_grants(cfg)
+    revoked = _load_revoked(cfg)
 
     policy = None
     ppath = cfg.data_dir / POLICY_BASENAME
@@ -1975,7 +1998,8 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
         except Exception:
             live_peers = None
 
-    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants)
+    nodes = [_node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers,
+                        grants, revoked=revoked)
              for r in records]
     live_n = sum(1 for n in nodes if not n["expired"])
     expired_n = len(nodes) - live_n
@@ -2621,13 +2645,7 @@ def cmd_diagnose(args) -> int:
         print(f"  ⚠ {warning}")
 
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
-    revoked: set = set()
-    rev_path = cfg.data_dir / "revoked.json"
-    if rev_path.exists():
-        try:
-            revoked = set(json.loads(rev_path.read_text()).get("revoked", []))
-        except Exception:
-            pass
+    revoked = _load_revoked(cfg)
 
     try:
         live_peers = wgmod.get_peers(cfg.wg_interface) or {}

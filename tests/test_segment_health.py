@@ -872,6 +872,13 @@ def test_paint_dims_an_expired_roster_row():
     assert _ANSI.sub("", _paint(row)) == row               # content preserved
 
 
+def test_paint_dims_a_revoked_roster_row():
+    from greasewood.status import _paint
+    row = "bb.home.internal fd8d::9 nfs_usr REVOKED │ ● up, 12s ago"
+    assert _paint(row) == "\x1b[2m" + row + "\x1b[0m"       # whole line dimmed
+    assert _ANSI.sub("", _paint(row)) == row               # content preserved
+
+
 def test_diagnose_resolves_to_the_live_twin_not_the_corpse():
     """A hostname with a revoked/expired twin AND a live record must diagnose
     the live one (freshest credential) — the dead-twin bug."""

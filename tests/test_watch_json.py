@@ -3,7 +3,9 @@
 scrape the human view. Validates the schema shape + the derived fields (roles,
 expiry, the policy peering verdict from this node) on a small directory.
 """
+import contextlib
 import datetime as dt
+import io
 import json
 import types
 
@@ -174,3 +176,24 @@ def test_text_peer_column_tracks_json_peer_expected(tmp_path):
             if ln.startswith(("api1.", "old1."))}
     assert rows["api1"].split()[-2] == "yes"         # peer? column ← peer_expected True
     assert rows["old1"].split()[-2] == "no"          # peer? column ← peer_expected False
+
+
+def test_revoked_node_is_flagged_in_json_and_text(tmp_path):
+    cfg = _setup(tmp_path)
+    directory = Directory.load(cfg.dir_cache_path)
+    revoked_rec = next(r for r in directory.all() if r.hostname == "api1")
+    (tmp_path / "revoked.json").write_text(
+        json.dumps({"revoked": [revoked_rec.id_pub.hex()]}))
+
+    doc = _run_json(cfg)
+    by = {n["hostname"]: n for n in doc["nodes"]}
+    assert by["api1"]["revoked"] is True
+    assert by["web1"]["revoked"] is False
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        status.cmd_watch(types.SimpleNamespace(
+            config=str(cfg.dir_cache_path.parent / "gw.toml"), all=True))
+    out = buf.getvalue()
+    assert "api1" in out and "REVOKED" in out
+    assert "old1" in out and "EXPIRED" in out        # expired node still shown
