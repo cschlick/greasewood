@@ -556,6 +556,17 @@ def _nft_table_lines(cfg) -> list:
                   "hasn't applied enforcement; it's (re)installed on reconcile)"]
 
 
+def _collapse_header_lines(header: list) -> list:
+    """The collapsed header keeps the rule + the compact identity lines
+    (role/hostname/addr/sync/daemon, plus any enforce warning), hiding the
+    operational details from `logs` onward. Falls back to the full header when
+    there is no clear split point."""
+    for i, ln in enumerate(header[1:], 1):
+        if ln.startswith("logs"):
+            return header[:i]
+    return header
+
+
 def _firewall_summary_lines(fw_lines: list, nft_lines: list, expand: str) -> list:
     """The COLLAPSED firewall area: a few aligned rows, not one dense line.
     Row 1 is the host-firewall verdict VERBATIM (fw_lines[0] — so a blocked
@@ -749,6 +760,7 @@ _KEY_ACTIONS = {
     b"g": "top",    b"\x1b[H": "top",
     b"G": "bottom", b"\x1b[F": "bottom",
     b"f": "toggle_nft",
+    b"h": "toggle_header",
     b"t": "toggle_total",
     b"\r": "select", b"\n": "select",
     b"r": "roles",  b"y": "yes",
@@ -1091,7 +1103,8 @@ def _help_lines(can_admin: bool) -> list:
         "keys:",
         "  ↑↓ / j k        select a peer        enter   open its detail panel",
         "  PgUp/PgDn g G   jump                 f       expand/collapse firewall",
-        "  t               rate ↔ total         a       show/hide expired peers",
+        "  h               expand/collapse header t       rate ↔ total",
+        "  a               show/hide expired",
     ]
     if can_admin:
         keys += ["  r  (in panel)   edit roles           x  (in panel)   revoke",]
@@ -1208,6 +1221,7 @@ class _WatchApp:
         self._show_nft = show_fw         # f toggles the firewall area; collapsed
                                          # to a 1-line summary by default
                                          # (--firewall starts expanded)
+        self._show_header = False        # h toggles the header; start collapsed
         # Pinned-top pieces, kept separate so `f` collapses the firewall area
         # instantly without a re-fetch.
         self._header: list = []          # role/addr/door/...
@@ -1303,11 +1317,11 @@ class _WatchApp:
 
     def _top_lines(self) -> list:
         """The pinned block above the scrollable roster: header, the firewall
-        area, a blank, then the roster's column header. Collapsed (the default),
-        the area is ONE summary line whose first part is the host-firewall
-        verdict verbatim — so a blocked port stays loud even collapsed; `f`
-        expands to the full host-rule check + greasewood's own table, verbatim.
-        Recomputed each render, so `f` toggles instantly."""
+        area, a blank, then the roster's column header. The header starts
+        collapsed (`h` expands it) like the firewall (`f`), showing just the
+        identity + sync/daemon heartbeat and hiding operational details from
+        `logs` onward. Recomputed each render, so toggles are instant."""
+        header = self._header if self._show_header else _collapse_header_lines(self._header)
         fw, nft = self._fw_lines, self._nft_lines
         if self._show_nft:
             area = fw + ([""] if fw and nft else []) + nft
@@ -1318,7 +1332,7 @@ class _WatchApp:
         fw_sec = (["", _rule("firewall")] + area) if area else []
         # Chrome gets the same 2-char gutter as the peer rows (see _compose),
         # so the column headers stay aligned with the guttered rows below.
-        return (self._header + fw_sec + ["", _rule("peers")]
+        return (header + fw_sec + ["", _rule("peers")]
                 + ["  " + c for c in self._chrome])
 
     def _footer(self, view_h: int) -> str:
@@ -1344,7 +1358,7 @@ class _WatchApp:
                     f"{self._panel['hostname']}{edit} · enter/q close")
         return (f"{now:%H:%M:%S}Z · {self._up} link"
                 f"{'' if self._up == 1 else 's'} up · {pos}{hidden} · "
-                f"↑↓ select · enter details · f firewall · {tkey} · "
+                f"↑↓ select · enter details · h header · f firewall · {tkey} · "
                 f"? help · q quit")
 
     def _compose(self, cols: int, term_h: int) -> list:
@@ -1458,6 +1472,9 @@ class _WatchApp:
         if action == "toggle_all":
             self._show_all = not self._show_all
             self._fetch()
+            return True
+        if action == "toggle_header":
+            self._show_header = not self._show_header
             return True
         if action == "revoke":
             if self._panel is not None and self._can_revoke(self._panel):

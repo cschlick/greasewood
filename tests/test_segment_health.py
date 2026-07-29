@@ -173,6 +173,7 @@ def test_key_action_map_covers_keys_and_arrows():
     assert s._KEY_ACTIONS[b" "] == "pgdown" and s._KEY_ACTIONS[b"\x1b[6~"] == "pgdown"
     assert s._KEY_ACTIONS[b"q"] == "quit" and s._KEY_ACTIONS[b"\x03"] == "quit"
     assert s._KEY_ACTIONS[b"f"] == "toggle_nft"
+    assert s._KEY_ACTIONS[b"h"] == "toggle_header"
 
 
 def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
@@ -188,6 +189,7 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app._chrome = []
     app._rows, app._off, app._up = rows, 0, len(rows)
     app._show_nft = True
+    app._show_header = False
     app._hidden = 0
     app._show_total = False
     app._sel = 0
@@ -259,6 +261,27 @@ def test_toggle_nft_collapses_the_top_block():
     # the whole firewall area is ONE line collapsed — that's the point
     assert len(expanded) - len(collapsed) >= len(app._nft_lines)
     assert any("main firewall" in ln for ln in collapsed)  # verdict stays verbatim
+
+
+def test_header_collapses_by_default_and_h_toggles():
+    full_header = [
+        "── x.y ──",
+        "role     : node",
+        "hostname : x",
+        "addr     : fd8d::1",
+        "synced   : 1s ago",
+        "daemon   : 0s ago",
+        "logs     : journalctl",
+        "version  : 1.0",
+    ]
+    app = _mk_app(full_header, ["p1"])
+    collapsed = app._top_lines()
+    assert collapsed[:6] == full_header[:6]
+    assert all("logs" not in ln and "version" not in ln for ln in collapsed)
+
+    app._handle("toggle_header")
+    expanded = app._top_lines()
+    assert "logs" in "\n".join(expanded) and "version" in "\n".join(expanded)
 
 
 def test_frame_clears_before_content_and_expands_tabs():
