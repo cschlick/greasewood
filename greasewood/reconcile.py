@@ -275,10 +275,13 @@ def reconcile_once(
     context: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
-    # The ANCHOR (reach-all, role:*) admits expired-but-not-revoked nodes so they
-    # can renew over its tunnel — expiry means "re-check-in with the anchor", not
-    # "dead" (revocation is the kill switch). Regular nodes NEVER waive expiry, so
-    # a stale node stays out of the mesh until the anchor recertifies it.
+    # Expiry is a liveness signal, not a trust kill.  Two parties must keep
+    # talking to an expired-but-not-revoked record within drop_grace:
+    #   - the ANCHOR, so stale nodes can renew/recertify themselves; and
+    #   - any MEMBER talking to the ANCHOR, so a member whose local cache has an
+    #     stale anchor record can still install the anchor peer, sync, and renew.
+    # Everybody else (a normal peer that has gone expired) is ignored by
+    # non-anchor members until it recertifies.
     is_anchor = "*" in _roles(local_caps)
 
     # Relay state, resolved after the pass. relay_anchor_pub is the peer we CAN
@@ -296,15 +299,19 @@ def reconcile_once(
     local_endpoints = list(own_record.endpoints) if own_record is not None else []
 
     for record in directory.all():
+        record_is_anchor = "*" in _roles(record.cred.caps)
         try:
-            record.verify(ca_pubs, revoked, allow_expired=is_anchor)
+            record.verify(ca_pubs, revoked,
+                          allow_expired=(is_anchor or record_is_anchor))
         except ValueError as e:
             log.debug("skip %s: %s", record.hostname, e)
             continue
-        if is_anchor and record.id_pub != local_id_pub \
+        if (is_anchor or record_is_anchor) and record.id_pub != local_id_pub \
                 and dt.datetime.now(dt.timezone.utc) >= record.cred.exp:
-            log.info("anchor admitting expired node %s [%s] for recertification "
+            who = "anchor" if is_anchor else "member"
+            log.info("%s admitting expired %s %s [%s] for recertification "
                      "(not revoked) — it can renew over this tunnel",
+                     who, "peer" if is_anchor else "anchor",
                      record.hostname, record.cred.addr)
         trusted.append(record)
 

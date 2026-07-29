@@ -161,14 +161,14 @@ class TestReconcileEndpointFallback:
 # ---------------------------------------------------------------------------
 
 def _make_cred(node: NodeKeys, ca: CAKeys, hostname: str,
-               ttl: int = 3600) -> Credential:
+               ttl: int = 3600, caps: "list[str] | None" = None) -> Credential:
     now = dt.datetime.now(_UTC).replace(microsecond=0)
     return Credential(
         id_pub=node.id_pub_bytes,
         wg_pub=node.wg_pub_bytes,
         addr=node.addr,
         hostname=hostname,
-        caps=["segment:mesh"],
+        caps=["segment:mesh"] if caps is None else caps,
         iat=now,
         exp=now + dt.timedelta(seconds=ttl),
     ).sign(ca.ca_priv)
@@ -282,6 +282,41 @@ class TestReconcileTrustGate:
         # for it to renew over
         stale_key = next(r for r in directory.all() if r.hostname == "stale")
         assert base64.b64encode(stale_key.cred.wg_pub).decode() in fake.peers
+
+    def test_member_admits_expired_anchor_for_recert(self, monkeypatch):
+        """A regular node still admits an expired ANCHOR record so a stale
+        cache doesn't strand the node: it can reach the anchor, sync, and renew.
+        It still rejects an expired non-anchor peer."""
+        import base64
+        ca = CAKeys.generate()
+        local = NodeKeys.generate()
+        anchor, stale = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        # Anchor is expired in the cache (stale node that hasn't synced)
+        directory.put(_make_record(anchor, _make_cred(
+            anchor, ca, "anchor", ttl=-1, caps=["role:*"])))
+        # A non-anchor peer is also expired; the regular node must still ignore it
+        directory.put(_make_record(stale, _make_cred(
+            stale, ca, "stale", ttl=-1)))
+
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        trusted, _ = reconcile_once(
+            "gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+            [ca.ca_pub_bytes], set(),
+        )
+        names = {r.hostname for r in trusted}
+        assert "anchor" in names        # expired anchor → admitted for recert
+        assert "stale" not in names     # expired non-anchor → still ignored
+        assert "local" in names
+
+        anchor_rec = next(r for r in directory.all() if r.hostname == "anchor")
+        stale_rec = next(r for r in directory.all() if r.hostname == "stale")
+        anchor_pub = base64.b64encode(anchor_rec.cred.wg_pub).decode()
+        stale_pub = base64.b64encode(stale_rec.cred.wg_pub).decode()
+        assert anchor_pub in fake.peers
+        assert stale_pub not in fake.peers
 
     def test_hosts_sync_receives_trusted_records_only(self, monkeypatch):
         """The ReconcileLoop's /etc/hosts block must be built from the same
