@@ -63,8 +63,21 @@ def test_relay_connects_peers_that_cant_go_direct(gw_image):
     podman("network", "create", "--ipv6", "--subnet", "fd00:5e1a::/64", net)
     cids = []
     try:
-        anchor = make_anchor(gw_image, net, hostname="relayanchor")
+        # Default-closed anchor, then apply a fully-open grant that also opts
+        # every pair into relay — relay needs both `gw relay on` AND a grant
+        # with `relay = true`.
+        anchor = make_anchor(gw_image, net, hostname="relayanchor",
+                             open_policy=False)
         cids.append(anchor["cid"])
+        open_relay = ('[[grant]]\n'
+                      'from = ["*"]\n'
+                      'to = ["*"]\n'
+                      'ports = ["*"]\n'
+                      'relay = true\n')
+        podman("exec", anchor["cid"], "sh", "-c",
+               f'cat > "$(ls -d /var/lib/greasewood_*)"/grants.toml '
+               f'<<\'EOF\'\n{open_relay}EOF')
+        pexec(anchor["cid"], "gw", "policy", "apply", "-y")
         a = _bring_up_outbound_only(gw_image, net, anchor, "relay-a")
         cids.append(a["cid"])
         b = _bring_up_outbound_only(gw_image, net, anchor, "relay-b")
