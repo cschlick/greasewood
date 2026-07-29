@@ -266,3 +266,81 @@ def test_watch_live_requires_root_and_tty(monkeypatch):
     with pytest.raises(SystemExit) as e:
         status._watch_live(types.SimpleNamespace(), "abc", "fd8d::1")
     assert "needs root" in str(e.value)
+
+
+def _add_peer(directory, ca, name, ttl_h=18):
+    k = NodeKeys.generate()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, addr=k.addr,
+                      hostname=name, caps=["segment:mesh"], iat=now,
+                      exp=now + dt.timedelta(hours=ttl_h)).sign(ca.ca_priv)
+    directory.put(NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
+                             cred=cred).sign(k.id_priv))
+    return k
+
+
+def test_expired_peer_shown_by_default_on_regular_node(tmp_path, capsys):
+    """A node now shows expired records (grayed out in live view) by default,
+    not only on the anchor."""
+    keys = NodeKeys.load_or_generate(tmp_path)
+    ca = CAKeys.generate()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    cred = Credential(id_pub=keys.id_pub_bytes, wg_pub=keys.wg_pub_bytes,
+                      addr=keys.addr, hostname="me", caps=["segment:mesh"],
+                      iat=now, exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
+    d = Directory()
+    d.put(NodeRecord(id_pub=keys.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred).sign(keys.id_priv))
+    _add_peer(d, ca, "old-peer", ttl_h=-1)        # already expired
+    d.save(tmp_path / "directory.json")
+
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "me"
+data_dir = "{tmp_path}"
+role = "node"
+caps = ["segment:mesh"]
+[network]
+seeds = []
+root_url = "http://[fd8d:e5c1:db1a:7::1]:51902"
+mesh_domain = "gw.internal"
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
+    out = capsys.readouterr().out
+    assert "old-peer" in out and "EXPIRED" in out
+    assert "expired hidden" not in out
+
+
+def test_revoked_peer_marked_on_regular_node(tmp_path, capsys):
+    """When the node has a cached revoke list, gw watch flags the peer as
+    REVOKED (and sync will refresh that list from the anchor)."""
+    import json as _json
+    keys = NodeKeys.load_or_generate(tmp_path)
+    ca = CAKeys.generate()
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    cred = Credential(id_pub=keys.id_pub_bytes, wg_pub=keys.wg_pub_bytes,
+                      addr=keys.addr, hostname="me", caps=["segment:mesh"],
+                      iat=now, exp=now + dt.timedelta(hours=18)).sign(ca.ca_priv)
+    d = Directory()
+    d.put(NodeRecord(id_pub=keys.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred).sign(keys.id_priv))
+    peer = _add_peer(d, ca, "bad-peer")
+    d.save(tmp_path / "directory.json")
+    (tmp_path / "revoked.json").write_text(_json.dumps({"revoked": [peer.id_pub_hex]}))
+
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "me"
+data_dir = "{tmp_path}"
+role = "node"
+caps = ["segment:mesh"]
+[network]
+seeds = []
+root_url = "http://[fd8d:e5c1:db1a:7::1]:51902"
+mesh_domain = "gw.internal"
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
+    out = capsys.readouterr().out
+    assert "bad-peer" in out and "REVOKED" in out

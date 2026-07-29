@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from .directory import Directory
+from .keys import atomic_write
 from .loop import Loop
 from .wire import NodeRecord
 
@@ -57,6 +58,38 @@ def pull_directory(seed_url: str, timeout: float = 10.0):
         return [NodeRecord.from_dict(r) for r in raw], None, None, None, None
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
+
+
+def pull_revoked(seed_url: str, timeout: float = 5.0) -> "set[str] | None":
+    """Fetch the seed's current revoke list from its /revoked endpoint.
+
+    Returns None on a missing endpoint (older anchors) or any pull error, so
+    sync doesn't fail just because the seed doesn't expose this yet. The caller
+    decides whether to persist an empty list (a 404 means "no info", not
+    "nothing revoked")."""
+    url = f"{seed_url.rstrip('/')}/revoked"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            raw = json.loads(resp.read())
+        if isinstance(raw, dict) and "revoked" in raw:
+            return set(raw["revoked"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        log.debug("pull_revoked from %s failed: %s", url, e)
+    except Exception as e:
+        log.debug("pull_revoked from %s failed: %s", url, e)
+    return None
+
+
+def _revoke_path(data_dir: Path) -> Path:
+    return data_dir / "revoked.json"
+
+
+def _save_revoked(data_dir: Path, revoked: set[str]) -> None:
+    """Persist a fetched revoke list to the node's data dir."""
+    atomic_write(_revoke_path(data_dir),
+                 json.dumps({"revoked": sorted(revoked)}, indent=2))
 
 
 def push_record(seed_url: str, record: NodeRecord, timeout: float = 10.0) -> None:
@@ -194,6 +227,11 @@ class SyncLoop(Loop):
                 n = self._directory.merge(records)
                 if n:
                     self._directory.save(self._cache_path)
+                # Also pull the anchor's revoke list and cache it locally, so
+                # regular nodes can mark and evict revoked peers immediately.
+                revoked = pull_revoked(seed)
+                if revoked is not None:
+                    _save_revoked(self._cache_path.parent, revoked)
                 log.debug("synced %d records from %s (%d new/updated)", len(records), seed, n)
                 self._stamp_sync()   # record a successful pull for `gw watch`
                 self._note_anchor_clock(anchor_now)

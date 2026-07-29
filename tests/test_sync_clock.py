@@ -7,11 +7,13 @@ warns loudly (rate-limited) past 60s, naming NTP instead of leaving the
 operator to reverse-engineer it from credential errors.
 """
 import datetime as dt
+import json
 import logging
 
 from greasewood.directory import Directory
+from greasewood.keys import NodeKeys
 from greasewood.server import ControlServer
-from greasewood.sync import SyncLoop, pull_directory
+from greasewood.sync import SyncLoop, pull_directory, pull_revoked
 
 _UTC = dt.timezone.utc
 
@@ -66,3 +68,40 @@ def test_skew_warning_is_rate_limited(tmp_path, caplog):
         loop._note_anchor_clock(behind)        # 20s later in real life; same warn window
         loop._note_anchor_clock(behind)
     assert len(caplog.records) == 1         # once per window, not once per pull
+
+
+def test_revoked_endpoint_serves_revoke_list():
+    a, b = NodeKeys.generate(), NodeKeys.generate()
+    srv = ControlServer(
+        listen="[::1]:0", directory=Directory(),
+        get_ca_pubs=lambda: [],
+        get_revoked=lambda: {a.id_pub_hex, b.id_pub_hex},
+    )
+    port = srv._server.server_address[1]
+    srv.start()
+    try:
+        rev = pull_revoked(f"http://[::1]:{port}")
+        assert rev == {a.id_pub_hex, b.id_pub_hex}
+    finally:
+        srv.stop()
+
+
+def test_sync_loop_caches_revoked_list(tmp_path, monkeypatch):
+    from greasewood import sync as syncmod
+    a = NodeKeys.generate()
+    monkeypatch.setattr(syncmod, "pull_directory",
+                        lambda url, timeout=10.0: ([], None, None, None, None))
+    monkeypatch.setattr(syncmod, "pull_revoked",
+                        lambda url, timeout=5.0: {a.id_pub_hex})
+
+    loop = SyncLoop(
+        directory=Directory(),
+        get_seeds=lambda: ["http://seed"],
+        cache_path=tmp_path / "dir.json",
+    )
+    loop._pull_once()
+
+    revoked_path = tmp_path / "revoked.json"
+    assert revoked_path.exists()
+    data = json.loads(revoked_path.read_text())
+    assert data["revoked"] == [a.id_pub_hex]

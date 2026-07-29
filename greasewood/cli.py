@@ -42,7 +42,7 @@ from pathlib import Path
 from . import service
 from .config import membership_key, render_config
 from .keys import _key_file_warnings, _own_identity, _secret_key_paths
-from .status import _dur_short, _version, cmd_diagnose, cmd_watch
+from .status import _dur_short, _load_revoked, _version, cmd_diagnose, cmd_watch
 
 _UTC = dt.timezone.utc
 log = logging.getLogger("greasewood")
@@ -3143,9 +3143,10 @@ def cmd_run(args) -> int:
 
     # Revoke list is re-read live (not snapshotted) so `gw revoke` takes effect
     # without a daemon restart — both for control-plane refusal and local
-    # eviction. Plain nodes have no revoke list (expiry-based revocation).
-    # The live grant table (roles → roles : ports) drives tunnel existence.
-    # Loaded from last-known-good on disk; the sync loop offers fresh tables
+    # eviction. The anchor owns the canonical list; plain nodes cache a copy
+    # pulled from the anchor's /revoked endpoint during sync. The live grant
+    # table (roles → roles : ports) drives tunnel existence. Loaded from
+    # last-known-good on disk; the sync loop offers fresh tables
     # (CA-verified, seq-monotonic). Built BEFORE the anchor block so the anchor
     # can feed its own copy from grants.toml (see _start_anchor_control_plane).
     from .policy import GrantPolicy, POLICY_BASENAME
@@ -3153,10 +3154,12 @@ def cmd_run(args) -> int:
                                get_ca_pubs=get_ca_pubs)
     grant_policy.load_cache()
 
-    get_revoked: "callable" = set
     if cfg.role == "anchor":
         get_revoked, door_watcher = _start_anchor_control_plane(
             cfg, keys, directory, get_ca_pubs, grant_policy)
+    else:
+        # Start from the cached copy (if any) and let the SyncLoop refresh it.
+        get_revoked = lambda: _load_revoked(cfg)
 
     # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval

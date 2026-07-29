@@ -147,6 +147,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"ca_cert": self.ca.ca_cert_pem()})
         elif self.path == "/health":
             self._send_json({"status": "ok", "now": self._now_iso()})
+        elif self.path == "/revoked":
+            # The current revoke list, for nodes that need to know which
+            # identities are permanently excluded. Signed/authorized records
+            # are the source of truth, but this lets regular nodes mark and
+            # evict revoked peers immediately rather than waiting for TTL.
+            self._send_json({"revoked": sorted(self.get_revoked())})
         else:
             self._send_json({"error": "not found"}, 404)
 

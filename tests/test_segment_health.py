@@ -847,12 +847,12 @@ def _expired_rec(name, endpoints=("203.0.113.9:51900",)):
                cred=cred).sign(k.id_priv)
 
 
-def test_expired_shown_by_default_is_anchor_only():
+def test_expired_shown_by_default_everywhere():
     import types as _t
     from greasewood.status import _expired_shown_by_default as f
     assert f(_t.SimpleNamespace(role="anchor")) is True
-    assert f(_t.SimpleNamespace(role="node")) is False
-    assert f(_t.SimpleNamespace()) is False        # default: hide
+    assert f(_t.SimpleNamespace(role="node")) is True
+    assert f(_t.SimpleNamespace()) is True        # default: show
 
 
 def test_roster_sort_key_sinks_expired():

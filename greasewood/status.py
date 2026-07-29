@@ -174,14 +174,11 @@ def _live_and_hidden(records, now, show_all):
 
 
 def _expired_shown_by_default(cfg) -> bool:
-    """The anchor SHOWS expired nodes by default; plain nodes hide them.
-    Rationale: an expired node is only actionable where you can revoke it —
-    the anchor — and now that `gw watch` has a one-key revoke (x), a visible
-    expired node is a to-do item, not noise (and it makes a name-squatting
-    stale record obvious instead of an invisible 'already in use' surprise).
-    On a plain node an expired peer is both unreachable and un-revocable, so
-    it stays hidden. Either way `a` / `--all` toggles it."""
-    return getattr(cfg, "role", "node") == "anchor"
+    """Expired records are shown by default everywhere, so a node can see the
+    full state of the mesh and so the grayed-out EXPIRED indicator is useful on
+    every node, not just the anchor. They are sorted below live records and
+    dimmed in the TUI. `a` / `--all` still toggles the view."""
+    return True
 
 
 def _roster_sort_key(now):
