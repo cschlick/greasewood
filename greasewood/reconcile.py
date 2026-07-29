@@ -39,6 +39,11 @@ _KEEPALIVE = 25
 # idle-but-live tunnel (keepalive=25 keeps it well inside).
 _LIVE_LINK_SECS = 180
 
+# How long to give a "stuck" (no shared family), relay-granted peer a chance to
+# form a direct tunnel before we fold it into the relay anchor.  This is the
+# direct-first guard: we never want to relay a pair that can in fact handshake.
+_RELAY_PROBE_SECONDS = 30
+
 # Step 6 authorization policy:
 #   (local_caps, peer_caps, local_hostname=None, peer_hostname=None) → bool
 # Hostnames enable derived host: tags (see policy.node_tags); a policy that
@@ -110,7 +115,7 @@ def _select_endpoint(endpoints: list[str],
     return candidates[0] if candidates else None
 
 
-def _stuck_both_ways(record, local_endpoints: list, local_families) -> bool:
+def _stuck_both_ways(record, local_endpoints: list) -> bool:
     """We can't dial this peer — but can it still dial US? Relay is only right
     when NEITHER direction can open the tunnel.
 
@@ -122,10 +127,14 @@ def _stuck_both_ways(record, local_endpoints: list, local_families) -> bool:
     a node that no longer knows its key, and it can never get in to prove it was
     fine. Hence the peer's self-reported `families` (see wire.NodeRecord).
 
-    It can dial us if we publish an endpoint in a family it can originate on.
-    Unknown families (an older node, or detection failed) means assume it CAN —
-    the same benefit of the doubt as before this field existed, so an old peer
-    is never worse off.
+    It can dial us if it can originate on a family we publish an endpoint in.
+    We deliberately do NOT restrict that by the families this node can originate
+    on: an endpoint we publish can be reached by a peer even if we have no
+    default route in that family (same LAN, on-link, reverse path). Restricting
+    by `local_families` caused false "stuck" decisions and unnecessary relaying
+    of pairs that were in fact directly reachable. Unknown families (an older
+    node, or detection failed) means assume it CAN — the same benefit of the
+    doubt as before this field existed, so an old peer is never worse off.
     """
     if not local_endpoints:
         return True          # we publish nothing to dial; nobody can reach us
@@ -138,10 +147,6 @@ def _stuck_both_ways(record, local_endpoints: list, local_families) -> bool:
     if not peer_families:
         return False         # unknown → assume it can dial us; stay direct
     our_families = {6 if ep.startswith("[") else 4 for ep in local_endpoints}
-    # Restrict to families we could actually originate on ourselves — an
-    # endpoint we advertise but can't source from is no use to either side.
-    if local_families:
-        our_families &= set(local_families)
     return not (our_families & peer_families)
 
 
@@ -228,6 +233,7 @@ def reconcile_once(
     local_hostname: "str | None" = None,
     allow_relay: bool = True,
     relay_policy: "Policy | None" = None,
+    relay_probe_until: "dict[str, float] | None" = None,
 ) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
@@ -261,6 +267,7 @@ def reconcile_once(
         log.warning("could not read live peers on %s; skipping reconcile this cycle", iface)
         return ReconcileResult([], [])
     now = time.time()
+    mono = time.monotonic()
 
     # The peers that SHOULD exist after this cycle: wg_pub_b64 → _Desired
     # (addr, endpoint, keepalive). Built from the verified+authorized records.
@@ -280,6 +287,7 @@ def reconcile_once(
     # IPv4-only node facing an IPv6-only one — no shared family, never direct).
     relay_anchor_pub: "str | None" = None
     unreachable: list = []          # (wg_pub_b64, addr, keepalive)
+    stuck_candidates: set[str] = set()  # peers that are stuck+granted this cycle
 
     # What WE publish, for the "can this peer still dial us?" half of the relay
     # decision (see _stuck_both_ways). Read from our own directory record, so
@@ -352,14 +360,33 @@ def reconcile_once(
         # connect. No relay policy supplied → no relaying (opt-in, not opt-out).
         may_relay = bool(relay_policy) and relay_policy(
             local_caps, record.cred.caps, local_hostname, record.cred.hostname)
-        if allow_relay and may_relay and not reachable_directly and not has_live_link \
-                and _stuck_both_ways(record, local_endpoints, local_families):
-            # Neither side can open this tunnel, and there's no live session to
-            # fall back on. Defer: relay via the anchor if we found one, else
-            # fall back below to a direct peer (the old direct-or-fail behaviour
-            # — it simply never handshakes).
+        would_relay = (allow_relay and may_relay and not reachable_directly
+                       and not has_live_link
+                       and _stuck_both_ways(record, local_endpoints))
+        if would_relay:
+            stuck_candidates.add(wg_pub_b64)
+        if would_relay and relay_probe_until is not None:
+            # Direct-first: a "stuck" peer is first installed as a direct peer
+            # for a probe window.  If it can in fact handshake, we keep it direct
+            # and cancel the probe; only if the window expires with no handshake
+            # do we fold it into the relay anchor.  This prevents relaying pairs
+            # that are directly reachable (same-LAN, reverse-path, etc.).
+            deadline = relay_probe_until.get(wg_pub_b64)
+            if deadline is None:
+                relay_probe_until[wg_pub_b64] = mono + _RELAY_PROBE_SECONDS
+            if deadline is None or mono < deadline:
+                # Still probing: install as direct and wait.
+                desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
+                continue
+            # Probe expired: no direct path, fall through to relay below.
+        if would_relay:
+            # Without a probe tracker (tests/embedding) or after the probe has
+            # expired, fold this peer into the anchor's AllowedIPs.
             unreachable.append((wg_pub_b64, record.cred.addr, keepalive))
             continue
+        # Not a relay candidate (or probe still running above installed direct).
+        if relay_probe_until is not None:
+            relay_probe_until.pop(wg_pub_b64, None)
         desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
 
     # Fold unreachable-but-granted peers into the relay anchor's AllowedIPs so
@@ -377,6 +404,13 @@ def reconcile_once(
     else:
         for wg_pub_b64, addr, keepalive in unreachable:
             desired[wg_pub_b64] = _Desired(addr, None, keepalive)
+
+    # Prune stale probe deadlines so the dict doesn't grow forever (a peer that
+    # left the directory, became reachable, or lost its grant drops out).
+    if relay_probe_until is not None:
+        for k in list(relay_probe_until):
+            if k not in stuck_candidates:
+                del relay_probe_until[k]
 
     # The three-way diff, named by intent: authorized-but-absent get installed,
     # present get their endpoint/route/keepalive re-checked, no-longer-authorized
@@ -535,6 +569,10 @@ class ReconcileLoop(Loop):
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
+        # Direct-first relay probe state: wg_pub_b64 → monotonic-time deadline.
+        # Peers that look stuck are installed as direct peers until the deadline
+        # expires, at which point they are folded into the relay anchor.
+        self._relay_probe_until: dict[str, float] = {}
         # Anchor relay: the loop reconciles own record.relay + forwarding to the
         # marker file; this hook lets it republish the own record (a cli concern).
         self._republish_relay = republish_relay
@@ -599,6 +637,7 @@ class ReconcileLoop(Loop):
                 endpoint_tracker=self._endpoint_tracker,
                 local_hostname=self._local_hostname,
                 relay_policy=self._relay_policy,
+                relay_probe_until=self._relay_probe_until,
             )
         except Exception as e:
             log.error("reconcile error: %s", e)

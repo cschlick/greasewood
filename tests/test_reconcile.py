@@ -912,6 +912,40 @@ class TestRelay:
         assert b_pub not in fake.peers
         assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
 
+    def test_direct_first_probe_before_relay(self, monkeypatch):
+        # A stuck, relay-granted peer is first installed as a direct peer for a
+        # probe window.  Only after the probe expires with no handshake does it
+        # fold into the anchor's AllowedIPs.
+        import time as _time
+        ca, A, anchor, B, d = self._scene(anchor_relay=True)
+        fake = _FakeWg()
+        monkeypatch.setattr(reconcile, "wgmod", fake)
+        b_pub = base64.b64encode(B.wg_pub_bytes).decode()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+        probe_until = {}
+        start = 1000.0
+
+        def _run_mono(mono):
+            monkeypatch.setattr(_time, "monotonic", lambda: mono)
+            reconcile_once("gw-test", d, A.id_pub_bytes, ["segment:mesh"],
+                           [ca.ca_pub_bytes], set(), local_families={4},
+                           relay_policy=_relay_ok,
+                           relay_probe_until=probe_until)
+
+        _run_mono(start)
+        assert b_pub in fake.peers                    # probing as direct
+        assert fake.peers[b_pub].endpoint == ""
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+        assert probe_until.get(b_pub) == start + reconcile._RELAY_PROBE_SECONDS
+
+        _run_mono(start + 1.0)                        # still inside window
+        assert b_pub in fake.peers
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr}
+
+        _run_mono(start + reconcile._RELAY_PROBE_SECONDS + 1.0)
+        assert b_pub not in fake.peers                # probe expired → relay
+        assert fake.peers[anchor_pub].allowed_addrs == {anchor.addr, B.addr}
+
 
 class TestRelayReachableAndForwarding:
     """The two edges of the relay feature: relayed peers show as reachable while

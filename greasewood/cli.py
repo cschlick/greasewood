@@ -2197,7 +2197,7 @@ def _grants_naming_role(cfg, role: str) -> str:
         return ""
     return "\n".join(
         f"    {', '.join(g['from'])} -> {', '.join(g['to'])} : "
-        f"{', '.join(g['ports'])}"
+        f"{', '.join(g['ports'])}{'  [relay]' if g.get('relay') else ''}"
         for g in grants or [] if role in list(g["from"]) + list(g["to"]))
 
 

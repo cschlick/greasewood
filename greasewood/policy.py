@@ -650,10 +650,13 @@ def render_grants(table: "GrantTable | None") -> str:
                 f"exist")
     src_w = max(len(", ".join(g["from"])) for g in table.grants)
     dst_w = max(len(", ".join(g["to"])) for g in table.grants)
+    port_w = max(len(", ".join(g["ports"])) for g in table.grants)
     lines = [f"policy v{table.seq} · {len(table.grants)} grant(s) · "
              f"allow-only (a flow passes iff some grant covers it)"]
     for g in table.grants:
+        relay = "  [relay]" if g.get("relay") else ""
         lines.append(f"  {', '.join(g['from']):<{src_w}} -> "
-                     f"{', '.join(g['to']):<{dst_w}} : {', '.join(g['ports'])}")
+                     f"{', '.join(g['to']):<{dst_w}} : "
+                     f"{', '.join(g['ports']):<{port_w}}{relay}")
     lines.append("  (hardwired, not editable: every node <-> anchor)")
     return "\n".join(lines)
