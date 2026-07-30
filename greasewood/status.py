@@ -1320,8 +1320,11 @@ class _WatchApp:
         area, a blank, then the roster's column header. The header starts
         collapsed (`h` expands it) like the firewall (`f`), showing just the
         identity + sync/daemon heartbeat and hiding operational details from
-        `logs` onward. Recomputed each render, so toggles are instant."""
+        `logs` onward. A hint line underneath tells the user how to expand.
+        Recomputed each render, so toggles are instant."""
         header = self._header if self._show_header else _collapse_header_lines(self._header)
+        if not self._show_header and len(header) < len(self._header):
+            header = header + ["(h to expand — full header)"]
         fw, nft = self._fw_lines, self._nft_lines
         if self._show_nft:
             area = fw + ([""] if fw and nft else []) + nft

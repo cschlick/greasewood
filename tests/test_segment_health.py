@@ -277,11 +277,13 @@ def test_header_collapses_by_default_and_h_toggles():
     app = _mk_app(full_header, ["p1"])
     collapsed = app._top_lines()
     assert collapsed[:6] == full_header[:6]
+    assert "(h to expand" in collapsed[6]
     assert all("logs" not in ln and "version" not in ln for ln in collapsed)
 
     app._handle("toggle_header")
     expanded = app._top_lines()
     assert "logs" in "\n".join(expanded) and "version" in "\n".join(expanded)
+    assert "(h to expand" not in "\n".join(expanded)
 
 
 def test_frame_clears_before_content_and_expands_tabs():
