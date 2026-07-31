@@ -141,11 +141,11 @@ limactl shell greasewood-node sudo gw watch --snapshot
 `limactl shell` covers the command line, but a GUI app — a remote desktop
 client, a database browser — can't type that. It also can't dial overlay
 addresses directly: the mesh terminates inside the VM, macOS has no route to
-it, and [direct-or-fail](concepts.md) means nothing will relay for it.
+it, and [direct-or-fail](concepts.md) means nothing will forward for it.
 
 The missing piece is Lima itself: **any port the guest listens on is
 auto-forwarded to `127.0.0.1` on the Mac** (ports ≥1024 — Lima can't bind
-privileged ports on the host). So a small relay inside the VM puts a peer's
+privileged ports on the host). So a small local forward inside the VM puts a peer's
 service on localhost, where any Mac app can reach it.
 
 Ad-hoc — an ssh tunnel via Lima's own ssh config (`sshd` inside the VM
@@ -166,16 +166,16 @@ limactl shell greasewood-node -- sudo systemd-run --unit rdp-desktop \
 ```
 
 Point the app at `localhost:3389` either way. The Mac leg never leaves
-loopback; the peer leg is this node's ordinary WireGuard tunnel, so the relay
+loopback; the peer leg is this node's ordinary WireGuard tunnel, so the forward
 reaches exactly what the node's grants allow — it widens nothing. A hang here
-is almost always a grant, not the relay: the peer must grant this node's role
+is almost always a grant, not the forward: the peer must grant this node's role
 that port. Stop the unit with `sudo systemctl stop rdp-desktop`; `systemd-run`
 units are transient, so a VM restart clears them — re-run it, or promote it to
-a real unit file if a relay should survive reboots.
+a real unit file if the forward should survive reboots.
 
 ## Route the whole Mac into the overlay
 
-The relay is the right default: one port, one peer, nothing widened. But if
+A per-port forward is the right default: one port, one peer, nothing widened. But if
 you want overlay addresses and mesh names to work from *every* Mac app with no
 per-service setup, the VM can be the Mac's **gateway into the mesh** — no
 bridged networking, no `socket_vmnet`; the `vzNAT` link already carries
@@ -258,10 +258,10 @@ without a password. `sudo gw-mac uninstall-autostart` undoes both.
 
 Know what you're trading:
 
-- **Per-port becomes whole-node.** The relay exposed one port; this hands
+- **Per-port becomes whole-node.** The per-port forward exposed one port; this hands
   every Mac process the node's full identity and grant set. For a personal
   laptop that's the same trust shape as any mesh VPN client on the host — but
-  it's a real widening; that's why the relay stays the default recipe.
+  it's a real widening; that's why the per-port forward stays the default recipe.
 - **Outbound only.** NAT66 has no inbound mappings — the Mac still can't be
   dialed from the mesh, which is the laptop posture anyway.
 - **Names go stale on the Mac.** The VM's hosts block updates every reconcile;
@@ -334,7 +334,7 @@ caveat) is the same.
     *Route the whole Mac* carries over as-is: `gw-mac` detects the guest's
     init system and installs the gateway as an OpenRC service
     ([`gw-mac-gateway.initd`](examples/gw-mac-gateway.initd)) instead of a
-    systemd unit. Only the *Reach a peer* transient relay needs adapting —
+    systemd unit. Only the *Reach a peer* transient port forward needs adapting —
     `systemd-run` has no OpenRC analog, so write a small
     `/etc/init.d/` script (the same shape `gw` itself installs) or run
     `socat` under `nohup` for a one-off.

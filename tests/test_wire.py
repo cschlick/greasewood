@@ -502,10 +502,10 @@ def test_record_allow_expired_still_enforces_revocation():
 
 
 # ---------------------------------------------------------------------------
-# NodeRecord.relay — the anchor's live relay opt-in
+# NodeRecord.relay — legacy no-op field, kept for wire-format compatibility
 # ---------------------------------------------------------------------------
 
-class TestRelayFlag:
+class TestLegacyRelayFlag:
     def _cred(self, node, ca):
         return make_cred(node, ca, hostname="n")
 

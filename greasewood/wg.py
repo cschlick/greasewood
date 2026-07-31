@@ -215,10 +215,9 @@ def set_peer(
     """
     Add or update a WireGuard peer. Idempotent.
     allowed_ips is the peer's overlay address — or a list of them. A single
-    address is the normal case (one peer, its own /128). A list is how the
-    ANCHOR peer carries extra /128s for peers relayed through it (see the relay
-    path in reconcile): AllowedIPs is the whole set, and each gets a kernel
-    route, so the node sends those peers' traffic into the anchor tunnel.
+    address is the normal case (one peer, its own /128). Multiple /128s may be
+    passed when a peer legitimately needs more than one overlay address.
+    AllowedIPs is the whole set, and each gets a kernel route.
     endpoint is "host:port" (v4) or "[v6]:port", or None (peer must initiate).
     """
     ips = [allowed_ips] if isinstance(allowed_ips, str) else list(allowed_ips)
@@ -250,25 +249,6 @@ def remove_peer(iface: str, wg_pub_b64: str,
     log.debug("removed peer ...%s", wg_pub_b64[-8:])
 
 
-def ipv6_forwarding_enabled() -> bool:
-    """Current net.ipv6.conf.all.forwarding. Read-only and NOT audited — the
-    anchor polls it every reconcile cycle, so it must stay out of the command
-    trail. Best-effort: False on any error."""
-    try:
-        r = subprocess.run(["sysctl", "-n", "net.ipv6.conf.all.forwarding"],
-                           capture_output=True, text=True)
-        return (r.stdout or "").strip() == "1"
-    except OSError:
-        return False
-
-
-def set_ipv6_forwarding(on: bool) -> None:
-    """Set net.ipv6.conf.all.forwarding (the anchor's relay switch). Audited (a
-    data-plane mutation); the caller only invokes it on an actual change."""
-    _run("sysctl", "-w", f"net.ipv6.conf.all.forwarding={'1' if on else '0'}",
-         check=False)
-
-
 @dataclass
 class LivePeer:
     wg_pub_b64: str
@@ -281,8 +261,7 @@ class LivePeer:
 
     @property
     def allowed_addrs(self) -> "frozenset[str]":
-        """The bare overlay addresses in AllowedIPs (prefix stripped) — a set, so
-        a peer carrying several /128s (the relay anchor) diffs cleanly."""
+        """The bare overlay addresses in AllowedIPs (prefix stripped)."""
         return frozenset(a.split("/")[0] for a in self.allowed_ips.split(",") if a)
 
 

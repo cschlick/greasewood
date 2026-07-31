@@ -1,10 +1,7 @@
 """
 The `via` column: how a peer's traffic actually travels.
 
-`ip6`/`ip4` for a live direct tunnel, `ip6R`/`ip4R` when it rides the anchor.
-Relay is decrypt-and-forward, so "the anchor can read this link" is a fact the
-operator should see in the roster rather than having to reconstruct from
-`wg show` — which is exactly the archaeology this column exists to end.
+`ip6`/`ip4` for a live direct tunnel, `""` when there is no live path.
 """
 from types import SimpleNamespace
 
@@ -17,7 +14,7 @@ def _peer(endpoint="", allowed=(), hs=1_000_000):
                            keepalive=25)
 
 
-NOW = 1_000_050          # 50s after the handshakes above → fresh
+NOW = 1_000_050          # 50s after the handshakes above -> fresh
 
 
 def test_direct_v6_link():
@@ -42,24 +39,9 @@ def test_a_stale_link_names_no_family():
     assert _via("fd8d::2", "P", peers, NOW) == ("", None)
 
 
-def test_relayed_peer_is_marked_R_with_the_carrier_family():
-    # The fold: the peer has no entry of its own; its /128 rides the anchor's
-    # AllowedIPs. The family shown is the leg WE actually use — to the anchor.
-    anchor = _peer("[2001:db8::1]:51900", {"fd8d::a", "fd8d::2"})
-    peers = {"ANCHOR": anchor}
-    via, carrier = _via("fd8d::2", "P", peers, NOW)
-    assert via == "ip6R"
-    assert carrier is anchor          # its liveness IS this link's liveness
-
-
-def test_relay_over_v4_carrier():
-    peers = {"ANCHOR": _peer("1.2.3.4:51900", {"fd8d::a", "fd8d::2"})}
-    assert _via("fd8d::2", "P", peers, NOW)[0] == "ip4R"
-
-
-def test_a_peers_own_entry_is_not_a_relay_carrier():
-    # Its own AllowedIPs obviously contain its own addr — that must not be
-    # mistaken for someone else relaying it.
+def test_a_peers_own_entry_is_not_a_carrier_for_someone_else():
+    # Its own AllowedIPs obviously contain its own addr -- that must not be
+    # mistaken for someone else carrying it.
     peers = {"P": _peer("", {"fd8d::2"}, hs=0)}
     assert _via("fd8d::2", "P", peers, NOW) == ("", None)
 

@@ -39,10 +39,7 @@ _KEEPALIVE = 25
 # idle-but-live tunnel (keepalive=25 keeps it well inside).
 _LIVE_LINK_SECS = 180
 
-# How long to give a "stuck" (no shared family), relay-granted peer a chance to
-# form a direct tunnel before we fold it into the relay anchor.  This is the
-# direct-first guard: we never want to relay a pair that can in fact handshake.
-_RELAY_PROBE_SECONDS = 30
+
 
 # Step 6 authorization policy:
 #   (local_caps, peer_caps, local_hostname=None, peer_hostname=None) → bool
@@ -56,15 +53,11 @@ class _Desired(NamedTuple):
     addr: str                   # the peer's overlay /128
     endpoint: "str | None"      # underlay endpoint to pin (None: peer initiates)
     keepalive: int              # 25, or 0 when backed off (dead endpoint)
-    # Extra overlay /128s to route THROUGH this peer. Only ever set on the anchor
-    # peer, to carry peers this node can't reach directly (relay). Empty for a
-    # normal peer, whose AllowedIPs is just its own addr.
-    extra_routes: tuple = ()
 
     @property
     def allowed(self) -> tuple:
-        """The full AllowedIPs set for this peer: its own addr + any relayed."""
-        return (self.addr, *self.extra_routes)
+        """The AllowedIPs set for this peer: just its own /128."""
+        return (self.addr,)
 
 
 class ReconcileResult(NamedTuple):
@@ -113,41 +106,6 @@ def _select_endpoint(endpoints: list[str],
     stateless choice used when no fallback tracker is supplied."""
     candidates = _endpoint_candidates(endpoints, local_families)
     return candidates[0] if candidates else None
-
-
-def _stuck_both_ways(record, local_endpoints: list) -> bool:
-    """We can't dial this peer — but can it still dial US? Relay is only right
-    when NEITHER direction can open the tunnel.
-
-    The distinction endpoints alone can't make: a node behind NAT advertises no
-    endpoint whether it's downstairs on the same LAN or on IPv4-only cafe wifi.
-    In the first case it will dial us in a moment and a direct tunnel forms; in
-    the second it can't reach us at all. Relaying the first case is actively
-    destructive — the fold REPLACES its direct peer, so its handshakes arrive at
-    a node that no longer knows its key, and it can never get in to prove it was
-    fine. Hence the peer's self-reported `families` (see wire.NodeRecord).
-
-    It can dial us if it can originate on a family we publish an endpoint in.
-    We deliberately do NOT restrict that by the families this node can originate
-    on: an endpoint we publish can be reached by a peer even if we have no
-    default route in that family (same LAN, on-link, reverse path). Restricting
-    by `local_families` caused false "stuck" decisions and unnecessary relaying
-    of pairs that were in fact directly reachable. Unknown families (an older
-    node, or detection failed) means assume it CAN — the same benefit of the
-    doubt as before this field existed, so an old peer is never worse off.
-    """
-    if not local_endpoints:
-        return True          # we publish nothing to dial; nobody can reach us
-    peer_families = set(record.families or ())
-    if not peer_families:
-        # No explicit field (an older node): fall back to what its endpoints
-        # imply — advertising a v6 endpoint means it holds a v6 address. Only a
-        # peer that advertises NOTHING and predates the field is truly unknown.
-        peer_families = {6 if ep.startswith("[") else 4 for ep in record.endpoints}
-    if not peer_families:
-        return False         # unknown → assume it can dial us; stay direct
-    our_families = {6 if ep.startswith("[") else 4 for ep in local_endpoints}
-    return not (our_families & peer_families)
 
 
 @dataclass
@@ -231,9 +189,6 @@ def reconcile_once(
     local_families: "set[int] | None" = None,
     endpoint_tracker: "_EndpointTracker | None" = None,
     local_hostname: "str | None" = None,
-    allow_relay: bool = True,
-    relay_policy: "Policy | None" = None,
-    relay_probe_until: "dict[str, float] | None" = None,
 ) -> ReconcileResult:
     """
     Single reconcile pass against the full directory.
@@ -267,7 +222,6 @@ def reconcile_once(
         log.warning("could not read live peers on %s; skipping reconcile this cycle", iface)
         return ReconcileResult([], [])
     now = time.time()
-    mono = time.monotonic()
 
     # The peers that SHOULD exist after this cycle: wg_pub_b64 → _Desired
     # (addr, endpoint, keepalive). Built from the verified+authorized records.
@@ -283,20 +237,6 @@ def reconcile_once(
     # Everybody else (a normal peer that has gone expired) is ignored by
     # non-anchor members until it recertifies.
     is_anchor = "*" in _roles(local_caps)
-
-    # Relay state, resolved after the pass. relay_anchor_pub is the peer we CAN
-    # reach that offers relay (CA-signed role:* AND self-asserted record.relay);
-    # unreachable holds granted peers we have no direct underlay path to (e.g. an
-    # IPv4-only node facing an IPv6-only one — no shared family, never direct).
-    relay_anchor_pub: "str | None" = None
-    unreachable: list = []          # (wg_pub_b64, addr, keepalive)
-    stuck_candidates: set[str] = set()  # peers that are stuck+granted this cycle
-
-    # What WE publish, for the "can this peer still dial us?" half of the relay
-    # decision (see _stuck_both_ways). Read from our own directory record, so
-    # it's the same set the fleet sees rather than local guesswork.
-    own_record = directory.get(local_id_pub.hex())
-    local_endpoints = list(own_record.endpoints) if own_record is not None else []
 
     for record in directory.all():
         record_is_anchor = "*" in _roles(record.cred.caps)
@@ -327,24 +267,9 @@ def reconcile_once(
 
         wg_pub_b64 = base64.b64encode(record.cred.wg_pub).decode()
         candidates = _endpoint_candidates(record.endpoints, local_families)
-        reachable_directly = bool(candidates)
-
-        # The relay anchor: reachable, CA-signed reach-all, and offering relay.
-        # role:* is CA-attested so only the real anchor qualifies; record.relay is
-        # its live, self-signed opt-in. First match wins (one anchor).
-        if (allow_relay and reachable_directly and relay_anchor_pub is None
-                and record.relay and "*" in _roles(record.cred.caps)):
-            relay_anchor_pub = wg_pub_b64
 
         live_peer = live_peers.get(wg_pub_b64)
         last_handshake = live_peer.latest_handshake if live_peer else 0
-        # A LIVE SESSION IS A DIRECT PATH, whatever the record advertises. An
-        # outbound-only peer (behind NAT/CGNAT, a laptop) publishes no endpoint
-        # we can dial, but it dials US and WireGuard roams to the learned
-        # address — that tunnel is up and direct. Relaying it would tear down a
-        # working link to route it the long way; see the relay fold below.
-        has_live_link = bool(last_handshake
-                             and (now - last_handshake) <= _LIVE_LINK_SECS)
 
         keepalive = _KEEPALIVE
         if endpoint_tracker is not None:
@@ -359,65 +284,7 @@ def reconcile_once(
         roles = ",".join(sorted(_roles(record.cred.caps))) or "-"
         context[wg_pub_b64] = f"{record.hostname} [{record.cred.addr}] roles={roles}"
 
-        # Relaying this pair takes THREE independent yeses: this node hasn't
-        # opted out (allow_relay), the anchor offers relay at all (checked when
-        # we pick relay_anchor_pub), and a grant names this pair as relayable.
-        # The last one is the point: relay is decrypt-and-forward, so it is
-        # granted per pair, never inferred from a pair merely failing to
-        # connect. No relay policy supplied → no relaying (opt-in, not opt-out).
-        may_relay = bool(relay_policy) and relay_policy(
-            local_caps, record.cred.caps, local_hostname, record.cred.hostname)
-        would_relay = (allow_relay and may_relay and not reachable_directly
-                       and not has_live_link
-                       and _stuck_both_ways(record, local_endpoints))
-        if would_relay:
-            stuck_candidates.add(wg_pub_b64)
-        if would_relay and relay_probe_until is not None:
-            # Direct-first: a "stuck" peer is first installed as a direct peer
-            # for a probe window.  If it can in fact handshake, we keep it direct
-            # and cancel the probe; only if the window expires with no handshake
-            # do we fold it into the relay anchor.  This prevents relaying pairs
-            # that are directly reachable (same-LAN, reverse-path, etc.).
-            deadline = relay_probe_until.get(wg_pub_b64)
-            if deadline is None:
-                relay_probe_until[wg_pub_b64] = mono + _RELAY_PROBE_SECONDS
-            if deadline is None or mono < deadline:
-                # Still probing: install as direct and wait.
-                desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
-                continue
-            # Probe expired: no direct path, fall through to relay below.
-        if would_relay:
-            # Without a probe tracker (tests/embedding) or after the probe has
-            # expired, fold this peer into the anchor's AllowedIPs.
-            unreachable.append((wg_pub_b64, record.cred.addr, keepalive))
-            continue
-        # Not a relay candidate (or probe still running above installed direct).
-        if relay_probe_until is not None:
-            relay_probe_until.pop(wg_pub_b64, None)
         desired[wg_pub_b64] = _Desired(record.cred.addr, endpoint, keepalive)
-
-    # Fold unreachable-but-granted peers into the relay anchor's AllowedIPs so
-    # their traffic leaves through the anchor tunnel (the anchor forwards). With
-    # no relay anchor (relay off / none advertised), they stay endpoint-less
-    # direct peers — unchanged direct-or-fail.
-    if relay_anchor_pub and relay_anchor_pub in desired and unreachable:
-        anchor_addr = desired[relay_anchor_pub].addr
-        routes = tuple(addr for _, addr, _ in unreachable if addr != anchor_addr)
-        desired[relay_anchor_pub] = desired[relay_anchor_pub]._replace(
-            extra_routes=desired[relay_anchor_pub].extra_routes + routes)
-        for wg_pub_b64, addr, _ in unreachable:
-            if addr != anchor_addr:
-                context[wg_pub_b64] = context.get(wg_pub_b64, addr) + " (relayed via anchor)"
-    else:
-        for wg_pub_b64, addr, keepalive in unreachable:
-            desired[wg_pub_b64] = _Desired(addr, None, keepalive)
-
-    # Prune stale probe deadlines so the dict doesn't grow forever (a peer that
-    # left the directory, became reachable, or lost its grant drops out).
-    if relay_probe_until is not None:
-        for k in list(relay_probe_until):
-            if k not in stuck_candidates:
-                del relay_probe_until[k]
 
     # The three-way diff, named by intent: authorized-but-absent get installed,
     # present get their endpoint/route/keepalive re-checked, no-longer-authorized
@@ -446,8 +313,7 @@ def reconcile_once(
         # endpoint on any authenticated packet anyway, and clearing one would
         # require remove+re-add — tearing down a working session for no gain.
         endpoint_changed = want.endpoint and have.endpoint != want.endpoint
-        # AllowedIPs set differs → re-set (covers a plain missing /128 AND a
-        # relay route added to / removed from the anchor peer).
+        # AllowedIPs set differs → re-set (a plain missing /128).
         allowed_changed = have.allowed_addrs != frozenset(want.allowed)
         keepalive_changed = have.keepalive != want.keepalive  # dead↔alive flips 25↔0
         if endpoint_changed or allowed_changed or keepalive_changed:
@@ -460,10 +326,8 @@ def reconcile_once(
             except Exception as e:
                 log.warning("update peer ...%s failed: %s", wg_pub[-8:], e)
 
-    # Addresses any DESIRED peer still routes — never delete their route when
-    # removing an old peer. This is what lets a /128 MOVE from a direct peer to
-    # the anchor peer (relay): the direct peer is removed, but its /128 is now in
-    # the anchor's AllowedIPs, so the route must survive.
+    # Addresses any DESIRED peer still routes — never delete a route that is
+    # still wanted by a remaining peer.
     desired_addrs = {a for want in desired.values() for a in want.allowed}
     for wg_pub in to_remove:
         try:
@@ -493,13 +357,6 @@ def reconcile_once(
         if (live_peer := live_peers.get(wg_pub)) and live_peer.latest_handshake
         and (now - live_peer.latest_handshake) <= _LIVE_LINK_SECS
     }
-    # Relayed peers ride the anchor tunnel, so they have no handshake of their
-    # own — count them reachable while the anchor link is live, so the fleet's
-    # segment-health view shows the edge (via relay) instead of a false gap.
-    if relay_anchor_pub and relay_anchor_pub in desired:
-        alp = live_peers.get(relay_anchor_pub)
-        if alp and alp.latest_handshake and (now - alp.latest_handshake) <= _LIVE_LINK_SECS:
-            reachable_set |= set(desired[relay_anchor_pub].extra_routes)
     return ReconcileResult(trusted, sorted(reachable_set))
 
 
@@ -514,7 +371,6 @@ class ReconcileLoop(Loop):
         get_revoked: "Callable[[], set[str]]",
         interval: float = 5.0,
         policy: Policy = default_policy,
-        relay_policy: "Policy | None" = None,
         hosts_domain: str | None = None,
         get_local_families: "Callable[[], set[int] | None] | None" = None,
         ensure_iface: "Callable[[], None] | None" = None,
@@ -524,9 +380,7 @@ class ReconcileLoop(Loop):
         policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
-        republish_relay=None,   # callable(bool): anchor republishes own record.relay
         republish_version=None,
-        republish_families=None,  # callable(list[int]): republish own record.families
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -561,8 +415,6 @@ class ReconcileLoop(Loop):
         self._get_ca_pubs = get_ca_pubs
         self._get_revoked = get_revoked
         self._policy = policy
-        # Per-pair relay opt-in, read from the same grant table as _policy.
-        self._relay_policy = relay_policy
         # If set, maintain the /etc/hosts mesh block each cycle (opt-in).
         self._hosts_domain = hosts_domain
         # Per-peer endpoint fallback state, persisted across cycles (a no-op for
@@ -576,17 +428,7 @@ class ReconcileLoop(Loop):
         self._reachable_min_interval = reachable_min_interval
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
-        # Direct-first relay probe state: wg_pub_b64 → monotonic-time deadline.
-        # Peers that look stuck are installed as direct peers until the deadline
-        # expires, at which point they are folded into the relay anchor.
-        self._relay_probe_until: dict[str, float] = {}
-        # Anchor relay: the loop reconciles own record.relay + forwarding to the
-        # marker file; this hook lets it republish the own record (a cli concern).
-        self._republish_relay = republish_relay
         self._republish_version = republish_version
-        self._republish_families = republish_families
-        # Say "leaving forwarding alone" once per run, not once per cycle.
-        self._forwarding_left_alone = False
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -643,8 +485,6 @@ class ReconcileLoop(Loop):
                 self._get_local_families() if self._get_local_families else None,
                 endpoint_tracker=self._endpoint_tracker,
                 local_hostname=self._local_hostname,
-                relay_policy=self._relay_policy,
-                relay_probe_until=self._relay_probe_until,
             )
         except Exception as e:
             log.error("reconcile error: %s", e)
@@ -652,9 +492,7 @@ class ReconcileLoop(Loop):
         self._stamp_reconcile()   # heartbeat: a pass completed (freshness in gw watch)
         from .loop import sd_watchdog_ping
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
-        self._reconcile_relay()
         self._reconcile_version()
-        self._reconcile_families()
         self._maybe_publish_reachable(reachable)
         if self._port_enforcer is not None:
             # trusted = the fully-verified records; the enforcer maps their
@@ -670,41 +508,6 @@ class ReconcileLoop(Loop):
                 self._rename_grace(trusted, hosts)
             except Exception as e:
                 log.error("hosts sync error: %s", e)
-
-    def _reconcile_relay(self) -> None:
-        """On the anchor, reconcile relay state to the marker file (the declarative
-        source of truth, toggled by `gw relay on/off`). The DAEMON is the sole
-        writer of its own record, so the command never republishes it — that
-        avoids a seq-collision race where the command's relay=True gets clobbered
-        by the daemon's carried-forward relay=False. Each cycle:
-          1. own record.relay tracks the marker (republish via the injected hook),
-          2. IPv6 forwarding tracks the marker.
-        A no-op on plain nodes and when everything already agrees (cheap: a
-        marker stat + an unaudited sysctl read, writes only on mismatch)."""
-        if "*" not in _roles(self._local_caps) or self._data_dir is None:
-            return
-        desired = relay_marker_enabled(self._data_dir)
-        own = self._directory.get(self._local_id_pub.hex())
-        if own is not None and own.relay != desired and self._republish_relay is not None:
-            log.info("relay: marker=%s but own record.relay=%s — republishing",
-                     desired, own.relay)
-            try:
-                self._republish_relay(desired)
-            except Exception as e:
-                log.warning("could not republish relay flag: %s", e)
-        try:
-            self._reconcile_forwarding(desired)
-        except Exception as e:
-            log.warning("could not reconcile IPv6 forwarding: %s", e)
-
-    def _reconcile_forwarding(self, desired: bool) -> None:
-        """Track IPv6 forwarding to the relay marker (see
-        :func:`apply_relay_forwarding` for why it only ever turns it on)."""
-        note = apply_relay_forwarding(self._data_dir, desired)
-        if note and not self._forwarding_left_alone:
-            # Once per daemon run — this is steady state, not an event.
-            log.info("relay: %s", note)
-            self._forwarding_left_alone = True
 
     def _reconcile_version(self) -> None:
         """Re-publish the running daemon's version in our own record so the
@@ -724,33 +527,6 @@ class ReconcileLoop(Loop):
                 self._republish_version(desired)
             except Exception as e:
                 log.warning("could not republish version: %s", e)
-
-    def _reconcile_families(self) -> None:
-        """Re-publish which underlay families we can originate on when they
-        change — a laptop moving from dual-stack wifi to an IPv4-only cafe, or
-        home again.
-
-        This is what lets a peer tell "it can't be dialled but will dial me"
-        from "it genuinely can't reach me", which endpoints alone can't say: a
-        NATed node advertises none in either case. Relay hangs off that
-        difference, and the change often comes with NO endpoint change at all
-        (a node behind NAT publishes nothing before or after), so it needs its
-        own trigger rather than riding endpoint auto-refresh."""
-        if self._republish_families is None or self._get_local_families is None:
-            return
-        try:
-            desired = sorted(self._get_local_families() or [])
-        except Exception as e:
-            log.warning("could not detect local families: %s", e)
-            return
-        own = self._directory.get(self._local_id_pub.hex())
-        if own is not None and sorted(own.families) != desired:
-            log.info("families: record=%s but host has %s — republishing",
-                     sorted(own.families) or "(none)", desired)
-            try:
-                self._republish_families(desired)
-            except Exception as e:
-                log.warning("could not republish families: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show
@@ -819,70 +595,6 @@ def read_daemon_version(data_dir) -> "str | None":
         return daemon_version_path(data_dir).read_text().strip() or None
     except (FileNotFoundError, OSError):
         return None
-
-
-def relay_marker_path(data_dir) -> "Path":
-    """The relay opt-in marker (present = on). `gw relay on/off` toggles it; the
-    anchor's reconcile loop reconciles its own record.relay + IPv6 forwarding to
-    it. This declarative file — not the command — is the source of truth, so the
-    daemon stays the sole writer of its own record (no republish race) and the
-    choice survives a restart."""
-    return Path(data_dir) / "relay"
-
-
-def apply_relay_forwarding(data_dir, desired: bool) -> "str | None":
-    """Bring IPv6 forwarding in line with the relay marker — but only ever turn
-    it ON. Shared by the daemon's reconcile and `gw relay on/off`, so the live
-    command and the loop can't disagree.
-
-    `net.ipv6.conf.all.forwarding` is a global, machine-wide switch that
-    greasewood does not own. An anchor is very often the site router, where that
-    sysctl IS the router: forcing it off — which relay=off, the default, used to
-    do on every cycle — black-holes IPv6 for every LAN client behind it. Joining
-    a mesh must never be able to take the house offline.
-
-    So ownership is explicit and durable: forwarding may be turned off only if
-    greasewood turned it on, recorded by a marker written when it flipped it.
-    Forwarding that was already on belongs to somebody else and is left exactly
-    as found.
-
-    Returns a human-readable note when it deliberately declined to turn
-    forwarding off, else None.
-    """
-    owned = relay_forwarding_owned_path(data_dir)
-    current = wgmod.ipv6_forwarding_enabled()
-    if desired and not current:
-        log.info("relay: enabling IPv6 forwarding (marker on)")
-        wgmod.set_ipv6_forwarding(True)
-        owned.write_text("greasewood enabled net.ipv6.conf.all.forwarding\n")
-    elif not desired and current:
-        if owned.exists():
-            log.info("relay: disabling IPv6 forwarding (we enabled it)")
-            wgmod.set_ipv6_forwarding(False)
-            owned.unlink()
-        else:
-            return ("IPv6 forwarding was already on before greasewood — left "
-                    "alone. This host forwards for something else; on an anchor "
-                    "that is also the site router, turning it off would break "
-                    "the LAN.")
-    elif not desired and not current and owned.exists():
-        owned.unlink()      # someone turned it off for us; drop the stale claim
-    return None
-
-
-def relay_forwarding_owned_path(data_dir) -> "Path":
-    """Marker: greasewood is the one that turned IPv6 forwarding on, so it may
-    turn it back off. Absent means forwarding predates us (the anchor forwards
-    for its own reasons — very often it IS the site router) and is not ours to
-    touch. See :meth:`ReconcileLoop._reconcile_forwarding`."""
-    return Path(data_dir) / "relay-forwarding-owned"
-
-
-def relay_marker_enabled(data_dir) -> bool:
-    try:
-        return relay_marker_path(data_dir).exists()
-    except OSError:
-        return False
 
 
 def read_last_reconcile(data_dir) -> "str | None":

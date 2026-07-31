@@ -1282,7 +1282,7 @@ def cmd_rename_mesh(args) -> int:
 
 
 def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
-                          aliases=None, reachable=None, relay=None, version=None,
+                          aliases=None, reachable=None, version=None,
                           families=None, push_to=(), quiet_push=False):
     """Re-sign this node's record (seq+1) carrying forward whatever isn't
     overridden, save the cache, and best-effort push. Renewal, rename,
@@ -1314,16 +1314,10 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         cred=cred if cred is not None else existing.cred,
         aliases=carry(aliases, "aliases", _config_aliases(cfg)),
         reachable=carry(reachable, "reachable", []),
-        # relay is a bool, not a list — carry the existing flag forward unless a
-        # caller (gw relay on/off) sets it explicitly, so a renewal/endpoint
-        # refresh never drops it.
-        relay=(bool(relay) if relay is not None
-               else (existing.relay if existing else False)),
         version=version or "",
-        # Which underlay families we can ORIGINATE on. Re-detected rather than
-        # carried, so a laptop that moves from dual-stack home wifi to an
-        # IPv4-only cafe republishes the truth — that change is precisely what
-        # tells peers whether they can still expect us to dial them.
+        # Which underlay families we can ORIGINATE on, re-detected rather than
+        # carried. It is an unsigned display field (like version) used for
+        # diagnostics; it does not affect peering decisions.
         families=sorted(families if families is not None else _local_families()),
     ).sign(keys.id_priv)
     directory.put(record)
@@ -1335,68 +1329,6 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
             (log.debug if quiet_push else log.warning)(
                 "published locally but push to %s failed (will sync): %s", url, e)
     return record
-
-
-def cmd_relay(args) -> int:
-    """[sudo, anchor] Toggle whether this anchor forwards between peers that
-    can't reach each other directly (e.g. an IPv4-only node and an IPv6-only
-    one — which can never form a direct tunnel). Opt-in, live: no rebuild, no
-    re-enrollment. `on` flips a self-signed flag on the anchor's own record and
-    enables IPv6 forwarding; the fleet picks it up within a sync cycle."""
-    from .config import load_config
-    from .directory import Directory
-    from .keys import NodeKeys
-    from . import wg as wgmod
-    from . import reconcile as rmod
-
-    cfg = load_config(Path(args.config))
-    keys = NodeKeys.load_or_generate(cfg.data_dir)
-    directory = Directory.load(cfg.dir_cache_path)
-    own = directory.get(keys.id_pub_hex)
-    marker = rmod.relay_marker_path(cfg.data_dir)
-
-    if args.action == "status":
-        print(f"relay:           {'ON' if marker.exists() else 'off'}  (marker: {marker})")
-        print(f"advertised:      {'yes' if (own and own.relay) else 'no'}"
-              "   (own record — set by the daemon from the marker)")
-        owned = rmod.relay_forwarding_owned_path(cfg.data_dir).exists()
-        whose = ("greasewood turned it on, and will turn it off again" if owned
-                 else "not greasewood's — left as found, either way")
-        print(f"IPv6 forwarding: {'on' if wgmod.ipv6_forwarding_enabled() else 'off'}"
-              f"   ({whose})")
-        return 0
-
-    _require_root("relay")
-    if own is None:
-        sys.exit("no local record yet — enroll and start the daemon first.")
-    if "role:*" not in own.cred.caps:
-        sys.exit("gw relay is an anchor feature — this host isn't the anchor "
-                 "(its credential has no role:*).")
-
-    want = (args.action == "on")
-    if want:
-        print("⚠ Enabling relay: this anchor will DECRYPT-AND-FORWARD the traffic "
-              "of peers it relays,\n  so it can see (and could tamper with) that "
-              "traffic. App-layer encryption (SSH/TLS)\n  still protects payloads, "
-              "and per-role port grants still apply. Undo: sudo gw relay off\n")
-        print("For relayed peers to reach each other, the anchor's forward chain must "
-              "allow traffic between gw-* interfaces, e.g.\n"
-              '    iifname "gw-*" oifname "gw-*" accept\n'
-              "(without this, peers can ping the anchor but not each other.)\n")
-        marker.write_text("on\n")
-    else:
-        marker.unlink(missing_ok=True)
-    # Toggle forwarding immediately for instant effect; the running daemon
-    # reconciles both forwarding AND its own record.relay to the marker each
-    # cycle (the daemon is the sole record-writer — no republish race). Same
-    # guarded path the daemon uses: greasewood never turns off forwarding it
-    # didn't turn on, so `relay off` can't take a router's LAN down.
-    note = rmod.apply_relay_forwarding(cfg.data_dir, want)
-    print(f"relay {'ENABLED' if want else 'disabled'} — the daemon advertises the "
-          f"change to the fleet within a sync cycle (no restart needed).")
-    if note:
-        print(f"note: {note}")
-    return 0
 
 
 _REPO_URL = "https://github.com/cschlick/greasewood"
@@ -2197,7 +2129,7 @@ def _grants_naming_role(cfg, role: str) -> str:
         return ""
     return "\n".join(
         f"    {', '.join(g['from'])} -> {', '.join(g['to'])} : "
-        f"{', '.join(g['ports'])}{'  [relay]' if g.get('relay') else ''}"
+        f"{', '.join(g['ports'])}"
         for g in grants or [] if role in list(g["from"]) + list(g["to"]))
 
 
@@ -3114,10 +3046,6 @@ def cmd_run(args) -> int:
 
     directory = Directory.load(cfg.dir_cache_path)
 
-    # Relay self-heal: if this anchor's own record says relay is ON (set live by
-    # `gw relay on`, persisted in the record), re-assert IPv6 forwarding at start
-    # so it survives reboots without editing /etc/sysctl.d. The record is the
-    # single declarative source of truth; forwarding is reconciled to it.
     # Trust is static, straight from config: the trusted CA set, the seeds to
     # pull the directory from, and the anchor URL. (Moving the anchor is a deliberate
     # re-root — a trusted_pubs/root_url config change — not a runtime event.)
@@ -3210,7 +3138,6 @@ def cmd_run(args) -> int:
         get_ca_pubs=get_ca_pubs,
         get_revoked=get_revoked,
         policy=grant_policy,
-        relay_policy=grant_policy.relay,   # `relay = true` on a grant, per pair
         hosts_domain=cfg.mesh_domain if cfg.hosts_sync else None,
         get_local_families=_local_families,   # re-detected each cycle (v6→v4 mid-run)
         ensure_iface=_ensure_mesh_iface,
@@ -3219,19 +3146,10 @@ def cmd_run(args) -> int:
         port_enforcer=port_enforcer,
         policy_refresh=grant_policy.refresh_from_cache,
         local_hostname=cfg.hostname,
-        # Anchor relay: republish our own record with relay=<marker> when they
-        # drift. The daemon is the sole writer of its own record, so this never
-        # races an out-of-process `gw relay` command.
-        republish_relay=lambda on: _republish_own_record(
-            cfg, keys, directory, relay=on, push_to=cfg.seeds, quiet_push=True),
         # Self-reported running version for `gw watch`. Not signed (omitted from
         # _body_dict) so older peers that don't parse it still verify.
         republish_version=lambda ver: _republish_own_record(
             cfg, keys, directory, version=ver, push_to=cfg.seeds, quiet_push=True),
-        # Underlay families we can originate on — republished when they change
-        # (roaming), so peers can tell "will dial me" from "can't reach me".
-        republish_families=lambda fams: _republish_own_record(
-            cfg, keys, directory, families=fams, push_to=cfg.seeds, quiet_push=True),
     )
     recon.start()
 
@@ -4766,16 +4684,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("node", help="the node: its hostname, its <host>.<mesh_domain> "
                     "mesh name, or its 64-char id_pub hex")
     sp.set_defaults(fn=cmd_revoke)
-
-    # relay (anchor) — opt in/out of forwarding between peers that can't reach
-    # each other directly (e.g. IPv4-only ↔ IPv6-only). Live, no rebuild.
-    sp = sub.add_parser("relay",
-                        help="[sudo, anchor] forward traffic between peers that "
-                             "can't connect directly (opt-in, live)")
-    sp.add_argument("action", choices=["on", "off", "status"],
-                    help="on: this anchor relays unreachable pairs (it will see "
-                         "that traffic); off: stop; status: show current state")
-    sp.set_defaults(fn=cmd_relay)
 
     # upgrade — clean pipx reinstall of this node, from PyPI or the repo.
     sp = sub.add_parser("upgrade",

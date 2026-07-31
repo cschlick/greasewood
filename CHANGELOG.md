@@ -14,19 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Node records publish `families` — the underlay address families that node can originate on (`[4]`, `[6]`, `[4, 6]`), re-detected and republished when it changes. It answers a question endpoints cannot: a node behind NAT advertises no endpoint whether it's on the same LAN or on IPv4-only cafe wifi, so peers had no way to tell "it will dial me in a second" from "it genuinely cannot reach me". Unsigned and optional (like `version`), so mixed-version fleets interoperate.
-
-- `gw watch` gains a `via` column: how each live link actually travels — `ip6`/`ip4` for a direct tunnel, `ip6R`/`ip4R` when it rides the anchor. Both halves are observed from live WireGuard state (the family is the endpoint in use; the `R` is the peer's /128 sitting in the anchor's AllowedIPs), so a relayed link — one the anchor can read — is visible without reading `wg show`. A relayed peer now also shows as up, on the anchor tunnel's liveness, instead of reporting no handshake.
+- `gw watch` gains a `via` column: the underlay address family in use for each live direct tunnel (`ip6`/`ip4`), observed from live WireGuard state without reading `wg show`.
 - `gw diagnose` gains a `can dial out` row: the underlay families each node can originate on. It answers what `reachable` cannot — an outbound-only node can't be dialled, but that says nothing about whether it can dial you.
 
-### Changed
+### Removed
 
-- **Relay no longer replaces a direct peer that could still dial you.** Folding a peer into the anchor removes its direct peer entry, so relaying a NATed-but-capable peer sent its handshakes to a node that no longer knew its key — breaking the one path that worked and leaving no way to recover, since it could never get in to prove otherwise. Relay now requires both directions to be impossible, decided from the peer's published `families` against the endpoints we publish. A peer that publishes no families is given the benefit of the doubt and stays direct, so un-upgraded peers are never worse off than before.
-- **Relay is now opt-in per pair, in the grant table.** `sudo gw relay on` on the anchor is no longer sufficient by itself: a pair is relayed only if a grant also carries `relay = true`. Relaying is decrypt-and-forward, so which traffic the anchor may see is now something the operator writes down rather than something inferred from a pair failing to connect. A pair with no `relay = true` grant stays direct-or-fail no matter how unreachable it is, and a mesh with no policy gets no relaying at all. The key is omitted from the signed table when false, so a table that opts nobody in is byte-identical to one written before the key existed.
-
-### Fixed
-
-- **An anchor that is also a router no longer loses IPv6 forwarding.** The relay reconcile forced the machine-wide `net.ipv6.conf.all.forwarding` sysctl to match the relay marker every cycle, so with relay off (the default) it set it to `0` — black-holing IPv6 for every LAN client behind an anchor that was also the site router, and re-doing it within a cycle of any manual fix. greasewood now only ever turns forwarding **on**, and turns it off only if it was the one that enabled it (tracked by a `relay-forwarding-owned` marker in the data dir). Forwarding that predates greasewood is left exactly as found.
-- **Turning relay on no longer severs working direct tunnels.** A peer was classified "unreachable" — and so routed through the anchor — purely from the endpoints its record advertised. An outbound-only peer (behind NAT/CGNAT, or a laptop) advertises none, but dials out and roams, so its tunnel is up and direct; relaying it removed the direct peer and tore that tunnel down. Reachability now consults the live session first: a peer with a recent handshake stays direct, and only a session dead longer than the live-link window folds into the relay.
+- **Anchor relay has been removed.** The mesh returns to strict direct-or-fail: if two nodes cannot form a direct WireGuard tunnel, the link fails rather than being routed through the anchor. The `gw relay` command, the per-pair `relay = true` grant key, and the anchor's IPv6 forwarding/relay marker management are gone. Old signed `NodeRecord` and `GrantTable` files with `relay` fields still verify — `relay` is now a no-op legacy field — but new records and grants never set it.
 
 ## [0.3.0] - 2026-07-26
 

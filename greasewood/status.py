@@ -251,23 +251,19 @@ def _render_roster(nodes, cfg, have_live, is_root,
         installed = bool(live and live.get("installed"))
         up = bool(live and live.get("up"))
         ver = n["version"]
-        # How the traffic travels: ip6 / ip4 direct, ip6R / ip4R via the anchor.
-        # Only meaningful for a live link — a dash elsewhere keeps the column
-        # from implying a path that doesn't exist.
+        # How the traffic travels: ip6 / ip4 for a live direct tunnel.
+        # A dash elsewhere keeps the column from implying a path that doesn't exist.
         via = (live or {}).get("via") or "—"
-        # Relayed: no peer entry of its own, but a real path through the anchor.
-        # Treat it as present for display, minus byte counters we can't attribute.
-        relayed = bool(live and live.get("relayed"))
         if is_live:                             # link · via · rate · latency · ver
             if is_self:
                 return ("(self)", "—", "", latency.get(n["addr"], "…"), ver)
             if not peers:
                 return ("— not a peer", "—", "", "", ver)
-            if not installed and not relayed:
+            if not installed:
                 return ("not installed", "—", "", "", ver)
             if up:
                 # middle column: cumulative traffic (steady) or per-second rate.
-                middle = "" if relayed else (
+                middle = (
                     f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}"
                     if show_total else (rates or {}).get(n["addr"], ""))
                 return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])}",
@@ -282,12 +278,11 @@ def _render_roster(nodes, cfg, have_live, is_root,
             return ("(self)", "—", "", ver)
         if not peers:
             return ("— not a peer", "—", "", ver)
-        if not installed and not relayed:
+        if not installed:
             return ("not installed", "—", "", ver)
         if up:
             return (f"● up, {_fmt_handshake_age(live['handshake_age_s'])} ago",
                     via,
-                    "" if relayed else
                     f"↓{_fmt_bytes(live['rx_bytes'])} ↑{_fmt_bytes(live['tx_bytes'])}",
                     ver)
         return ("○ no handshake", via, "", ver)
@@ -1829,21 +1824,6 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "
                  f"anchor {cfg.root_url or '(none configured)'}")
 
-    # Relay posture. On the anchor: a loud reminder that it decrypt-and-forwards
-    # (so it SEES) the traffic of peers it relays. On a node: a quiet note that
-    # the anchor will carry peers this node can't reach directly.
-    if self_rec is not None and self_rec.relay:
-        lines.append(f"{'relay':<9}: ⚠ ON — this anchor forwards traffic between "
-                     f"peers that can't connect directly, so it SEES that traffic "
-                     f"(sudo gw relay off to stop)")
-    else:
-        offerer = next((r for r in directory.all()
-                        if r.relay and "role:*" in r.cred.caps
-                        and r.id_pub.hex() != (own_id or "")), None)
-        if offerer is not None:
-            lines.append(f"{'relay':<9}: available — the anchor forwards peers you "
-                         f"can't reach directly (it sees that relayed traffic)")
-
     # (Sync freshness is shown prominently at the top of `gw watch` instead —
     # see _sync_freshness — so the segment/roster view's staleness is obvious.)
 
@@ -1874,20 +1854,14 @@ def _iso_z(t) -> "str | None":
 
 def _via(addr: str, wg_pub_b64: str, live_peers: dict, now_epoch: int):
     """How this peer's traffic actually travels, as ``(via, carrier)``:
-    ``ip6``/``ip4`` for a live direct tunnel, ``ip6R``/``ip4R`` when it rides the
-    anchor (relay), ``""`` when there is no path at all.
+    ``ip6``/``ip4`` for a live direct tunnel, ``""`` when there is no live path.
 
-    Both halves are OBSERVED from live WireGuard state, not inferred from policy:
-    the family is whichever endpoint the tunnel is really using, and the ``R`` is
-    the relay fold itself — the peer has no entry of its own and its /128 sits in
-    another peer's AllowedIPs. A relayed link is one the anchor can read
-    (decrypt-and-forward), so it should be visible without reading `wg show`.
-
-    A configured-but-dead endpoint reports nothing: this column describes the
-    path traffic takes, and naming a family for a peer that has never handshaked
-    would imply a working path that isn't there. ``carrier`` is the peer whose
-    tunnel carries a relayed link (its liveness IS this link's liveness), else
-    None.
+    This is OBSERVED from live WireGuard state, not inferred from policy: the
+    family is whichever endpoint the tunnel is really using. A configured-but-dead
+    endpoint reports nothing, because naming a family for a peer that has never
+    handshaked would imply a working path that isn't there. ``carrier`` is always
+    ``None`` in the direct-only model and is kept only for call-signature
+    compatibility.
 
     getattr throughout: a partial peer object (an older wg parse, a stub) must
     degrade to a blank cell, never take the whole roster down with it.
@@ -1896,12 +1870,6 @@ def _via(addr: str, wg_pub_b64: str, live_peers: dict, now_epoch: int):
     endpoint = getattr(lp, "endpoint", "") if lp is not None else ""
     if endpoint and _handshake_fresh(lp, now_epoch):
         return f"ip{6 if endpoint.startswith('[') else 4}", None
-    for pub, other in live_peers.items():
-        if pub == wg_pub_b64:
-            continue                      # its own entry is not a relay carrier
-        carrier = getattr(other, "endpoint", "")
-        if carrier and addr in getattr(other, "allowed_addrs", ()):
-            return f"ip{6 if carrier.startswith('[') else 4}R", other
     return "", None
 
 
@@ -1947,7 +1915,7 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants,
     if live_peers is not None:
         wg_pub_b64 = base64.b64encode(r.cred.wg_pub).decode()
         lp = live_peers.get(wg_pub_b64)
-        via, carrier = _via(r.cred.addr, wg_pub_b64, live_peers, now_epoch)
+        via, _ = _via(r.cred.addr, wg_pub_b64, live_peers, now_epoch)
         if lp:
             entry["live"] = {
                 "installed": True,
@@ -1959,16 +1927,6 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants,
                                     if lp.latest_handshake else None),
                 "rx_bytes": lp.rx_bytes,
                 "tx_bytes": lp.tx_bytes,
-            }
-        elif carrier is not None:
-            # Relayed: it has no peer entry of its own, so its liveness is the
-            # anchor tunnel's. Byte counters stay out — the carrier's totals are
-            # every relayed peer's traffic, not this one's.
-            entry["live"] = {
-                "installed": False, "relayed": True, "via": via,
-                "up": _handshake_fresh(carrier, now_epoch),
-                "handshake_age_s": ((now_epoch - carrier.latest_handshake)
-                                    if carrier.latest_handshake else None),
             }
         else:
             entry["live"] = {"installed": False, "via": via}

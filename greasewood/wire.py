@@ -217,13 +217,9 @@ class NodeRecord:
     # interop). Rides the existing directory sync so `gw watch` can render
     # fleet-wide per-segment connectivity without any new channel.
     reachable: list[str] = field(default_factory=list)
-    # Anchor-only, self-asserted: "I will forward between peers that can't reach
-    # each other directly" (e.g. IPv4-only ↔ IPv6-only, which can never go
-    # direct). Nodes only act on it when the SAME record also carries a CA-signed
-    # role:* (the anchor), so a non-anchor can't attract traffic by claiming it.
-    # Omitted from the signed body when False — a relay-off record is byte-for-
-    # byte a normal record, so old/new interop — and toggled live by republishing
-    # (like reachable), so relay turns on/off on a running mesh with no re-issue.
+    # Legacy anchor-relay flag, kept for wire-format compatibility. It is now a
+    # no-op: no node acts on it. Omitted from the signed body when False, so an
+    # old/new record still interops and the signed bytes don't churn.
     relay: bool = False
     # Running greasewood version, self-asserted for `gw watch` fleet version
     # visibility. NOT covered by the self-signature (omitted from _body_dict) so
@@ -231,15 +227,11 @@ class NodeRecord:
     # from the wire when empty; a tampered version only affects display.
     version: str = ""
     # Underlay address families this node can ORIGINATE from ([4], [6], [4, 6]).
-    # Self-observed and self-asserted, for peers to answer a question endpoints
-    # can't: a node behind NAT advertises no endpoint at all, so "it can't be
-    # dialled" says nothing about whether IT can dial US. A roaming laptop on
-    # IPv4-only wifi and the same laptop at home look identical without this —
-    # and that difference is exactly when relay should engage vs stay out of the
-    # way. Like `version`, NOT covered by the self-signature (omitted from
-    # _body_dict) so mixed-version fleets interoperate; empty means "unknown",
-    # which callers must treat as "assume it can reach us" (the pre-existing
-    # behaviour, so an old peer is never worse off than before).
+    # Self-observed and self-asserted; a node behind NAT advertises no endpoint
+    # at all, so "it can't be dialled" says nothing about whether IT can dial US.
+    # Like `version`, NOT covered by the self-signature (omitted from _body_dict)
+    # so mixed-version fleets interoperate; empty means "unknown". This is an
+    # unsigned display field used for diagnostics.
     families: list[int] = field(default_factory=list)
     sig: bytes = field(default=b"", repr=False)
 
@@ -264,8 +256,8 @@ class NodeRecord:
             d["aliases"] = sorted(self.aliases)
         if self.reachable:                       # live link set (optional)
             d["reachable"] = sorted(self.reachable)
-        if self.relay:                           # anchor relay offer (optional)
-            d["relay"] = True
+        if self.relay:                           # legacy no-op flag (optional)
+            d["relay"] = True          # legacy no-op, kept for wire-format compatibility
         return d
 
     def sign(self, id_priv: Ed25519PrivateKey) -> "NodeRecord":
@@ -498,9 +490,9 @@ def _validate_grant(g: dict, i: int) -> dict:
     src = _str_list(g.get("from"), f"grant #{i} from")
     dst = _str_list(g.get("to"), f"grant #{i} to")
     ports = _str_list(g.get("ports", ["*"]), f"grant #{i} ports")
-    # relay: may this pair fall back to the anchor when no direct tunnel can
-    # form? Default FALSE — relaying is decrypt-and-forward, so it is named
-    # explicitly per grant, never inferred from a pair merely failing to connect.
+    # relay is kept for backward compatibility with old grants.toml/policy.json
+    # files but is now ignored. It is still validated as a bool so that old
+    # signed tables continue to parse and verify.
     relay = g.get("relay", False)
     if not isinstance(relay, bool):
         raise ValueError(f"grant #{i}: relay must be true or false, "
@@ -537,9 +529,9 @@ def _validate_grant(g: dict, i: int) -> dict:
                              f"(want 'tcp/5432', 'udp/51900', or '*')")
     out = {"from": sorted(src), "to": sorted(dst), "ports": sorted(ports)}
     if relay:
-        # Omitted when false, so a table that opts nobody into relaying is
-        # byte-identical to one written before the key existed (old nodes keep
-        # verifying it, and the signed bytes don't churn).
+        # Omitted when false; `relay` is now a no-op but is kept in the signed
+        # output when true so that old signed tables with `relay = true` still
+        # verify.
         out["relay"] = True
     return out
 
