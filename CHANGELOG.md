@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `reconcile` no longer drops `persistent-keepalive` to 0 when the `EndpointTracker` thinks a peer's endpoint is dead **if this node advertises no underlay endpoints of its own**. An outbound-only peer (typical laptop behind NAT) cannot be called back, so stopping keepalives after a sleep or network change meant the tunnel never recovered on its own.
+- `reconcile` now keeps a post-sleep/roaming "wake window" keyed to the last anchor (or any peer, on the anchor) handshake. If the witness has not handshaked recently, the `EndpointTracker` ignores backoff so every peer gets `keepalive=25` for a settle period; once the witness recovers, the window extends further so the rest of the fleet has time to re-establish before normal backoff can resume.
 
 ### Known issues
 

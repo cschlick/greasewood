@@ -543,6 +543,81 @@ class TestEndpointBackoff:
         assert fake.peers[pub].keepalive == 25              # keep poking: we are the only side that can
         assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"  # still pinned
 
+    def test_tracker_witness_gap_suppresses_backoff(self):
+        """A long gap with the witness peer keeps the wake window open so a
+        peer that looks dead still gets poked. Once the witness recovers we get
+        a settle window, and only after that can normal backoff resume."""
+        from greasewood.reconcile import _EndpointTracker, _PeerEndpoint
+        t = _EndpointTracker(dwell=20.0, wake_rearm=180.0, wake_settle=180.0)
+        t._last_witness = 100.0
+        # 900s since the last witness handshake → dark; wake window opens.
+        t.witness(1000.0, 100.0)
+        assert t.in_wake(1000.0)
+        # A peer that had already been marked dead stays alive in the wake window.
+        t._state["p"] = _PeerEndpoint(current="[::1]:1", since=0.0,
+                                      unhealthy_since=0.0, dead=True)
+        assert t.choose("p", ["[::1]:1"], hs=0, now=1000.0) == "[::1]:1"
+        assert not t.is_backoff("p")
+        # Witness just handshaked (newer than the old one); settle window starts.
+        t.witness(1000.0, 900.0)
+        assert t.in_wake(1000.0)
+        # After the settle window expires, the same dead peer can back off again.
+        t.choose("p", ["[::1]:1"], hs=0, now=1181.0)
+        assert t.is_backoff("p")
+
+    def test_reconcile_wakes_dialed_node_after_witness_gap(self, monkeypatch):
+        """A node that *does* advertise an endpoint should still keep poking
+        when its witness (anchor) has not been heard from in a long time — the
+        whole node may just have woken from sleep and the peer needs a settle
+        window rather than an immediate backoff."""
+        import base64
+        import time as _time
+        from greasewood import reconcile as rmod
+        from greasewood.reconcile import reconcile_once, _EndpointTracker
+        from greasewood.wg import LivePeer
+
+        ca = CAKeys.generate()
+        local, peer, anchor = (NodeKeys.generate() for _ in range(3))
+        directory = Directory()
+        directory.put(_make_record(local, _make_cred(local, ca, "local")))
+        rec = _make_record(peer, _make_cred(peer, ca, "peer"),
+                           endpoints=["[2001:db8::9]:51900"])
+        directory.put(rec)
+        anchor_rec = _make_record(
+            anchor, _make_cred(anchor, ca, "anchor",
+                               caps=["role:*", "segment:mesh"]),
+            endpoints=["[2001:db8::10]:51900"])
+        directory.put(anchor_rec)
+
+        pub = base64.b64encode(peer.wg_pub_bytes).decode()
+        anchor_pub = base64.b64encode(anchor.wg_pub_bytes).decode()
+
+        fake = _FakeWg()
+        # The anchor's last handshake is 900s old; this node was probably asleep.
+        fake.peers[anchor_pub] = LivePeer(
+            wg_pub_b64=anchor_pub, endpoint="[2001:db8::10]:51900",
+            allowed_ips=f"{anchor_rec.cred.addr}/128",
+            latest_handshake=100, keepalive=25)
+        # The peer was already backed off before the sleep (keepalive=0).
+        fake.peers[pub] = LivePeer(
+            wg_pub_b64=pub, endpoint="[2001:db8::9]:51900",
+            allowed_ips=f"{rec.cred.addr}/128",
+            latest_handshake=0, keepalive=0)
+        monkeypatch.setattr(rmod, "wgmod", fake)
+
+        tracker = _EndpointTracker(dwell=20.0)
+        tracker._state[pub] = rmod._PeerEndpoint(
+            current="[2001:db8::9]:51900", since=0.0, unhealthy_since=0.0)
+        monkeypatch.setattr(_time, "time", lambda: 1000.0)
+
+        reconcile_once("gw-test", directory, local.id_pub_bytes,
+                       ["segment:mesh"], [ca.ca_pub_bytes], set(),
+                       endpoint_tracker=tracker)
+
+        assert fake.set_calls == 1
+        assert fake.peers[pub].keepalive == 25    # wake window keeps it poking
+        assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"
+
 
 class TestReachablePublish:
     """reconcile_once reports the live-link set; ReconcileLoop publishes it

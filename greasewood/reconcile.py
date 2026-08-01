@@ -117,6 +117,15 @@ class _PeerEndpoint:
     dead: bool = False                      # past a full probe cycle → backoff
 
 
+# How long after the last witness handshake we consider this node "dark"
+# (just woke from sleep, or all connectivity was lost). During that dark window
+# we keep poking all peers rather than letting the EndpointTracker back off.
+_WAKE_REARM = _LIVE_LINK_SECS
+# Extra settle time after we first recover a witness handshake, so other peers
+# have a chance to re-establish before backoff is allowed to suppress keepalive.
+_WAKE_SETTLE = _LIVE_LINK_SECS
+
+
 class _EndpointTracker:
     """Per-peer endpoint fallback state, carried across reconcile cycles.
 
@@ -127,17 +136,56 @@ class _EndpointTracker:
     handshake, round-robining until one sticks. It only ever tries endpoints the
     PEER advertised — still direct-or-fail, no relay. A fresh handshake resets
     the dwell clock, so a healthy link is never disturbed.
+
+    It also tracks a "wake window" keyed to a witness peer (usually the
+    anchor). If the witness hasn't handshaked recently, this node was likely
+    asleep or roaming; we keep sending keepalives even if individual peer
+    endpoints look dead, and we extend that window after a witness handshake
+    recovers so the rest of the fleet has time to settle.
     """
 
-    def __init__(self, dwell: float = 20.0, healthy: float = _LIVE_LINK_SECS) -> None:
+    def __init__(self, dwell: float = 20.0, healthy: float = _LIVE_LINK_SECS,
+                 wake_rearm: float = _WAKE_REARM,
+                 wake_settle: float = _WAKE_SETTLE) -> None:
         self._dwell = dwell
         # A handshake within `healthy` seconds means the current endpoint works
         # (defaults to the shared _LIVE_LINK_SECS window).
         self._healthy = healthy
+        self._wake_rearm = wake_rearm
+        self._wake_settle = wake_settle
         self._state: dict[str, _PeerEndpoint] = {}  # keyed by wg_pub_b64
+        # Time of the most recent handshake from the witness peer (anchor, or
+        # any peer if this node is the anchor). 0 means we have never seen one.
+        self._last_witness = 0.0
+        # While now < _wake_until, is_backoff() stays false for every peer.
+        self._wake_until = 0.0
 
     def _is_healthy(self, hs: int, now: float) -> bool:
         return bool(hs) and (now - hs) <= self._healthy
+
+    def witness(self, now: float, peer_latest_handshake: float) -> None:
+        """Call once per cycle with the latest handshake of the witness peer.
+
+        A long gap with no witness means this node was probably asleep; keep the
+        wake window open so we keep poking. When a witness finally handshakes,
+        extend the window further so other peers get a fair settle window.
+        """
+        if peer_latest_handshake > 0:
+            if (self._last_witness > 0
+                    and peer_latest_handshake > self._last_witness + 0.5
+                    and now - self._last_witness > self._wake_rearm):
+                # Recovered from a dark gap — let the whole peer set settle.
+                self._wake_until = now + self._wake_settle
+            self._last_witness = peer_latest_handshake
+
+        dark = (self._last_witness > 0
+                and now - self._last_witness > self._wake_rearm)
+        if dark:
+            # Still no recent word from the witness; stay in wake mode.
+            self._wake_until = now + self._wake_settle
+
+    def in_wake(self, now: float) -> bool:
+        return now < self._wake_until
 
     def choose(self, wg_pub_b64: str, candidates: list[str],
                hs: int, now: float) -> "str | None":
@@ -169,6 +217,13 @@ class _EndpointTracker:
         # keep it pinned for automatic recovery, but the caller drops keepalive
         # to 0 so we stop firing a futile packet every 25s into the void.
         st.dead = (now - st.unhealthy_since) >= self._dwell * len(candidates)
+        if self.in_wake(now):
+            # Post-sleep / roaming window: do not let this peer settle into
+            # keepalive=0 while we are still trying to re-establish the first
+            # live link. Reset its backoff clock each cycle during the window.
+            st.dead = False
+            if st.unhealthy_since is not None:
+                st.unhealthy_since = now
         return st.current
 
     def is_backoff(self, wg_pub_b64: str) -> bool:
@@ -176,6 +231,26 @@ class _EndpointTracker:
         pinned but not worth keepalive traffic (see choose())."""
         st = self._state.get(wg_pub_b64)
         return bool(st and st.dead)
+
+
+def _witness_handshake(live_peers: dict, directory: Directory,
+                       local_id_pub: bytes, is_anchor: bool) -> int:
+    """The latest handshake of a witness peer: the anchor if this node is not
+    the anchor, otherwise any live peer. Used to detect a post-sleep or roaming
+    dark window. Returns 0 if no suitable peer has handshaked."""
+    if not is_anchor:
+        anchor_wg_pubs = {
+            base64.b64encode(r.cred.wg_pub).decode()
+            for r in directory.all()
+            if "*" in _roles(r.cred.caps) and r.id_pub != local_id_pub
+        }
+        if anchor_wg_pubs:
+            hs = [live_peers[p].latest_handshake
+                  for p in anchor_wg_pubs if p in live_peers]
+            if hs:
+                return max(hs)
+    hs = [p.latest_handshake for p in live_peers.values() if p.latest_handshake]
+    return max(hs) if hs else 0
 
 
 def reconcile_once(
@@ -245,6 +320,16 @@ def reconcile_once(
     # Everybody else (a normal peer that has gone expired) is ignored by
     # non-anchor members until it recertifies.
     is_anchor = "*" in _roles(local_caps)
+
+    # Tell the endpoint tracker when this node last heard from a witness peer.
+    # A long gap with the anchor (or any peer, if this is the anchor) means we
+    # may just have woken from sleep and should keep poking every peer for a
+    # settle window rather than trusting old backoff state.
+    if endpoint_tracker is not None:
+        endpoint_tracker.witness(
+            now,
+            _witness_handshake(live_peers, directory, local_id_pub, is_anchor)
+        )
 
     for record in directory.all():
         record_is_anchor = "*" in _roles(record.cred.caps)
