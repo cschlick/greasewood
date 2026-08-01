@@ -64,7 +64,11 @@ gw-mac            # creates the VM, prints the invite/join steps
     helpers. They use standard `/usr/bin` tools (`sh`, `awk`, `sed`, `route`,
     `netstat`) plus `lima` from Homebrew. The helper scripts no longer call
     `python3`, so a fresh macOS install with no Xcode/CLT disk space will not
-    get `xcode-select` prompts. Everything you need comes from `brew`.
+    get `xcode-select` prompts from `gw-mac` itself.
+
+    There is one Homebrew-level wrinkle: on Apple Silicon, `brew install` of a
+    source formula still considers the CLT a build dependency. If `brew install`
+    itself pops the Xcode prompt, see [No CLT?](#no-clt) below.
 
 The rest of this section is the same setup by hand — read it to know what the
 formula is doing for you, or to customize the VM.
@@ -91,6 +95,49 @@ The choices that make it an appliance rather than a dev box:
 | the `command -v gw && exit 0` guard | Provisioning is idempotent, so reboots skip apt and the VM comes back in seconds. |
 | Debian, not Alpine | Both work — `gw join` installs a systemd unit on Debian, an OpenRC service on Alpine. Debian is the default here because systemd gives the daemon a kernel-enforced exec sandbox (`CAP_NET_ADMIN` bounding, `ProtectSystem`, syscall filters) that OpenRC can't; on Alpine the daemon runs as unconfined root. For the leaner, sandbox-free Alpine build see [below](#leaner-alternative-alpine-openrc). |
 | `PIPX_BIN_DIR=/usr/local/bin` | Lands `gw` where the unit's `ExecStart` looks for it, on old pipx or new (no reliance on `pipx install --global`). |
+
+## No CLT?
+
+On Apple Silicon, Homebrew requires the Xcode Command Line Tools to install a
+formula that it treats as a source build, even if that formula just copies shell
+scripts. `gw-mac` itself no longer calls `python3`, but `brew install` can still
+pop the CLT prompt before it gets that far.
+
+If you have `lima` and `git` already, you can install the Mac side by hand:
+
+```bash
+# Clone just the release you want
+GIT=/opt/homebrew/bin/git
+TAG=v0.4.0
+REPO=https://github.com/cschlick/greasewood.git
+CLONE=/tmp/greasewood-$TAG
+rm -rf "$CLONE"
+"$GIT" clone --depth 1 --branch "$TAG" "$REPO" "$CLONE"
+
+# Put the commands and recipes where brew would put them
+sudo install -m 755 "$CLONE/docs/examples/gw-shim.sh" /opt/homebrew/bin/gw
+sudo install -m 755 "$CLONE/docs/examples/gw-mac-net.sh" /opt/homebrew/bin/gw-mac
+sudo mkdir -p /opt/homebrew/share/greasewood
+sudo install -m 644 \
+    "$CLONE/docs/examples/gw-mac-gateway.nft" \
+    "$CLONE/docs/examples/gw-mac-gateway.sysctl.conf" \
+    "$CLONE/docs/examples/gw-mac-gateway.service" \
+    "$CLONE/docs/examples/gw-mac-gateway.initd" \
+    "$CLONE/docs/examples/gw-mac-priv.sh" \
+    "$CLONE/docs/examples/greasewood-node.yaml" \
+    "$CLONE/docs/examples/greasewood-node-alpine.yaml" \
+    /opt/homebrew/share/greasewood/
+
+# Install the root helper and sudoers rule
+sudo /opt/homebrew/bin/gw-mac install-autostart
+
+# Start the 2-minute timer manually if you didn't install via brew services
+/opt/homebrew/bin/gw-mac up
+(crontab -l 2>/dev/null; echo "*/2 * * * * /opt/homebrew/bin/gw-mac up >/tmp/gw-mac.log 2>&1") | crontab -
+```
+
+This gives you the same files and the same `gw-mac up` timer, without the
+Xcode/CLT installer.
 
 ## Join the mesh
 
