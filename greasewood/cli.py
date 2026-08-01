@@ -3258,15 +3258,51 @@ def cmd_run(args) -> int:
     # systemd there's no notify socket — arm the portable self-exit watchdog so
     # a death-restart supervisor (OpenRC's supervise-daemon, runit, a bare
     # respawn) can recover a wedged daemon the same way systemd would.
+    #
+    # The health age is composite: stale reconcile, stale sync (non-anchors),
+    # or a credential that is about to expire without having been recently
+    # renewed. The latter catches a dead/silent RenewalLoop before the whole
+    # mesh tears down.
     watchdog = None
     if not os.environ.get("NOTIFY_SOCKET"):
         from .loop import WedgeWatchdog
         from .reconcile import seconds_since_reconcile
-        watchdog = WedgeWatchdog(
-            age_fn=lambda: seconds_since_reconcile(cfg.data_dir))
+        from .sync import seconds_since_sync
+
+        def _health_age():
+            now = dt.datetime.now(_UTC)
+            ages = []
+
+            r_age = seconds_since_reconcile(cfg.data_dir)
+            if r_age is not None:
+                ages.append((r_age, "reconcile"))
+
+            if cfg.role != "anchor":
+                s_age = seconds_since_sync(cfg.data_dir)
+                if s_age is not None:
+                    ages.append((s_age, "sync"))
+
+            own = directory.get(keys.id_pub_hex)
+            if own is not None:
+                since_iat = (now - own.cred.iat).total_seconds()
+                remaining = (own.cred.exp - now).total_seconds()
+                # If the time since the credential was issued is already more
+                # than the remaining lifetime plus a grace window, the
+                # RenewalLoop is not keeping up (or is dead). At half a 24h TTL,
+                # since_iat ≈ remaining and the condition is false. Near
+                # expiry, since_iat >> remaining, so we exit and let the
+                # supervisor restart us before the credential dies.
+                if since_iat > remaining + 600:
+                    ages.append((since_iat, "credential renewal"))
+
+            if not ages:
+                return None
+            return max(ages, key=lambda x: x[0])
+
+        watchdog = WedgeWatchdog(age_fn=_health_age)
         watchdog.start()
-        log.info("liveness watchdog on (self-exit if reconcile wedges; "
-                 "no systemd notify socket)")
+        log.info("liveness watchdog on (self-exit if reconcile/sync/renewal "
+                 "wedges; no systemd notify socket)")
 
     # Startup fully succeeded (interface up, control plane up, loops running) —
     # forget any death breadcrumb from a prior failed boot so `gw watch` stops

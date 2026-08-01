@@ -105,3 +105,26 @@ def test_sync_loop_caches_revoked_list(tmp_path, monkeypatch):
     assert revoked_path.exists()
     data = json.loads(revoked_path.read_text())
     assert data["revoked"] == [a.id_pub_hex]
+
+
+def test_seconds_since_sync_none_until_stamped(tmp_path):
+    from greasewood import sync as syncmod
+    assert syncmod.seconds_since_sync(tmp_path) is None
+    syncmod.stamp_sync_path(tmp_path).write_text(
+        dt.datetime.now(_UTC).replace(microsecond=0).isoformat())
+    age = syncmod.seconds_since_sync(tmp_path)
+    assert age is not None and age < 5
+
+
+def test_seconds_since_sync_grows_with_staleness(tmp_path):
+    from greasewood import sync as syncmod
+    syncmod.stamp_sync_path(tmp_path).write_text(
+        (dt.datetime.now(_UTC) - dt.timedelta(seconds=300)).replace(microsecond=0).isoformat())
+    age = syncmod.seconds_since_sync(tmp_path)
+    assert 295 <= age <= 360
+
+
+def test_seconds_since_sync_none_on_garbled_stamp(tmp_path):
+    from greasewood import sync as syncmod
+    syncmod.stamp_sync_path(tmp_path).write_text("not-a-timestamp")
+    assert syncmod.seconds_since_sync(tmp_path) is None

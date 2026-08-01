@@ -65,3 +65,11 @@ def test_watchdog_uptime_grace_before_threshold():
     wd = WedgeWatchdog(age_fn=lambda: None, threshold=120, exit=exits.append)
     wd._tick()                                               # just started → within grace
     assert exits == []
+
+
+def test_watchdog_accepts_tuple_reason_and_exits():
+    exits = []
+    wd = WedgeWatchdog(age_fn=lambda: (300.0, "sync"), threshold=120,
+                       exit=exits.append)
+    wd._tick()
+    assert exits == [70]

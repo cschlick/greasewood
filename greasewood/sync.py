@@ -269,3 +269,18 @@ def read_last_sync(data_dir) -> "str | None":
         return stamp_sync_path(data_dir).read_text().strip()
     except (FileNotFoundError, OSError):
         return None
+
+
+def seconds_since_sync(data_dir) -> "float | None":
+    """Age in seconds of the last successful directory sync, or None if the
+    daemon has never stamped one. Anchor nodes do not stamp last_sync."""
+    last = read_last_sync(data_dir)
+    if last is None:
+        return None
+    try:
+        ts = dt.datetime.fromisoformat(last)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_UTC)
+        return (dt.datetime.now(_UTC) - ts).total_seconds()
+    except ValueError:
+        return None

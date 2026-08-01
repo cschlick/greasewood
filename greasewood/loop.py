@@ -74,24 +74,25 @@ class Loop:
 # --- wedge watchdog (the non-systemd half of the liveness contract) --------
 
 class WedgeWatchdog(Loop):
-    """Self-exit when reconcile stops completing — the portable equivalent of
-    the systemd unit's WatchdogSec=.
+    """Self-exit when the daemon stops making liveness progress — the portable
+    equivalent of the systemd unit's WatchdogSec=.
 
-    A daemon that is alive but no longer reconciling (wedged in a blocking call,
-    a deadlocked thread) is invisible to a plain process supervisor: the process
+    A daemon that is alive but no longer reconciling, syncing, or renewing
+    (wedged in a blocking call, a deadlocked thread, or a RenewalLoop that has
+    silently stopped) is invisible to a plain process supervisor: the process
     exists, so nothing restarts it, and the data plane silently freezes. systemd
     catches this via sd_notify (the daemon stops pinging → killed after
     WatchdogSec). Off systemd there is no notify socket, so THIS loop is the
-    consumer: it watches the same reconcile heartbeat and, once it goes stale
-    past `threshold`, exits the process so a death-restart supervisor
+    consumer: it watches whichever heartbeat the caller supplies and, once it
+    goes stale past `threshold`, exits the process so a death-restart supervisor
     (OpenRC's supervise-daemon, runit, a bare respawn) brings it back.
 
-    It runs in its own thread, so it still fires when the reconcile thread is
-    the one wedged. `age_fn` returns seconds since the last completed reconcile
-    (None = none yet); until the first one lands we measure against process
-    start, so a daemon that comes up but never reconciles is caught too. `exit`
-    is injectable for tests (default os._exit — a clean sys.exit would leave the
-    other daemon threads running)."""
+    It runs in its own thread, so it still fires when the monitored thread is
+    the one wedged. `age_fn` may return a float/None (legacy: seconds since the
+    last reconcile, None = none yet) or a tuple `(age, reason)`. Until the first
+    tick lands we measure against process start, so a daemon that comes up but
+    never makes progress is caught too. `exit` is injectable for tests (default
+    os._exit — a clean sys.exit would leave the other daemon threads running)."""
 
     def __init__(self, age_fn, *, threshold: float = 120.0,
                  interval: float = 15.0, exit=None) -> None:
@@ -102,13 +103,17 @@ class WedgeWatchdog(Loop):
         self._started = time.monotonic()
 
     def _tick(self) -> None:
-        age = self._age_fn()
-        if age is None:                      # never reconciled yet → measure uptime
+        result = self._age_fn()
+        if isinstance(result, tuple):
+            age, reason = result
+        else:
+            age, reason = result, "reconcile"
+        if age is None:                      # no progress yet → measure uptime
             age = time.monotonic() - self._started
         if age <= self._threshold:
             return
         log.critical(
-            "no reconcile completed in %ds (threshold %ds) — daemon looks "
-            "wedged; exiting so the supervisor restarts it",
-            int(age), int(self._threshold))
+            "daemon %s stale for %ds (threshold %ds) — looks wedged; exiting "
+            "so the supervisor restarts it",
+            reason, int(age), int(self._threshold))
         self._exit(70)                       # EX_SOFTWARE
