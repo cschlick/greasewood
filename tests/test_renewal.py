@@ -58,3 +58,43 @@ def test_renewal_retries_with_exponential_backoff_then_stops(tmp_path, monkeypat
     # a fleet renew hint), so _stop.wait only sees the exponential backoffs 30, 60.
     assert waits == [30, 60]
     assert attempts["n"] == 2  # two failed attempts before the stop fired
+
+
+def test_renewal_loop_survives_unhandled_delay_error(tmp_path, monkeypatch):
+    """An unhandled exception outside _renew_and_publish (e.g. in _next_delay)
+    must not kill the renewal thread. The outer run() guard should catch it,
+    sleep, and continue."""
+    node = NodeKeys.generate()
+    ca = CAKeys.generate()
+    loop = RenewalLoop(
+        node_keys=node,
+        directory=Directory(),
+        get_anchor_url=lambda: "http://[::1]:0",
+        current_cred=_cred(node, ca),
+        hostname="n1",
+        endpoints=[],
+        cache_path=tmp_path / "dir.json",
+    )
+
+    calls = {"n": 0}
+
+    def flaky_next_delay():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("_next_delay boom")
+        return 0.0
+
+    monkeypatch.setattr(loop, "_next_delay", flaky_next_delay)
+
+    def renew_and_stop():
+        loop.stop()
+        return _cred(node, ca)
+
+    monkeypatch.setattr(loop, "_renew_and_publish", renew_and_stop)
+    # Prevent the outer 30s sleep from returning early when stop is set;
+    # the while-loop condition (not _stop.is_set()) is what exits run().
+    monkeypatch.setattr(loop._stop, "wait", lambda t: False)
+
+    loop.run()
+
+    assert calls["n"] >= 2  # first call raised, second call succeeded

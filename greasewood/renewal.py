@@ -170,28 +170,37 @@ class RenewalLoop(Loop):
         # fleet renew hint (maybe_renew_after) — then renew. stop() also sets
         # _renew_now so shutdown doesn't block on the long timeout.
         while not self._stop.is_set():
-            self._renew_now.wait(timeout=self._next_delay())
-            if self._stop.is_set():
-                return
-            self._renew_now.clear()
-            for attempt in range(5):
-                try:
-                    new_cred = self._renew_and_publish()
-                    log.info("credential renewed + republished, expires %s", new_cred.exp)
-                    break
-                except Exception as e:
-                    # Cap the backoff at 2min so a node that's been unreachable
-                    # (e.g. asleep past its TTL) recovers within minutes once the
-                    # anchor is reachable again — the anchor admits it as an
-                    # expired-but-not-revoked peer, and this loop must retry
-                    # promptly to renew over the freshly-formed tunnel, not sit on
-                    # an ever-growing backoff.
-                    backoff = min(30 * (2 ** attempt), 120)
-                    log.warning(
-                        "renewal attempt %d failed (%s); retry in %ds", attempt + 1, e, backoff
-                    )
-                    if self._stop.wait(backoff):
-                        return
+            try:
+                self._renew_now.wait(timeout=self._next_delay())
+                if self._stop.is_set():
+                    return
+                self._renew_now.clear()
+                for attempt in range(5):
+                    try:
+                        new_cred = self._renew_and_publish()
+                        log.info("credential renewed + republished, expires %s", new_cred.exp)
+                        break
+                    except Exception as e:
+                        # Cap the backoff at 2min so a node that's been unreachable
+                        # (e.g. asleep past its TTL) recovers within minutes once the
+                        # anchor is reachable again — the anchor admits it as an
+                        # expired-but-not-revoked peer, and this loop must retry
+                        # promptly to renew over the freshly-formed tunnel, not sit on
+                        # an ever-growing backoff.
+                        backoff = min(30 * (2 ** attempt), 120)
+                        log.warning(
+                            "renewal attempt %d failed (%s); retry in %ds", attempt + 1, e, backoff
+                        )
+                        if self._stop.wait(backoff):
+                            return
+            except Exception:
+                # The inner try already covers _renew_and_publish; this outer guard
+                # catches unexpected failures in _next_delay(), _renew_now.wait(),
+                # etc. Without it a single transient error kills the renewal thread
+                # and the credential expires silently.
+                log.exception("unhandled error in renewal loop; retry in 30s")
+                if self._stop.wait(30.0):
+                    return
 
     # start() comes from Loop; run() is overridden above (event-driven).
 
