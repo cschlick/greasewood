@@ -37,8 +37,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-14       # Apple Silicon, arm64_sonoma (covers newer arm64 via fallback)
-          - macos-13       # Intel, x86_64_ventura
+          - macos-15       # Apple Silicon, arm64_sequoia
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
