@@ -1,0 +1,126 @@
+name: Build Homebrew bottles
+
+# Build macOS bottles for the greasewood tap, upload them to the GitHub release,
+# and update cschlick/homebrew-tap with a `bottle do` block so `brew install`
+# can pour a prebuilt bottle instead of treating it as a source build (which on
+# Apple Silicon requires the Xcode Command Line Tools).
+#
+# Trigger models:
+#   - workflow_dispatch with a version (e.g. 0.4.0)
+#   - automatically from release.yml after a release is published
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build bottles for, without the leading v (e.g. 0.4.0)'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to build bottles for, without the leading v'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # upload bottle assets to the GitHub release
+
+concurrency:
+  group: bottle-${{ inputs.version || github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build bottle on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14       # Apple Silicon, arm64_sonoma (covers newer arm64 via fallback)
+          - macos-13       # Intel, x86_64_ventura
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+
+      - name: Tap and build bottle
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          VERSION="${{ inputs.version || github.event.inputs.version }}"
+          brew tap cschlick/tap
+          brew update
+          # Build into a bottle. `lima` will be poured from its bottle.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-bottle cschlick/tap/greasewood
+          # Generate the bottle tarball and JSON metadata.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew bottle \
+            --json \
+            --root-url="https://github.com/cschlick/greasewood/releases/download/v${VERSION}" \
+            cschlick/tap/greasewood
+
+      - name: Collect bottle files
+        run: |
+          mkdir -p bottles
+          cp greasewood--*.bottle.tar.gz greasewood--*.json bottles/ || true
+          ls -la bottles/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bottle-${{ matrix.os }}
+          path: bottles/*
+
+  publish:
+    name: Publish bottles and update tap
+    needs: build
+    runs-on: macos-14
+    env:
+      TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: bottles
+          merge-multiple: true
+
+      - name: Upload bottles to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version || github.event.inputs.version }}"
+          for f in bottles/greasewood--*.bottle.tar.gz; do
+            [ -f "$f" ] || continue
+            gh release upload "v${VERSION}" "$f" --clobber
+          done
+
+      - name: Clone tap and merge bottle block
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version || github.event.inputs.version }}"
+          git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/cschlick/homebrew-tap.git" tap
+          
+          # Tap the local clone so `brew bottle --merge` can find the formula.
+          TAP_DIR="$(brew --repository)/Library/Taps/cschlick/homebrew-tap"
+          rm -rf "$TAP_DIR"
+          mkdir -p "$(dirname "$TAP_DIR")"
+          ln -snf "$PWD/tap" "$TAP_DIR"
+          
+          # Generate and write the `bottle do` block.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew bottle \
+            --merge \
+            --write \
+            --no-commit \
+            bottles/greasewood--*.json
+          
+          # Commit and push the updated tap formula.
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/greasewood.rb
+          git diff --cached --quiet || git commit -m "greasewood ${VERSION} bottles"
+          git push
