@@ -87,7 +87,9 @@ mesh_info() {
     GWIF=$(guest 'ls /sys/class/net | grep "^gw-" | head -1' || true)
     [ -n "$GWIF" ] || { echo "no gw-* interface in $VM — node not joined?" >&2; exit 1; }
     OVERLAY=$(guest "ip -6 -o addr show dev $GWIF scope global" | awk '{print $4}' | cut -d/ -f1 | head -1)
-    PREFIX=$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv6Interface(sys.argv[1]).network)' "$OVERLAY/64")
+    # Compute the /64 prefix without python3 so this works on a fresh Mac
+    # without Xcode command-line tools installed.
+    PREFIX=$(printf '%s' "$OVERLAY" | awk -F: 'NF>=4 {printf "%s:%s:%s:%s::/64\n", $1, $2, $3, $4}')
     VMADDR=$(guest 'ip -6 -o addr show dev lima0 scope global' | awk '{print $4}' | cut -d/ -f1 | head -1)
     [ -n "$VMADDR" ] || { echo "VM has no vzNAT IPv6 on lima0 — networks: [vzNAT] missing?" >&2; exit 1; }
 }

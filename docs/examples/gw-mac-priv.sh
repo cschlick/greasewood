@@ -28,16 +28,25 @@ route-del)
     ;;
 hosts-sync)
     # stdin: the VM's managed hosts block, BEGIN/END markers included
-    # (empty input = remove the block).
-    python3 -c '
-import re, sys
-block = sys.stdin.read().rstrip("\n")
-hosts = open("/etc/hosts").read()
-new = re.sub(r"\n*# BEGIN greasewood.*?# END greasewood[^\n]*\n?", "\n", hosts, flags=re.S).rstrip("\n") + "\n"
-if block:
-    new += "\n" + block + "\n"
-open("/etc/hosts", "w").write(new)
-'
+    # (empty input = remove the block).  Use awk, not python3, so this works on
+    # a fresh Mac that doesn't have Xcode command-line tools installed yet.
+    new=$(mktemp)
+    cat > "$new"
+    awk -v newfile="$new" '
+        BEGIN { n=0; while ((getline line < newfile) > 0) block[n++] = line }
+        /^# BEGIN greasewood/ { skip=1; next }
+        /^# END greasewood/ { skip=0; next }
+        !skip { out[++m] = $0 }
+        END {
+            for (i = 1; i <= m; i++) print out[i]
+            if (n > 0) {
+                print ""
+                for (i = 0; i < n; i++) print block[i]
+            }
+        }
+    ' /etc/hosts > /etc/hosts.new
+    mv /etc/hosts.new /etc/hosts
+    rm -f "$new"
     ;;
 *)
     echo "usage: gw-mac-priv {route-add <prefix> <gw> | route-del <prefix> | hosts-sync}" >&2
