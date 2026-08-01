@@ -67,6 +67,10 @@ class Config:
     ca_key_file: Path | None
     ca_key_passphrase_env: str | None
     control_listen: str
+    # Optional read-only bootstrap endpoint on the underlay. Disabled by default.
+    # Used when a node has lost the anchor record and cannot build an overlay
+    # tunnel to sync normally. Format: ":<port>" or "[<addr>]:<port>".
+    bootstrap_listen: str
     credential_ttl: dt.timedelta
     renew_before: dt.timedelta
     door_window: dt.timedelta
@@ -174,6 +178,9 @@ trusted_pubs = {json.dumps(list(trusted_pubs))}
 [anchor]
 ca_key_file = "{anchor["ca_key_file"]}"
 control_listen = ":{anchor["control_port"]}"
+# Optional underlay bootstrap port for nodes whose directory cache is stale.
+# Empty = disabled. "51903" = any address; "[2601:db8::1]:51903" = one address.
+bootstrap_listen = ""
 credential_ttl = "{anchor["credential_ttl"]}"
 renew_before = "12h"
 door_window = "15m"
@@ -238,6 +245,7 @@ def load_config(path: Path) -> Config:
         ca_key_file=Path(anchor["ca_key_file"]).expanduser() if "ca_key_file" in anchor else None,
         ca_key_passphrase_env=anchor.get("ca_key_passphrase_env"),
         control_listen=anchor.get("control_listen", ":51902"),
+        bootstrap_listen=anchor.get("bootstrap_listen", ""),
         credential_ttl=_duration(anchor, "credential_ttl", "24h"),
         renew_before=_duration(anchor, "renew_before", "12h"),
         door_window=_duration(anchor, "door_window", "15m"),

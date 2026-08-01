@@ -1,4 +1,4 @@
-.TH GW 1 "2026-07-27" "greasewood 0.1.0" "User Commands"
+.TH GW 1 "2026-08-01" "greasewood 0.1.0" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -238,6 +238,19 @@ pypi: the published release (default); github: the git repo, for running a fix t
 .TP
 \fB\-\-ref\fR \fIREF\fR
 which one: a git ref (branch/tag/commit, default main) with \-\-from github, or an exact version with \-\-from pypi (default: latest)
+.TP
+\fB\-\-yes\fR, \fB\-y\fR
+skip the confirmation prompt
+.SS gw bootstrap
+\fBUsage:\fR gw bootstrap [\-h] [\-\-yes] seed
+.PP
+[sudo] fetch a fresh directory snapshot over the underlay from the anchor and restart the daemon
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fISEED\fR
+anchor bootstrap URL, e.g. http://[2601:db8::1]:51903
 .TP
 \fB\-\-yes\fR, \fB\-y\fR
 skip the confirmation prompt

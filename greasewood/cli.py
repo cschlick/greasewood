@@ -2907,7 +2907,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     is a daemon thread that dies with the process, so it isn't returned)."""
     from .ca import CA
     from .keys import CAKeys
-    from .server import ControlServer, ControlPlaneAddrInUse
+    from .server import ControlServer, ControlPlaneAddrInUse, BootstrapServer
     from .enroll import DoorWatcher, EnrollContext
     from . import wg as wgmod
 
@@ -2971,6 +2971,20 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     except ControlPlaneAddrInUse as e:
         _daemon_fatal(cfg, f"anchor control plane can't start: {e}")
     server.start()
+
+    # Optional underlay bootstrap port (anchor-only). Disabled by default.
+    if cfg.bootstrap_listen:
+        try:
+            bootstrap = BootstrapServer(
+                cfg.bootstrap_listen, directory,
+                get_revoked=get_revoked,
+                get_renew_after=read_renew_after,
+                get_policy=read_policy,
+                mesh_domain=cfg.mesh_domain)
+            bootstrap.start()
+        except OSError as e:
+            log.warning("bootstrap server could not start on %s: %s",
+                        cfg.bootstrap_listen, e)
 
     door_watcher = DoorWatcher(
         EnrollContext(
@@ -3665,6 +3679,106 @@ def cmd_policy(args) -> int:
             _request_fleet_renewal(cfg)
             print(f"  {len(changed)} node(s) re-roled — fleet renewal "
                   f"requested; they adopt live within a poll interval.")
+    return 0
+
+
+def cmd_bootstrap(args) -> int:
+    """
+    Fetch a fresh signed directory/revocation/policy snapshot from the anchor's
+    optional underlay bootstrap port. Use this when the local directory cache
+    has lost the anchor record and the daemon can no longer build an overlay
+    tunnel to sync normally.
+
+    The seed URL is the anchor's underlay bootstrap listener, e.g.
+    http://[2601:643:8800:36f0:3cdb:45ff:fed8:8e50]:51903
+    """
+    _require_root("bootstrap")
+    from .config import load_config
+    from .keys import NodeKeys, atomic_write
+    from .directory import Directory
+    from .sync import pull_directory, pull_revoked, _save_revoked
+    from .policy import POLICY_BASENAME
+    from .wire import GrantTable
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"not configured (no config file at {cfg_path})")
+    cfg = load_config(cfg_path)
+
+    if not cfg.ca_pubs_hex:
+        sys.exit("no trusted CA public keys configured")
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+
+    try:
+        keys = NodeKeys.load(cfg.data_dir)
+    except Exception:
+        sys.exit("this node isn't enrolled yet (no keys) — run 'gw join <token>' first")
+
+    if not args.yes:
+        ans = input(f"Replace {cfg.dir_cache_path} and restart the daemon? [y/N] ")
+        if ans.lower() not in ("y", "yes"):
+            print("aborted")
+            return 1
+
+    seed = args.seed.rstrip("/")
+    log.info("bootstrapping directory from %s", seed)
+
+    try:
+        records, _renew_after, _anchor_now, _mesh_domain, policy_dict = (
+            pull_directory(seed, timeout=30.0))
+    except Exception as e:
+        sys.exit(f"bootstrap directory pull failed: {e}")
+
+    revoked = pull_revoked(seed, timeout=15.0) or set()
+    _save_revoked(cfg.data_dir, revoked)
+
+    directory = Directory()
+    now = dt.datetime.now(_UTC)
+    accepted = 0
+    skipped = 0
+    for record in records:
+        try:
+            # The anchor may have an expired record at the exact moment we
+            # bootstrap (e.g. during the outage we're recovering from). Allow
+            # it so the node can install the anchor peer and reach it to renew.
+            allow_expired = ('role:anchor' in record.cred.caps)
+            record.verify(ca_pubs, revoked, allow_expired=allow_expired)
+            directory.merge([record])
+            accepted += 1
+        except ValueError as e:
+            log.warning("bootstrap: skip %s: %s", record.hostname, e)
+            skipped += 1
+
+    # Filter out records the directory dropped as too stale (exp + DROP_GRACE).
+    # We do this after merge so a wildly stale record doesn't evict a fresher
+    # one we may have locally.
+    if not any('role:anchor' in r.cred.caps for r in directory.all()):
+        sys.exit("bootstrap failed: no anchor record could be verified/retained")
+
+    try:
+        directory.save(cfg.dir_cache_path)
+    except Exception as e:
+        sys.exit(f"failed to save directory: {e}")
+
+    if policy_dict:
+        policy_path = cfg.data_dir / POLICY_BASENAME
+        try:
+            policy = GrantTable.from_dict(policy_dict)
+            policy.verify(ca_pubs)
+            atomic_write(policy_path,
+                         json.dumps(policy.to_dict(), indent=2))
+        except Exception as e:
+            log.warning("bootstrap: policy could not be verified/saved: %s", e)
+
+    anchor = [r for r in directory.all() if 'role:anchor' in r.cred.caps][0]
+    print(f"bootstrapped {accepted} record(s), skipped {skipped}; "
+          f"anchor: {anchor.hostname}")
+    print(f"directory saved to {cfg.dir_cache_path}")
+
+    if not _service_restart(membership_key(cfg.mesh_domain),
+                            why="to adopt the bootstrapped directory"):
+        print("Restart the daemon to adopt it: "
+              f"{_svc_restart_hint()}  (or re-run sudo gw run)")
     return 0
 
 
@@ -4737,6 +4851,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--yes", "-y", action="store_true",
                     help="skip the confirmation prompt")
     sp.set_defaults(fn=cmd_upgrade)
+
+    # bootstrap — fetch a fresh directory/revocation/policy snapshot over the
+    # underlay from an anchor's bootstrap port. Used when a node's local cache
+    # has lost the anchor record and it can no longer build an overlay tunnel
+    # to the anchor to sync normally.
+    sp = sub.add_parser("bootstrap",
+                        help="[sudo] fetch a fresh directory snapshot over the "
+                             "underlay from the anchor and restart the daemon")
+    sp.add_argument("seed",
+                    help="anchor bootstrap URL, e.g. "
+                         "http://[2601:db8::1]:51903")
+    sp.add_argument("--yes", "-y", action="store_true",
+                    help="skip the confirmation prompt")
+    sp.set_defaults(fn=cmd_bootstrap)
 
     # set-caps (anchor) — change an enrolled node's full tag set
     sp = sub.add_parser("set-caps",

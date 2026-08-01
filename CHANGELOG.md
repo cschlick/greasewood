@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node records publish `families` — the underlay address families that node can originate on (`[4]`, `[6]`, `[4, 6]`), re-detected and republished when it changes. It answers a question endpoints cannot: a node behind NAT advertises no endpoint whether it's on the same LAN or on IPv4-only cafe wifi, so peers had no way to tell "it will dial me in a second" from "it genuinely cannot reach me". Unsigned and optional (like `version`), so mixed-version fleets interoperate.
 - `gw watch` gains a `via` column: the underlay address family in use for each live direct tunnel (`ip6`/`ip4`), observed from live WireGuard state without reading `wg show`.
 - `gw diagnose` gains a `can dial out` row: the underlay families each node can originate on. It answers what `reachable` cannot — an outbound-only node can't be dialled, but that says nothing about whether it can dial you.
+- `gw bootstrap <underlay-url>` — recover a node whose local directory cache has lost the anchor record. The anchor can optionally expose a read-only bootstrap port on the underlay (`bootstrap_listen` in `[anchor]`); a stuck node fetches the signed directory/revoked/policy snapshot over the underlay, installs the anchor peer, and restarts. This breaks the overlay catch-22 that previously required `scp`-ing a fresh `directory.json`.
 
 ### Known issues
 

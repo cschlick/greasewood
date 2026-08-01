@@ -481,3 +481,82 @@ class ControlServer:
         for srv in self._servers:
             srv.shutdown()
             srv.server_close()   # close the socket AND shut the worker pool
+
+
+class _BootstrapHandler(_Handler):
+    """Read-only HTTP handler for the underlay bootstrap endpoint. Reuses the
+    GET endpoints from _Handler but turns away any POST/PUT/DELETE."""
+
+    def do_POST(self) -> None:
+        self._send_json({"error": "method not allowed"}, 405)
+
+    do_PUT = do_POST
+    do_DELETE = do_POST
+
+
+class BootstrapServer:
+    """A small, read-only HTTP server for bootstrapping nodes whose local
+    directory cache has lost the anchor record.
+
+    It serves /directory, /revoked, /health, and /ca-cert just like the main
+    control plane, but it binds to an underlay address (not the overlay) and
+    rejects all mutating requests. A node that has the right trusted CA but a
+    stale/missing cache can run `gw bootstrap http://[anchor-underlay]:51903`
+    to pull a fresh signed snapshot and rejoin the mesh.
+    """
+
+    def __init__(
+        self,
+        listen,                     # str or list[str] of "[addr]:port" or ":port"
+        directory: "Directory",
+        get_revoked,
+        get_renew_after=lambda: None,
+        get_policy=lambda: None,
+        mesh_domain: str = "gw.internal",
+        request_timeout: float = 30.0,
+    ) -> None:
+        listens = [listen] if isinstance(listen, str) else list(listen)
+
+        class Handler(_BootstrapHandler):
+            pass
+        # See ControlServer for the timeout/pool rationale.
+        Handler.timeout = request_timeout
+        Handler.directory = directory
+        Handler.ca = None
+        Handler.get_ca_pubs = staticmethod(list)
+        Handler.get_revoked = staticmethod(get_revoked)
+        Handler.cache_path = None
+        Handler.tls_cert_ttl = None
+        Handler.mesh_domain = mesh_domain
+        Handler.get_renew_after = staticmethod(get_renew_after)
+        Handler.get_policy = staticmethod(get_policy)
+        Handler.replay = _ReplayGuard()
+
+        self._servers = []
+        for lst in listens:
+            host, _, port_str = lst.rpartition(":")
+            host = host.strip("[]")  # strip brackets from "[fd8d::1]"
+            try:
+                self._servers.append(
+                    _IPv6Server((host or "::", int(port_str)), Handler,
+                                max_workers=4))
+            except OSError as e:
+                for srv in self._servers:       # close what we already bound
+                    srv.server_close()
+                raise
+        self._server = self._servers[0]
+
+    def start(self) -> threading.Thread:
+        threads = []
+        for srv in self._servers:
+            t = threading.Thread(target=srv.serve_forever, name="bootstrap-http",
+                                 daemon=True)
+            t.start()
+            threads.append(t)
+            log.info("bootstrap listening on %s", srv.server_address)
+        return threads[0]
+
+    def stop(self) -> None:
+        for srv in self._servers:
+            srv.shutdown()
+            srv.server_close()   # close the socket AND shut the worker pool
