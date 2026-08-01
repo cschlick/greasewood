@@ -465,7 +465,7 @@ class TestEndpointBackoff:
 
     def test_reconcile_drops_keepalive_on_dead_endpoint(self, monkeypatch):
         """End to end: a peer whose endpoint never handshakes is re-set with
-        keepalive=0, endpoint still pinned."""
+        keepalive=0, endpoint still pinned (only when this node can be dialed)."""
         import base64
         import time as _time
         from greasewood import reconcile as rmod
@@ -499,6 +499,48 @@ class TestEndpointBackoff:
 
         assert fake.set_calls == 1                          # re-set for keepalive
         assert fake.peers[pub].keepalive == 0               # futile poke stopped
+        assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"  # still pinned
+
+    def test_outbound_only_keeps_keepalive_on_dead_endpoint(self, monkeypatch):
+        """A node that advertises no underlay endpoints cannot be called back by
+        a peer.  Even when the tracker has given up on the peer's endpoint, we
+        keep sending keepalives so the tunnel can recover after sleep/mobility."""
+        import base64
+        import time as _time
+        from greasewood import reconcile as rmod
+        from greasewood.reconcile import reconcile_once, _EndpointTracker
+        from greasewood.wg import LivePeer
+
+        ca = CAKeys.generate()
+        local, peer = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        # Local node is outbound-only: no advertised endpoints.
+        directory.put(_make_record(local, _make_cred(local, ca, "local"),
+                                   endpoints=[]))
+        rec = _make_record(peer, _make_cred(peer, ca, "peer"),
+                           endpoints=["[2001:db8::9]:51900"])
+        directory.put(rec)
+
+        fake = _FakeWg()
+        pub = base64.b64encode(peer.wg_pub_bytes).decode()
+        # Simulate the kernel already having the peer with keepalive=0 (the
+        # pre-fix behavior when the tracker backed off) — we expect reconcile
+        # to raise it back to 25 because this node is outbound-only.
+        fake.peers[pub] = LivePeer(wg_pub_b64=pub, endpoint="[2001:db8::9]:51900",
+                                   allowed_ips=f"{rec.cred.addr}/128",
+                                   latest_handshake=0, keepalive=0)
+        monkeypatch.setattr(rmod, "wgmod", fake)
+        # Tracker already past dwell for this peer.
+        tracker = _EndpointTracker(dwell=20.0)
+        tracker._state[pub] = rmod._PeerEndpoint(
+            current="[2001:db8::9]:51900", since=0.0, unhealthy_since=0.0)
+        monkeypatch.setattr(_time, "time", lambda: 1000.0)
+
+        reconcile_once("gw-test", directory, local.id_pub_bytes, ["segment:mesh"],
+                       [ca.ca_pub_bytes], set(), endpoint_tracker=tracker)
+
+        assert fake.set_calls == 1                          # re-set for keepalive
+        assert fake.peers[pub].keepalive == 25              # keep poking: we are the only side that can
         assert fake.peers[pub].endpoint == "[2001:db8::9]:51900"  # still pinned
 
 

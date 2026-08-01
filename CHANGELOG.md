@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gw watch` gains a `via` column: the underlay address family in use for each live direct tunnel (`ip6`/`ip4`), observed from live WireGuard state without reading `wg show`.
 - `gw diagnose` gains a `can dial out` row: the underlay families each node can originate on. It answers what `reachable` cannot — an outbound-only node can't be dialled, but that says nothing about whether it can dial you.
 
+### Fixed
+
+- `reconcile` no longer drops `persistent-keepalive` to 0 when the `EndpointTracker` thinks a peer's endpoint is dead **if this node advertises no underlay endpoints of its own**. An outbound-only peer (typical laptop behind NAT) cannot be called back, so stopping keepalives after a sleep or network change meant the tunnel never recovered on its own.
+
 ### Known issues
 
 - `tests/test_server.py::TestControlServerConcurrency::test_bounded_pool_sheds_load_at_capacity` is flaky on macOS: it expects a clean EOF when the anchor drops an over-capacity control-plane connection, but the OS sometimes returns `ConnectionResetError` instead. The load-shedding behavior itself is correct (the log shows `dropping a connection from ::1`). This is a test-level tolerance issue, not a product bug, and is deferred.

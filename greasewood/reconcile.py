@@ -229,6 +229,14 @@ def reconcile_once(
     context: dict[str, str] = {}   # wg_pub_b64 → human context for the audit trail
     trusted: list = []
 
+    # If we advertise no underlay endpoints, no peer can initiate to us; we are
+    # strictly outbound-only and MUST keep sending keepalives even when the
+    # currently-pinned endpoint looks dead.  Otherwise a laptop that slept or
+    # roamed never recovers: it drops keepalive to 0 and just waits for the
+    # remote to call, which it cannot do because we have no endpoint.
+    own_record = directory.get(local_id_pub.hex()) if local_id_pub is not None else None
+    local_is_outbound_only = own_record is None or not own_record.endpoints
+
     # Expiry is a liveness signal, not a trust kill.  Two parties must keep
     # talking to an expired-but-not-revoked record within drop_grace:
     #   - the ANCHOR, so stale nodes can renew/recertify themselves; and
@@ -275,7 +283,7 @@ def reconcile_once(
         if endpoint_tracker is not None:
             endpoint = endpoint_tracker.choose(wg_pub_b64, candidates,
                                                last_handshake, now)
-            if endpoint_tracker.is_backoff(wg_pub_b64):
+            if endpoint_tracker.is_backoff(wg_pub_b64) and not local_is_outbound_only:
                 keepalive = 0          # dead endpoint: stop the futile 25s poke
         else:
             endpoint = candidates[0] if candidates else None
