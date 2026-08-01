@@ -65,18 +65,18 @@ jobs:
 
           # `brew bottle` creates a local file with `--` between name and version,
           # but the canonical release asset name (recorded in the JSON) uses a
-          # single dash. Rename the tarball to the canonical name so `brew install`
-          # downloads the right URL, then upload it to the release.
+          # single dash. Copy the tarball to the canonical name for the release
+          # asset and keep the original local file for `brew bottle --merge`.
           python3 - <<'PY'
-          import json, glob, os
+          import json, glob, os, shutil
           for j in glob.glob('greasewood--*.json'):
               with open(j) as f:
                   data = json.load(f)
               for info in data['cschlick/tap/greasewood']['bottle']['tags'].values():
-                  src = info['local_filename']
-                  dst = info['filename']
-                  if os.path.exists(src) and src != dst:
-                      os.rename(src, dst)
+                  local = info['local_filename']
+                  canonical = info['filename']
+                  if os.path.exists(local):
+                      shutil.copy2(local, canonical)
           PY
 
           for f in greasewood-*.bottle.*.tar.gz; do
@@ -87,7 +87,8 @@ jobs:
       - name: Collect bottle metadata
         run: |
           mkdir -p bottles
-          cp greasewood-*.bottle.*.json bottles/ || true
+          cp greasewood--*.bottle.json bottles/ || true
+          cp greasewood--*.bottle.*.tar.gz bottles/ || true
           ls -la bottles/
 
       - uses: actions/upload-artifact@v4
@@ -130,7 +131,7 @@ jobs:
             --merge \
             --write \
             --no-commit \
-            bottles/greasewood-*.bottle.*.json
+            bottles/greasewood--*.bottle.json
 
           # Commit and push the updated tap formula.
           cd tap
