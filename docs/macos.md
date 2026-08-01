@@ -59,6 +59,13 @@ brew install cschlick/tap/greasewood
 gw-mac            # creates the VM, prints the invite/join steps
 ```
 
+!!! note "No Xcode command-line tools required"
+    The Mac side of greasewood is just the `gw` shell shim and the `gw-mac`
+    helpers. They use standard `/usr/bin` tools (`sh`, `awk`, `sed`, `route`,
+    `netstat`) plus `lima` from Homebrew. The helper scripts no longer call
+    `python3`, so a fresh macOS install with no Xcode/CLT disk space will not
+    get `xcode-select` prompts. Everything you need comes from `brew`.
+
 The rest of this section is the same setup by hand — read it to know what the
 formula is doing for you, or to customize the VM.
 
