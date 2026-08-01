@@ -66,9 +66,10 @@ gw-mac            # creates the VM, prints the invite/join steps
     `python3`, so a fresh macOS install with no Xcode/CLT disk space will not
     get `xcode-select` prompts from `gw-mac` itself.
 
-    There is one Homebrew-level wrinkle: on Apple Silicon, `brew install` of a
-    source formula still considers the CLT a build dependency. If `brew install`
-    itself pops the Xcode prompt, see [No CLT?](#no-clt) below.
+    As of v0.4.0 the Homebrew formula also ships a prebuilt Apple Silicon bottle
+    (`cellar :any_skip_relocation`), so `brew install` can pour the bottle
+    without treating `greasewood` as a source build. If `brew install` still
+    pops the CLT prompt for any reason, see the [No CLT?](#no-clt) fallback.
 
 The rest of this section is the same setup by hand — read it to know what the
 formula is doing for you, or to customize the VM.
@@ -98,12 +99,25 @@ The choices that make it an appliance rather than a dev box:
 
 ## No CLT?
 
-On Apple Silicon, Homebrew requires the Xcode Command Line Tools to install a
-formula that it treats as a source build, even if that formula just copies shell
-scripts. `gw-mac` itself no longer calls `python3`, but `brew install` can still
-pop the CLT prompt before it gets that far.
+As of greasewood 0.4.0, the Homebrew formula ships a prebuilt Apple Silicon
+bottle with `cellar :any_skip_relocation`, so `brew install cschlick/tap/greasewood`
+no longer needs the Xcode Command Line Tools:
 
-If you have `lima` and `git` already, you can install the Mac side by hand:
+```bash
+brew update
+HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install cschlick/tap/greasewood
+sudo gw-mac install-autostart
+brew services start greasewood
+```
+
+(Third-party taps require explicit trust in recent Homebrew; run
+`brew trust cschlick/tap` once instead of the `HOMEBREW_NO_REQUIRE_TAP_TRUST`
+workaround if you prefer.)
+
+On older Apple Silicon macOS releases, the `arm64_sequoia` bottle will be used
+via Homebrew's bottle fallback. If you are on an unsupported combination or
+`brew install` still prompts for CLT, the manual path below gives the same
+files:
 
 ```bash
 # Clone just the release you want
@@ -135,9 +149,6 @@ sudo /opt/homebrew/bin/gw-mac install-autostart
 /opt/homebrew/bin/gw-mac up
 (crontab -l 2>/dev/null; echo "*/2 * * * * /opt/homebrew/bin/gw-mac up >/tmp/gw-mac.log 2>&1") | crontab -
 ```
-
-This gives you the same files and the same `gw-mac up` timer, without the
-Xcode/CLT installer.
 
 ## Join the mesh
 
