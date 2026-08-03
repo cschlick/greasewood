@@ -108,8 +108,15 @@ class WedgeWatchdog(Loop):
             age, reason = result
         else:
             age, reason = result, "reconcile"
+        uptime = time.monotonic() - self._started
         if age is None:                      # no progress yet → measure uptime
-            age = time.monotonic() - self._started
+            age = uptime
+        else:
+            # The age_fn uses wall-clock stamps. A machine that slept (or had
+            # its clock stepped) can report a huge age even though the daemon is
+            # healthy; it just hasn't had a chance to run. Cap the age at the
+            # process's active uptime so we don't exit before the loops recover.
+            age = min(age, uptime)
         if age <= self._threshold:
             return
         log.critical(

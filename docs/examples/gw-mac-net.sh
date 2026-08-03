@@ -96,6 +96,25 @@ mesh_info() {
 
 route_ok() { netstat -rn -f inet6 | awk -v p="$PREFIX" -v g="$VMADDR" '$1==p && $2==g' | grep -q .; }
 
+# After a Mac sleep/wake the Lima VM's clock jumps and the greasewood daemon can
+# get wedged on stale liveness stamps.  Restart the service if it isn't active,
+# and clear those stamps so the watchdog gives it time to recover.
+ensure_daemon() {
+    limactl shell "$VM" -- sh -c '
+        if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/greasewood@.service ]; then
+            if ! systemctl is-active --quiet greasewood@home 2>/dev/null; then
+                rm -f /var/lib/greasewood_home/last_sync /var/lib/greasewood_home/last_reconcile
+                systemctl restart greasewood@home
+            fi
+        elif [ -f /etc/init.d/greasewood.home ]; then
+            if ! rc-service greasewood.home status 2>/dev/null | grep -q started; then
+                rm -f /var/lib/greasewood_home/last_sync /var/lib/greasewood_home/last_reconcile
+                rc-service greasewood.home restart
+            fi
+        fi
+    '
+}
+
 case "$CMD" in
 up)
     if ! vm_exists; then
@@ -121,6 +140,7 @@ EOF
     # ${VM} braced: macOS /bin/sh (bash 3.2) parses a bare $VM followed by a
     # multibyte char as part of the variable name — unbound under set -u.
     vm_running || { echo "starting ${VM}…"; limactl start --tty=false "$VM"; }
+    ensure_daemon
     mesh_info
     if route_ok; then
         echo "route: $PREFIX via $VMADDR — already in place"

@@ -46,8 +46,22 @@ def test_watchdog_stays_quiet_while_fresh():
 def test_watchdog_exits_when_reconcile_is_stale():
     exits = []
     wd = WedgeWatchdog(age_fn=lambda: 300.0, threshold=120, exit=exits.append)
+    wd._started -= 300                                       # already up long enough
     wd._tick()
     assert exits == [70]                                     # stale → EX_SOFTWARE exit
+
+
+def test_watchdog_caps_wall_clock_age_by_uptime():
+    # A clock jump (e.g. machine woke from sleep) can make the age look huge
+    # even though the daemon has only been running a moment.  It must not exit
+    # before the loops have a fair chance to run.
+    exits = []
+    wd = WedgeWatchdog(age_fn=lambda: 100000.0, threshold=120, exit=exits.append)
+    wd._tick()                                               # just started
+    assert exits == []
+    wd._started -= 300
+    wd._tick()                                               # now up long enough
+    assert exits == [70]
 
 
 def test_watchdog_measures_uptime_before_first_reconcile(monkeypatch):
@@ -71,5 +85,6 @@ def test_watchdog_accepts_tuple_reason_and_exits():
     exits = []
     wd = WedgeWatchdog(age_fn=lambda: (300.0, "sync"), threshold=120,
                        exit=exits.append)
+    wd._started -= 300
     wd._tick()
     assert exits == [70]
