@@ -11,6 +11,15 @@ depend() {
 }
 
 start() {
+    # forwarding=1 (from sysctl.d) makes the kernel ignore RAs, but the vzNAT
+    # link's address and default route come from RA. accept_ra=2 keeps them.
+    # It lives here, not in sysctl.d: systemd-sysctl/OpenRC's sysctl runs before
+    # the interface exists, so the per-interface write silently no-ops. `need
+    # net` above means the link is up by the time we get here.
+    for f in /proc/sys/net/ipv6/conf/lima*/accept_ra; do
+        [ -e "$f" ] && echo 2 > "$f"
+    done
+
     ebegin "Loading gw-mac gateway nftables ruleset"
     /usr/sbin/nft -f /etc/gw-mac-gateway.nft
     eend $?

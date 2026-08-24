@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **macOS: the node VM's non-mesh interfaces are sealed by default.** `gw-mac` installs a small default-closed nftables ruleset (`gw-mac-lan.nft`, plus a systemd unit and an OpenRC script) into every VM it creates, and retro-fits it to an existing VM on the next `gw-mac` run. Under `vzNAT` the VM is unreachable and its listeners — sshd, mDNS, LLMNR — are closed by construction rather than by a rule; the moment the VM is given a real NIC so it can be dialled inbound, that stops being true, and greasewood's own table deliberately governs only the mesh interfaces. The seal closes everything that isn't loopback or `gw-*`, then reopens exactly what a node needs: established flows, ICMP (IPv6 does not work without it), DHCP, inbound WireGuard on the node's configured port, and Lima's host→guest ssh scoped to the RFC1918 ranges Lima's own NATs use. It seals by exclusion rather than by interface name, so which of `lima0`/`lima1` is the bridged one doesn't matter and a NIC added later is closed the day it appears. The final `drop` is counted, so `nft list table inet gwlan` answers "is the seal eating this?" without guessing.
 
+### Fixed
+
+- The per-interface `accept_ra=2` in `gw-mac-gateway.sysctl.conf` never took effect. `sysctl.d` is applied by `systemd-sysctl` at boot, before the interface has been renamed to `lima0`, so the write failed and was ignored (`Couldn't write '2' to 'net/ipv6/conf/lima0/accept_ra', ignoring: No such file or directory`). Its job — keeping the vzNAT link's RA-derived address and default route alive despite the gateway's `forwarding=1` — is now done where ordering is guaranteed: a systemd-networkd drop-in (`IPv6AcceptRA=yes`, which is what actually governs RA on networkd-managed images) installed beside whatever `.network` file networkd matched to the link, and in `gw-mac-gateway`'s `start()` on OpenRC, which runs after `need net`.
+
 ## [0.4.0] - 2026-08-01
 
 ### Added

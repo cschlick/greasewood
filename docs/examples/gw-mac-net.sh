@@ -57,7 +57,8 @@ priv() {
 # Works on both recipes: systemd unit on Debian, OpenRC script on Alpine.
 install_gateway() {
     limactl cp "$SHARE/gw-mac-gateway.nft" "$SHARE/gw-mac-gateway.sysctl.conf" \
-               "$SHARE/gw-mac-gateway.service" "$SHARE/gw-mac-gateway.initd" "$VM:/tmp/"
+               "$SHARE/gw-mac-gateway.service" "$SHARE/gw-mac-gateway.initd" \
+               "$SHARE/gw-mac-gateway.network.conf" "$VM:/tmp/"
     if limactl shell "$VM" -- sh -c 'command -v systemctl' >/dev/null 2>&1; then
         limactl shell "$VM" -- sudo sh -c '
             mv /tmp/gw-mac-gateway.nft /etc/ &&
@@ -66,14 +67,26 @@ install_gateway() {
             rm -f /tmp/gw-mac-gateway.initd &&
             chown root:root /etc/gw-mac-gateway.nft /etc/sysctl.d/99-gw-mac-gateway.conf \
                             /etc/systemd/system/gw-mac-gateway.service &&
-            sysctl --system >/dev/null && systemctl daemon-reload &&
+            sysctl --system >/dev/null &&
+            NETFILE=$(networkctl status lima0 2>/dev/null | grep "Network File:" \
+                      | tr -d " " | cut -d: -f2) &&
+            if [ -n "$NETFILE" ]; then
+                DROPIN="/etc/systemd/network/$(basename "$NETFILE").d"
+                mkdir -p "$DROPIN"
+                mv /tmp/gw-mac-gateway.network.conf "$DROPIN/gw-mac-gateway.conf"
+                chown root:root "$DROPIN/gw-mac-gateway.conf"
+                networkctl reload 2>/dev/null || true
+            else
+                rm -f /tmp/gw-mac-gateway.network.conf
+            fi &&
+            systemctl daemon-reload &&
             systemctl enable --now gw-mac-gateway'
     else
         limactl shell "$VM" -- sudo sh -c '
             mv /tmp/gw-mac-gateway.nft /etc/ &&
             mv /tmp/gw-mac-gateway.sysctl.conf /etc/sysctl.d/99-gw-mac-gateway.conf &&
             mv /tmp/gw-mac-gateway.initd /etc/init.d/gw-mac-gateway &&
-            rm -f /tmp/gw-mac-gateway.service &&
+            rm -f /tmp/gw-mac-gateway.service /tmp/gw-mac-gateway.network.conf &&
             chown root:root /etc/gw-mac-gateway.nft /etc/sysctl.d/99-gw-mac-gateway.conf \
                             /etc/init.d/gw-mac-gateway &&
             chmod 755 /etc/init.d/gw-mac-gateway &&
