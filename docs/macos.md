@@ -40,13 +40,20 @@ The one thing NAT can't do is reach *another* NAT'd node directly — two nodes
 both behind NAT never handshake. As long as the peers this laptop talks to are
 themselves directly reachable (a GUA'd server, your anchor), that never comes
 up. If you genuinely need this node to be dialed *inbound*, you want bridged
-networking instead — a different, heavier setup — but most laptop clients don't.
+networking instead — a heavier setup, described in
+[Make the node dialable](#make-the-node-dialable-bridged) — but most laptop
+clients don't.
 
 !!! note "The firewall is scoped to the VM"
     On Linux, greasewood's per-role nftables filter governs the whole host. Here
     it governs only the VM's interface, not macOS. For a laptop that normally
     runs no firewall at all, that's a reasonable trade — the node is sealed, the
     Mac is untouched.
+
+    Note what "sealed" is doing there: under NAT the VM is unreachable, so its
+    listeners (sshd, mDNS) are closed by construction rather than by a rule.
+    Give the VM a real NIC and that stops being true, which is why `gw-mac`
+    installs the [LAN seal](#the-lan-seal) into every VM it creates.
 
 ## Set it up
 
@@ -255,9 +262,14 @@ Masquerading to the node's own address sidesteps all of it: **to the fleet,
 the Mac is this node** — same identity, same grants, enforced at each
 receiving peer's input filter exactly as before.
 
-Three small files inside the VM (forwarding + NAT66 + MSS clamp for the
-1500→1420 MTU step — and note `accept_ra=2`, without which enabling forwarding
-would silently kill the VM's own SLAAC underlay):
+Four small files inside the VM: the NAT66 + MSS clamp for the 1500→1420 MTU
+step, `forwarding=1`, the gateway unit (which also pins the VM's side of the
+transfer address `gw-mac` routes through (explained with the `gw-mac`
+command below)), and a networkd drop-in that keeps RA autoconfiguration alive on the
+vzNAT link — `forwarding=1` makes the kernel ignore RAs, and the per-interface
+`accept_ra` sysctl that would counter it silently loses a race with interface
+renaming at boot (the sysctl file's comment has the details; on OpenRC the
+gateway script applies it at start instead):
 
 ```nft
 --8<-- "examples/gw-mac-gateway.nft"
@@ -271,17 +283,24 @@ would silently kill the VM's own SLAAC underlay):
 --8<-- "examples/gw-mac-gateway.service"
 ```
 
+```ini
+--8<-- "examples/gw-mac-gateway.network.conf"
+```
+
 Install once (`gw-mac` does this automatically when it creates the VM — this
 is the manual path for a VM you built yourself):
 
 ```bash
-limactl cp gw-mac-gateway.nft gw-mac-gateway.sysctl.conf gw-mac-gateway.service greasewood-node:/tmp/
+limactl cp gw-mac-gateway.nft gw-mac-gateway.sysctl.conf gw-mac-gateway.service gw-mac-gateway.network.conf greasewood-node:/tmp/
 limactl shell greasewood-node -- sudo sh -c '
   mv /tmp/gw-mac-gateway.nft /etc/ &&
   mv /tmp/gw-mac-gateway.sysctl.conf /etc/sysctl.d/99-gw-mac-gateway.conf &&
   mv /tmp/gw-mac-gateway.service /etc/systemd/system/ &&
-  chown root:root /etc/gw-mac-gateway.nft /etc/sysctl.d/99-gw-mac-gateway.conf /etc/systemd/system/gw-mac-gateway.service &&
-  sysctl --system >/dev/null && systemctl daemon-reload && systemctl enable --now gw-mac-gateway'
+  NETFILE=$(networkctl status lima0 | grep "Network File:" | tr -d " " | cut -d: -f2) &&
+  mkdir -p /etc/systemd/network/$(basename "$NETFILE").d &&
+  mv /tmp/gw-mac-gateway.network.conf /etc/systemd/network/$(basename "$NETFILE").d/gw-mac-gateway.conf &&
+  chown -R root:root /etc/gw-mac-gateway.nft /etc/sysctl.d/99-gw-mac-gateway.conf /etc/systemd/system/gw-mac-gateway.service /etc/systemd/network/ &&
+  sysctl --system >/dev/null && networkctl reload && systemctl daemon-reload && systemctl enable --now gw-mac-gateway'
 ```
 
 Then on the Mac, install [`gw-mac-net.sh`](examples/gw-mac-net.sh) as a
@@ -294,7 +313,14 @@ install -m 755 gw-mac-net.sh /opt/homebrew/bin/gw-mac
 `gw-mac` (short for `gw-mac up`) starts the VM if it's stopped, installs the
 mesh `/64` route via the VM, and syncs the VM's managed hosts block into the
 Mac's `/etc/hosts` — idempotent, and it only asks for sudo when something
-actually needs changing. The VM half of the setup is permanent, but macOS
+actually needs changing. Under the hood it gives both ends of the `vzNAT` link
+a fixed *transfer address* (`fd6d:6163::1` on the Mac, `::2` in the VM): the
+route's next hop, and — the part that matters — the source macOS picks for
+mesh-bound traffic, so the VM's replies come back over the `vzNAT` link
+regardless of where its default route points. (A
+[bridged](#make-the-node-dialable-bridged) VM's default route points at the
+bridged link, which is host-blind — without the transfer net, replies to the
+Mac die there.) The VM half of the setup is permanent, but macOS
 routes are not files: the route dies with a Mac reboot or VM stop. So the
 whole day-to-day is:
 
@@ -333,6 +359,112 @@ Know what you're trading:
   the Mac's copy updates when you run `gw-mac`. Rerun it after joins,
   departures, or renames (resolution only — reachability and revocation are
   still enforced live, at the peers).
+
+## Make the node dialable (bridged)
+
+Everything above assumes the laptop posture: this node dials out, and never
+needs to be called. A Mac that lives on one desk — a clamshell machine used as a
+desktop, a mini acting as a small server — may need the opposite, and two
+outbound-only nodes never link at all:
+
+```
+panda ↔ melvin
+  panda → melvin: can't — melvin is outbound-only / advertises no endpoint
+  melvin → panda: can't — panda is outbound-only / advertises no endpoint
+  ✗ no dialable direction — the link can't form (both outbound-only)
+```
+
+The Mac has a GUA; the node doesn't. greasewood runs *inside the VM*, whose only
+global address under `vzNAT` is Apple's NAT66 ULA (`fd…`), and
+[endpoint detection](networking.md#reachability) correctly refuses to advertise
+a ULA — nothing could dial it. The GUA is on the Mac's `en0`, on the far side of
+that NAT.
+
+Fixing it means giving the VM its own NIC on your LAN, so it gets a GUA from
+your router's RA directly and `endpoint_auto` picks it up on its next cycle.
+That last part is the reason to prefer bridging over pinning an endpoint by
+hand: a residential prefix rotates, and only the node that can *see* its own
+address can follow it.
+
+Lima does this with `socket_vmnet`, which runs as root — so unlike everything
+else on this page, it costs a sudoers rule. Install the binary somewhere the
+user cannot rewrite (Homebrew's prefix is user-writable, which is exactly why
+Lima refuses to run it from there):
+
+```bash
+brew install socket_vmnet && sudo install -o root -g wheel -m 0755 -d /opt/socket_vmnet/bin && sudo install -o root -g wheel -m 0555 "$(brew --prefix)/opt/socket_vmnet/bin/socket_vmnet" "$(brew --prefix)/opt/socket_vmnet/bin/socket_vmnet_client" /opt/socket_vmnet/bin/
+```
+
+Then the sudoers rule — generated by Lima, validated before install so a bad
+file can't lock you out of `sudo`, and left world-readable because `limactl`
+insists on reading it back (`sudo` only objects to a sudoers file being
+*writable*):
+
+```bash
+limactl sudoers > /tmp/lima.sudoers && sudo visudo -cf /tmp/lima.sudoers && sudo install -o root -g wheel -m 0444 /tmp/lima.sudoers /etc/sudoers.d/lima
+```
+
+Now add the NIC. Add it **alongside** `vzNAT`, never replacing it. This is not
+bookkeeping: Apple's bridged vmnet carries **no host↔guest traffic at all** —
+the Mac gets no L3 presence on that bridge, so while every *other* machine on
+the LAN can dial the VM's new address, the Mac itself cannot. `limactl shell`
+survives regardless (Lima reaches the guest over vsock), but whole-Mac overlay
+routing needs an IP path to the VM, and `vzNAT` is the only one:
+
+```bash
+limactl stop greasewood-node && limactl edit greasewood-node --network lima:bridged && limactl start greasewood-node
+```
+
+The node should pick up a GUA within a minute and republish itself:
+
+```
+advertised endpoint(s) changed: (none) → ['[2601:db8:…:54e7]:51900'] — re-advertising
+```
+
+Confirm with `gw diagnose <peer>`, which should now show `reachable: yes
+(advertises endpoint)` and a dialable direction for the pair that had none.
+
+!!! warning "Bridging over Wi-Fi is the uncertain part"
+    Bridged mode puts a second MAC behind one 802.11 association. Apple's vmnet
+    handles this with MAC translation (`bridge100` gains `en0` as a member with
+    a `MACNAT` flag) and it works on plenty of access points — but some drop the
+    frames, and that is a property of your AP, not of this setup. It costs five
+    minutes to find out, and adding the NIC alongside `vzNAT` means a failure
+    changes nothing: delete the line and you are back where you started.
+
+    Lima's bridged mode also pins one host interface (`interface: en0` in
+    `~/.lima/_config/networks.yaml`). Stationary machines don't care; a laptop
+    that moves between Wi-Fi, a dock, and tethering does.
+
+If your peers are outside the LAN, they reach the VM's GUA through your router's
+IPv6 firewall, which needs a rule permitting inbound UDP on the node's port —
+there is no NAT to forward. Peers on the same `/64` need nothing: that traffic
+is neighbour discovery on the local link and never touches the router.
+
+### The LAN seal
+
+A bridged VM is on your network for real, and the listeners that NAT used to
+hide — sshd, mDNS, LLMNR — now face the LAN, and the internet too if the router
+forwards to them. greasewood's own table governs the mesh interfaces only; it
+never touches the rest of the host, by design. So `gw-mac` installs a small
+default-closed ruleset into every VM it creates, and retro-fits it to an
+existing VM the next time you run `gw-mac`:
+
+```nft
+--8<-- "examples/gw-mac-lan.nft"
+```
+
+It closes everything that isn't loopback or the mesh, then reopens exactly what
+a node needs: established flows, ICMP (IPv6 does not work without it), DHCP,
+inbound WireGuard, and Lima's own host→guest ssh scoped to the RFC1918 ranges
+Lima's NATs use. Sealing by *exclusion* rather than by interface name is
+deliberate: which of `lima0`/`lima1` is the bridged one depends on the order of
+`networks:` in the recipe, and a NIC added later should be closed the day it
+appears rather than silently exposed.
+
+If your node listens on something other than the default 51900, `gw-mac`
+substitutes the configured port when it installs the seal. Installing the file
+by hand instead means editing the `define wg_port` line yourself.
 
 ## Leaner alternative: Alpine (OpenRC)
 
