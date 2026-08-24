@@ -25,6 +25,19 @@ CMD="${1:-up}"
 VM="${2:-greasewood-node}"
 PRIV=/usr/local/libexec/gw-mac-priv
 
+# The gw-mac "transfer net": a fixed ULA for exactly the Mac↔VM hop over the
+# vzNAT link. The VM side is the mesh route's next hop; the Mac side is what
+# macOS sources mesh-bound traffic from (RFC 6724 prefers an on-interface,
+# prefix-matching source over the en0 GUA) — which is what makes the VM's
+# replies route back over the vzNAT link. Without it the Mac sources from its
+# GUA, and a VM whose default route points elsewhere (a bridged VM's does —
+# the bridged RA wins) sends replies out a link that is host-blind: Apple's
+# bridged vmnet carries no host↔guest traffic, so whole-Mac routing dies.
+# vmnet's own NAT66 fd… ULA used to fill this role by accident; it is not
+# guaranteed (adding a second network rebuilds the shared bridge without it).
+TRANSFER_VM=fd6d:6163::2
+TRANSFER_MAC=fd6d:6163::1
+
 guest() { limactl shell "$VM" -- sh -c "$1"; }
 vm_running() { limactl list --format '{{.Status}}' "$VM" 2>/dev/null | grep -q '^Running$'; }
 vm_exists() { limactl list --format '{{.Name}}' 2>/dev/null | grep -qx "$VM"; }
@@ -44,7 +57,10 @@ find_share() {
 priv() {
     if [ -x "$PRIV" ]; then
         sudo -n "$PRIV" "$@"
-    elif [ -t 0 ]; then
+    elif [ -t 2 ]; then
+        # Terminal check on stderr, NOT stdin: hosts-sync pipes the hosts
+        # block into stdin by design, so fd 0 is never a tty for exactly the
+        # op that made this matter. sudo prompts on /dev/tty regardless.
         find_share || { echo "gw-mac: gw-mac-priv.sh not found near $0" >&2; exit 1; }
         sudo sh "$SHARE/gw-mac-priv.sh" "$@"        # may prompt for a password
     else
@@ -140,8 +156,27 @@ mesh_info() {
     # Compute the /64 prefix without python3 so this works on a fresh Mac
     # without Xcode command-line tools installed.
     PREFIX=$(printf '%s' "$OVERLAY" | awk -F: 'NF>=4 {printf "%s:%s:%s:%s::/64\n", $1, $2, $3, $4}')
-    VMADDR=$(guest 'ip -6 -o addr show dev lima0 scope global' | awk '{print $4}' | cut -d/ -f1 | head -1)
-    [ -n "$VMADDR" ] || { echo "VM has no vzNAT IPv6 on lima0 — networks: [vzNAT] missing?" >&2; exit 1; }
+    guest 'ip link show dev lima0' >/dev/null 2>&1 || { echo "VM has no lima0 — networks: [vzNAT] missing from the recipe?" >&2; exit 1; }
+    # Next hop for the mesh route: the VM's transfer address (see TRANSFER_VM
+    # at the top). `up` ensures it exists on both ends before routing; status/
+    # down only compare against it.
+    VMADDR=$TRANSFER_VM
+}
+
+# Idempotently give both ends of the vzNAT link their transfer address (see
+# TRANSFER_VM/TRANSFER_MAC at the top). The VM side also lands at boot via the
+# gw-mac-gateway unit; doing it here too covers VMs whose installed unit
+# predates it. The Mac side cannot persist (macOS addresses die with the VM's
+# bridge), so the reconciler is its home.
+ensure_transfer() {
+    guest "ip -6 -o addr show dev lima0 | grep -q \" $TRANSFER_VM/\"" || \
+        guest "sudo ip -6 addr replace $TRANSFER_VM/64 dev lima0"
+    VMV4=$(guest 'ip -4 -o addr show dev lima0 scope global' | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$VMV4" ] || { echo "VM has no v4 on lima0 — networks: [vzNAT] missing from the recipe?" >&2; exit 1; }
+    HOSTIF=$(route -n get "$VMV4" 2>/dev/null | awk '/interface:/{print $2}')
+    [ -n "$HOSTIF" ] || { echo "no host route to the VM's vzNAT address ($VMV4) — is the VM running?" >&2; exit 1; }
+    ifconfig "$HOSTIF" inet6 2>/dev/null | grep -q " $TRANSFER_MAC " || \
+        priv transfer-add "$HOSTIF" "$TRANSFER_MAC"
 }
 
 route_ok() { netstat -rn -f inet6 | awk -v p="$PREFIX" -v g="$VMADDR" '$1==p && $2==g' | grep -q .; }
@@ -198,6 +233,7 @@ EOF
         install_lanfilter
     fi
     ensure_daemon
+    ensure_transfer
     mesh_info
     if route_ok; then
         echo "route: $PREFIX via $VMADDR — already in place"
@@ -239,7 +275,11 @@ install-autostart)
     install -o root -g wheel -m 755 "$SHARE/gw-mac-priv.sh" "$PRIV"
     printf '%s ALL=(root) NOPASSWD: %s\n' "$U" "$PRIV" > /etc/sudoers.d/gw-mac
     chmod 440 /etc/sudoers.d/gw-mac
-    visudo -c >/dev/null || { rm -f /etc/sudoers.d/gw-mac; echo "sudoers validation failed — rolled back" >&2; exit 1; }
+    # Validate OUR file only (-f). A global `visudo -c` audits every file in
+    # sudoers.d and fails on unrelated ones — e.g. Lima's, which is 0444 on
+    # purpose (limactl refuses a rule file it cannot read back; sudo's runtime
+    # accepts 0444, only the audit is stricter).
+    visudo -c -f /etc/sudoers.d/gw-mac >/dev/null || { rm -f /etc/sudoers.d/gw-mac; echo "sudoers validation failed — rolled back" >&2; exit 1; }
     cat <<EOF
 installed: $PRIV + /etc/sudoers.d/gw-mac (NOPASSWD, that helper only, for $U)
 next:      brew services start greasewood

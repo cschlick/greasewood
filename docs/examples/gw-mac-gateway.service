@@ -4,6 +4,10 @@ Description=greasewood mac-gateway (NAT66 for the host Mac into the overlay)
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# The VM's side of the gw-mac transfer net (fd6d:6163::/64) — the fixed
+# next hop the Mac routes the mesh /64 through, and the on-link destination
+# its replies come back to. See gw-mac-net.sh for why this exists.
+ExecStart=/bin/sh -c 'ip -6 addr replace fd6d:6163::2/64 dev lima0'
 ExecStart=/usr/sbin/nft -f /etc/gw-mac-gateway.nft
 
 [Install]

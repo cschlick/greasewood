@@ -20,6 +20,9 @@ start() {
         [ -e "$f" ] && echo 2 > "$f"
     done
 
+    # The VM's side of the gw-mac transfer net (see gw-mac-net.sh).
+    ip -6 addr replace fd6d:6163::2/64 dev lima0
+
     ebegin "Loading gw-mac gateway nftables ruleset"
     /usr/sbin/nft -f /etc/gw-mac-gateway.nft
     eend $?
