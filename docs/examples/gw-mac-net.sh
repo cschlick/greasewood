@@ -17,7 +17,8 @@
 # drifted — after a Mac reboot or VM restart, `gw-mac` is the one command
 # (or let `brew services` run it on a timer and never think about it).
 # Requires the gw-mac-gateway unit inside the VM (NAT66 + forwarding);
-# installed automatically when gw-mac creates the VM.
+# installed automatically when gw-mac creates the VM, along with the gw-mac-lan
+# seal (closes the VM's non-mesh interfaces — see gw-mac-lan.nft).
 set -eu
 
 CMD="${1:-up}"
@@ -83,6 +84,42 @@ install_gateway() {
     fi
 }
 
+# Seal the VM's non-mesh interfaces (see gw-mac-lan.nft). Installed whenever
+# gw-mac creates a VM, and retro-fitted by `up` to a VM that predates it — the
+# exposure it closes only appears once the VM is given a real NIC, but a seal
+# that arrives with the NIC would be a seal you have to remember.
+#
+# The ruleset has to name the node's WireGuard port, which isn't knowable at VM
+# creation (nothing has joined a mesh yet), so it ships defaulting to 51900 and
+# we substitute the configured port whenever one exists.
+install_lanfilter() {
+    limactl cp "$SHARE/gw-mac-lan.nft" "$SHARE/gw-mac-lan.service" \
+               "$SHARE/gw-mac-lan.initd" "$VM:/tmp/"
+    limactl shell "$VM" -- sudo sh -c '
+        PORT=$(grep -h "^ *listen_port" /etc/greasewood_*.toml 2>/dev/null \
+               | head -1 | tr -dc "0-9")
+        [ -n "$PORT" ] && sed -i "s/^define wg_port = .*/define wg_port = $PORT/" \
+                              /tmp/gw-mac-lan.nft
+        mv /tmp/gw-mac-lan.nft /etc/ && chown root:root /etc/gw-mac-lan.nft
+        if command -v systemctl >/dev/null 2>&1; then
+            mv /tmp/gw-mac-lan.service /etc/systemd/system/
+            rm -f /tmp/gw-mac-lan.initd
+            chown root:root /etc/systemd/system/gw-mac-lan.service
+            systemctl daemon-reload && systemctl enable --now gw-mac-lan
+        else
+            mv /tmp/gw-mac-lan.initd /etc/init.d/gw-mac-lan
+            rm -f /tmp/gw-mac-lan.service
+            chown root:root /etc/init.d/gw-mac-lan
+            chmod 755 /etc/init.d/gw-mac-lan
+            rc-update add gw-mac-lan default && rc-service gw-mac-lan start
+        fi'
+}
+
+# Has the seal been installed in this VM yet?
+lanfilter_present() {
+    limactl shell "$VM" -- sh -c '[ -f /etc/gw-mac-lan.nft ]' >/dev/null 2>&1
+}
+
 mesh_info() {
     GWIF=$(guest 'ls /sys/class/net | grep "^gw-" | head -1' || true)
     [ -n "$GWIF" ] || { echo "no gw-* interface in $VM — node not joined?" >&2; exit 1; }
@@ -123,6 +160,7 @@ up)
         echo "first run — creating $VM from $SHARE/greasewood-node.yaml (downloads a Debian image)…"
         limactl start --tty=false --name="$VM" "$SHARE/greasewood-node.yaml"
         install_gateway
+        install_lanfilter
         # The node should carry the MAC's name, not the VM's — same default the
         # gw shim applies at join time.
         MACHOST=$( (hostname -s 2>/dev/null || scutil --get LocalHostName) \
@@ -140,6 +178,12 @@ EOF
     # ${VM} braced: macOS /bin/sh (bash 3.2) parses a bare $VM followed by a
     # multibyte char as part of the variable name — unbound under set -u.
     vm_running || { echo "starting ${VM}…"; limactl start --tty=false "$VM"; }
+    # A VM created before the seal existed gets it here, once. Cheap to test,
+    # and it means the protection arrives through the command people already run.
+    if ! lanfilter_present && find_share; then
+        echo "sealing ${VM}'s non-mesh interfaces (gw-mac-lan)…"
+        install_lanfilter
+    fi
     ensure_daemon
     mesh_info
     if route_ok; then

@@ -28,6 +28,9 @@ class Greasewood < Formula
                      "#{ex}/gw-mac-gateway.sysctl.conf",
                      "#{ex}/gw-mac-gateway.service",
                      "#{ex}/gw-mac-gateway.initd",
+                     "#{ex}/gw-mac-lan.nft",
+                     "#{ex}/gw-mac-lan.service",
+                     "#{ex}/gw-mac-lan.initd",
                      "#{ex}/gw-mac-priv.sh"
     doc.install "docs/macos.md"
   end

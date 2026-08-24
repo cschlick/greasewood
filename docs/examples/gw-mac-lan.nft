@@ -1,0 +1,60 @@
+#!/usr/sbin/nft -f
+# greasewood mac-node: seal the VM's non-mesh interfaces.
+#
+# WHY THIS EXISTS.  With the default `networks: [vzNAT]` recipe the VM sits
+# behind Apple's NAT and nothing on your LAN can reach it, so its listeners
+# (sshd, mDNS, LLMNR) are unreachable by construction.  The moment you give the
+# VM a real NIC — `lima: bridged`, so it can be dialed INBOUND and stop being
+# outbound-only — that seal is gone and those listeners face the LAN, and face
+# the internet too if your router forwards to the VM's GUA.  greasewood's own
+# table deliberately governs only the mesh interfaces (it never touches your
+# main firewall), so nothing else closes this.  This file does.
+#
+# DEFAULT-CLOSED BY INTERFACE, NOT BY NAME.  Everything except loopback and the
+# mesh is sealed, so a NIC added later is closed the day it appears rather than
+# silently exposed.  Naming is deliberately not load-bearing: which of lima0 /
+# lima1 is the bridged one depends on the order of `networks:` in the VM recipe.
+#
+# The one hole is Lima's own host->guest control path (ssh), scoped to the
+# RFC1918 ranges Lima's user-mode and vmnet NATs actually use — never a real LAN.
+#
+# gw-mac rewrites the wg_port line below to this node's configured listen_port;
+# edit it by hand if you install this file yourself and don't use 51900.
+define wg_port = 51900
+
+destroy table inet gwlan
+table inet gwlan {
+    chain input {
+        # priority filter + 10: AFTER greasewood's own meshfilter (priority
+        # filter), so its grant enforcement decides mesh traffic first. An
+        # accept in one base chain doesn't end evaluation, so this chain would
+        # otherwise drop what greasewood just allowed — hence the gw-* accept.
+        type filter hook input priority filter + 10; policy accept;
+
+        iifname "lo" accept
+        iifname "gw-*" accept                 # the mesh — greasewood's table owns it
+
+        ct state established,related accept
+        ct state invalid drop
+
+        # NDP, RA, PMTUD. IPv6 does not work without this.
+        meta l4proto { icmp, ipv6-icmp } accept
+
+        # The reason the VM has a real NIC at all: inbound WireGuard.
+        udp dport $wg_port accept
+
+        # DHCP client (v4 + v6) — the bridged NIC gets its address this way.
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+
+        # Lima's host->guest ssh. Lima 2.x prefers vsock (invisible to nft), but
+        # a QEMU or older-vz guest is reached over the user-mode / vmnet subnet,
+        # and locking ourselves out of the VM would be a poor trade for sealing it.
+        tcp dport 22 ip saddr { 192.168.5.0/24, 192.168.64.0/24 } accept
+
+        # Counted, so `nft list table inet gwlan` answers "is the seal eating
+        # this?" directly — the first question to ask when a service on the VM
+        # is unreachable and you'd otherwise be guessing.
+        counter drop
+    }
+}

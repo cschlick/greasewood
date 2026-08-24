@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# gw-mac-lan (OpenRC variant of gw-mac-lan.service) — seal the VM's non-mesh
+# interfaces. Installed to /etc/init.d/gw-mac-lan by gw-mac when it creates an
+# Alpine VM; pairs with /etc/gw-mac-lan.nft.
+description="greasewood mac-node LAN seal: close non-mesh interfaces"
+
+depend() {
+    need net
+    before greasewood
+}
+
+start() {
+    ebegin "Loading gw-mac LAN seal nftables ruleset"
+    /usr/sbin/nft -f /etc/gw-mac-lan.nft
+    eend $?
+}
+
+stop() {
+    ebegin "Removing gw-mac LAN seal nftables ruleset"
+    /usr/sbin/nft destroy table inet gwlan 2>/dev/null
+    eend 0
+}
