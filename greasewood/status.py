@@ -1816,7 +1816,14 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     elif own_id:
         lines.append(f"{'cred':<9}: no self record yet (has the daemon published?)")
 
-    reach = ("advertises an endpoint (dialable)" if cfg.endpoints
+    # Reachability is a property of the PUBLISHED record, not of the config.
+    # A node whose endpoint was auto-detected after join (endpoint_auto →
+    # EndpointLoop) re-signs its record without rewriting the TOML, so
+    # cfg.endpoints still reads empty long after the node became dialable —
+    # `gw diagnose` would say reachable while this line said outbound-only.
+    # Fall back to the config only before the first record exists.
+    endpoints = self_rec.endpoints if self_rec is not None else cfg.endpoints
+    reach = ("advertises an endpoint (dialable)" if endpoints
              else "no endpoint (outbound-only — you dial peers)")
     lines.append(f"{'reach':<9}: {reach}")
 

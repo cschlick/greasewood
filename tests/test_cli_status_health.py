@@ -15,7 +15,7 @@ _UTC = dt.timezone.utc
 
 
 def _node(tmp_path, *, role="node", endpoints=None, trusted=None, cred_ttl_h=18,
-          with_self=True):
+          with_self=True, record_endpoints=None):
     keys = NodeKeys.load_or_generate(tmp_path)
     ca = trusted or CAKeys.generate()
     eps = f"\nendpoints = {endpoints}" if endpoints else ""
@@ -36,8 +36,9 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
                           addr=keys.addr, hostname="db01", caps=["segment:prod"],
                           iat=now, exp=now + dt.timedelta(hours=cred_ttl_h)).sign(ca.ca_priv)
         d = Directory()
+        published = record_endpoints if record_endpoints is not None else endpoints
         d.put(NodeRecord(id_pub=keys.id_pub_bytes, seq=1,
-                         endpoints=list(endpoints or []), cred=cred).sign(keys.id_priv))
+                         endpoints=list(published or []), cred=cred).sign(keys.id_priv))
         d.save(tmp_path / "directory.json")
     return types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False)
 
@@ -344,3 +345,23 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     cli.cmd_watch(types.SimpleNamespace(config=str(tmp_path / "gw.toml"), by_segment=False))
     out = capsys.readouterr().out
     assert "bad-peer" in out and "REVOKED" in out
+
+
+def test_reach_follows_the_published_record_not_the_config(tmp_path, capsys):
+    # endpoint_auto re-signs the RECORD when detection finds an address, but
+    # never rewrites the TOML. A node that gained an endpoint after join (a Mac
+    # VM that got bridged onto the LAN, a host that grew a GUA) is dialable, and
+    # this line has to say so — reading cfg.endpoints reported it outbound-only
+    # forever, contradicting `gw diagnose`.
+    args = _node(tmp_path, endpoints=None,
+                 record_endpoints=["[2001:db8::1]:51900"])
+    cli.cmd_watch(args)
+    assert "reach    : advertises an endpoint" in capsys.readouterr().out
+
+
+def test_reach_falls_back_to_config_before_the_first_record(tmp_path, capsys):
+    # No published record yet (daemon hasn't run): the configured endpoint is
+    # the only thing we know, so it still drives the posture.
+    args = _node(tmp_path, endpoints=["[2001:db8::1]:51900"], with_self=False)
+    cli.cmd_watch(args)
+    assert "reach    : advertises an endpoint" in capsys.readouterr().out
