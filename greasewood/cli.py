@@ -2336,6 +2336,42 @@ def _service_backend():
     return service.detect(_UNIT_DIR)
 
 
+def cmd_service(args) -> int:
+    """[sudo] Enable or disable this config's daemon service — the adoption
+    path for a membership whose service was never installed here (a config
+    migrated from another machine or VM, a --no-service join revisited). On
+    systemd/OpenRC the shared template plus the per-mesh instance; on launchd
+    the per-mesh plist (which only greasewood can write — there is no shared
+    template to enable by hand there)."""
+    from .config import load_config
+    _require_root("service", "it installs/removes the daemon service")
+    cfg = load_config(Path(args.config))
+    key = membership_key(cfg.mesh_domain)
+    mgr = _service_backend()
+    if mgr is None:
+        sys.exit("no supported init system is managing services on this host — "
+                 "run the daemon yourself:\n  sudo gw run")
+    if args.action == "disable":
+        was = mgr.disable_now(key)
+        print(f"{mgr.unit_name(key)}: {'stopped and ' if was else ''}removed from boot.")
+        return 0
+    if mgr.write_template() is None:
+        sys.exit(f"{mgr.name} is not usable here — run the daemon yourself:\n"
+                 f"  sudo gw run")
+    state = mgr.enable_now(key)
+    if state == "active":
+        print(f"{mgr.unit_name(key)} is running (and starts at boot).")
+        print(f"  {mgr.status_hint(key)}")
+        return 0
+    if state == "failed":
+        print(f"{mgr.unit_name(key)} was installed but is NOT running — see why:")
+        print(f"  {mgr.logs_hint(key)}")
+        return 1
+    print(f"couldn't manage {mgr.name} here — run the daemon yourself:")
+    print("  sudo gw run")
+    return 1
+
+
 def _svc_restart_hint(key: str = "<mesh>") -> str:
     """The backend-correct 'restart this mesh's daemon' command for THIS host —
     rc-service on OpenRC, systemctl on systemd (systemctl-shaped fallback)."""
@@ -4732,6 +4768,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_join)
 
     # purge
+    sp = sub.add_parser("service",
+        help="[sudo] enable/disable this config's daemon service (adopt a "
+             "migrated config; on launchd only greasewood can write the plist)")
+    sp.add_argument("action", choices=("enable", "disable"))
+    sp.set_defaults(func=cmd_service)
+
     sp = sub.add_parser("purge",
                         help="[sudo] remove this mesh entirely — stop+disable its "
                              "service, tear down the interface, delete data dir + "

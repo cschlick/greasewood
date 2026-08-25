@@ -180,3 +180,93 @@ def test_permission_error_as_root_names_the_ownership_fix(monkeypatch):
     msg = str(e.value)
     assert "AS ROOT" in msg and "CAP_DAC_OVERRIDE" in msg
     assert "chown root:root /var/lib/greasewood/ca.key" in msg
+
+
+# ---------------------------------------------------------------------------
+# gw service enable/disable — adopting an existing config
+# ---------------------------------------------------------------------------
+
+class _FakeMgr:
+    name = "fake"
+
+    def __init__(self, state="active", usable=True):
+        self.state, self.usable, self.calls = state, usable, []
+
+    def write_template(self, exec_path=None):
+        self.calls.append("write_template")
+        return "ok" if self.usable else None
+
+    def enable_now(self, key):
+        self.calls.append(f"enable:{key}")
+        return self.state
+
+    def disable_now(self, key):
+        self.calls.append(f"disable:{key}")
+        return True
+
+    def unit_name(self, key):
+        return f"greasewood@{key}.service"
+
+    def status_hint(self, key):
+        return "status: ..."
+
+    def logs_hint(self, key):
+        return "logs: ..."
+
+
+def _svc_args(tmp_path, action):
+    import types
+    cfg = tmp_path / "gw.toml"
+    cfg.write_text(f"""[node]
+hostname = "n1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-mesh"
+mesh_domain = "home.internal"
+seeds = []
+root_url = ""
+[ca]
+trusted_pubs = []
+""")
+    return types.SimpleNamespace(config=str(cfg), action=action)
+
+
+def test_service_enable_installs_and_starts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    mgr = _FakeMgr()
+    monkeypatch.setattr(cli, "_service_backend", lambda: mgr)
+    assert cli.cmd_service(_svc_args(tmp_path, "enable")) == 0
+    assert mgr.calls == ["write_template", "enable:home"]
+    assert "is running" in capsys.readouterr().out
+
+
+def test_service_enable_reports_a_failed_start(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    mgr = _FakeMgr(state="failed")
+    monkeypatch.setattr(cli, "_service_backend", lambda: mgr)
+    assert cli.cmd_service(_svc_args(tmp_path, "enable")) == 1
+    assert "NOT running" in capsys.readouterr().out
+
+
+def test_service_disable_stops_and_removes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    mgr = _FakeMgr()
+    monkeypatch.setattr(cli, "_service_backend", lambda: mgr)
+    assert cli.cmd_service(_svc_args(tmp_path, "disable")) == 0
+    assert mgr.calls == ["disable:home"]
+
+
+def test_service_without_backend_points_at_gw_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "_service_backend", lambda: None)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_service(_svc_args(tmp_path, "enable"))
+    assert "sudo gw run" in str(e.value)
+
+
+def test_service_needs_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_service(_svc_args(tmp_path, "enable"))
+    assert "needs root" in str(e.value)
