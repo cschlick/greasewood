@@ -16,7 +16,8 @@ past the point of practicality, and wanted the simplest possible upgrade.
   link comes up directly or it honestly fails.
 - **[IPv6 only overlay.](concepts.md#ipv6-overlay)** The overlay is IPv6-only;
   the underlay may be IPv4 or IPv6.
-- **[Linux-only.](concepts.md#linux-only)** Leans heavily on systemd, nftables.
+- **[Linux-first, macOS native.](concepts.md#platforms)** Kernel WireGuard +
+  systemd/nftables on Linux; wireguard-go + launchd on macOS.
 - **[Greasy.](concepts.md#greasy)** Uses the stock `wg`/`ip` tools over
   subprocess.
 - **[Named.](networking.md#names)** Every node gets a `<host>.<mesh>.internal`

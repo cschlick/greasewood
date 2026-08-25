@@ -2,7 +2,8 @@
 
 Requires Python 3.11+, the WireGuard userspace tools (`wireguard-tools`/`wg`),
 and `iproute2` (`ip`). The kernel WireGuard module is built into Linux 5.6+ and
-autoloads on first use.
+autoloads on first use. (macOS installs differently — Homebrew, wireguard-go,
+launchd; see the [macOS guide](macos.md).)
 
 Two ways to install on a host that will run the daemon; both let `create`/`join`
 set up the managed service — a systemd unit, or an OpenRC service on Alpine and

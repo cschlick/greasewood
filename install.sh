@@ -42,7 +42,7 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # points at this checkout, so `git pull` + a daemon restart runs the new commit
 # with NO reinstall and no version tag — re-run install.sh --dev only if the
 # dependencies change. (Needs a WRITABLE checkout: pip writes *.egg-info into it.
-# On a Lima read-only home mount, clone inside the VM instead.)
+# On a read-only mount, clone somewhere writable instead.)
 DEV=0
 for arg in "$@"; do
     case "$arg" in

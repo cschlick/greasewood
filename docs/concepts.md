@@ -96,18 +96,21 @@ enrollments and credential renewals need a reachable anchor. Restore or replace 
 anchor within that window (see [Moving the anchor](operations.md#moving-the-anchor-re-root) and the
 [RUNBOOK](operations.md)) and nothing ever drops.
 
-## Linux-only
+## Platforms
 
-greasewood is built on **Linux-specific kernel interfaces** — the in-kernel
-WireGuard module and the kernel's own networking — and is best run as a
-**systemd** service (the recommended way to keep the daemon up across reboots and
-crashes; a bare `gw run` works for dev). It relies on the
-kernel's WireGuard and on systemd rather than shipping its own userspace
-transport (the way a Go implementation such as `wireguard-go` does) or its own
-supervisor. It reaches those kernel interfaces via the stock `wg`/`ip` tools
-(see [Auditable](#auditable)). Other platforms would need a different data-plane
-backend and a different supervisor, and are out of scope: greasewood is,
-deliberately, a Linux tool.
+greasewood is **Linux-first, with a native macOS port**. On Linux it is built
+on the kernel's own interfaces — in-kernel WireGuard, iproute2, nftables —
+supervised by systemd (or OpenRC on Alpine). On macOS the same daemon runs on
+[wireguard-go](https://git.zx2c4.com/wireguard-go/about/) (userspace — macOS
+has no kernel module) over a `utun`, drives `ifconfig`/`route` instead of
+`ip`, and is supervised by launchd. One seam (`greasewood.platform` + the
+per-OS halves of `wg.py` and `service.py`) answers "which OS"; the control
+plane, crypto, directory, enrollment, and policy layers are byte-identical.
+The one capability gap: [port enforcement](access-control.md) is
+nftables-only until a pf backend lands, so macOS nodes run their port scopes
+advisory — tunnel existence is still fully policy-enforced. The
+[macOS guide](macos.md) has the details. Anything else (BSDs, Windows) would
+need another data-plane backend and supervisor, and is out of scope.
 
 ## Greasy
 

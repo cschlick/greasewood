@@ -18,8 +18,8 @@ past the point of practicality, and wanted the simplest possible upgrade.
   A link comes up directly or it honestly fails.
 - **[IPv6 only overlay.](docs/concepts.md#ipv6-overlay)** The overlay is
   IPv6-only; the underlay may be IPv4 or IPv6.
-- **[Linux-only.](docs/concepts.md#linux-only)** Leans heavily on systemd,
-  nftables.
+- **[Linux-first, macOS native.](docs/concepts.md#platforms)** Kernel
+  WireGuard + systemd/nftables on Linux; wireguard-go + launchd on macOS.
 - **[Greasy.](docs/concepts.md#greasy)** Uses the stock `wg`/`ip` tools over
   subprocess.
 - **[Named.](docs/networking.md#names)** Every node gets a
@@ -47,6 +47,9 @@ Requires Python 3.11+, the WireGuard tools (`wg`), and `iproute2` (`ip`).
 sudo apt install pipx wireguard-tools     # Debian/Ubuntu; use your distro's pkg mgr
 sudo pipx install --global greasewood
 ```
+
+macOS installs natively via Homebrew (`brew install cschlick/tap/greasewood`)
+— see the **[macOS guide](docs/macos.md)**.
 
 `--global` puts `gw` on root's `PATH` so `sudo gw …` resolves. Distro `.deb`/
 `.rpm` packages and the bundled installer are also available — see the

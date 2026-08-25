@@ -2,74 +2,52 @@
 # tagging a release, `sh scripts/release-brew.sh` pins the tag's tarball
 # sha256 here and pushes the copy the tap (cschlick/homebrew-tap) serves.
 #
-# greasewood has no macOS build, on purpose (see docs/macos.md): the daemon is
-# Linux-only, and a Mac joins a mesh via a minimal Lima VM. What brew installs
-# is the Mac side of that story:
-#   gw      run greasewood's CLI inside the node VM, from a Mac terminal
-#   gw-mac  create/start the VM, route the whole Mac into the overlay
-# plus the VM recipes and gateway files under <prefix>/share/greasewood.
+# This installs the NATIVE macOS node: the real `gw`, running the mesh on this
+# Mac via wireguard-go (userspace WireGuard — macOS has no kernel module) and
+# a launchd daemon that `sudo gw create`/`gw join` installs. It replaces the
+# Lima-VM appliance this formula used to ship (preserved at repo tag
+# lima-era-archive) — see docs/macos.md for what changed and the migration.
 class Greasewood < Formula
-  desc "WireGuard mesh node on macOS — Lima VM appliance + Mac-side tooling"
+  include Language::Python::Virtualenv
+
+  desc "Minimal self-hosted WireGuard mesh overlay"
   homepage "https://github.com/cschlick/greasewood"
-  url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.4.0.tar.gz"
-  sha256 "78853a0a719dc80664bc96be7d1d7cacb5b6c9a34b55bae4e59fdc0c52d83fdb"
+  url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.5.0.tar.gz"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000" # pinned by release-brew.sh
   license "MIT"
   head "https://github.com/cschlick/greasewood.git", branch: "main"
 
-  depends_on "lima"
+  depends_on "python@3.13"
+  depends_on "wireguard-go"
+  depends_on "wireguard-tools"
 
   def install
-    ex = "docs/examples"
-    bin.install "#{ex}/gw-shim.sh" => "gw"
-    bin.install "#{ex}/gw-mac-net.sh" => "gw-mac"
-    pkgshare.install "#{ex}/greasewood-node.yaml",
-                     "#{ex}/greasewood-node-alpine.yaml",
-                     "#{ex}/gw-mac-gateway.nft",
-                     "#{ex}/gw-mac-gateway.sysctl.conf",
-                     "#{ex}/gw-mac-gateway.service",
-                     "#{ex}/gw-mac-gateway.initd",
-                     "#{ex}/gw-mac-gateway.network.conf",
-                     "#{ex}/gw-mac-lan.nft",
-                     "#{ex}/gw-mac-lan.service",
-                     "#{ex}/gw-mac-lan.initd",
-                     "#{ex}/gw-mac-priv.sh"
-    doc.install "docs/macos.md"
-  end
-
-  # `gw-mac up` is an idempotent reconciler: VM started if stopped, mesh route
-  # reinstalled if gone (reboot kills it — macOS routes aren't files), hosts
-  # block resynced if drifted. Headless root needs the one-time
-  # `sudo gw-mac install-autostart` (see caveats).
-  service do
-    run [opt_bin/"gw-mac", "up"]
-    run_type :interval
-    interval 120
-    log_path var/"log/gw-mac.log"
-    error_log_path var/"log/gw-mac.log"
-    environment_variables PATH: std_service_path_env
+    venv = virtualenv_create(libexec, "python3.13")
+    # cryptography first, as a WHEEL: building it from source needs a rust
+    # toolchain (and the CLT), which is exactly the install friction this
+    # project avoids. The wheel is the same artifact the Linux pipx install
+    # uses. greasewood itself is pure Python and builds from the tarball.
+    system libexec/"bin/pip", "install", "cryptography>=42.0"
+    venv.pip_install_and_link buildpath
   end
 
   def caveats
     <<~EOS
-      The node runs in a Lima VM; these commands drive it from the Mac:
-        gw-mac         first run creates the VM; afterwards it starts the VM,
-                       routes this Mac into the overlay, and syncs mesh names
-        gw <command>   greasewood's CLI, run inside the VM (gw watch, gw join …)
+      greasewood needs root for the data plane (utun, routes, /etc/hosts):
 
-      To join a mesh:
-        gw-mac                                        # creates the VM
-        # on your anchor:  sudo gw invite
-        gw join <token>     # the node claims this Mac's hostname (or pass --hostname)
-        gw-mac                                        # routes the Mac in
+        sudo gw create <mesh>     # start a new mesh (this Mac is the anchor)
+        sudo gw join <token>      # or join an existing one
 
-      The mesh route is not persistent — rerun `gw-mac` after a reboot, or let
-      it run itself:
-        sudo gw-mac install-autostart   # once: root helper + scoped sudoers rule
-        brew services start greasewood  # 'gw-mac up' every 2 min at login
+      Both install a launchd daemon (com.greasewood.<mesh>) that starts at
+      boot and restarts on failure. Logs: /var/log/greasewood/<mesh>.log
+
+      Port enforcement (the grant table's port scopes) is not available on
+      macOS yet — a pf backend is planned. Tunnel-level access control is
+      fully enforced.
     EOS
   end
 
   test do
-    assert_match "usage: gw-mac", shell_output("#{bin}/gw-mac help 2>&1", 2)
+    assert_match version.to_s, shell_output("#{bin}/gw --version")
   end
 end

@@ -55,7 +55,8 @@ jobs:
           VERSION="${{ inputs.version || github.event.inputs.version }}"
           brew tap cschlick/tap
           brew update
-          # Build into a bottle. `lima` will be poured from its bottle.
+          # Build into a bottle. python@3.13 / wireguard-go / wireguard-tools
+          # are poured from their own bottles.
           HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-bottle cschlick/tap/greasewood
           # Generate the bottle tarball and JSON metadata.
           HOMEBREW_NO_AUTO_UPDATE=1 brew bottle \
