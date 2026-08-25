@@ -428,10 +428,13 @@ def _fmt_rate(bytes_per_s: float) -> str:
 
 def _ping_rtt(addr: str) -> str:
     """Round-trip time to an overlay address via one ICMPv6 echo, as 'Nms', or
-    '—' on timeout/unreachable. Numeric only (-n), 1s deadline (-W1)."""
+    '—' on timeout/unreachable. Numeric only (-n); the deadline is -W1 on Linux
+    (seconds) and the subprocess timeout on macOS (ping6 there has no -W)."""
+    from . import platform as gwplat
+    cmd = (["ping6", "-n", "-c", "1", addr] if gwplat.IS_MACOS
+           else ["ping", "-6", "-n", "-c", "1", "-W", "1", addr])
     try:
-        r = subprocess.run(["ping", "-6", "-n", "-c", "1", "-W", "1", addr],
-                           capture_output=True, text=True, timeout=3)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
     except Exception:
         return "—"
     if r.returncode != 0:
@@ -2201,9 +2204,19 @@ _ICMP6_OVERHEAD = 48
 
 
 def _iface_mtu(iface: str) -> "int | None":
-    """The MTU of the WireGuard interface, or None if it can't be read."""
-    r = subprocess.run(["ip", "-o", "link", "show", iface],
-                       capture_output=True, text=True)
+    """The MTU of the WireGuard interface, or None if it can't be read. macOS:
+    resolve the logical name to its utun first; ifconfig prints 'mtu N' in the
+    same token shape the parse below expects."""
+    from . import platform as gwplat
+    from . import wg as wgmod
+    if gwplat.IS_MACOS:
+        dev = wgmod.resolve_iface(iface)
+        if dev is None:
+            return None
+        r = subprocess.run(["ifconfig", dev], capture_output=True, text=True)
+    else:
+        r = subprocess.run(["ip", "-o", "link", "show", iface],
+                           capture_output=True, text=True)
     if r.returncode != 0:
         return None
     parts = r.stdout.split()
@@ -2222,6 +2235,12 @@ def _ping6_df(addr: str, payload: int, timeout: int = 1) -> "bool | None":
     -M do forbids fragmentation, so an oversized packet is dropped rather than
     split — which is exactly what a full-size tunnel packet does over a
     too-small underlay path."""
+    from . import platform as gwplat
+    if gwplat.IS_MACOS:
+        # macOS ping6 has no don't-fragment knob (it source-fragments oversize
+        # payloads, which would defeat the probe) — report "unavailable" and
+        # the MTU-blackhole check quietly skips, same as a missing ping.
+        return None
     ping = shutil.which("ping")
     if not ping:
         return None
@@ -2257,6 +2276,12 @@ def _self_firewall_verdict(port: int) -> str:
     '??? (nft unreadable)'. Only the local host is knowable — every other node's
     firewall is inferred from observed connectivity or left ???."""
     from . import firewall as fw
+    from . import platform as gwplat
+    if gwplat.IS_MACOS:
+        # No nftables to read; the default macOS posture is no packet filter,
+        # so "open" is the honest verdict — with the application firewall or a
+        # pf config of the user's own, they know what they changed.
+        return "open (macOS: no packet filter by default)"
     rs = fw._load_ruleset()
     if rs is None:
         return "??? (nft unreadable)"

@@ -213,3 +213,116 @@ def test_door_interfaces_use_primitives_not_iproute2(macos, monkeypatch, tmp_pat
     assert not any(f.startswith("ip ") for f in flat)
     assert any(f.startswith("wg set utun5 private-key") for f in flat)
     assert any("-interface utun5" in f for f in flat)  # guest /128 route via utun
+
+
+# ---------------------------------------------------------------------------
+# cli detection via ifconfig + route (Stage 4)
+# ---------------------------------------------------------------------------
+
+_IFCONFIG = """\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet6 ::1 prefixlen 128
+\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.1.23 netmask 0xffffff00 broadcast 192.168.1.255
+\tinet 185.199.108.1 netmask 0xffffff00 broadcast 185.199.108.255
+\tinet6 fe80::1c5e%en0 prefixlen 64 secured scopeid 0xb
+\tinet6 2001:db8:15::7a prefixlen 64 autoconf secured
+\tinet6 2001:db8:15::99 prefixlen 64 autoconf temporary
+\tinet6 fd00:aaaa::5 prefixlen 64 autoconf secured
+"""
+
+
+def _fake_cmd(monkeypatch, table):
+    """Route cli's subprocess.run by argv[0] (+ first args) through `table`."""
+    import subprocess as sp
+    from greasewood import cli
+    def fake_run(argv, **kw):
+        for prefix, (rc, out) in table.items():
+            if tuple(argv[:len(prefix)]) == prefix:
+                return sp.CompletedProcess(argv, rc, out, "")
+        return sp.CompletedProcess(argv, 1, "", "not scripted")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+
+def test_detect_public_ipv6_parses_ifconfig(macos, monkeypatch):
+    from greasewood import cli
+    _fake_cmd(monkeypatch, {("ifconfig", "-a"): (0, _IFCONFIG)})
+    # stable GUA wins over the temporary one; ULA + link-local excluded
+    assert cli._detect_public_ipv6() == "2001:db8:15::7a"
+
+
+def test_detect_public_ipv4_parses_ifconfig(macos, monkeypatch):
+    from greasewood import cli
+    _fake_cmd(monkeypatch, {("ifconfig", "-a"): (0, _IFCONFIG)})
+    # the RFC1918 inet is skipped; the truly-global one wins (doc ranges
+    # like 203.0.113/24 would be rejected by _globally_reachable_v4)
+    assert cli._detect_public_ipv4() == "185.199.108.1"
+
+
+def test_local_families_via_route_get(macos, monkeypatch):
+    from greasewood import cli
+    _fake_cmd(monkeypatch, {
+        ("route", "-n", "get", "-inet6", "default"): (0, "   gateway: fe80::1\n"),
+        ("route", "-n", "get", "default"): (1, "route: not in table\n"),
+    })
+    assert cli._local_families() == {6}
+
+
+def test_enforce_ports_defaults_off_on_macos(macos, caplog):
+    import logging
+    from greasewood import cli
+    with caplog.at_level(logging.WARNING, logger="greasewood"):
+        assert cli._enforce_ports_default() is False
+    assert any("pf backend" in r.message for r in caplog.records)
+
+
+def test_require_supported_accepts_macos(macos):
+    gwplat.require_supported()                       # must not exit
+
+
+def test_firewall_help_macos_says_nothing_to_configure(macos, capsys):
+    from greasewood import cli
+    cli._print_firewall_help(51900, role="node")
+    out = capsys.readouterr().out
+    assert "runs no packet filter" in out          # (wraps across lines)
+    assert "nftables" not in out.split("pf backend")[0]   # no nft rules offered
+
+
+# ---------------------------------------------------------------------------
+# status probes (Stage 4)
+# ---------------------------------------------------------------------------
+
+def test_ping_rtt_uses_ping6_on_macos(macos, monkeypatch):
+    import subprocess as sp
+    from greasewood import status
+    seen = {}
+    def fake_run(argv, **kw):
+        seen["argv"] = list(argv)
+        return sp.CompletedProcess(argv, 0, "time=12.5 ms", "")
+    monkeypatch.setattr(status.subprocess, "run", fake_run)
+    assert status._ping_rtt("fd8d::1") == "12ms"
+    assert seen["argv"][0] == "ping6"
+
+
+def test_iface_mtu_resolves_utun_and_parses_ifconfig(macos, monkeypatch):
+    import subprocess as sp
+    from greasewood import status, wg
+    _wire(macos, "gw-pm", "utun2")
+    def fake_run(argv, **kw):
+        assert argv == ["ifconfig", "utun2"]
+        return sp.CompletedProcess(argv, 0,
+            "utun2: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1420\n", "")
+    monkeypatch.setattr(status.subprocess, "run", fake_run)
+    assert status._iface_mtu("gw-pm") == 1420
+    assert status._iface_mtu("gw-absent") is None     # unresolved → None
+
+
+def test_mtu_probe_unavailable_on_macos(macos):
+    from greasewood import status
+    assert status._ping6_df("fd8d::1", 1372) is None  # no DF knob → quiet skip
+
+
+def test_self_firewall_verdict_macos(macos):
+    from greasewood import status
+    assert "no packet filter" in status._self_firewall_verdict(51900)

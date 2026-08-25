@@ -252,19 +252,27 @@ def test_invite_preflight_requires_answering_daemon(tmp_path, monkeypatch):
 # a command — it must exit cleanly, not fail deep in an ip/wg call.
 # ---------------------------------------------------------------------------
 
-def test_non_linux_exits_cleanly(monkeypatch):
-    import platform
-    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+def test_unsupported_os_exits_cleanly(monkeypatch):
+    # Darwin is a supported platform since the macOS port revival (its
+    # acceptance is covered in test_macos_port); the guard's job is now to
+    # refuse everything else with a clean message rather than fail deep in an
+    # ip/ifconfig call. The seam caches platform.system() at import, so pin
+    # the seam's own state, not the stdlib function.
+    from greasewood import platform as gwplat
+    monkeypatch.setattr(gwplat, "IS_LINUX", False)
+    monkeypatch.setattr(gwplat, "IS_MACOS", False)
+    monkeypatch.setattr(gwplat, "_SYSTEM", "Plan9")
     with pytest.raises(SystemExit) as e:
         cli.main(["watch", "--snapshot"])
-    assert "Linux-only" in str(e.value)
+    assert "Plan9" in str(e.value) and "Linux and macOS" in str(e.value)
 
 
-def test_version_still_works_on_non_linux(monkeypatch):
+def test_version_still_works_on_unsupported_os(monkeypatch):
     # --version is an argparse action that exits during parse_args, BEFORE the
-    # guard — so it works everywhere (a Mac user can still see what they got).
-    import platform
-    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    # guard — so it works everywhere (any user can still see what they got).
+    from greasewood import platform as gwplat
+    monkeypatch.setattr(gwplat, "IS_LINUX", False)
+    monkeypatch.setattr(gwplat, "IS_MACOS", False)
     with pytest.raises(SystemExit) as e:
         cli.main(["--version"])
     assert e.value.code == 0

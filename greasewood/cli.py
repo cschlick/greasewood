@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 from . import service
+from . import platform as gwplat
 from .config import membership_key, render_config
 from .keys import _key_file_warnings, _own_identity, _secret_key_paths
 from .status import _dur_short, _load_revoked, _version, cmd_diagnose, cmd_watch
@@ -137,6 +138,22 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     is_anchor = role == "anchor"
     who = "an anchor" if is_anchor else "a node"
+    if gwplat.IS_MACOS:
+        # macOS default = no packet filter configured; that's the expected
+        # posture and there is nothing to add. The UDP ports just need to not
+        # be blocked if the user runs the (off-by-default) application
+        # firewall or a pf config of their own.
+        print("Firewall (greasewood never edits it). macOS runs no packet filter by")
+        print("default — nothing to configure. If you enable one, allow inbound")
+        if is_anchor:
+            print(f"udp/{listen_port} (mesh WireGuard) and udp/{DOOR_PORT} (enrollment door).")
+        else:
+            print(f"udp/{listen_port} (mesh WireGuard).")
+        print("Port enforcement (the grant table's port scopes) is not available on")
+        print("macOS yet — a pf backend is planned; tunnel-level access control is")
+        print("fully enforced. The enrollment door is isolated by WireGuard keys +")
+        print("IPv6 forwarding staying off (greasewood checks and warns).")
+        return
     if header:
         print(f"Firewall (greasewood never edits it). Recommended posture for {who}.")
         print("On a default-drop host, allow (nftables):")
@@ -184,23 +201,11 @@ def _detect_public_ipv6() -> str | None:
     GUA = 2000::/3 (first 3 bits are 001).  ULA (fc/fd) and link-local
     (fe80) are excluded because they are not routable across the internet.
     """
-    try:
-        r = subprocess.run(
-            ["ip", "-6", "-o", "addr", "show", "scope", "global"],
-            capture_output=True, text=True, check=False,
-        )
-    except FileNotFoundError:
-        return None
-
     stable, temporary, any_gua = [], [], []
 
-    for line in r.stdout.splitlines():
-        # Format: <idx>: <iface>    inet6 <addr/prefix> scope global [flags...]
-        parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet6":
-            continue
+    for raw, line in _inet6_addrs():
         try:
-            addr = ipaddress.IPv6Address(parts[3].split("/")[0])
+            addr = ipaddress.IPv6Address(raw)
         except ValueError:
             continue
 
@@ -222,6 +227,38 @@ def _detect_public_ipv6() -> str | None:
     return (stable or temporary or any_gua or [None])[0]
 
 
+def _inet6_addrs() -> "list[tuple[str, str]]":
+    """Every global-ish inet6 address on this host as (addr, flags-line) pairs
+    — the OS-specific parse behind _detect_public_ipv6. Linux reads `ip -6 -o
+    addr show scope global`; macOS reads `ifconfig -a` (its inet6 lines carry
+    the same temporary/deprecated flag words, and zone ids like %en0 are
+    stripped — a zoned address is link-local anyway and fails the GUA check)."""
+    out: "list[tuple[str, str]]" = []
+    if gwplat.IS_MACOS:
+        try:
+            r = subprocess.run(["ifconfig", "-a"],
+                               capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return out
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            # "inet6 <addr>[%zone] prefixlen N [autoconf secured temporary ...]"
+            if len(parts) >= 2 and parts[0] == "inet6":
+                out.append((parts[1].split("%")[0], line))
+        return out
+    try:
+        r = subprocess.run(["ip", "-6", "-o", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return out
+    for line in r.stdout.splitlines():
+        # "<idx>: <iface>    inet6 <addr/prefix> scope global [flags...]"
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet6":
+            out.append((parts[3].split("/")[0], line))
+    return out
+
+
 _CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # RFC 6598 carrier-grade NAT
 
 
@@ -240,19 +277,25 @@ def _detect_public_ipv4() -> str | None:
     v4) OR carrier-grade NAT (a 100.64/10 address) this returns None, so those
     nodes advertise nothing (correctly outbound-only) unless the operator passes
     `--endpoint <public-v4>`. Only the underlay may be v4; the overlay stays IPv6."""
+    cmd = (["ifconfig", "-a"] if gwplat.IS_MACOS
+           else ["ip", "-4", "-o", "addr", "show", "scope", "global"])
     try:
-        r = subprocess.run(
-            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
-            capture_output=True, text=True, check=False,
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return None
     for line in r.stdout.splitlines():
         parts = line.split()
-        if len(parts) < 4 or parts[2] != "inet":
-            continue
+        # macOS: "inet <a.b.c.d> netmask ..." / Linux: "N: eth0 inet <a.b.c.d>/nn ..."
+        if gwplat.IS_MACOS:
+            if len(parts) < 2 or parts[0] != "inet":
+                continue
+            raw = parts[1]
+        else:
+            if len(parts) < 4 or parts[2] != "inet":
+                continue
+            raw = parts[3].split("/")[0]
         try:
-            addr = ipaddress.IPv4Address(parts[3].split("/")[0])
+            addr = ipaddress.IPv4Address(raw)
         except ValueError:
             continue
         if _globally_reachable_v4(addr):
@@ -265,11 +308,20 @@ def _local_families() -> set[int]:
     default-route presence. Used to pick a reachable peer endpoint. Falls back to
     assuming both if detection fails."""
     fams: set[int] = set()
-    for fam, flag in ((6, "-6"), (4, "-4")):
+    for fam, cmd in ((6, (["route", "-n", "get", "-inet6", "default"]
+                          if gwplat.IS_MACOS else
+                          ["ip", "-6", "route", "show", "default"])),
+                     (4, (["route", "-n", "get", "default"]
+                          if gwplat.IS_MACOS else
+                          ["ip", "-4", "route", "show", "default"]))):
         try:
-            r = subprocess.run(["ip", flag, "route", "show", "default"],
-                               capture_output=True, text=True, check=False)
-            if r.stdout.strip():
+            r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            # macOS `route get` exits non-zero with "not in table" when absent;
+            # Linux `ip route show default` prints nothing.
+            if gwplat.IS_MACOS:
+                if r.returncode == 0 and "gateway" in (r.stdout or ""):
+                    fams.add(fam)
+            elif r.stdout.strip():
                 fams.add(fam)
         except FileNotFoundError:
             pass
@@ -329,6 +381,12 @@ def _enforce_ports_default() -> bool:
     `enforce_ports = false` explicitly, so its daemon never trips the startup
     guard — the restart-loop this avoids."""
     from .portfilter import nft_usable
+    if not gwplat.port_enforcement_available():
+        log.warning("port enforcement is not available on %s yet (a pf backend "
+                    "is planned) — writing enforce_ports = false (port scopes "
+                    "advisory; grants still gate which tunnels exist).",
+                    gwplat.os_name())
+        return False
     if nft_usable():
         return True
     log.warning("nftables not usable here — writing enforce_ports = false "
@@ -4499,13 +4557,13 @@ def _wait_service_settled(systemctl: str, unit: str, wait_secs: float = 6.0) -> 
 # ---------------------------------------------------------------------------
 
 def _require_supported_os() -> None:
-    """Exit cleanly on a non-Linux host instead of failing deep in an ip/wg call.
-    greasewood is Linux-only (in-kernel WireGuard, nftables, ip, systemd); PyPI
-    is public, so a non-Linux user could pip-install and run a command. --version
+    """Exit cleanly on an unsupported host instead of failing deep in an
+    ip/ifconfig/wg call. greasewood runs on Linux (in-kernel WireGuard,
+    nftables, iproute2) and macOS (wireguard-go, launchd); PyPI
+    is public, so any other OS could pip-install and run a command. --version
     and -h are handled by parse_args before this, so they work everywhere."""
     import platform as _plat
-    if _plat.system() != "Linux":
-        sys.exit(f"greasewood is a Linux-only tool (this host is {_plat.system()}).")
+    gwplat.require_supported()
 
 
 def build_parser() -> argparse.ArgumentParser:
