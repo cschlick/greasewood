@@ -270,3 +270,23 @@ def test_service_needs_root(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.cmd_service(_svc_args(tmp_path, "enable"))
     assert "needs root" in str(e.value)
+
+
+def test_every_subcommand_dispatches(monkeypatch):
+    """Every registered subparser must set fn= (the dispatcher calls args.fn) —
+    a set_defaults(func=...) typo otherwise survives unit tests that call the
+    cmd_* function directly and crashes only on the real command line (seen in
+    the field: 'gw service enable' AttributeError'd mid-migration)."""
+    import argparse
+    seen = []
+    def fake_parse(self, *a, **k):
+        for act in self._actions:
+            if isinstance(act, argparse._SubParsersAction):
+                for name, sub in act.choices.items():
+                    assert "fn" in sub._defaults, f"subcommand {name!r} sets no fn="
+                    seen.append(name)
+        raise SystemExit(0)
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", fake_parse)
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+    assert "service" in seen and len(seen) > 20

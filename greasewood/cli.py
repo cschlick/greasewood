@@ -4772,7 +4772,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="[sudo] enable/disable this config's daemon service (adopt a "
              "migrated config; on launchd only greasewood can write the plist)")
     sp.add_argument("action", choices=("enable", "disable"))
-    sp.set_defaults(func=cmd_service)
+    sp.set_defaults(fn=cmd_service)
 
     sp = sub.add_parser("purge",
                         help="[sudo] remove this mesh entirely — stop+disable its "
