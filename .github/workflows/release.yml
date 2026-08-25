@@ -130,3 +130,16 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "greasewood ${GITHUB_REF_NAME#v}" \
             --generate-notes
+
+  # Build macOS bottles for the tap once the Release exists — bottle.yml
+  # uploads them to the Release and pushes the tap's `bottle do` block. This
+  # is the chain bottle.yml's header always described; without a bottle,
+  # `brew install` on a Mac without the Xcode CLT is refused by Homebrew's
+  # source-build gate (the formula itself needs no compiler — wheels — but
+  # the gate is policy, not toolchain).
+  bottles:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [dist, release]     # dist for the version output
+    uses: ./.github/workflows/bottle.yml
+    with:
+      version: ${{ needs.dist.outputs.version }}
