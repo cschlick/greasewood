@@ -33,7 +33,9 @@ provision:
     command -v gw >/dev/null 2>&1 && exit 0     # idempotent: skip on every reboot after the first
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends nftables wireguard-tools pipx
+    # git: so `gw upgrade --from github` (running an unreleased fix) works in
+    # the appliance VM without a manual install first.
+    apt-get install -y --no-install-recommends nftables wireguard-tools pipx git
     # /usr/local/bin so it matches the greasewood@ unit's ExecStart, old pipx or new.
     PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install greasewood
 
