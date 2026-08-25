@@ -11,6 +11,19 @@ table ip6 gwmac {
     }
     chain clamp {
         type filter hook forward priority mangle; policy accept;
-        tcp flags syn tcp option maxseg size set rt mtu
+        # Clamp ONLY SYNs entering the mesh. `set rt mtu` is unconditional —
+        # applied to both directions it also rewrote the PEER's SYN-ACK toward
+        # the Mac, using the route MTU to the Mac (1500), which RAISED the
+        # peer's honest 1360 to 1440. The Mac then sent 1500-byte packets into
+        # the 1420 tunnel and TCP collapsed into PMTU-blackhole stalls — an
+        # order-of-magnitude throughput loss on every Mac→peer bulk transfer,
+        # with nothing visibly wrong. Scoped to oifname, each side is exactly
+        # right: the Mac's SYN is clamped to the tunnel (protecting peer→Mac
+        # data), and the peer's SYN-ACK — already sized to its own tunnel
+        # interface — passes untouched (protecting Mac→peer data). This
+        # matters doubly here because Apple's vmnet silently drops IPv6
+        # FRAGMENTS between guest and host, so any packet that overshoots the
+        # tunnel MTU has no fragmentation fallback: TCP must never need one.
+        oifname "gw-*" tcp flags syn tcp option maxseg size set rt mtu
     }
 }

@@ -355,6 +355,16 @@ Know what you're trading:
   it's a real widening; that's why the per-port forward stays the default recipe.
 - **Outbound only.** NAT66 has no inbound mappings — the Mac still can't be
   dialed from the mesh, which is the laptop posture anyway.
+- **No fragments.** Apple's vmnet silently drops IPv6 *fragments* between
+  guest and host, in both directions. TCP is protected — the gateway clamps
+  MSS into the tunnel, and the clamp is deliberately one-directional so it
+  never raises the peer's advertised MSS toward the Mac (rewriting it upward
+  was exactly the bug that made every Mac→peer bulk transfer collapse into
+  PMTU-blackhole stalls, ~10× slower with nothing visibly wrong). But a UDP
+  or ICMPv6 packet larger than the tunnel MTU (1420) has no fallback on the
+  Mac leg: it just disappears. Apps that send big UDP datagrams mesh↔Mac
+  (rare — QUIC and WireGuard-in-WireGuard stay under 1350) won't work; run
+  those from inside the VM instead.
 - **Names go stale on the Mac.** The VM's hosts block updates every reconcile;
   the Mac's copy updates when you run `gw-mac`. Rerun it after joins,
   departures, or renames (resolution only — reachability and revocation are

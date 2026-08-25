@@ -96,7 +96,7 @@ install_gateway() {
                 rm -f /tmp/gw-mac-gateway.network.conf
             fi &&
             systemctl daemon-reload &&
-            systemctl enable --now gw-mac-gateway'
+            systemctl enable gw-mac-gateway && systemctl restart gw-mac-gateway'
     else
         limactl shell "$VM" -- sudo sh -c '
             mv /tmp/gw-mac-gateway.nft /etc/ &&
@@ -109,7 +109,7 @@ install_gateway() {
             sysctl -p /etc/sysctl.d/99-gw-mac-gateway.conf >/dev/null &&
             rc-update -q add sysctl boot 2>/dev/null || true &&
             rc-update add gw-mac-gateway default &&
-            rc-service gw-mac-gateway start'
+            rc-service gw-mac-gateway restart'
     fi
 }
 
@@ -231,6 +231,13 @@ EOF
     if ! lanfilter_present && find_share; then
         echo "sealing ${VM}'s non-mesh interfaces (gw-mac-lan)…"
         install_lanfilter
+    fi
+    # Gateway-definition self-heal: pick up shipped fixes on an existing VM
+    # (same philosophy as the daemon's refresh_template). Content-compare the
+    # nft ruleset; reinstall the gateway files when the shipped copy differs.
+    if find_share && ! guest 'cat /etc/gw-mac-gateway.nft 2>/dev/null' | cmp -s - "$SHARE/gw-mac-gateway.nft"; then
+        echo "gateway ruleset drifted from the shipped version — refreshing…"
+        install_gateway
     fi
     ensure_daemon
     ensure_transfer
