@@ -404,9 +404,213 @@ def enable_openrc_now(init_dir: Path, key: str, *, runlevel: str = "default",
     return settle(svc)
 
 
+# ---------------------------------------------------------------------------
+# launchd (macOS)
+#
+# No template mechanism exists in launchd, so the systemd-template concept maps
+# to a per-mesh plist FAMILY at /Library/LaunchDaemons/com.greasewood.<key>.plist
+# — each derives its config path from the key exactly as systemd's %i does.
+# Semantics (a Mac that sleeps/roams needs the daemon whenever its job is
+# loaded, so this is deliberately stronger than the Linux unit's
+# Restart=on-failure): RunAtLoad starts it at boot, KeepAlive=true restarts it
+# on ANY exit while loaded. `gw run` returns 0 on SIGTERM and launchd's
+# KeepAlive — unlike systemd — can't tell an operator stop from a stray signal,
+# so SuccessfulExit=false would leave the mesh down after any clean SIGTERM
+# that isn't a reboot. The only intentional stop is bootout/remove, which
+# UNLOADS the job; crash-loops are bounded by ThrottleInterval.
+# ---------------------------------------------------------------------------
+
+LAUNCHD_DIR = Path("/Library/LaunchDaemons")
+LAUNCHD_LOG_DIR = Path("/var/log/greasewood")
+
+# launchd strips the environment; the daemon shells out to wireguard-go / wg /
+# ifconfig / route, so hand it the standard prefixes plus both Homebrew homes.
+_LAUNCHD_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def launchd_label(key: str) -> str:
+    """The launchd job label for one membership: com.greasewood.<key>."""
+    return f"com.greasewood.{key}"
+
+
+def launchd_plist_path(key: str) -> Path:
+    return LAUNCHD_DIR / f"{launchd_label(key)}.plist"
+
+
+def launchd_available() -> bool:
+    """launchd management is possible: macOS with launchctl on PATH."""
+    from . import platform as gwplat
+    return gwplat.IS_MACOS and shutil.which("launchctl") is not None
+
+
+def _launchd_daemon_argv(cfg_path, exec_argv: "list | None" = None) -> list:
+    """ProgramArguments for the daemon. Prefer `<interpreter> -m greasewood`
+    over the `gw` console-script path — same rationale as service_exec(): the
+    absolute interpreter survives a moved/regenerated wrapper, so the job can't
+    dangle after a reinstall. exec_argv overrides (tests / refresh)."""
+    if exec_argv:
+        head = list(exec_argv)
+    elif sys.executable:
+        head = [sys.executable, "-m", "greasewood"]
+    else:
+        head = [shutil.which("gw") or os.path.realpath(sys.argv[0])]
+    return head + ["-c", str(cfg_path), "run"]
+
+
+def render_launchd_plist(key: str, cfg_path, exec_argv: "list | None" = None) -> bytes:
+    """The LaunchDaemon plist for one membership, as plist XML bytes."""
+    import plistlib
+    return plistlib.dumps({
+        "Label": launchd_label(key),
+        "ProgramArguments": _launchd_daemon_argv(cfg_path, exec_argv),
+        "RunAtLoad": True,                 # start at boot
+        "KeepAlive": True,                 # always restart while loaded (see section note)
+        "EnvironmentVariables": {"PATH": _LAUNCHD_PATH},
+        "StandardOutPath": str(LAUNCHD_LOG_DIR / f"{key}.log"),
+        "StandardErrorPath": str(LAUNCHD_LOG_DIR / f"{key}.log"),
+        "ThrottleInterval": 5,             # crash-loop backoff (secs)
+    }, sort_keys=False)
+
+
+def launchctl_run(argv, *, timeout: float = SYSTEMCTL_TIMEOUT) -> subprocess.CompletedProcess:
+    """Run launchctl with a bounded wait (mirrors systemctl_run/rc_run)."""
+    try:
+        return subprocess.run(["launchctl", *argv], capture_output=True,
+                              text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return subprocess.CompletedProcess(["launchctl", *argv], 1, "", str(e))
+
+
+def _launchd_is_running(key: str, *, run=launchctl_run) -> bool:
+    """Is the job's process actually running (not merely loaded)? `launchctl
+    print` shows `state = running` for a live job."""
+    r = run(["print", f"system/{launchd_label(key)}"])
+    return r.returncode == 0 and "state = running" in (r.stdout or "")
+
+
+def launchd_config_path(key: str) -> Path:
+    """The config file for mesh `key` — the launchd equivalent of the systemd
+    unit's /etc/greasewood_%i.toml."""
+    return Path(f"/etc/greasewood_{key}.toml")
+
+
+def launchd_install(key: str, cfg_path=None, exec_argv: "list | None" = None, *,
+                    run=launchctl_run, sleep=time.sleep) -> str:
+    """Write the plist and (re)bootstrap the job. Returns the same states the
+    systemd path reports: 'active' (came up and stayed up), 'failed' (loaded
+    but not running — likely crashing), or 'manual' (couldn't manage launchd
+    here — caller prints the `gw run` line)."""
+    if not launchd_available():
+        return "manual"
+    cfg_path = cfg_path or launchd_config_path(key)
+    try:
+        LAUNCHD_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
+        p = launchd_plist_path(key)
+        p.write_bytes(render_launchd_plist(key, cfg_path, exec_argv))
+        # launchd requires root:wheel 0644 — and if the GROUP is anything else
+        # (e.g. staff, when written outside a gid-0 context) launchd SILENTLY
+        # refuses to auto-load the plist at boot, so the job never comes up on
+        # its own and needs a manual bootstrap. chmod alone doesn't fix the
+        # group; force owner root (0) + group wheel (gid 0) explicitly.
+        p.chmod(0o644)
+        os.chown(p, 0, 0)
+    except OSError as e:
+        log.warning("could not write %s: %s", launchd_plist_path(key), e)
+        return "manual"
+
+    # Re-bootstrap: bootout first (idempotent — fine if it wasn't loaded), so a
+    # reinstall or config change always picks up the fresh plist. bootout is
+    # ASYNCHRONOUS — bootstrapping the same label before the old job finishes
+    # unloading fails with "Bootstrap failed: 5: Input/output error", so wait
+    # for the label to actually disappear, then retry a couple of times in case
+    # it's still settling. (This bites exactly on a reinstall / re-join.)
+    run(["bootout", f"system/{launchd_label(key)}"])
+    for _ in range(16):                   # ≈5s at 0.3s/step (iteration-bounded
+        if run(["print", f"system/{launchd_label(key)}"]).returncode != 0:
+            break                         # so an injected no-op sleep still ends)
+        sleep(0.3)
+    r = None
+    for _attempt in range(4):
+        r = run(["bootstrap", "system", str(launchd_plist_path(key))])
+        if r.returncode == 0:
+            break
+        sleep(1.0)                        # still unloading → back off and retry
+    if r is None or r.returncode != 0:
+        log.warning("launchctl bootstrap failed after retries: %s",
+                    (r.stderr or r.stdout or "").strip() if r else "no attempt")
+        return "manual"
+
+    # bootstrap LOADS the job; RunAtLoad is supposed to start it, but at
+    # bootstrap time that's racy — an explicit kickstart is the deterministic
+    # start. -k kills any half-started instance first, so it's idempotent
+    # whether RunAtLoad already fired or not.
+    run(["kickstart", "-k", f"system/{launchd_label(key)}"])
+
+    # Settle: reach running, then STILL be running after the fast-crash window
+    # (mirrors the systemd path — a job that execs and dies "started" too).
+    for _ in range(12):                   # ≈6s at 0.5s/step
+        if _launchd_is_running(key, run=run):
+            break
+        sleep(0.5)
+    if not _launchd_is_running(key, run=run):
+        return "failed"
+    sleep(2.0)
+    return "active" if _launchd_is_running(key, run=run) else "failed"
+
+
+def launchd_remove(key: str, *, run=launchctl_run) -> bool:
+    """Stop the job and remove its plist (purge / rename / disable). True if
+    anything was actually removed. Idempotent."""
+    removed = False
+    if shutil.which("launchctl"):
+        r = run(["bootout", f"system/{launchd_label(key)}"])
+        removed = r.returncode == 0
+    p = launchd_plist_path(key)
+    if p.exists():
+        try:
+            p.unlink()
+            removed = True
+        except OSError as e:
+            log.warning("could not remove %s: %s", p, e)
+    return removed
+
+
+def refresh_launchd_plists() -> bool:
+    """Self-heal every installed com.greasewood.*.plist whose ProgramArguments
+    head no longer matches this interpreter (a rebuilt venv, an upgrade) —
+    rewrite the file only; the running job keeps its old argv until its next
+    load, exactly like systemd's refresh (which daemon-reloads but never
+    restarts). Returns True if anything changed."""
+    import plistlib
+    changed = False
+    try:
+        plists = sorted(LAUNCHD_DIR.glob("com.greasewood.*.plist"))
+    except OSError:
+        return False
+    for path in plists:
+        try:
+            d = plistlib.loads(path.read_bytes())
+            argv = d.get("ProgramArguments") or []
+            if "-c" not in argv:
+                continue
+            cfg = argv[argv.index("-c") + 1]
+            want = _launchd_daemon_argv(cfg)
+            if argv != want:
+                d["ProgramArguments"] = want
+                path.write_bytes(plistlib.dumps(d, sort_keys=False))
+                path.chmod(0o644)
+                os.chown(path, 0, 0)
+                log.info("refreshed launchd plist %s", path.name)
+                changed = True
+        except Exception:
+            continue
+    return changed
+
+
 class ServiceManager(ABC):
     """An init-system backend for the per-mesh greasewood daemon. One
-    implementation per init system (systemd today; OpenRC next). `detect()`
+    implementation per init system (systemd, OpenRC, launchd). `detect()`
     returns the one for the current host, or None for the manual path."""
 
     name: str
@@ -645,11 +849,88 @@ class OpenRCManager(ServiceManager):
         return (self.init_dir / "greasewood").exists()
 
 
+class LaunchdManager(ServiceManager):
+    name = "launchd"
+
+    def __init__(self, launchd_dir: Path = LAUNCHD_DIR) -> None:
+        self.launchd_dir = launchd_dir
+
+    def available(self) -> bool:
+        return launchd_available()
+
+    def write_template(self, exec_path: "str | None" = None) -> "str | None":
+        # launchd has no shared template — the per-mesh plist is written by
+        # enable_now, config path derived from the key like systemd's %i.
+        # Return a truthy handle when launchd is manageable here.
+        return "launchd" if self.available() else None
+
+    def refresh_template(self) -> bool:
+        return refresh_launchd_plists()
+
+    def enable_now(self, key: str) -> str:
+        return launchd_install(key)
+
+    def restart_now(self, key: str) -> bool:
+        if not self.available():
+            return False
+        if not launchd_plist_path(key).exists():
+            return False
+        self.refresh_template()
+        r = launchctl_run(["kickstart", "-k", f"system/{launchd_label(key)}"])
+        if r.returncode != 0:
+            return False
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            if _launchd_is_running(key):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def unit_name(self, key: str) -> str:
+        return launchd_label(key)
+
+    def restart_hint(self, key: str) -> str:
+        return f"sudo launchctl kickstart -k system/{launchd_label(key)}"
+
+    def status_hint(self, key: str) -> str:
+        return (f"status: sudo launchctl print system/{launchd_label(key)} | "
+                f"grep state   logs: {LAUNCHD_LOG_DIR}/{key}.log")
+
+    def logs_hint(self, key: str) -> str:
+        return f"sudo tail -n 40 {LAUNCHD_LOG_DIR}/{key}.log"
+
+    def enable_hint(self, key: str) -> str:
+        return f"sudo launchctl bootstrap system {launchd_plist_path(key)}"
+
+    def stop_hint(self, key: str) -> str:
+        return f"sudo launchctl bootout system/{launchd_label(key)}"
+
+    def disable_now(self, key: str) -> bool:
+        return launchd_remove(key)
+
+    def remove_template(self) -> bool:
+        # Nothing shared exists — disable_now already removed the per-mesh
+        # plist; the log dir is left behind deliberately (it's the crash
+        # forensics for a mesh that was just purged).
+        return False
+
+    def template_name(self) -> str:
+        return str(self.launchd_dir / "com.greasewood.<mesh>.plist")
+
+    def template_installed(self) -> bool:
+        try:
+            return any(self.launchd_dir.glob("com.greasewood.*.plist"))
+        except OSError:
+            return False
+
+
 def detect(unit_dir: Path = SYSTEMD_UNIT_DIR) -> "ServiceManager | None":
     """The service backend for this host, or None when no supported init system
     is managing services here (the operator supervises `gw run` themselves).
     systemd wins when both are somehow present — it's the one greasewood's unit
     and tests target."""
+    if launchd_available():
+        return LaunchdManager()           # macOS — can't coexist with the others
     if systemd_available():
         return SystemdManager(unit_dir)
     if openrc_available():
