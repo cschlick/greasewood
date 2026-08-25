@@ -33,6 +33,19 @@ route-del)
     net_ok "${2:-}" || { echo "usage: gw-mac-priv route-del <prefix>" >&2; exit 2; }
     route -n delete -inet6 "$2" >/dev/null 2>&1 || true
     ;;
+tso-off)
+    # Disable TCP segmentation offload on the Mac. With TSO on, macOS hands
+    # multi-segment TCP trains to the vmnet "NIC"; Virtualization.framework
+    # delivers them into the guest as over-MTU frames the kernel cannot
+    # re-segment (rx-gro-hw is a fixed feature, no usable GSO metadata), so
+    # the VM's forward path can only drop them and send Packet-Too-Big —
+    # measured: every window head dropped, cwnd pinned at 2 segments, mesh
+    # uploads at 1/230th of path capacity. Off, the Mac emits honest ≤MSS
+    # segments and mesh throughput matches the VM's own. The cost is CPU
+    # that only matters at multi-gigabit rates on real NICs. Volatile across
+    # reboots, so `gw-mac up` re-asserts it.
+    sysctl -w net.inet.tcp.tso=0 >/dev/null
+    ;;
 transfer-add)
     # Give the Mac its side of the gw-mac transfer net (see gw-mac-net.sh):
     # the source macOS picks for mesh-bound traffic, so the VM's replies route
@@ -65,7 +78,7 @@ hosts-sync)
     rm -f "$new"
     ;;
 *)
-    echo "usage: gw-mac-priv {route-add <prefix> <gw> | route-del <prefix> | transfer-add <iface> <addr> | hosts-sync}" >&2
+    echo "usage: gw-mac-priv {route-add <prefix> <gw> | route-del <prefix> | transfer-add <iface> <addr> | tso-off | hosts-sync}" >&2
     exit 2
     ;;
 esac

@@ -177,6 +177,11 @@ ensure_transfer() {
     [ -n "$HOSTIF" ] || { echo "no host route to the VM's vzNAT address ($VMV4) — is the VM running?" >&2; exit 1; }
     ifconfig "$HOSTIF" inet6 2>/dev/null | grep -q " $TRANSFER_MAC " || \
         priv transfer-add "$HOSTIF" "$TRANSFER_MAC"
+    # TSO must be off on the Mac or mesh UPLOADS collapse ~200x: macOS's TSO
+    # trains reach the VM as over-MTU frames its forward path can only
+    # drop-and-PTB (see gw-mac-priv tso-off for the full mechanism). Volatile
+    # across reboots — re-assert, only when drifted.
+    [ "$(sysctl -n net.inet.tcp.tso 2>/dev/null)" = 0 ] || priv tso-off
 }
 
 route_ok() { netstat -rn -f inet6 | awk -v p="$PREFIX" -v g="$VMADDR" '$1==p && $2==g' | grep -q .; }

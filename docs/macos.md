@@ -355,6 +355,14 @@ Know what you're trading:
   it's a real widening; that's why the per-port forward stays the default recipe.
 - **Outbound only.** NAT66 has no inbound mappings — the Mac still can't be
   dialed from the mesh, which is the laptop posture anyway.
+- **TSO is turned off on the Mac.** `gw-mac up` sets `net.inet.tcp.tso=0`
+  (and re-asserts it after reboots). With TSO on, macOS hands multi-segment
+  TCP trains to the vmnet NIC, and Virtualization.framework delivers them
+  into the guest as over-MTU frames the kernel cannot re-segment — the VM's
+  forward path can only drop them and emit Packet-Too-Big, which collapsed
+  every mesh *upload* to ~1/230th of path capacity (downloads were untouched;
+  the asymmetry is the tell). TSO's CPU saving only matters at multi-gigabit
+  rates on real NICs; at mesh speeds the setting is free.
 - **No fragments.** Apple's vmnet silently drops IPv6 *fragments* between
   guest and host, in both directions. TCP is protected — the gateway clamps
   MSS into the tunnel, and the clamp is deliberately one-directional so it
