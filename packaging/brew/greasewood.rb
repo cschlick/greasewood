@@ -13,7 +13,7 @@ class Greasewood < Formula
   desc "Minimal self-hosted WireGuard mesh overlay"
   homepage "https://github.com/cschlick/greasewood"
   url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000" # pinned by release-brew.sh
+  sha256 "92facd68bf969ff97fd43c99a8c8b54c0fc8eac055b3f6deaa7ab222de53c7ac" # pinned by release-brew.sh
   license "MIT"
   head "https://github.com/cschlick/greasewood.git", branch: "main"
 
