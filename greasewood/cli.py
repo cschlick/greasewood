@@ -1409,28 +1409,48 @@ def cmd_upgrade(args) -> int:
                  "checkout with 'pip install -e .'.")
     home, bin_dir = env
     _require_root("upgrade", "it reinstalls the package and restarts the service")
+    cfg = load_config(Path(args.config))
+    key = membership_key(cfg.mesh_domain)
 
+    # For the github source, FETCH BEFORE UNINSTALL. The uninstall→install
+    # window used to include the full network clone, so a GitHub outage in
+    # that window stranded the node with greasewood uninstalled (seen in the
+    # field: a 133s connect timeout mid-clone → pip failed → no venv, the
+    # daemon alive only on deleted inodes, one restart from going dark). With
+    # the payload cloned to local disk first, a network failure aborts while
+    # the node is still untouched; only the local-path install (deps usually
+    # wheel-cached) remains inside the window.
+    fetch_steps: list = []
     if args.source == "github":
         if not shutil.which("git"):
             sys.exit("installing from the repo needs git, which isn't installed.\n"
                      "Try: sudo apt install git   # or: sudo apk add git")
+        import tempfile
         ref = args.ref or "main"
-        spec = f"git+{_REPO_URL}@{ref}"
         origin = f"the repo @ {ref}"
+        # Under data_dir, not /tmp: confined hosts (AppArmor/SELinux) restrict
+        # /tmp, which has bitten greasewood before — see tests/test_no_tmp.py.
+        workdir = Path(tempfile.mkdtemp(prefix="gw-upgrade-", dir=cfg.data_dir))
+        clone = workdir / "greasewood"
+        # clone + checkout (not --branch): --branch takes branches/tags only,
+        # while --ref is documented to accept a commit too.
+        fetch_steps = [["git", "clone", "--quiet", _REPO_URL, str(clone)],
+                       ["git", "-C", str(clone), "checkout", "--quiet", ref]]
+        spec = str(clone)
     else:
+        workdir = None
         spec = f"greasewood=={args.ref}" if args.ref else "greasewood"
         origin = f"PyPI {args.ref}" if args.ref else "PyPI (latest release)"
 
     pipx_env = {"PIPX_HOME": str(home), "PIPX_BIN_DIR": str(bin_dir)}
     prefix = " ".join(f"{k}={v}" for k, v in pipx_env.items())
-    steps = [["pipx", "uninstall", "greasewood"], ["pipx", "install", spec]]
-
-    cfg = load_config(Path(args.config))
-    key = membership_key(cfg.mesh_domain)
+    steps = fetch_steps + [["pipx", "uninstall", "greasewood"],
+                           ["pipx", "install", spec]]
 
     print(f"greasewood {_version()}  →  reinstall from {origin}\n")
     for step in steps:
-        print(f"  {prefix} {' '.join(step)}")
+        p = "" if step in fetch_steps else prefix + " "
+        print(f"  {p}{' '.join(step)}")
     print(f"\nthen: restart the daemon for '{key}'\n")
     print("The uninstall step removes 'gw' until the install finishes. If the "
           "install fails\n(no network, bad ref), recover by re-running the "
@@ -1438,6 +1458,8 @@ def cmd_upgrade(args) -> int:
 
     if not args.yes and input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
         print("cancelled — nothing changed.")
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
         return 1
 
     venv = home / "venvs" / "greasewood"
@@ -1452,6 +1474,17 @@ def cmd_upgrade(args) -> int:
         print(f"\n$ {' '.join(step)}")
         r = subprocess.run(step, env=run_env)
         if r.returncode != 0:
+            if step in fetch_steps:
+                # Nothing has been removed yet — this is the failure mode the
+                # fetch-first ordering exists for. Say so plainly.
+                if workdir is not None:
+                    shutil.rmtree(workdir, ignore_errors=True)
+                sys.exit(f"\n'{' '.join(step)}' failed (exit {r.returncode}).\n"
+                         f"Nothing was changed — the fetch runs before the "
+                         f"uninstall precisely so a network failure can't strand "
+                         f"the node. Re-run when the network is back.")
+            # The clone (if any) is still on disk and valid — name it in the
+            # recovery command rather than a spec that needs the network again.
             sys.exit(f"\n'{' '.join(step)}' failed (exit {r.returncode}).\n"
                      f"greasewood may be uninstalled right now — recover with:\n"
                      f"  sudo {prefix} pipx install {spec}")
@@ -1468,6 +1501,8 @@ def cmd_upgrade(args) -> int:
             print(f"\ninstalled: {v.stdout.strip()}")
     if not _service_restart(key, why="to run the new code"):
         print(f"restart the daemon to run the new code:\n  {_svc_restart_hint(key)}")
+    if workdir is not None:
+        shutil.rmtree(workdir, ignore_errors=True)
     return 0
 
 

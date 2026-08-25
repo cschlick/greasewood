@@ -102,18 +102,38 @@ def test_targets_the_pipx_home_this_install_came_from(tmp_path, monkeypatch,
     assert runs.calls[1] == ["pipx", "install", "greasewood"]
 
 
-def test_github_source_builds_a_git_spec(tmp_path, monkeypatch, pipx_layout):
+def test_github_source_clones_before_uninstalling(tmp_path, monkeypatch,
+                                                  pipx_layout):
+    """The github path fetches the payload BEFORE the uninstall — the
+    uninstall→install window must not contain the network clone (a GitHub
+    outage mid-window stranded a node with greasewood uninstalled)."""
     runs = _Runs()
     _patch_run(monkeypatch, runs)
     cli.cmd_upgrade(_args(tmp_path, source="github", ref="main"))
-    assert runs.calls[1] == ["pipx", "install", f"git+{cli._REPO_URL}@main"]
+    assert runs.calls[0][:2] == ["git", "clone"] and cli._REPO_URL in runs.calls[0]
+    assert runs.calls[1][:2] == ["git", "-C"] and runs.calls[1][-1] == "main"
+    assert runs.calls[2] == ["pipx", "uninstall", "greasewood"]
+    # …and the install is from the LOCAL clone, not a network spec.
+    assert runs.calls[3][:2] == ["pipx", "install"]
+    assert runs.calls[3][2] == runs.calls[0][-1]         # the clone dir
+
+
+def test_github_clone_failure_changes_nothing(tmp_path, monkeypatch, pipx_layout):
+    """A failed fetch aborts with the node untouched: no uninstall has run,
+    and the message says nothing was changed (not 'may be uninstalled')."""
+    runs = _Runs(rc=1)                                   # every step fails
+    _patch_run(monkeypatch, runs)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_upgrade(_args(tmp_path, source="github"))
+    assert "Nothing was changed" in str(e.value)
+    assert ["pipx", "uninstall", "greasewood"] not in runs.calls
 
 
 def test_github_defaults_to_main(tmp_path, monkeypatch, pipx_layout):
     runs = _Runs()
     _patch_run(monkeypatch, runs)
     cli.cmd_upgrade(_args(tmp_path, source="github"))
-    assert runs.calls[1] == ["pipx", "install", f"git+{cli._REPO_URL}@main"]
+    assert runs.calls[1][-1] == "main"                   # the checkout ref
 
 
 def test_pypi_ref_pins_an_exact_version(tmp_path, monkeypatch, pipx_layout):
