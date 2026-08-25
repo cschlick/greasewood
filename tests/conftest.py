@@ -30,3 +30,19 @@ settings.register_profile("deep", settings(
     print_blob=True,      # failures print a reproduction blob for the fast suite
 ))
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _pin_linux_platform(monkeypatch):
+    """Pin the platform seam to Linux for every test. The suite's fixtures and
+    assertions speak the Linux data plane (`ip` argv, nftables, systemd paths),
+    and must pass identically on a macOS dev box and the Linux CI — the OS the
+    suite happens to run on must never leak into what it asserts. Darwin-path
+    tests opt in explicitly by re-setting IS_MACOS/IS_LINUX themselves (their
+    monkeypatch runs after this autouse fixture)."""
+    from greasewood import platform as gwplat
+    monkeypatch.setattr(gwplat, "IS_LINUX", True)
+    monkeypatch.setattr(gwplat, "IS_MACOS", False)
