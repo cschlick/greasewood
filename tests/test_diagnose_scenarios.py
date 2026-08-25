@@ -172,3 +172,38 @@ def test_globally_reachable_v4_excludes_cgnat():
     assert g(ipaddress.IPv4Address("100.64.1.1")) is False   # CGNAT — the bug this fixes
     assert g(ipaddress.IPv4Address("192.168.1.5")) is False
     assert g(ipaddress.IPv4Address("10.0.0.1")) is False
+
+
+def test_diagnose_family_mismatch_is_named(tmp_path, monkeypatch, capsys):
+    """A v4-only dialer facing a v6-only endpoint has NO dialable direction —
+    diagnose must say so, instead of suggesting the v6 dial and then blaming
+    the peer's firewall for the silence (the block is local connectivity, and
+    the misdirected ⚠ sends the operator debugging the wrong machine)."""
+    peer = NodeKeys.generate()
+    monkeypatch.setattr(cli, "_local_families", lambda: {4})
+    _run(tmp_path, monkeypatch, title="self(ip4-only) ↔ peer(v6-only endpoint)",
+         nodes=["peer"],                  # self outbound-only, ip4-only egress
+         records=[_rec(peer, _cred(peer, CA, "peer"),
+                       endpoints=["[2001:db8::7]:51900"])],
+         live_peers={})
+    out = capsys.readouterr().out
+    print(out)
+    assert "advertises only ip6" in out and "can only dial out on ip4" in out
+    assert "no dialable direction" in out
+    assert "isn't answering" not in out      # the old, misdirecting hint
+
+
+def test_diagnose_unknown_families_never_asserts_mismatch(tmp_path, monkeypatch,
+                                                          capsys):
+    """`families` is optional and unsigned — an old node that doesn't publish
+    it must still be shown dialing (silence is unknown, not a mismatch)."""
+    a, b = NodeKeys.generate(), NodeKeys.generate()
+    _run(tmp_path, monkeypatch, title="a(no families) ↔ b(v6-only endpoint)",
+         nodes=["a", "b"],
+         records=[_rec(a, _cred(a, CA, "a")),           # publishes no families
+                  _rec(b, _cred(b, CA, "b"),
+                       endpoints=["[2001:db8::9]:51900"])],
+         live_peers={})
+    out = capsys.readouterr().out
+    print(out)
+    assert "a → b: dial 2001:db8::9" in out

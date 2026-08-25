@@ -2536,23 +2536,46 @@ def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
               f"this node's daemon; if it's truly gone, it prunes on its own.")
         return
 
-    a_dials_b = col_b.has_endpoint     # a can dial b iff b listens with an endpoint
-    b_dials_a = col_a.has_endpoint
+    def _dial(src, dst):
+        """Can src dial dst? (ok, endpoint, why_not). An endpoint alone isn't
+        enough: src must be able to ORIGINATE on that endpoint's family — a
+        v4-only node facing a v6-only endpoint has no dialable direction, and
+        saying "dial <v6>" would send the operator debugging dst's firewall
+        when the block is src's own connectivity. src.families is the
+        published, optional `families` field: EMPTY means unknown (an old node
+        that doesn't publish it), and silence never asserts a mismatch."""
+        if not dst.has_endpoint:
+            return False, None, f"can't — {dst.label} is outbound-only / advertises no endpoint"
+        offered = [(6, dst.underlay_v6), (4, dst.underlay_v4)]
+        offered = [(f, ep) for f, ep in offered if ep != "-"]
+        usable = [(f, ep) for f, ep in offered
+                  if not src.families or f in src.families]
+        if not usable:
+            offers = "/".join(f"ip{f}" for f, _ in offered)
+            dials = "/".join(f"ip{f}" for f in sorted(src.families))
+            return False, None, (f"can't — {dst.label} advertises only {offers} "
+                                 f"endpoints and {src.label} can only dial out "
+                                 f"on {dials}")
+        return True, usable[0][1], None      # v6-first, matching reconcile
 
     def _dir(src, dst):
-        if not dst.has_endpoint:
-            return f"can't — {dst.label} is outbound-only / advertises no endpoint"
+        ok, ep, why = _dial(src, dst)
+        if not ok:
+            return why
         # State the address class as a fact, no inference: a non-global endpoint
         # is reachable only from its own network (a same-LAN peer still can), so
         # don't claim it "won't work" — just name it so the operator can judge.
         if dst.scope_note:
-            return f"dial {dst.endpoint}  ⚠ {dst.scope_note}"
-        return f"dial {dst.endpoint}"
+            return f"dial {ep}  ⚠ {dst.scope_note}"
+        return f"dial {ep}"
+    a_dials_b, a_ep, _ = _dial(col_a, col_b)
+    b_dials_a, b_ep, _ = _dial(col_b, col_a)
     print(f"    {col_a.label} → {col_b.label}: {_dir(col_a, col_b)}")
     print(f"    {col_b.label} → {col_a.label}: {_dir(col_b, col_a)}")
     if not (a_dials_b or b_dials_a):
-        print("    ✗ no dialable direction — the link can't form "
-              "(both outbound-only)")
+        why = ("both outbound-only" if not (col_a.has_endpoint or col_b.has_endpoint)
+               else "see the directions above")
+        print(f"    ✗ no dialable direction — the link can't form ({why})")
         return
 
     this_host = col_a if col_a.is_self else (col_b if col_b.is_self else None)
@@ -2585,8 +2608,9 @@ def _print_pair_verdict(col_a, col_b, cfg, port, grants=None) -> None:
                   f"(create/join printed the exact rule).")
         else:
             print(f"    firewall udp/{port} here: {self_fw}")
-    if other.has_endpoint:
-        print(f"    ⚠ we can dial {other.label} at {other.endpoint} but it isn't "
+    dial_ok, dial_ep, _ = _dial(this_host, other)
+    if dial_ok:
+        print(f"    ⚠ we can dial {other.label} at {dial_ep} but it isn't "
               f"answering — check {other.label}'s host firewall + any upstream "
               f"port-forward for udp/{port}, and that its daemon is up "
               f"('gw diagnose' on {other.label} shows its host firewall).")
