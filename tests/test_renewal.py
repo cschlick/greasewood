@@ -98,3 +98,51 @@ def test_renewal_loop_survives_unhandled_delay_error(tmp_path, monkeypatch):
     loop.run()
 
     assert calls["n"] >= 2  # first call raised, second call succeeded
+
+
+# ---------------------------------------------------------------------------
+# scheduling: from the credential's own timeline, never from "remaining"
+# ---------------------------------------------------------------------------
+
+def _loop_with_cred(tmp_path, iat_ago_h, ttl_h=24):
+    import datetime as dt
+    from greasewood.directory import Directory
+    from greasewood.keys import NodeKeys, CAKeys, derive_addr
+    from greasewood.wire import Credential
+    from greasewood.renewal import RenewalLoop
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    keys, ca = NodeKeys.generate(), CAKeys.generate()
+    cred = Credential(id_pub=keys.id_pub_bytes, wg_pub=keys.wg_pub_bytes,
+                      addr=derive_addr(keys.id_pub_bytes), hostname="n1",
+                      caps=[], iat=now - dt.timedelta(hours=iat_ago_h),
+                      exp=now + dt.timedelta(hours=ttl_h - iat_ago_h),
+                      ).sign(ca.ca_priv)
+    return RenewalLoop(keys, Directory(), lambda: "http://x", cred, "n1", [],
+                       tmp_path / "cache.json")
+
+
+def test_next_delay_schedules_at_half_lifetime(tmp_path):
+    # fresh credential: renewal lands at ~half the 24h lifetime (±10% jitter)
+    loop = _loop_with_cred(tmp_path, iat_ago_h=0)
+    d = loop._next_delay()
+    half = 12 * 3600
+    assert half * 0.89 <= d <= half * 1.11
+
+
+def test_next_delay_is_immediate_past_half_life(tmp_path):
+    """A daemon restarting PAST the credential's half-life must renew now
+    (1-30s herd jitter), not in half-of-remaining. Scheduling from remaining
+    deadlocked with the liveness watchdog: every restart pushed renewal hours
+    out, the watchdog killed the daemon 120s later, forever — a crash loop
+    that held until the credential expired (first seen on the first
+    non-systemd node, minutes after its migration)."""
+    loop = _loop_with_cred(tmp_path, iat_ago_h=13)      # 13h into a 24h cred
+    d = loop._next_delay()
+    assert d <= 30.0
+
+
+def test_next_delay_is_immediate_when_expired(tmp_path):
+    # asleep past the TTL: renew promptly — the anchor admits
+    # expired-but-not-revoked peers precisely for this recovery
+    loop = _loop_with_cred(tmp_path, iat_ago_h=25)
+    assert loop._next_delay() <= 30.0

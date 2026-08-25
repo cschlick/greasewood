@@ -125,11 +125,25 @@ class RenewalLoop(Loop):
         timer.start()
 
     def _next_delay(self) -> float:
-        """Sleep until ~half the remaining TTL, with ±10% jitter."""
-        remaining = (self._cred.exp - dt.datetime.now(_UTC)).total_seconds()
-        half = max(30.0, remaining / 2)
+        """Sleep until the credential's renewal point — halfway through its
+        LIFETIME (iat→exp) with ±10% jitter — not half of what REMAINS from
+        now. The distinction only matters after downtime, and then it is
+        everything: a daemon restarting past the halfway point must renew
+        immediately (small 1–30s jitter against a fleet-wide thundering
+        herd), while scheduling from "remaining" pushed renewal another
+        half-of-remaining out on EVERY restart. Combined with the non-systemd
+        liveness watchdog's renewal heuristic, that was a permanent kill-
+        reschedule-kill loop that would have held until the credential
+        expired (seen in the field on the first node whose daemon was down
+        across its credential's half-life). An already-expired credential
+        (asleep past TTL) renews promptly the same way — the anchor admits
+        expired-but-not-revoked peers precisely for this recovery."""
+        now = dt.datetime.now(_UTC).timestamp()
+        lifetime = (self._cred.exp - self._cred.iat).total_seconds()
+        half = max(30.0, lifetime / 2)
         jitter = random.uniform(-half * 0.1, half * 0.1)
-        return half + jitter
+        target = self._cred.iat.timestamp() + half + jitter
+        return max(random.uniform(1.0, 30.0), target - now)
 
     def _publish(self, cred: Credential) -> NodeRecord:
         existing = self._directory.get(self._keys.id_pub_hex)

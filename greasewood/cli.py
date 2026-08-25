@@ -3414,14 +3414,17 @@ def cmd_run(args) -> int:
             own = directory.get(keys.id_pub_hex)
             if own is not None:
                 since_iat = (now - own.cred.iat).total_seconds()
-                remaining = (own.cred.exp - now).total_seconds()
-                # If the time since the credential was issued is already more
-                # than the remaining lifetime plus a grace window, the
-                # RenewalLoop is not keeping up (or is dead). At half a 24h TTL,
-                # since_iat ≈ remaining and the condition is false. Near
-                # expiry, since_iat >> remaining, so we exit and let the
-                # supervisor restart us before the credential dies.
-                if since_iat > remaining + 600:
+                lifetime = (own.cred.exp - own.cred.iat).total_seconds()
+                # The RenewalLoop renews at half the credential's lifetime
+                # ±10% jitter (see renewal._next_delay), so "not keeping up"
+                # starts BEYOND half + a margin that must exceed the jitter —
+                # 15% of lifetime, floored at 10 minutes for tiny TTLs. The
+                # old margin was a flat 600s: smaller than the jitter itself,
+                # so a healthy node whose draw came out late got killed at
+                # half-life + 10min on every non-systemd host (systemd nodes
+                # never arm this watchdog, which is why the fleet never saw
+                # it — the first launchd node did, within minutes).
+                if since_iat > lifetime / 2 + max(600.0, lifetime * 0.15):
                     ages.append((since_iat, "credential renewal"))
 
             if not ages:
