@@ -538,3 +538,34 @@ class TestLegacyRelayFlag:
         d = rec.to_dict()
         assert "relay" not in d
         assert NodeRecord.from_dict(d).relay is False
+
+
+def test_leave_request_roundtrip_and_verify():
+    from greasewood.wire import LeaveRequest
+    import datetime as dt
+    from greasewood.keys import NodeKeys
+    node = NodeKeys.generate()
+    req = LeaveRequest(id_pub=node.id_pub_bytes, nonce="abc123",
+                       ts=dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+                       ).sign(node.id_priv)
+    again = LeaveRequest.from_dict(req.to_dict())
+    again.verify_self_sig()                              # survives the wire
+
+    # tampering with any signed field must break the signature
+    import dataclasses
+    dataclasses.replace(again, nonce="evil")             # sanity: replace works
+    try:
+        dataclasses.replace(again, nonce="evil").verify_self_sig()
+        assert False, "tampered nonce verified"
+    except ValueError as e:
+        assert "leave self-signature" in str(e)
+
+    # a different key's signature over the same body must not verify
+    other = NodeKeys.generate()
+    forged = LeaveRequest(id_pub=node.id_pub_bytes, nonce="abc123",
+                          ts=req.ts).sign(other.id_priv)
+    try:
+        forged.verify_self_sig()
+        assert False, "foreign signature verified"
+    except ValueError:
+        pass

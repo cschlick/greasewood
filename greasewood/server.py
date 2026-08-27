@@ -165,6 +165,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         if self.path == "/publish":
             self._handle_publish(body)
+        elif self.path == "/leave":
+            if self.ca is None:
+                self._send_json({"error": "not an anchor"}, 403)
+            else:
+                self._handle_leave(body)
         elif self.path == "/renew":
             if self.ca is None:
                 self._send_json({"error": "not an anchor"}, 403)
@@ -196,6 +201,50 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError) as e:
             log.warning("publish rejected: %s", e)
             self._send_json({"error": str(e)}, 400)
+
+    def _handle_leave(self, body: dict) -> None:
+        """A node voluntarily departs (`gw leave`). Verify possession + replay
+        + skew like /renew, then forget it: registry entry unlinked (hostname
+        frees immediately; renewal refuses naturally from then on) and the
+        record dropped from the directory so new syncs stop serving it. NOT a
+        revocation — the departing cred stays valid until expiry (revocation's
+        own fleet-wide bound), and the node is cooperating: it tears its side
+        down first, so a straggler record elsewhere just ages out. Idempotent:
+        leaving twice (or leaving while never enrolled here) still succeeds —
+        the desired state is "absent", and it is."""
+        import datetime as _dt
+        from .wire import LeaveRequest
+        try:
+            req = LeaveRequest.from_dict(body)
+            req.verify_self_sig()  # authenticate before consuming the nonce
+        except (ValueError, KeyError, TypeError) as e:
+            log.warning("leave rejected: %s", e)
+            self._send_json({"error": str(e)}, 400)
+            return
+        skew = abs((_dt.datetime.now(_dt.timezone.utc) - req.ts).total_seconds())
+        if skew > 300:
+            self._send_json({"error": f"timestamp skew too large ({skew:.0f}s); "
+                                      "check NTP"}, 400)
+            return
+        if not self.replay.check_and_add(req.nonce):
+            log.warning("leave rejected: replayed nonce from %s", req.id_pub.hex()[:16])
+            self._send_json({"error": "replay detected (nonce already used)"}, 400)
+            return
+        hex_id = req.id_pub.hex()
+        rec = self.directory.get(hex_id)
+        who = rec.hostname if rec is not None else hex_id[:16]
+        freed = self.ca.forget_node(req.id_pub)
+        dropped = self.directory.remove(hex_id)
+        if dropped and self.cache_path is not None:
+            try:
+                self.directory.save(self.cache_path)
+            except Exception as e:
+                log.warning("failed to persist directory after leave: %s", e)
+        from . import audit as _audit
+        _audit.event("leave", node=who, id=hex_id[:16],
+                     hostname_freed=freed, record_dropped=dropped)
+        log.info("node left voluntarily: %s (hostname freed: %s)", who, freed)
+        self._send_json({"status": "left", "hostname_freed": freed})
 
     def _handle_renew(self, body: dict) -> None:
         from .wire import RenewRequest

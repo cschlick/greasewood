@@ -2336,6 +2336,101 @@ def _service_backend():
     return service.detect(_UNIT_DIR)
 
 
+def cmd_leave(args) -> int:
+    """[sudo] Voluntarily depart the mesh — the node removes ITSELF from the
+    anchor, so nobody has to log into the anchor to revoke it or wait for the
+    drop-grace sweep to free its name.
+
+    Order matters: the signed LeaveRequest goes to the anchor FIRST, over the
+    still-up tunnel (the control plane is overlay-only — tearing down before
+    telling would strand the request). Only after the anchor confirms does the
+    local side come down: daemon stopped and removed from boot, WireGuard
+    interface destroyed, the managed /etc/hosts block removed. Local keys,
+    config, and data are KEPT — `gw purge` erases them; keeping them here
+    means an accidental leave is recoverable with a fresh invite + join
+    without minting a new identity.
+
+    Not a revocation: the departing credential stays valid until expiry (the
+    same fleet-wide bound revocation has), and this node cooperates by tearing
+    its side down. Peers' cached records age out on their own."""
+    import secrets as _secrets
+    import urllib.request
+    import urllib.error
+    from .config import load_config
+    from .keys import NodeKeys
+    from .wire import LeaveRequest
+    from . import wg as wgmod
+    from . import audit
+    from . import hosts as _hosts
+
+    _require_root("leave", "it stops the daemon and removes the interface")
+    cfg = load_config(Path(args.config))
+    if cfg.role == "anchor":
+        sys.exit("the anchor can't leave its own mesh — it IS the mesh's "
+                 "coordination point. Hand the role to a standby first "
+                 "(anchor-transfer / anchor-activate), or tear the mesh down "
+                 "(see operations.md).")
+    if not cfg.root_url:
+        sys.exit("no anchor URL configured (root_url) — nothing to leave.")
+    key = membership_key(cfg.mesh_domain)
+
+    if not args.yes:
+        print(f"This node will leave mesh '{key}':")
+        print(f"  anchor forgets it     : {cfg.root_url}  (hostname "
+              f"'{cfg.hostname}' frees immediately; renewals refused)")
+        print(f"  daemon                : stopped and removed from boot")
+        print(f"  WireGuard interface   : {cfg.wg_interface} destroyed")
+        print(f"  local keys/config/data: KEPT — 'gw purge' erases them")
+        print("Peers keep their tunnel to this node until its credential "
+              "expires (same bound as a revocation).")
+        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("cancelled — nothing changed.")
+            return 1
+
+    keys = NodeKeys.load_or_generate(cfg.data_dir)
+    req = LeaveRequest(
+        id_pub=keys.id_pub_bytes,
+        nonce=_secrets.token_hex(16),
+        ts=dt.datetime.now(_UTC).replace(microsecond=0),
+    ).sign(keys.id_priv)
+
+    url = f"{cfg.root_url.rstrip('/')}/leave"
+    http_req = urllib.request.Request(
+        url, data=json.dumps(req.to_dict()).encode(),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(http_req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"couldn't reach the anchor at {url}: {e}\n"
+                 "Leaving needs the anchor reachable (the request must be "
+                 "authenticated and delivered) — nothing was changed locally.\n"
+                 "If the anchor is gone for good, there is nothing to leave: "
+                 "this node ages out of the fleet at credential expiry; "
+                 "'gw purge' cleans up this host.")
+    if "error" in data:
+        sys.exit(f"anchor refused the leave: {data['error']}\n"
+                 "Nothing was changed locally.")
+    print(f"anchor confirmed: departed '{key}'"
+          + (" (hostname freed)" if data.get("hostname_freed") else ""))
+
+    # Now — and only now — the local teardown.
+    mgr = _service_backend()
+    if mgr is not None:
+        if mgr.disable_now(key):
+            print(f"stopped {mgr.unit_name(key)} (removed from boot).")
+    with audit.context(f"leave: departing mesh {key}"):
+        wgmod.destroy_interface(cfg.wg_interface)
+    try:
+        if cfg.hosts_sync and _hosts.remove_block(cfg.mesh_domain):
+            print("removed the managed /etc/hosts block.")
+    except Exception as e:
+        log.warning("could not clean /etc/hosts: %s", e)
+    print(f"left. Local keys/config/data remain — 'sudo gw purge' erases them; "
+          f"rejoining later takes a fresh invite.")
+    return 0
+
+
 def cmd_service(args) -> int:
     """[sudo] Enable or disable this config's daemon service — the adoption
     path for a membership whose service was never installed here (a config
@@ -4771,6 +4866,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_join)
 
     # purge
+    sp = sub.add_parser("leave",
+        help="[sudo] voluntarily depart the mesh — the anchor forgets this "
+             "node (name freed, renewals refused) with no anchor-side action; "
+             "local keys/config are kept (purge erases them)")
+    sp.add_argument("--yes", action="store_true",
+                    help="skip the confirmation prompt")
+    sp.set_defaults(fn=cmd_leave)
+
     sp = sub.add_parser("service",
         help="[sudo] enable/disable this config's daemon service (adopt a "
              "migrated config; on launchd only greasewood can write the plist)")

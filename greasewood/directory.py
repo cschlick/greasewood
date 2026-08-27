@@ -118,6 +118,14 @@ class Directory:
         with self._lock:
             self._records[record.id_pub.hex()] = record
 
+    def remove(self, id_pub_hex: str) -> bool:
+        """Drop one record (a voluntary leave). True if it was present. The
+        record may still live in OTHER nodes' caches until its credential
+        expires — same propagation bound as revocation; only the anchor's
+        copy (the one everyone syncs from) is authoritative for new pulls."""
+        with self._lock:
+            return self._records.pop(id_pub_hex, None) is not None
+
     def size(self) -> int:
         with self._lock:
             return len(self._records)

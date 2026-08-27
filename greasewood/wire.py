@@ -409,6 +409,63 @@ class RenewRequest:
         )
 
 
+@dataclass
+class LeaveRequest:
+    """
+    Sent by a node that is VOLUNTARILY departing the mesh (`gw leave`). The
+    anchor forgets it — registry entry gone (the hostname frees immediately,
+    renewals refuse naturally) and its record dropped from the directory —
+    with no operator action on the anchor at all.
+
+    id_priv possession is the authentication, exactly like RenewRequest: only
+    the node itself can remove itself. nonce prevents replay within the
+    timestamp skew window (a captured leave must not be re-sendable later to
+    knock a node off after it rejoined).
+
+    Deliberately NOT a revocation: the departing credential stays valid until
+    its expiry, the same bound revocation itself has fleet-wide — and the node
+    is cooperating (it tears its own side down first), so nothing keeps using
+    it. The id can re-enroll later with a fresh invite.
+    """
+    id_pub: bytes
+    nonce: str
+    ts: dt.datetime
+    sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "id_pub": _b64e(self.id_pub),
+            "nonce": self.nonce,
+            "ts": _ts(self.ts),
+        }
+
+    def sign(self, id_priv: Ed25519PrivateKey) -> "LeaveRequest":
+        sig = id_priv.sign(_canonical(self._body_dict()))
+        return replace(self, sig=sig)
+
+    def verify_self_sig(self) -> None:
+        body = _canonical(self._body_dict())
+        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
+        try:
+            pub.verify(self.sig, body)
+        except InvalidSignature:
+            raise ValueError("invalid leave self-signature")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["sig"] = _b64e(self.sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LeaveRequest":
+        return cls(
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            nonce=_str(d["nonce"], "nonce"),
+            ts=_parse_ts(d["ts"]),
+            sig=_b64d(d["sig"]),
+        )
+
+
 # ---------------------------------------------------------------------------
 # CertRequest — a node asking the anchor for an x509 TLS cert (§12)
 # ---------------------------------------------------------------------------

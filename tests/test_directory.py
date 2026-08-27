@@ -126,3 +126,23 @@ def test_prune_stale_protects_own_record():
     d.put(mine)                                             # put bypasses merge's filter
     removed = d.prune_stale(protect=mine.id_pub.hex())
     assert removed == 0 and len(d.all()) == 1
+
+
+def test_remove_drops_one_record():
+    import datetime as dt
+    from greasewood.keys import NodeKeys, CAKeys, derive_addr
+    from greasewood.wire import Credential, NodeRecord
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    d, ca = Directory(), CAKeys.generate()
+    nodes = [NodeKeys.generate(), NodeKeys.generate()]
+    for i, n in enumerate(nodes):
+        cred = Credential(id_pub=n.id_pub_bytes, wg_pub=n.wg_pub_bytes,
+                          addr=derive_addr(n.id_pub_bytes), hostname=f"n{i}",
+                          caps=[], iat=now, exp=now + dt.timedelta(hours=1),
+                          ).sign(ca.ca_priv)
+        d.put(NodeRecord(id_pub=n.id_pub_bytes, seq=1, endpoints=[],
+                         cred=cred).sign(n.id_priv))
+    a, b = nodes
+    assert d.remove(a.id_pub_hex) is True
+    assert d.get(a.id_pub_hex) is None and d.get(b.id_pub_hex) is not None
+    assert d.remove(a.id_pub_hex) is False               # idempotent

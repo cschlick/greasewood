@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`gw leave` — a node voluntarily departs the mesh, removing ITSELF from the anchor.** No anchor login, no `revoke`, no waiting for the drop-grace sweep: the node sends a self-signed `LeaveRequest` (identity-key possession is the authentication, nonce+timestamp against replay — the same discipline as renewal) to a new overlay-only `POST /leave`, and the anchor forgets it — registry entry unlinked so the hostname frees immediately and renewals refuse naturally, record dropped from the directory so new syncs stop serving it. Deliberately NOT a revocation: the departing credential stays valid until expiry (revocation's own fleet-wide bound), the node cooperates by tearing its side down — daemon stopped and removed from boot, interface destroyed, hosts block cleaned — and the id can re-enroll later with a fresh invite. Local keys/config/data are kept (`gw purge` erases them), so an accidental leave is recoverable without minting a new identity. The request goes to the anchor FIRST, over the still-up tunnel; a failed or refused request changes nothing locally. Idempotent on the anchor; `event=leave` in the audit trail.
+
 ## [0.5.0] - 2026-08-25
 
 ### Changed

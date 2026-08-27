@@ -698,3 +698,102 @@ def test_addr_in_use_surfaces_clean_error_not_pool_attributeerror():
         assert "_pool" not in str(e.value)          # the masking bug is gone
     finally:
         held.close()
+
+
+class TestLeaveEndpoint:
+    """POST /leave — a node removes ITSELF (gw leave): registry entry gone
+    (hostname freed), record dropped from the directory, no revocation."""
+
+    def _leave_req(self, node):
+        import secrets
+        from greasewood.wire import LeaveRequest
+        return LeaveRequest(
+            id_pub=node.id_pub_bytes,
+            nonce=secrets.token_hex(16),
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+        ).sign(node.id_priv)
+
+    def _anchor_server(self, tmp_path):
+        ca = CAKeys.generate()
+        node = NodeKeys.generate()
+        record = _make_record(node, _make_cred(node, ca))
+        directory = Directory()
+        directory.put(record)
+        ca_obj = CA(ca, tmp_path)
+        ca_obj._save_node_caps(node.id_pub_bytes, "leaver", ["mesh"])
+        cache = tmp_path / "directory.json"
+        srv = ControlServer(
+            listen="[::1]:0", directory=directory,
+            get_ca_pubs=lambda: [ca.ca_pub_bytes], get_revoked=set,
+            ca=ca_obj, cache_path=cache,
+        )
+        port = srv._server.server_address[1]
+        srv.start()
+        return srv, port, directory, ca_obj, node, cache
+
+    def test_leave_frees_registry_and_drops_record(self, tmp_path):
+        srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
+        try:
+            assert ca_obj.node_info(node.id_pub_bytes) is not None
+            status, body = _post(port, "/leave", self._leave_req(node).to_dict())
+            assert status == 200 and body["status"] == "left"
+            assert body["hostname_freed"] is True
+            # registry entry gone → renewal would refuse; hostname reusable
+            assert ca_obj.node_info(node.id_pub_bytes) is None
+            # record gone from directory AND the persisted cache
+            assert directory.get(node.id_pub_hex) is None
+            assert node.id_pub_hex not in cache.read_text()
+        finally:
+            srv.stop()
+
+    def test_leave_is_idempotent(self, tmp_path):
+        srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
+        try:
+            _post(port, "/leave", self._leave_req(node).to_dict())
+            status, body = _post(port, "/leave", self._leave_req(node).to_dict())
+            assert status == 200 and body["status"] == "left"
+            assert body["hostname_freed"] is False       # already gone
+        finally:
+            srv.stop()
+
+    def test_leave_requires_valid_signature(self, tmp_path):
+        srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
+        try:
+            other = NodeKeys.generate()                  # signs with the WRONG key
+            req = self._leave_req(other)
+            d = req.to_dict()
+            d["id_pub"] = node.id_pub_b64 if hasattr(node, "id_pub_b64") else __import__("base64").b64encode(node.id_pub_bytes).decode()
+            status, body = _post(port, "/leave", d)
+            assert status == 400 and "signature" in body["error"]
+            assert ca_obj.node_info(node.id_pub_bytes) is not None   # untouched
+        finally:
+            srv.stop()
+
+    def test_leave_replay_is_rejected(self, tmp_path):
+        srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
+        try:
+            req = self._leave_req(node).to_dict()
+            _post(port, "/leave", req)
+            status, body = _post(port, "/leave", req)    # byte-identical replay
+            assert status == 400 and "replay" in body["error"].lower()
+        finally:
+            srv.stop()
+
+    def test_leave_rejects_stale_timestamp(self, tmp_path):
+        srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
+        try:
+            import secrets
+            from greasewood.wire import LeaveRequest
+            req = LeaveRequest(
+                id_pub=node.id_pub_bytes, nonce=secrets.token_hex(16),
+                ts=dt.datetime.now(_UTC) - dt.timedelta(hours=2),
+            ).sign(node.id_priv)
+            status, body = _post(port, "/leave", req.to_dict())
+            assert status == 400 and "skew" in body["error"]
+        finally:
+            srv.stop()
+
+    def test_leave_needs_an_anchor(self, running_server):
+        _, port, *_ = running_server                     # fixture has ca=None
+        status, _ = _post(port, "/leave", {})
+        assert status == 403

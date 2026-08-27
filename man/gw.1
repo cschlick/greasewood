@@ -1,4 +1,4 @@
-.TH GW 1 "2026-08-25" "greasewood 0.4.0" "User Commands"
+.TH GW 1 "2026-08-27" "greasewood 0.4.0" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -147,6 +147,16 @@ don't maintain the managed /etc/hosts block (<name>.gw.internal \-> overlay addr
 .TP
 \fB\-\-no\-service\fR
 don't set up the systemd service; print the manual 'gw run' line instead (for non\-systemd hosts)
+.SS gw leave
+\fBUsage:\fR gw leave [\-h] [\-\-yes]
+.PP
+[sudo] voluntarily depart the mesh \(em the anchor forgets this node (name freed, renewals refused) with no anchor\-side action; local keys/config are kept (purge erases them)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-yes\fR
+skip the confirmation prompt
 .SS gw service
 \fBUsage:\fR gw service [\-h] {enable,disable}
 .PP

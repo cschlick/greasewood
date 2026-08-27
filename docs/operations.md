@@ -208,10 +208,23 @@ The node's `id_priv` leaked. The attacker can impersonate *that node only*.
 
 ## SOP: node lost / decommissioned (not compromised)
 
-Either let it expire (do nothing — its credential lapses within one TTL and peers
-remove it), or for immediate cleanup `sudo gw revoke <hostname>` (which also
-releases the hostname). On the node itself, `sudo gw purge` tears down its local
-config, data dir, interface, and service.
+Three ways out, by who is holding the keyboard:
+
+- **On the node itself (preferred): `sudo gw leave`.** The node removes
+  ITSELF from the anchor — hostname freed immediately, renewals refused —
+  with nobody logging into the anchor at all. It then stops its own daemon
+  and interface; local keys/config stay until a `sudo gw purge`. Requires the
+  anchor reachable (the request is authenticated by the node's identity key
+  and delivered over the tunnel).
+- **On the anchor: `sudo gw revoke <hostname>`** — for a node you can't or
+  don't trust to cooperate; also releases the hostname.
+- **Nowhere: do nothing.** Its credential lapses within one TTL, peers remove
+  it, and the anchor's drop-grace sweep eventually frees the name.
+
+All three share the same fleet-wide bound: peers keep their tunnel to the
+departed node until its credential expires. `leave` and `revoke` differ only
+in who acts and whether the id is blacklisted — a left node can re-enroll
+with a fresh invite; a revoked one cannot renew ever.
 
 ## SOP: open access through the grant table (SSH, or any service)
 
