@@ -149,3 +149,50 @@ def test_second_leg_bad_record_is_quiet(monkeypatch, caplog):
     assert any(r.levelname == "WARNING" and "rejected" in r.getMessage()
                for r in caplog.records)
     assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_successful_enrollment_emits_membership_event(monkeypatch, caplog):
+    """A completed enrollment writes ONE first-class `event=enroll` line —
+    the durable membership trail, symmetric with event=leave / event=revoke.
+    (The wg command trail only carries it as ctx tags; `grep event=` must
+    read the full join/leave/revoke history without parsing commands.)"""
+    import logging
+    joiner = NodeKeys.generate()
+    installed = []
+    monkeypatch.setattr(
+        "greasewood.wg.set_peer",
+        lambda iface, pub, addr, endpoint=None, keepalive=25: installed.append(pub))
+    ctx = EnrollContext(
+        ca=_FakeCA(), directory=types.SimpleNamespace(get=lambda *a: None),
+        node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
+    srv = EnrollServer(ctx, lambda: None)
+    ours, theirs = socket.socketpair()
+    try:
+        with caplog.at_level(logging.INFO, logger="greasewood.audit"):
+            cred = srv._issue_and_install(theirs, "198.51.100.7", 3,
+                                          joiner.id_pub_bytes, joiner.wg_pub_bytes,
+                                          "nats01")
+    finally:
+        ours.close()
+        theirs.close()
+    assert cred is not None and installed          # the enrollment succeeded
+    ev = [r.getMessage() for r in caplog.records
+          if r.name == "greasewood.audit"
+          and r.getMessage().startswith("event=enroll")]
+    assert len(ev) == 1
+    assert "node=nats01" in ev[0]
+    assert f"id={joiner.id_pub_hex[:16]}" in ev[0]
+    assert "peer_ip=198.51.100.7" in ev[0]
+    assert "reenroll=False" in ev[0]
+
+
+def test_failed_enrollment_emits_no_membership_event(monkeypatch, caplog):
+    """A broken-data-plane attempt must NOT record an enroll event — the trail
+    is membership history, and this node never became a member."""
+    import logging
+    joiner = NodeKeys.generate()
+    with caplog.at_level(logging.INFO, logger="greasewood.audit"):
+        _attempt(monkeypatch, _FakeCA(), joiner)
+    assert not [r for r in caplog.records
+                if r.name == "greasewood.audit"
+                and r.getMessage().startswith("event=enroll")]

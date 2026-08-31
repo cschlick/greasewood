@@ -181,6 +181,14 @@ ts=2026-07-02T22:12:03Z INFO greasewood.audit: event=policy prev=4 seq=5 grants=
 ts=2026-07-02T22:12:08Z INFO greasewood.audit: event=topology added=2 removed=1 peers=7
 ```
 
+On the anchor this trail is also the **membership history**: every enrollment
+(`event=enroll`, with the joiner's name, id, overlay address, and the IP it
+joined from), every voluntary departure (`event=leave`), and every revocation
+(`event=revoke` — written even though `gw revoke` runs outside the daemon; the
+command attaches the same audit file itself). `grep event= audit.log` on the
+anchor answers "who has ever joined or left this mesh, and when" without
+reconstructing it from command lines.
+
 So the narrative reads at a glance: policy v4→v5 was adopted, and the next
 reconcile settled the topology (+2/−1, 7 peers) with the per-peer `+peer`/
 `-peer` commands right below carrying the who and why. A topology line appears

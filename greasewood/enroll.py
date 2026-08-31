@@ -414,6 +414,12 @@ class EnrollServer:
                              "reason": reason,
                              "attempts_remaining": attempts_left - 1})
             return None
+        # First-class membership event, symmetric with event=leave/event=revoke:
+        # the command trail above records the wg surgery, this records the
+        # SO-WHAT — `grep 'event='` on audit.log reads the membership history.
+        audit.event("enroll", node=hostname, id=id_pub_bytes.hex()[:16],
+                    addr=overlay_addr, peer_ip=peer_ip,
+                    reenroll=was_registered)
         log.info("enrolled %s  addr=%s", hostname, overlay_addr)
         self._status(door.mark_door_enrolled, peer_ip, hostname)
         return cred

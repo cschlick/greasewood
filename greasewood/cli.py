@@ -2116,6 +2116,15 @@ def cmd_revoke(args) -> int:
     id_pub_bytes, name = _resolve_node(ca, cfg, args.node, require_enrolled=False)
 
     freed = ca.add_revoke(id_pub_bytes)
+    # Durable membership event, symmetric with event=enroll/event=leave. This
+    # runs as a CLI process (not the daemon), so the audit-file sink isn't
+    # attached yet — attach it so the revoke lands in the same audit.log the
+    # daemon writes; `grep 'event='` there reads the full membership history.
+    from . import audit
+    if cfg.audit_log is not None:
+        audit.attach_file(cfg.audit_log)
+    audit.event("revoke", node=name, id=id_pub_bytes.hex()[:16],
+                hostname_freed=freed)
     print(f"revoked: {name}  ({id_pub_bytes.hex()})")
     if freed:
         print("Its hostname is now free for reuse by a different node.")

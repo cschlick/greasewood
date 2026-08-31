@@ -731,11 +731,13 @@ class TestLeaveEndpoint:
         srv.start()
         return srv, port, directory, ca_obj, node, cache
 
-    def test_leave_frees_registry_and_drops_record(self, tmp_path):
+    def test_leave_frees_registry_and_drops_record(self, tmp_path, caplog):
+        import logging
         srv, port, directory, ca_obj, node, cache = self._anchor_server(tmp_path)
         try:
             assert ca_obj.node_info(node.id_pub_bytes) is not None
-            status, body = _post(port, "/leave", self._leave_req(node).to_dict())
+            with caplog.at_level(logging.INFO, logger="greasewood.audit"):
+                status, body = _post(port, "/leave", self._leave_req(node).to_dict())
             assert status == 200 and body["status"] == "left"
             assert body["hostname_freed"] is True
             # registry entry gone → renewal would refuse; hostname reusable
@@ -743,6 +745,16 @@ class TestLeaveEndpoint:
             # record gone from directory AND the persisted cache
             assert directory.get(node.id_pub_hex) is None
             assert node.id_pub_hex not in cache.read_text()
+            # one durable membership event in the audit trail
+            ev = [r.getMessage() for r in caplog.records
+                  if r.name == "greasewood.audit"
+                  and r.getMessage().startswith("event=leave")]
+            assert len(ev) == 1
+            # `node=` is the record's hostname (the record is still in the
+            # directory when the handler names the leaver)
+            assert "node=test-node" in ev[0]
+            assert f"id={node.id_pub_hex[:16]}" in ev[0]
+            assert "hostname_freed=True" in ev[0]
         finally:
             srv.stop()
 

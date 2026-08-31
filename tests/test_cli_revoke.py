@@ -153,3 +153,42 @@ def test_revoke_without_ca_key_exits(tmp_path):
     args = types.SimpleNamespace(config=str(p), node="ab" * 32)
     with pytest.raises(SystemExit):
         cli.cmd_revoke(args)
+
+
+@pytest.fixture(autouse=True)
+def _detach_audit_sinks():
+    """cmd_revoke attaches the rotating audit-file sink (that IS the feature —
+    the CLI process must write the durable trail). Detach whatever a test
+    attached so later tests don't keep logging into dead tmp dirs."""
+    from greasewood import audit
+    before = set(id(h) for h in audit.log.handlers)
+    yield
+    for h in list(audit.log.handlers):
+        if id(h) not in before and getattr(h, "_gw_path", None):
+            audit.log.removeHandler(h)
+            h.close()
+
+
+def test_revoke_writes_durable_membership_event(tmp_path, monkeypatch):
+    """The revoke lands as `event=revoke` in the anchor's audit.log even though
+    the CLI runs outside the daemon — cmd_revoke attaches the file sink itself.
+    grep 'event=' on audit.log must read the FULL membership history
+    (enroll / leave / revoke), not just what the daemon happened to witness."""
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    ca_keys = CAKeys.generate()
+    ca_key = tmp_path / "ca.key"
+    ca_keys.save(ca_key)
+    ca = CA(ca_keys, tmp_path)
+    node = NodeKeys.generate()
+    ca.issue(node.id_pub_bytes, node.wg_pub_bytes, "db", ["mesh"])
+
+    args = types.SimpleNamespace(config=str(_anchor_cfg(tmp_path, ca_key)),
+                                 node=node.id_pub_hex)
+    assert cli.cmd_revoke(args) == 0
+
+    trail = (tmp_path / "audit.log").read_text()   # data_dir default sink
+    lines = [l for l in trail.splitlines() if "event=revoke" in l]
+    assert len(lines) == 1
+    assert "node=db" in lines[0]
+    assert f"id={node.id_pub_hex[:16]}" in lines[0]
+    assert "hostname_freed=True" in lines[0]
