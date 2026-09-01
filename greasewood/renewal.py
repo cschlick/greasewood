@@ -34,6 +34,17 @@ from .wire import Credential, NodeRecord, RenewRequest
 log = logging.getLogger(__name__)
 _UTC = dt.timezone.utc
 
+# Never sleep past this without re-deriving the delay from the wall clock.
+# Event.wait() counts MONOTONIC time, so a single long timeout computed from
+# one wall-clock reading survives any later clock step. A node that boots with
+# a slow clock (no RTC, pre-NTP) computes a months-long delay; NTP then steps
+# the clock forward, the monotonic sleep doesn't move, and the loop sleeps
+# straight through its credential's expiry. Field incident: an anchor rebooted
+# reading 87 days slow, scheduled its own renewal ~43 days out, and sat
+# expired for a week while renewing everyone else on time. Chunked waits bound
+# the damage of any clock step — either direction — to one chunk.
+_MAX_WAIT_CHUNK = 900.0
+
 
 def _do_renew(root_url: str, node_keys: NodeKeys, timeout: float = 15.0) -> Credential:
     req = RenewRequest(
@@ -145,6 +156,18 @@ class RenewalLoop(Loop):
         target = self._cred.iat.timestamp() + half + jitter
         return max(random.uniform(1.0, 30.0), target - now)
 
+    def _wait_until_due(self) -> bool:
+        """Sleep until the renewal point in bounded chunks, re-deriving the
+        remaining delay from the CURRENT wall clock each chunk (see
+        _MAX_WAIT_CHUNK). Returns True on an early wake (fleet renew hint or
+        stop), False when the scheduled time arrived."""
+        while True:
+            delay = self._next_delay()
+            if self._renew_now.wait(timeout=min(delay, _MAX_WAIT_CHUNK)):
+                return True
+            if delay <= _MAX_WAIT_CHUNK:
+                return False
+
     def _publish(self, cred: Credential) -> NodeRecord:
         existing = self._directory.get(self._keys.id_pub_hex)
         seq = (existing.seq + 1) if existing else 1
@@ -185,7 +208,7 @@ class RenewalLoop(Loop):
         # _renew_now so shutdown doesn't block on the long timeout.
         while not self._stop.is_set():
             try:
-                self._renew_now.wait(timeout=self._next_delay())
+                self._wait_until_due()
                 if self._stop.is_set():
                     return
                 self._renew_now.clear()

@@ -146,3 +146,60 @@ def test_next_delay_is_immediate_when_expired(tmp_path):
     # expired-but-not-revoked peers precisely for this recovery
     loop = _loop_with_cred(tmp_path, iat_ago_h=25)
     assert loop._next_delay() <= 30.0
+
+
+# ---------------------------------------------------------------------------
+# waiting: bounded chunks that re-derive from the CURRENT wall clock
+# ---------------------------------------------------------------------------
+# Event.wait() counts MONOTONIC time, so one long timeout computed from a
+# single wall-clock reading survives any later clock step. Field incident: an
+# anchor booted with its clock ~87 days slow (no NTP yet), computed a 43-day
+# delay, NTP stepped the clock forward — and the loop slept straight through
+# its credential's expiry for six days. The chunked wait re-derives the delay
+# every _MAX_WAIT_CHUNK, bounding any clock step's damage to one chunk.
+
+
+def test_wait_until_due_rederives_delay_each_chunk(tmp_path, monkeypatch):
+    """A huge delay computed before a clock step must not be slept through:
+    each chunk re-asks _next_delay, so the corrected clock takes effect on the
+    next chunk boundary. Modeled by a _next_delay whose answer collapses from
+    'months' to 'now' between calls — the test completing at all (instead of
+    sleeping 90 days) is the assertion; the call count proves the re-derive."""
+    from greasewood import renewal as rmod
+    loop = _loop_with_cred(tmp_path, iat_ago_h=0)
+    monkeypatch.setattr(rmod, "_MAX_WAIT_CHUNK", 0.01)
+    delays = iter([90 * 86400.0, 90 * 86400.0, 0.005])   # clock step "heals" it
+    calls = {"n": 0}
+
+    def fake_next_delay():
+        calls["n"] += 1
+        return next(delays)
+    monkeypatch.setattr(loop, "_next_delay", fake_next_delay)
+
+    assert loop._wait_until_due() is False               # scheduled time arrived
+    assert calls["n"] == 3                               # re-derived per chunk
+
+
+def test_wait_until_due_wakes_early_on_hint(tmp_path, monkeypatch):
+    """A fleet renew hint (or stop) must cut the wait short mid-chunk."""
+    from greasewood import renewal as rmod
+    loop = _loop_with_cred(tmp_path, iat_ago_h=0)
+    monkeypatch.setattr(rmod, "_MAX_WAIT_CHUNK", 30.0)
+    monkeypatch.setattr(loop, "_next_delay", lambda: 90 * 86400.0)
+    loop._renew_now.set()
+    assert loop._wait_until_due() is True
+
+
+def test_wait_until_due_sleeps_final_stretch_only_once(tmp_path, monkeypatch):
+    """A delay already under one chunk is slept exactly once — no busy loop."""
+    from greasewood import renewal as rmod
+    loop = _loop_with_cred(tmp_path, iat_ago_h=0)
+    monkeypatch.setattr(rmod, "_MAX_WAIT_CHUNK", 900.0)
+    calls = {"n": 0}
+
+    def fake_next_delay():
+        calls["n"] += 1
+        return 0.005
+    monkeypatch.setattr(loop, "_next_delay", fake_next_delay)
+    assert loop._wait_until_due() is False
+    assert calls["n"] == 1

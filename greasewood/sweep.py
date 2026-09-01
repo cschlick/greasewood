@@ -36,19 +36,27 @@ _SWEEP_INTERVAL = 3600.0
 
 class StaleSweep(Loop):
     def __init__(self, ca, directory: Directory, drop_grace,
-                 cache_path, interval: float = _SWEEP_INTERVAL) -> None:
+                 cache_path, interval: float = _SWEEP_INTERVAL,
+                 protect: "str | None" = None) -> None:
         super().__init__(interval, "sweep")
         self._ca = ca
         self._directory = directory
         self._drop_grace = drop_grace      # anchor config → authorization drop
         self._cache_path = cache_path
+        # The anchor's own id_pub hex: the sweep must never reap the anchor
+        # itself. If the anchor's own renewal stalls (clock skew, a wedged
+        # loop) its credential goes stale like anyone's — but sweeping it
+        # deletes the registry entry renewal re-issues from AND prunes the
+        # record every member's directory converges on, turning a recoverable
+        # stall into a permanent, fleet-wide partition.
+        self._protect = protect
 
     def _tick(self) -> None:
-        dropped = self._ca.drop_stale(self._drop_grace)
+        dropped = self._ca.drop_stale(self._drop_grace, protect=self._protect)
         # Prune the served directory on the fleet-wide constant (DROP_GRACE), so
         # visibility converges the same way on every node regardless of the
         # anchor's authorization grace.
-        pruned = self._directory.prune_stale()
+        pruned = self._directory.prune_stale(protect=self._protect)
         if dropped or pruned:
             log.info("stale sweep: dropped %d abandoned node(s) from the CA, "
                      "pruned %d record(s) from the directory", len(dropped), pruned)

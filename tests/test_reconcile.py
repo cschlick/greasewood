@@ -786,3 +786,61 @@ def test_read_daemon_fatal_tolerates_garbage(tmp_path):
     reconcile.clear_daemon_fatal(tmp_path)   # idempotent even when absent already
 
 
+
+
+class TestExpiredAdmissionLogging:
+    """The 'admitting expired peer' line fires on the ADMISSION TRANSITION,
+    once per (peer, expiry) — not once per reconcile cycle. Field incident: an
+    anchor with one long-expired peer wrote the identical line every 5s for
+    days, burying the renewal/CA history an operator greps for."""
+
+    def _setup(self, monkeypatch):
+        import logging  # noqa: F401  (caplog levels)
+        reconcile._ADMITTED_EXPIRED.clear()          # module state — isolate
+        ca = CAKeys.generate()
+        local, peer = NodeKeys.generate(), NodeKeys.generate()
+        directory = Directory()
+        # Local is the anchor (role:*) — the admitting side.
+        directory.put(_make_record(local, _make_cred(local, ca, "local",
+                                                     caps=["role:*"])))
+        monkeypatch.setattr(reconcile, "wgmod", _FakeWg())
+        return ca, local, peer, directory
+
+    def _expired_cred(self, peer, ca, hours_ago=2):
+        now = dt.datetime.now(_UTC).replace(microsecond=0)
+        return Credential(
+            id_pub=peer.id_pub_bytes, wg_pub=peer.wg_pub_bytes,
+            addr=peer.addr, hostname="bb", caps=["segment:mesh"],
+            iat=now - dt.timedelta(hours=24 + hours_ago),
+            exp=now - dt.timedelta(hours=hours_ago)).sign(ca.ca_priv)
+
+    def _run(self, directory, local, ca):
+        reconcile_once("gw-test", directory, local.id_pub_bytes,
+                       ["role:*"], [ca.ca_pub_bytes], set())
+
+    def _admission_lines(self, caplog):
+        return [r for r in caplog.records if "admitting expired" in r.getMessage()]
+
+    def test_logged_once_per_expiry_not_per_cycle(self, monkeypatch, caplog):
+        import logging
+        ca, local, peer, directory = self._setup(monkeypatch)
+        directory.put(_make_record(peer, self._expired_cred(peer, ca)))
+        with caplog.at_level(logging.INFO, logger="greasewood.reconcile"):
+            for _ in range(5):                       # five cycles, one line
+                self._run(directory, local, ca)
+        assert len(self._admission_lines(caplog)) == 1
+
+    def test_next_expiry_of_same_peer_logs_again(self, monkeypatch, caplog):
+        import logging
+        ca, local, peer, directory = self._setup(monkeypatch)
+        directory.put(_make_record(peer, self._expired_cred(peer, ca, hours_ago=9)))
+        with caplog.at_level(logging.INFO, logger="greasewood.reconcile"):
+            self._run(directory, local, ca)
+            # The peer recertifies (fresh, un-expired cred) …
+            directory.put(_make_record(peer, _make_cred(peer, ca, "bb"), seq=2))
+            self._run(directory, local, ca)
+            # … and later goes expired AGAIN (a new exp): a fresh transition.
+            directory.put(_make_record(peer, self._expired_cred(peer, ca,
+                                                                hours_ago=1), seq=3))
+            self._run(directory, local, ca)
+        assert len(self._admission_lines(caplog)) == 2

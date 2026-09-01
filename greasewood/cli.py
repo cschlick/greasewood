@@ -3219,7 +3219,8 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     # directory sheds) any node that's been expired longer than drop_grace, so a
     # churned cloud fleet left to expire is forgotten without manual `gw revoke`.
     from .sweep import StaleSweep
-    StaleSweep(ca, directory, cfg.drop_grace, cfg.dir_cache_path).start()
+    StaleSweep(ca, directory, cfg.drop_grace, cfg.dir_cache_path,
+               protect=keys.id_pub_hex).start()
     log.info("stale-node sweep started (drop_grace=%s)", cfg.drop_grace)
     return get_revoked, door_watcher
 

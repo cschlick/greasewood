@@ -365,3 +365,49 @@ def test_reach_falls_back_to_config_before_the_first_record(tmp_path, capsys):
     args = _node(tmp_path, endpoints=["[2001:db8::1]:51900"], with_self=False)
     cli.cmd_watch(args)
     assert "reach    : advertises an endpoint" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the expired-ANCHOR alarm — loud on every member's header, not one dim cell
+# ---------------------------------------------------------------------------
+
+def _anchor_record(hours_to_exp):
+    from greasewood.keys import derive_addr
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    k, ca = NodeKeys.generate(), CAKeys.generate()
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                      addr=derive_addr(k.id_pub_bytes), hostname="router",
+                      caps=["role:*", "role:admin"],
+                      iat=now + dt.timedelta(hours=hours_to_exp) - dt.timedelta(hours=24),
+                      exp=now + dt.timedelta(hours=hours_to_exp)).sign(ca.ca_priv)
+    return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
+                      cred=cred).sign(k.id_priv)
+
+
+def test_expired_anchor_raises_header_alarm():
+    """An expired anchor is uniquely silent (the mesh keeps working on the CA
+    key; reconcile keeps talking to it), so the header must shout: hostname,
+    EXPIRED, the partition countdown, and the fix."""
+    d = Directory()
+    d.put(_anchor_record(hours_to_exp=-30))          # expired 30h ago
+    lines = status._anchor_alarm_lines(d, own_id=None)
+    assert len(lines) == 1
+    assert "router" in lines[0] and "EXPIRED" in lines[0]
+    assert "partitions" in lines[0] and "Restart the anchor daemon" in lines[0]
+
+
+def test_healthy_anchor_and_expired_plain_node_stay_quiet():
+    """No alarm for a live anchor, and none for an ordinary expired node —
+    those already show in the roster and age out by design."""
+    d = Directory()
+    d.put(_anchor_record(hours_to_exp=12))           # healthy anchor
+    from greasewood.keys import derive_addr
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    k, ca = NodeKeys.generate(), CAKeys.generate()
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                      addr=derive_addr(k.id_pub_bytes), hostname="bb",
+                      caps=["role:node"], iat=now - dt.timedelta(hours=48),
+                      exp=now - dt.timedelta(hours=24)).sign(ca.ca_priv)
+    d.put(NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred).sign(k.id_priv))
+    assert status._anchor_alarm_lines(d, own_id=None) == []

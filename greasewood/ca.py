@@ -336,7 +336,8 @@ class CA:
         atomic_write(p, json.dumps(rec, indent=2))
 
     def drop_stale(self, grace: dt.timedelta,
-                   now: "dt.datetime | None" = None) -> list[tuple[str, str]]:
+                   now: "dt.datetime | None" = None,
+                   protect: "str | None" = None) -> list[tuple[str, str]]:
         """The AUTHORIZATION drop: forget every enrolled node whose last-issued
         credential expired more than `grace` ago. Since renew() re-issues from
         the registry, a forgotten node can no longer renew — it must re-enroll
@@ -344,7 +345,13 @@ class CA:
         indefinite recert of expired-but-not-revoked nodes so an abandoned fleet
         (destroyed cloud instances left to expire) is garbage-collected with no
         manual `gw revoke`. Records without an exp (legacy) are left alone — a
-        renewal will stamp one. Returns the (id_hex, hostname) pairs dropped."""
+        renewal will stamp one. `protect` (an id_pub hex) is never dropped: the
+        anchor passes its OWN id, because sweeping itself out of its own
+        registry makes its credential permanently unrenewable and, once the
+        record ages out of the fleet's directories, partitions the whole mesh
+        (a stuck anchor renewal loop is a recoverable outage right up until
+        this sweep makes it a permanent one). Returns the (id_hex, hostname)
+        pairs dropped."""
         now = now or dt.datetime.now(_UTC)
         dropped: list[tuple[str, str]] = []
         nodes_dir = self._data_dir / "nodes"
@@ -362,6 +369,8 @@ class CA:
                 if exp is None or now < exp + grace:
                     continue
                 id_hex = name[:-len(".json")]
+                if protect is not None and id_hex == protect:
+                    continue
                 try:
                     self.forget_node(bytes.fromhex(id_hex))
                 except ValueError:

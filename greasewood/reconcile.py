@@ -30,6 +30,11 @@ from . import wg as wgmod
 
 log = logging.getLogger(__name__)
 
+# Expired-but-admitted peers already announced in the log, id_pub → the exp we
+# announced for. Keeps the admission line to one per expiry instead of one per
+# reconcile cycle (see the transition logging below). Bounded by mesh size.
+_ADMITTED_EXPIRED: "dict[bytes, dt.datetime]" = {}
+
 # persistent-keepalive (secs) for a healthy or still-probing peer. A peer whose
 # endpoint has gone dead past a full probe cycle drops to 0 — see _EndpointTracker.
 _KEEPALIVE = 25
@@ -341,11 +346,22 @@ def reconcile_once(
             continue
         if (is_anchor or record_is_anchor) and record.id_pub != local_id_pub \
                 and dt.datetime.now(dt.timezone.utc) >= record.cred.exp:
-            who = "anchor" if is_anchor else "member"
-            log.info("%s admitting expired %s %s [%s] for recertification "
-                     "(not revoked) — it can renew over this tunnel",
-                     who, "peer" if is_anchor else "anchor",
-                     record.hostname, record.cred.addr)
+            # Log the ADMISSION TRANSITION, not the steady state: this branch
+            # runs every reconcile cycle (seconds), and a peer that stays
+            # expired for days floods the journal with an identical line every
+            # cycle — burying the renewal/CA lines an operator greps for.
+            # Remembered per id against the credential's exp: a recert issues
+            # a new exp, so the NEXT expiry of the same peer logs again.
+            if _ADMITTED_EXPIRED.get(record.id_pub) != record.cred.exp:
+                _ADMITTED_EXPIRED[record.id_pub] = record.cred.exp
+                who = "anchor" if is_anchor else "member"
+                log.info("%s admitting expired %s %s [%s] for recertification "
+                         "(not revoked) — it can renew over this tunnel; "
+                         "logged once, admission continues every cycle",
+                         who, "peer" if is_anchor else "anchor",
+                         record.hostname, record.cred.addr)
+        else:
+            _ADMITTED_EXPIRED.pop(record.id_pub, None)
         trusted.append(record)
 
         if record.id_pub == local_id_pub:

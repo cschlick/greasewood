@@ -520,8 +520,41 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
         lines.append(f"audit    : {cfg.audit_log}  (ip/wg/nft commands + "
                      f"'grep event=' for topology/policy changes)")
     lines += _self_health_lines(cfg, directory, own_id)
+    lines += _anchor_alarm_lines(directory, own_id)
     if cfg.role == "anchor":                       # the door only exists here
         lines += _door_status_lines(cfg)
+    return lines
+
+
+def _anchor_alarm_lines(directory, own_id) -> list:
+    """A LOUD header warning when the ANCHOR's record is expired — for every
+    member, not just the anchor. An expired anchor is uniquely silent: the mesh
+    keeps working (its authority is the CA key, and reconcile deliberately
+    keeps talking to an expired anchor), so the only symptom is one dim
+    EXPIRED cell in the roster — until the record ages past the fleet drop
+    grace, members shed it, and the mesh partitions. Field incident: an anchor
+    whose renewal loop slept through a boot-time clock step sat expired for
+    six days with zero functional symptoms. On the anchor itself the self-cred
+    line already warns; this line covers everyone else (and repeats the alarm
+    on the anchor — it cannot be too loud)."""
+    from .directory import DROP_GRACE
+    if directory is None:                # header renders before the first sync
+        return []
+    now = dt.datetime.now(_UTC)
+    lines = []
+    for r in directory.all():
+        if "*" not in _record_roles(r):
+            continue
+        left = (r.cred.exp - now).total_seconds()
+        if left >= 0:
+            continue
+        drop_at = r.cred.exp + DROP_GRACE
+        days_left = (drop_at - now).total_seconds() / 86400.0
+        lines.append(
+            f"{'ANCHOR':<9}: ⚠ {r.hostname}'s own credential EXPIRED "
+            f"{_dur_short(-left)} ago — its renewal loop is stuck (the mesh "
+            f"still works, but members shed its record ~{days_left:.1f}d from "
+            f"now and the mesh partitions). Restart the anchor daemon.")
     return lines
 
 

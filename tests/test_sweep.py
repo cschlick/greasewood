@@ -70,3 +70,39 @@ def test_sweep_tick_noop_when_nothing_stale(tmp_path):
     StaleSweep(ca, directory, drop_grace=DROP_GRACE, cache_path=cache)._tick()
     assert cache.exists() is False                           # nothing changed → no write
     assert ca.node_info(k.id_pub_bytes) is not None
+
+
+def test_sweep_never_reaps_the_protected_anchor(tmp_path):
+    """The anchor passes its own id as `protect`: even when its credential is
+    long past drop_grace (a stalled self-renewal — field incident: a renewal
+    loop that slept through a boot-time clock step), the sweep must not delete
+    the registry entry renewal re-issues from, nor prune the record the fleet
+    converges on. Sweeping itself turns a recoverable stall into a permanent,
+    mesh-wide partition. An equally-stale ordinary node is still reaped."""
+    import json
+    ca_keys = CAKeys.generate()
+    ca = CA(ca_keys, tmp_path, credential_ttl=dt.timedelta(hours=1))
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    stale_exp = now - (DROP_GRACE + dt.timedelta(days=2))
+
+    anchor = NodeKeys.generate()
+    dead = NodeKeys.generate()
+    for k, name in ((anchor, "anchor"), (dead, "dead")):
+        ca.issue(k.id_pub_bytes, k.wg_pub_bytes, name, ["mesh"])
+        p = tmp_path / "nodes" / f"{k.id_pub_bytes.hex()}.json"
+        rec = json.loads(p.read_text())
+        rec["exp"] = stale_exp.isoformat()
+        p.write_text(json.dumps(rec))
+
+    directory = Directory()
+    directory.put(_rec(ca_keys, anchor, "anchor", stale_exp))
+    directory.put(_rec(ca_keys, dead, "dead", stale_exp))
+    cache = tmp_path / "directory.json"
+
+    StaleSweep(ca, directory, drop_grace=DROP_GRACE, cache_path=cache,
+               protect=anchor.id_pub_bytes.hex())._tick()
+
+    # The anchor survived in BOTH stores; the ordinary stale node in neither.
+    assert ca.node_info(anchor.id_pub_bytes) is not None
+    assert ca.node_info(dead.id_pub_bytes) is None
+    assert {r.cred.hostname for r in directory.all()} == {"anchor"}
