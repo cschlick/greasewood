@@ -200,10 +200,22 @@ def _detect_public_ipv6() -> str | None:
 
     GUA = 2000::/3 (first 3 bits are 001).  ULA (fc/fd) and link-local
     (fe80) are excluded because they are not routable across the internet.
-    """
-    stable, temporary, any_gua = [], [], []
 
-    for raw, line in _inet6_addrs():
+    Within each class, a non-/128 address beats a /128, and the interface
+    holding the v6 default route breaks ties. A lone /128 on some tunnel
+    interface is the signature of a VPN client address — commercial WireGuard
+    VPNs hand EVERY client the same "global" /128, so it passes the GUA test
+    while being (a) NATed from the internet and (b) a LOCAL address on any
+    other machine running the same VPN, which then dials ITSELF. Field
+    incident: the anchor advertised its VPN /128 as its endpoint; a returning
+    node on the same VPN hung forever joining through its own loopback. The
+    /128 stays a last resort (DHCPv6 IA_NA legitimately assigns /128s) rather
+    than being excluded outright.
+    """
+    candidates = []                      # (is_128, class_rank, off_def, addr)
+
+    def_iface = _default_iface6()
+    for raw, iface, prefixlen, line in _inet6_addrs():
         try:
             addr = ipaddress.IPv6Address(raw)
         except ValueError:
@@ -214,37 +226,73 @@ def _detect_public_ipv6() -> str | None:
             continue
 
         flags = line
-        is_temp = "temporary" in flags
-        is_deprecated = "deprecated" in flags
-
-        if not is_deprecated and not is_temp:
-            stable.append(str(addr))
-        elif not is_deprecated:
-            temporary.append(str(addr))
+        if "deprecated" in flags:
+            rank = 2
+        elif "temporary" in flags:
+            rank = 1
         else:
-            any_gua.append(str(addr))
+            rank = 0
+        candidates.append((
+            prefixlen == 128,                                  # real prefix first:
+            rank,                                              # this outranks the
+            0 if (def_iface and iface == def_iface) else 1,    # stability class —
+            str(addr),                                         # a rotating privacy
+        ))                                                     # address is still
+        # reachable while it lives; a VPN /128 never is.
 
-    return (stable or temporary or any_gua or [None])[0]
+    return min(candidates)[3] if candidates else None
 
 
-def _inet6_addrs() -> "list[tuple[str, str]]":
-    """Every global-ish inet6 address on this host as (addr, flags-line) pairs
-    — the OS-specific parse behind _detect_public_ipv6. Linux reads `ip -6 -o
-    addr show scope global`; macOS reads `ifconfig -a` (its inet6 lines carry
-    the same temporary/deprecated flag words, and zone ids like %en0 are
-    stripped — a zoned address is link-local anyway and fails the GUA check)."""
-    out: "list[tuple[str, str]]" = []
+def _default_iface6() -> "str | None":
+    """The interface carrying the v6 default route, or None."""
+    cmd = (["route", "-n", "get", "-inet6", "default"] if gwplat.IS_MACOS
+           else ["ip", "-6", "route", "show", "default"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return None
+    if gwplat.IS_MACOS:
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == "interface:":
+                return parts[1]
+        return None
+    toks = r.stdout.split()
+    return toks[toks.index("dev") + 1] if "dev" in toks[:-1] else None
+
+
+def _inet6_addrs() -> "list[tuple[str, str, int, str]]":
+    """Every global-ish inet6 address on this host as (addr, iface, prefixlen,
+    flags-line) tuples — the OS-specific parse behind _detect_public_ipv6.
+    Linux reads `ip -6 -o addr show scope global`; macOS reads `ifconfig -a`
+    (its inet6 lines carry the same temporary/deprecated flag words, the
+    interface comes from the preceding `en0: flags=` header, and zone ids like
+    %en0 are stripped — a zoned address is link-local anyway and fails the GUA
+    check). A missing prefixlen parses as 128 (the conservative reading: a
+    lone host address ranks as tunnel-like, never better)."""
+    out: "list[tuple[str, str, int, str]]" = []
     if gwplat.IS_MACOS:
         try:
             r = subprocess.run(["ifconfig", "-a"],
                                capture_output=True, text=True, check=False)
         except FileNotFoundError:
             return out
+        iface = ""
         for line in r.stdout.splitlines():
+            # "en0: flags=8863<UP,...> mtu 1500" opens each interface block
+            if line and not line[0].isspace() and ":" in line:
+                iface = line.split(":", 1)[0]
+                continue
             parts = line.split()
             # "inet6 <addr>[%zone] prefixlen N [autoconf secured temporary ...]"
             if len(parts) >= 2 and parts[0] == "inet6":
-                out.append((parts[1].split("%")[0], line))
+                pl = 128
+                if "prefixlen" in parts:
+                    try:
+                        pl = int(parts[parts.index("prefixlen") + 1])
+                    except (IndexError, ValueError):
+                        pass
+                out.append((parts[1].split("%")[0], iface, pl, line))
         return out
     try:
         r = subprocess.run(["ip", "-6", "-o", "addr", "show", "scope", "global"],
@@ -255,7 +303,12 @@ def _inet6_addrs() -> "list[tuple[str, str]]":
         # "<idx>: <iface>    inet6 <addr/prefix> scope global [flags...]"
         parts = line.split()
         if len(parts) >= 4 and parts[2] == "inet6":
-            out.append((parts[3].split("/")[0], line))
+            addr, _, plraw = parts[3].partition("/")
+            try:
+                pl = int(plraw) if plraw else 128
+            except ValueError:
+                pl = 128
+            out.append((addr, parts[1], pl, line))
     return out
 
 
@@ -328,16 +381,69 @@ def _local_families() -> set[int]:
     return fams or {4, 6}
 
 
-def _pick_reachable_host(hosts: list[str]) -> str:
-    """From candidate bare underlay hosts (v6 and/or v4), pick one this node can
-    originate on. Order matters — callers list v6 first — so a dual-stack node
-    prefers v6. Falls back to the first host if no family matches."""
+def _local_global_addrs() -> "set":
+    """Every global-scope address (v6 and v4) THIS host owns, as ip_address
+    objects. Used to refuse dialing an 'anchor' host that is actually one of
+    our own addresses — which happens in the wild: a shared commercial VPN
+    assigns every client the same 'global' address, so a token minted on an
+    anchor running that VPN can carry an address the joiner also owns, and
+    dialing it loops back to the joiner forever."""
+    addrs = set()
+    for raw, _iface, _pl, _line in _inet6_addrs():
+        try:
+            addrs.add(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    cmd = (["ifconfig", "-a"] if gwplat.IS_MACOS
+           else ["ip", "-4", "-o", "addr", "show"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return addrs
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        raw = None
+        if gwplat.IS_MACOS:
+            if len(parts) >= 2 and parts[0] == "inet":
+                raw = parts[1]
+        elif len(parts) >= 4 and parts[2] == "inet":
+            raw = parts[3].split("/")[0]
+        if raw:
+            try:
+                addrs.add(ipaddress.ip_address(raw))
+            except ValueError:
+                continue
+    return addrs
+
+
+def _order_door_hosts(hosts: "list[str]") -> "tuple[list[str], list[tuple[str, str]]]":
+    """Order the token's candidate door hosts for dialing and drop the ones
+    that can never work. Returns (ordered_hosts, skipped) where skipped is
+    (host, reason) pairs for the final report.
+
+    - A host that is one of OUR OWN addresses is dropped: dialing it loops
+      back to this machine (the shared-VPN failure — see _local_global_addrs).
+    - Hosts whose family this node can't originate on are demoted, not
+      dropped (family detection is a heuristic; the handshake is the proof).
+    - Within each group the token's order (v6 first) is preserved."""
+    local = _local_global_addrs()
     fams = _local_families()
+    ordered, demoted, skipped = [], [], []
     for h in hosts:
+        h = h.strip()
+        if not h:
+            continue
+        try:
+            if ipaddress.ip_address(h) in local:
+                skipped.append((h, "this is one of THIS machine's own addresses "
+                                   "(a VPN tunnel shared by both ends?) — dialing "
+                                   "it would loop back to this host"))
+                continue
+        except ValueError:
+            pass                                    # a DNS name — always dialable
         fam = 6 if ":" in h else 4
-        if fam in fams:
-            return h
-    return hosts[0]
+        (ordered if fam in fams else demoted).append(h)
+    return ordered + demoted, skipped
 
 
 def _endpoint_with_port(explicit: str, listen_port: int) -> str:
@@ -1584,7 +1690,59 @@ def _enroll_over_door(*args, **kwargs):
         raise
 
 
-def _enroll_over_door_inner(data_dir, node_keys, hostname: str, anchor_host: str,
+def _door_handshake_up(wgmod, timeout: float) -> bool:
+    """Poll the transient door interface until its (single) peer shows a
+    WireGuard handshake, or the timeout passes. The handshake is the ONLY
+    honest reachability signal for a door host: local-family heuristics and
+    ping say nothing about whether the anchor's door answers on this address."""
+    from .door import DOOR_IFACE
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        peers = wgmod.get_peers(DOOR_IFACE)
+        if peers and any(p.latest_handshake > 0 for p in peers.values()):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+_DOOR_HANDSHAKE_TIMEOUT = 10.0    # per candidate host
+
+
+def _dial_door(wgmod, anchor_hosts: "list[str]", guest_priv_bytes: bytes,
+               anchor_door_pub_b64: str, psk_b64: str, door_port) -> str:
+    """Dial the anchor's door on each candidate host in order, gated on the
+    real WireGuard handshake, and return the host that answered — leaving the
+    door interface up against it. On total failure, tear the door down and
+    exit with a per-host report (never a silent hang on the first address)."""
+    from . import audit
+    from .door import DOOR_IFACE
+    failures: "list[tuple[str, str]]" = []
+    for host in anchor_hosts:
+        with audit.context(f"join: bring up node door interface → {host}"):
+            wgmod.ensure_node_door_interface(
+                guest_priv_bytes, anchor_door_pub_b64, psk_b64, host, door_port)
+        log.info("dialing the door at [%s]:%s — waiting for WireGuard handshake ...",
+                 host, door_port)
+        if _door_handshake_up(wgmod, _DOOR_HANDSHAKE_TIMEOUT):
+            return host
+        failures.append((host, f"no WireGuard handshake within "
+                               f"{_DOOR_HANDSHAKE_TIMEOUT:.0f}s"))
+        log.warning("no handshake via %s — trying the next host", host)
+    wgmod.destroy_interface(DOOR_IFACE)
+    report = "\n".join(f"  {h} — {why}" for h, why in failures)
+    hints = ["is the anchor daemon running, and the invite window still open? "
+             "(the door only exists while a window is open — mint a fresh "
+             "token and join within its lifetime)"]
+    if any(":" not in h for h, _ in failures):
+        hints.append("a v4 endpoint dialed from INSIDE the anchor's own "
+                     "network needs NAT hairpin, which many routers lack — "
+                     "from inside, the anchor's v6 or LAN address works")
+    sys.exit("could not reach the anchor's door on any advertised host:\n"
+             f"{report}\n" + "\n".join(f"Hint: {h}" for h in hints))
+
+
+def _enroll_over_door_inner(data_dir, node_keys, hostname: str,
+                            anchor_hosts: "list[str]",
                             anchor_door_pub_b64: str, params, door_port,
                             ca_pub_bytes: bytes, already_enrolled: bool,
                             requested_roles: "list | tuple" = ()):
@@ -1594,20 +1752,24 @@ def _enroll_over_door_inner(data_dir, node_keys, hostname: str, anchor_host: str
     actionable message (tearing the door down first). On success the door is
     left UP and the socket OPEN: the caller pushes its signed record back on
     the same connection as the second leg, then tears down. Returns
-    (conn, resp, cred)."""
+    (conn, resp, cred).
+
+    `anchor_hosts` is the token's candidate list in dialing order (see
+    _order_door_hosts). Each is tried in turn, gated on the actual WireGuard
+    handshake — not on family heuristics — so a node with several paths to the
+    anchor heals over whichever one really works, and a total failure reports
+    every host with its reason instead of hanging on the first."""
     from . import wg as wgmod
     from .wire import Credential
 
-    # Bring up the local door interface (door port comes from the token)
+    # Bring up the local door interface (door port comes from the token) and
+    # dial each candidate host until one completes a handshake.
     from . import audit
     audit.attach_file(data_dir / "audit.log")   # one-shot door commands → the trail
-    with audit.context("join: bring up node door interface"):
-        wgmod.ensure_node_door_interface(
-            params.guest_priv_bytes, anchor_door_pub_b64, params.psk_b64, anchor_host,
-            door_port,
-        )
+    _dial_door(wgmod, anchor_hosts, params.guest_priv_bytes,
+               anchor_door_pub_b64, params.psk_b64, door_port)
 
-    # Connect to anchor's enroll daemon via the door tunnel (retry for WG handshake)
+    # Connect to anchor's enroll daemon via the door tunnel
     from .door import ANCHOR_DOOR_IP, ENROLL_PORT
     log.info("connecting to enroll daemon at [%s]:%d ...", ANCHOR_DOOR_IP, ENROLL_PORT)
     conn: socket.socket | None = None
@@ -1902,9 +2064,23 @@ def cmd_join(args) -> int:
             "if this node is publicly reachable.")
 
     # (token was decoded up top — its CA pub routed the join to a slot)
-    # The token may carry several anchor underlay hosts (v4 and/or v6, comma-sep);
-    # dial one this node can actually reach.
-    anchor_host = _pick_reachable_host(anchor_host.split(","))
+    # The token may carry several anchor underlay hosts (v4 and/or v6, comma-
+    # sep). Order them for dialing (v6 first when we can originate v6) and drop
+    # any that are OUR OWN addresses — a shared commercial VPN can put the
+    # anchor's detected "public" address on this machine too, and dialing it
+    # would loop back to ourselves forever. The door dance then tries each
+    # remaining host in turn, gated on the real WireGuard handshake.
+    anchor_hosts, _skipped_hosts = _order_door_hosts(anchor_host.split(","))
+    for _h, _why in _skipped_hosts:
+        log.warning("not dialing anchor host %s: %s", _h, _why)
+    if not anchor_hosts:
+        detail = "\n".join(f"  {h} — {why}" for h, why in _skipped_hosts)
+        sys.exit("every anchor host in this token is undialable from here:\n"
+                 f"{detail}\n"
+                 "Hint: the anchor is advertising an address this machine also "
+                 "owns (a VPN both ends run?). On the anchor, pin a real "
+                 "address: sudo gw invite --endpoint <the anchor's actual "
+                 "LAN or public address>")
 
     anchor_door_pub_b64 = base64.b64encode(anchor_door_pub_bytes).decode()
 
@@ -1932,7 +2108,7 @@ def cmd_join(args) -> int:
     log.info("overlay addr: %s", node_keys.addr)
 
     conn, resp, cred = _enroll_over_door(
-        data_dir, node_keys, hostname, anchor_host, anchor_door_pub_b64,
+        data_dir, node_keys, hostname, anchor_hosts, anchor_door_pub_b64,
         params, door_port, ca_pub_bytes, already_enrolled,
         requested_roles=requested_roles)
 
