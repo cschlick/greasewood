@@ -467,6 +467,103 @@ class LeaveRequest:
 
 
 # ---------------------------------------------------------------------------
+# AnchorStatement — a CA-signed membership decision, replicated like records
+# ---------------------------------------------------------------------------
+
+# The statement kinds and their merge semantics (see statements.StatementLog):
+#   revoke    — permanent exclusion of an identity. Monotone set-union: once
+#               any holder has seen a revoke for an id, it stays revoked
+#               (there is no unrevoke, same as revoked.json before it).
+#   tombstone — this id's CURRENT membership ended (a leave, or the stale
+#               sweep). Kills records whose credential was issued AT OR BEFORE
+#               ts and frees the hostname — but a re-enrollment mints a fresh
+#               credential with iat > ts, which the tombstone does not touch,
+#               so departed ids can return. Latest ts wins per id.
+#   setcaps   — the operator changed this node's caps (set-roles/set-caps).
+#               Applied by whichever holder serves the node's next renewal.
+#               Latest ts wins per id.
+STATEMENT_KINDS = ("revoke", "tombstone", "setcaps")
+
+
+@dataclass
+class AnchorStatement:
+    """One CA-signed membership decision — the replicated replacement for the
+    anchor's private registry mutations.
+
+    With a single anchor machine, revoking, dropping, or re-capping a node was
+    a local file edit (revoked.json, deleting nodes/<id>.json, rewriting its
+    caps). With the anchor FILE model — any node holding the anchor file may
+    perform anchor duties, several at once — those decisions must reach every
+    holder, so they become signed statements that ride the same directory
+    gossip as NodeRecords. The CA signature is what lets any node relay them:
+    a statement is as unforgeable in transit as a credential.
+
+    `ts` is the deciding holder's clock at minting; per-(kind, id) latest-ts
+    wins on merge. Two holders deciding about the same id at the same moment
+    is the accepted race of the active/active design — both statements are
+    individually authentic, the later one prevails everywhere, and both remain
+    in the audit trail."""
+    kind: str            # one of STATEMENT_KINDS
+    id_pub: bytes        # the subject identity
+    ts: dt.datetime      # when the decision was made (merge order)
+    caps: list[str] = field(default_factory=list)   # setcaps payload; else []
+    hostname: str = ""   # informational (audit/narrate); not load-bearing
+    ca_sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "caps": sorted(self.caps),
+            "hostname": self.hostname,
+            "id_pub": _b64e(self.id_pub),
+            "kind": self.kind,
+            "ts": _ts(self.ts),
+        }
+
+    def sign(self, ca_priv: Ed25519PrivateKey) -> "AnchorStatement":
+        sig = ca_priv.sign(_canonical(self._body_dict()))
+        return replace(self, ca_sig=sig)
+
+    def verify(self, ca_pubs: list[bytes]) -> None:
+        """Verify the CA signature against the trusted set. No expiry: a
+        statement is a decision, not a lease — its lifetime is governed by the
+        StatementLog's pruning rules, not by wall-clock validity (a revoke
+        must never lapse because time passed). Raises ValueError."""
+        if self.kind not in STATEMENT_KINDS:
+            raise ValueError(f"unknown statement kind {self.kind!r}")
+        body = _canonical(self._body_dict())
+        for raw_pub in ca_pubs:
+            pub = Ed25519PublicKey.from_public_bytes(raw_pub)
+            try:
+                pub.verify(self.ca_sig, body)
+                return
+            except InvalidSignature:
+                continue
+        raise ValueError("statement has no trusted CA signature")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["ca_sig"] = _b64e(self.ca_sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AnchorStatement":
+        kind = _str(d["kind"], "kind")
+        if kind not in STATEMENT_KINDS:
+            # Reject unknown kinds at the parse boundary: a future kind this
+            # version doesn't understand must not be half-processed (merged,
+            # persisted, re-served) with its semantics silently ignored.
+            raise ValueError(f"unknown statement kind {kind!r}")
+        return cls(
+            kind=kind,
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            ts=_parse_ts(d["ts"]),
+            caps=_str_list(d.get("caps", []), "caps"),
+            hostname=_str(d.get("hostname", ""), "hostname"),
+            ca_sig=_b64d(d["ca_sig"]),
+        )
+
+
+# ---------------------------------------------------------------------------
 # CertRequest — a node asking the anchor for an x509 TLS cert (§12)
 # ---------------------------------------------------------------------------
 
