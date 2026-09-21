@@ -1,59 +1,59 @@
 """
-greasewood.ca — certificate authority operations (anchor only).
+greasewood.ca — certificate authority operations (anchor-file holders).
 
 The CA signs Credentials only. It never generates or sees any private key
 other than ca_priv.
 
-CA.issue() is called by the anchor during enrollment (over the transient door, see
-greasewood.enroll) and renewal — never directly by an operator, and never over a
-network-reachable endpoint.
+There is NO private registry. The credential itself is the registry entry —
+hostname, caps, and expiry all ride in it, CA-signed, replicated to every
+node inside its NodeRecord — and the three mutations a credential can't
+express (revoke, forget, re-cap) are CA-signed AnchorStatements replicated
+the same way (greasewood.statements). That is what makes anchor duties
+location-independent: ANY holder of the anchor file serves issuance from the
+same eventually-consistent view every node already has, several holders at
+once, with no state to hand over.
 
-Revoke list: revoked.json — a set of id_pub hex strings, re-read live by the
-  daemon. Revoking refuses the node's renew/publish at the anchor immediately and
-  frees its hostname; its credential also expires on its own, so other nodes
-  evict it within one credential TTL (expiry-based revocation, no CRL).
+What replaced the old nodes/<id>.json registry:
+  hostname uniqueness  → scan of live directory records (+ this process's
+                         just-issued credentials, below)
+  renewal's (hostname, caps) lookup → the node's own directory record,
+                         cred verified against the TRUSTED CA SET (so a
+                         re-root overlap re-issues from the outgoing CA's
+                         records with no special path)
+  caps changes         → setcaps statements, applied at next renewal
+  forgetting a node    → tombstone statements (leave / sweep / revoke)
+  the revoke list      → revoke statements, merged with legacy revoked.json
 
-Node caps: stored in nodes/<id_pub_hex>.json so renewal can re-use them without
-  a separate config lookup. Written at issue time; removed on revoke (which is
-  what frees the hostname for reuse).
+The one gap the directory can't cover: a credential issued moments ago whose
+NodeRecord hasn't landed yet (the joiner publishes it seconds later over the
+door's second leg). `_recent` — an in-process overlay of just-issued
+credentials — bridges it, so two concurrent enrolls at THIS holder can't both
+claim one hostname. Two enrolls racing at DIFFERENT holders is the
+active/active design's accepted race: both succeed, the collision is visible
+in every view (two records, one name), and the fix is re-running one join.
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Callable
 
 from .keys import CAKeys, atomic_write, derive_addr
-from .wire import Credential, RenewRequest
+from .wire import AnchorStatement, Credential, RenewRequest
 
 log = logging.getLogger(__name__)
 
 
 class UnknownNodeError(ValueError):
-    """The id_pub has no registry entry (nodes/<id>.json). A distinct type
-    because the control plane's re-root fallback fires ONLY on this condition
-    (server._reroot_reissue) — gating a security-relevant path on an exception
-    *type* instead of its message text."""
+    """No live, trusted record (or just-issued credential) exists for this
+    id — nothing to renew from. The node must (re-)enroll through the door."""
 
 _UTC = dt.timezone.utc
 
 CapPolicy = Callable[[list[str]], list[str]]
-
-
-def _parse_ts(raw: "str | None") -> "dt.datetime | None":
-    """Parse an ISO timestamp from a registry record, tolerating a missing or
-    malformed value (legacy records have none). Always tz-aware (UTC)."""
-    if not raw:
-        return None
-    try:
-        d = dt.datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return d if d.tzinfo else d.replace(tzinfo=_UTC)
 
 
 class CA:
@@ -64,12 +64,37 @@ class CA:
         credential_ttl: dt.timedelta = dt.timedelta(hours=24),
         cap_policy: CapPolicy | None = None,
         key_file: "Path | None" = None,
+        directory=None,
+        statements=None,
+        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
+        dir_cache_path: "Path | None" = None,
     ) -> None:
         self._keys = ca_keys
         self._data_dir = data_dir
         self._ttl = credential_ttl
         self._cap_policy: CapPolicy = cap_policy or (lambda caps: caps)
         self._revoke_path = data_dir / "revoked.json"
+        # The replicated substrate. The daemon injects its LIVE directory and
+        # statement log; a one-shot CLI process (gw revoke, gw invite's
+        # hostname check) loads both from the same on-disk caches the daemon
+        # maintains — one view, two access paths.
+        self._get_ca_pubs = get_ca_pubs or (lambda: [ca_keys.ca_pub_bytes])
+        if directory is None:
+            from .directory import Directory
+            directory = Directory.load(
+                dir_cache_path or (data_dir / "directory.json"))
+        self._directory = directory
+        self._dir_cache_path = dir_cache_path or (data_dir / "directory.json")
+        if statements is None:
+            from .statements import StatementLog, statements_path
+            statements = StatementLog.load(statements_path(data_dir),
+                                           self._get_ca_pubs())
+        self._statements = statements
+        # Just-issued credentials whose records haven't landed yet:
+        # id_pub_hex → {hostname, caps, iat, exp}. In-process only — the
+        # window is the seconds between issue and the joiner's door-leg
+        # publish, not something worth a persistence story.
+        self._recent: dict[str, dict] = {}
         # Stale-key guard (long-running daemon only — one-shot CLI uses skip it
         # by not passing key_file): snapshot the key FILE's bytes at load so
         # issue() can detect the file changing underneath a running daemon
@@ -81,14 +106,13 @@ class CA:
         # to the key file means the operator did something a restart resolves.
         self._key_file = Path(key_file) if key_file is not None else None
         self._key_snapshot = self._key_file.read_bytes() if self._key_file else None
-        # Serializes the registry's check-then-act / read-modify-write regions
-        # (issue/renew/set-caps/revoke). The control plane is a
-        # ThreadingHTTPServer, so these run concurrently; without this a hostname
-        # uniqueness check could interleave (two nodes claim one name) and two
-        # writers could race. Reentrant because renew()->issue() and
-        # add_revoke()->forget_node() nest. Cross-PROCESS races (a `gw revoke`
-        # CLI vs the daemon) are handled by the unique-temp atomic write, not
-        # this lock.
+        # Serializes check-then-act regions (issue/renew/set-caps/revoke) —
+        # the control plane is a ThreadingHTTPServer, so these run
+        # concurrently; without this a hostname uniqueness check could
+        # interleave (two nodes claim one name). Reentrant because
+        # renew()->issue() and add_revoke()->forget_node() nest. Cross-PROCESS
+        # races (a `gw revoke` CLI vs the daemon) converge through the
+        # statement log's merge, not this lock.
         self._lock = threading.RLock()
 
     # --- credential issuance ---
@@ -128,14 +152,14 @@ class CA:
         caps: list[str],
     ) -> Credential:
         """
-        Sign a credential for a node (anchor-side; called during enrollment/renewal).
-        Persists node caps so renewal can re-use them without operator input.
-        Raises ValueError if id_pub is revoked or the hostname is already taken
-        by a different node (enforced on the sanitized name, so db/DB collide).
+        Sign a credential for a node (holder-side; called during
+        enrollment/renewal). Raises ValueError if id_pub is revoked or the
+        hostname is already claimed by a different live node (enforced on the
+        sanitized name, so db/DB collide).
         """
-        # The revoke check, the hostname-uniqueness check, and the registry
-        # write are one atomic critical section: otherwise two concurrent
-        # issues for the same name both see it free and both persist it.
+        # The revoke check, the hostname-uniqueness check, and the recent-
+        # issue note are one atomic critical section: otherwise two concurrent
+        # issues for the same name both see it free and both sign.
         with self._lock:
             self._refuse_if_key_stale()
             if self.is_revoked(id_pub):
@@ -163,17 +187,46 @@ class CA:
                 exp=now + self._ttl,
             )
             signed = cred.sign(self._keys.ca_priv)
-            self._save_node_caps(id_pub, hostname, caps, exp=signed.exp, iat=now)
+            self._gc_recent(now)
+            self._recent[id_pub.hex()] = {
+                "hostname": hostname, "caps": list(caps), "iat": now,
+                "exp": signed.exp,
+            }
         log.info("issued credential for %s caps=%s exp=%s", hostname, caps, signed.exp)
         return signed
+
+    def _gc_recent(self, now: "dt.datetime | None" = None) -> None:
+        """Drop overlay entries the directory has caught up with (a record at
+        or past the issue's iat landed) or whose credential expired. Called
+        under the lock."""
+        now = now or dt.datetime.now(_UTC)
+        for hex_id in list(self._recent):
+            entry = self._recent[hex_id]
+            rec = self._directory.get(hex_id)
+            caught_up = rec is not None and rec.cred.iat >= entry["iat"]
+            if caught_up or now >= entry["exp"]:
+                del self._recent[hex_id]
+
+    def discard_recent(self, id_pub: bytes) -> bool:
+        """Roll back a just-issued credential that never took effect (a failed
+        enrollment's peer-install). Frees the hostname the overlay was
+        holding. Nothing was replicated yet, so — unlike forget_node — no
+        tombstone is minted; there is nothing anywhere else to kill."""
+        with self._lock:
+            return self._recent.pop(id_pub.hex(), None) is not None
 
     # --- renewal (§10.3) ---
 
     def renew(self, req: RenewRequest) -> Credential:
         """
-        Process a renewal request from an already-enrolled node.
-        id_priv possession is proven by the self-signature on the request.
-        Raises ValueError on any failure.
+        Process a renewal request from an enrolled node. id_priv possession is
+        proven by the self-signature on the request. The (hostname, caps) to
+        re-issue come from the node's live directory record — cred verified
+        against the TRUSTED CA SET, not just this CA's key, so during a
+        re-root overlap the new CA recertifies the outgoing CA's nodes from
+        their records with no special path. Raises ValueError on any failure;
+        UnknownNodeError when no live trusted record exists (the node must
+        re-enroll through the door).
         """
         req.verify_self_sig()
 
@@ -190,14 +243,15 @@ class CA:
 
             node_info = self.node_info(req.id_pub)
             if node_info is None:
-                raise UnknownNodeError("unknown node — issue a credential first")
+                raise UnknownNodeError(
+                    "unknown node — no live record to renew from; re-enroll "
+                    "through the door (gw invite / gw join)")
 
             hostname, caps = node_info
             if req.hostname and req.hostname != hostname:
-                # Rename (gw rename): issue() enforces uniqueness on the new name
-                # and rewrites nodes/<id>.json, which frees the old name for
-                # reuse. But an anchor-pinned node (enrolled via `gw invite
-                # --hostname`) may not rename itself — the name is the anchor's.
+                # Rename (gw rename): issue() enforces uniqueness on the new name.
+                # But an anchor-pinned node (enrolled via `gw invite --hostname`)
+                # may not rename itself — the name is the anchor's.
                 if "hostname-pinned" in caps:
                     raise ValueError(
                         "hostname is anchor-pinned for this node; rename disabled "
@@ -247,33 +301,67 @@ class CA:
             )
         return tlsca.cert_pem(cert)
 
-    def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
-        """(hostname, caps) for an enrolled node, or None if unknown."""
-        d = self._read_node(id_pub)
-        if d is None:
-            return None
-        return d.get("hostname", ""), d.get("caps", [])
+    # --- the replicated registry view ---
 
-    def _read_node(self, id_pub: bytes) -> "dict | None":
-        """The full registry record ({hostname, caps, iat, exp}), or None."""
-        p = self._node_path(id_pub)
-        if not p.exists():
+    def _live_record(self, id_pub_hex: str):
+        """The node's directory record, IF its credential is signed by a
+        trusted CA (expired is fine — expiry means "recertify me", and this is
+        the recertification path) and no tombstone ended that membership.
+        Returns the NodeRecord or None."""
+        rec = self._directory.get(id_pub_hex)
+        if rec is None:
             return None
-        return json.loads(p.read_text())
+        try:
+            rec.cred.verify(self._get_ca_pubs(), allow_expired=True)
+        except ValueError:
+            return None
+        if self._statements.is_dead(id_pub_hex, rec.cred.iat):
+            return None
+        return rec
+
+    def node_info(self, id_pub: bytes) -> tuple[str, list[str]] | None:
+        """(hostname, caps) for an enrolled node, or None if unknown. Caps
+        honor the newest setcaps statement when it postdates the credential —
+        the operator's pending change, applied at the next renewal. (A setcaps
+        raced by a renewal at a holder that hadn't synced it yet can be lost
+        for one cycle — re-apply; the ~20s statement gossip makes the window
+        small. Accepted active/active race.)"""
+        hex_id = id_pub.hex()
+        if hex_id in self.load_revoked_set():
+            return None
+        with self._lock:
+            self._gc_recent()
+            entry = self._recent.get(hex_id)
+            if entry is not None:
+                return entry["hostname"], self._caps_for(
+                    hex_id, entry["caps"], entry["iat"])
+        rec = self._live_record(hex_id)
+        if rec is None:
+            return None
+        return rec.cred.hostname, self._caps_for(
+            hex_id, list(rec.cred.caps), rec.cred.iat)
+
+    def _caps_for(self, hex_id: str, cred_caps: list[str],
+                  cred_iat: dt.datetime) -> list[str]:
+        # The newest decision wins: a setcaps at or after the credential's
+        # issuance is the operator's latest wish (>= not >, so a set-caps in
+        # the same second as an issue isn't lost to timestamp granularity);
+        # a credential issued after it — a re-enrollment, whose caps the
+        # anchor chose fresh at the door — supersedes it.
+        override = self._statements.caps_override(hex_id)
+        if override is not None and override[1] >= cred_iat:
+            return override[0]
+        return cred_caps
 
     def set_caps(self, id_pub: bytes, caps: list[str]) -> None:
-        """Rewrite a known node's caps in the registry. Takes effect at the
-        node's NEXT renewal — `renew` re-issues from the registry, so the node
-        picks up the change with no re-join. Raises ValueError if unknown."""
+        """Change a node's caps: mint a replicated setcaps statement. Takes
+        effect at the node's NEXT renewal — served by whichever holder gets
+        it, since the statement reaches them all. Raises if unknown."""
         with self._lock:
-            rec = self._read_node(id_pub)
-            if rec is None:
+            info = self.node_info(id_pub)
+            if info is None:
                 raise UnknownNodeError("unknown node — enroll it first")
-            # Preserve the last-issued exp/iat: a caps edit is not a renewal, so
-            # it must not reset the drop clock (issuance is what refreshes it).
-            self._save_node_caps(id_pub, rec.get("hostname", ""), caps,
-                                 exp=_parse_ts(rec.get("exp")),
-                                 iat=_parse_ts(rec.get("iat")))
+            self._mint("setcaps", id_pub, caps=caps, hostname=info[0])
 
     # --- revoke list ---
 
@@ -281,135 +369,95 @@ class CA:
         return id_pub.hex() in self.load_revoked_set()
 
     def add_revoke(self, id_pub: bytes) -> bool:
-        """Revoke an identity and release its hostname. Returns True if the
-        node's caps record existed and was removed (i.e. a hostname was freed)."""
+        """Revoke an identity and release its hostname. Returns True if a
+        live claim (record or just-issued credential) existed and was ended.
+        Dual-written: a replicated revoke statement (reaches every holder and
+        node) AND the legacy revoked.json (so this holder's /revoked and any
+        pre-statement holder stay correct)."""
         with self._lock:
-            revoked = self.load_revoked_set()
+            revoked = self._load_legacy_revoked()
             revoked.add(id_pub.hex())
             self._save_revoked(revoked)
+            info = self.node_info(id_pub)
+            self._mint("revoke", id_pub,
+                       hostname=info[0] if info else "")
             freed = self.forget_node(id_pub)
         log.info("revoked %s%s", id_pub.hex()[:16],
                  " (hostname freed)" if freed else "")
         return freed
 
     def forget_node(self, id_pub: bytes) -> bool:
-        """Remove the node's caps record (nodes/<id>.json). This is what holds
-        the hostname for uniqueness, so deleting it frees the name for reuse by
-        a different identity. Returns True if a record was actually removed.
-        Safe alongside revocation: a revoked id can't renew anyway, and without
-        a caps record renewal would refuse it regardless."""
-        p = self._node_path(id_pub)
-        try:
-            p.unlink()
-            return True
-        except FileNotFoundError:
-            return False
+        """End this id's membership: mint a tombstone (kills its records
+        everywhere, freeing the hostname for reuse) and drop it from the local
+        view now. A later re-enrollment mints a fresh credential the
+        tombstone doesn't touch. Returns True if a live claim existed."""
+        hex_id = id_pub.hex()
+        with self._lock:
+            had_recent = self._recent.pop(hex_id, None) is not None
+            rec = self._directory.get(hex_id)
+            self._mint("tombstone", id_pub,
+                       hostname=rec.hostname if rec is not None else "")
+            dropped = self._directory.remove(hex_id)
+            if dropped:
+                try:
+                    self._directory.save(self._dir_cache_path)
+                except OSError as e:
+                    log.warning("could not persist directory after forget: %s", e)
+        return had_recent or dropped
 
-    def load_revoked_set(self) -> set[str]:
+    def _mint(self, kind: str, id_pub: bytes, caps: "list[str] | None" = None,
+              hostname: str = "") -> AnchorStatement:
+        """Sign one AnchorStatement, add it to the log, persist the log."""
+        from .statements import statements_path
+        stmt = AnchorStatement(
+            kind=kind, id_pub=id_pub,
+            ts=dt.datetime.now(_UTC).replace(microsecond=0),
+            caps=list(caps or []), hostname=hostname,
+        ).sign(self._keys.ca_priv)
+        self._statements.add(stmt)
+        try:
+            self._statements.save(statements_path(self._data_dir))
+        except OSError as e:
+            log.warning("could not persist statements: %s", e)
+        return stmt
+
+    def _load_legacy_revoked(self) -> set[str]:
         if not self._revoke_path.exists():
             return set()
         return set(json.loads(self._revoke_path.read_text()).get("revoked", []))
+
+    def load_revoked_set(self) -> set[str]:
+        """The full revoke set: legacy revoked.json ∪ replicated revoke
+        statements — so a revocation minted at ANY holder counts here."""
+        return self._load_legacy_revoked() | self._statements.revoked_ids()
 
     def _save_revoked(self, revoked: set[str]) -> None:
         atomic_write(
             self._revoke_path, json.dumps({"revoked": sorted(revoked)}, indent=2)
         )
 
-    # --- node info (for renewal) ---
-
-    def _node_path(self, id_pub: bytes) -> Path:
-        return self._data_dir / "nodes" / f"{id_pub.hex()}.json"
-
-    def _save_node_caps(self, id_pub: bytes, hostname: str, caps: list[str],
-                        exp: "dt.datetime | None" = None,
-                        iat: "dt.datetime | None" = None) -> None:
-        p = self._node_path(id_pub)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        rec = {"hostname": hostname, "caps": caps}
-        # iat/exp track the LAST-ISSUED credential, so drop_stale() knows how
-        # long a node has been gone. Legacy records (pre-drop) have neither;
-        # they're grandfathered until their next renewal writes them.
-        if iat is not None:
-            rec["iat"] = iat.replace(microsecond=0).isoformat()
-        if exp is not None:
-            rec["exp"] = exp.replace(microsecond=0).isoformat()
-        atomic_write(p, json.dumps(rec, indent=2))
-
-    def drop_stale(self, grace: dt.timedelta,
-                   now: "dt.datetime | None" = None,
-                   protect: "str | None" = None) -> list[tuple[str, str]]:
-        """The AUTHORIZATION drop: forget every enrolled node whose last-issued
-        credential expired more than `grace` ago. Since renew() re-issues from
-        the registry, a forgotten node can no longer renew — it must re-enroll
-        through the door (a true re-join, not a reconnect). This bounds the
-        indefinite recert of expired-but-not-revoked nodes so an abandoned fleet
-        (destroyed cloud instances left to expire) is garbage-collected with no
-        manual `gw revoke`. Records without an exp (legacy) are left alone — a
-        renewal will stamp one. `protect` (an id_pub hex) is never dropped: the
-        anchor passes its OWN id, because sweeping itself out of its own
-        registry makes its credential permanently unrenewable and, once the
-        record ages out of the fleet's directories, partitions the whole mesh
-        (a stuck anchor renewal loop is a recoverable outage right up until
-        this sweep makes it a permanent one). Returns the (id_hex, hostname)
-        pairs dropped."""
-        now = now or dt.datetime.now(_UTC)
-        dropped: list[tuple[str, str]] = []
-        nodes_dir = self._data_dir / "nodes"
-        try:
-            entries = [n for n in os.listdir(nodes_dir) if n.endswith(".json")]
-        except FileNotFoundError:
-            return dropped
-        with self._lock:
-            for name in entries:
-                try:
-                    rec = json.loads((nodes_dir / name).read_text())
-                except (OSError, ValueError):
-                    continue
-                exp = _parse_ts(rec.get("exp"))
-                if exp is None or now < exp + grace:
-                    continue
-                id_hex = name[:-len(".json")]
-                if protect is not None and id_hex == protect:
-                    continue
-                try:
-                    self.forget_node(bytes.fromhex(id_hex))
-                except ValueError:
-                    continue
-                dropped.append((id_hex, rec.get("hostname", "")))
-        for id_hex, hostname in dropped:
-            log.info("dropped abandoned node %s [%s] — expired > %s ago; a return "
-                     "requires re-enrollment (renew will no longer recertify it)",
-                     hostname, id_hex[:16], grace)
-        return dropped
-
     def hostname_owner(self, hostname: str) -> str | None:
-        """id_pub hex of the node already using this (sanitized) hostname among
-        the credentials this CA has issued, or None. `gw invite --hostname`
-        uses it to verify a pinned name is free before issuing the token. Note:
-        this tracks the names the CA *issued*; a decommissioned node keeps its
-        name until its nodes/<id>.json is removed."""
+        """id_pub hex of the live node claiming this (sanitized) hostname, or
+        None. A claim is a trusted, un-tombstoned directory record — or a
+        just-issued credential still in this process's overlay. Departed,
+        revoked, and aged-out nodes hold nothing: their claims ended with
+        their records, which is exactly what frees a name for reuse."""
         from .hosts import sanitize
         want = sanitize(hostname)
-        nodes_dir = self._data_dir / "nodes"
-        # List explicitly, not via glob/exists: Path.exists() reads a denied
-        # stat as False and glob can swallow an unreadable dir — both would
-        # turn "you can't read the registry" into "no such node". Only a
-        # genuinely-missing dir means an empty registry.
-        try:
-            entries = sorted(n for n in os.listdir(nodes_dir) if n.endswith(".json"))
-        except FileNotFoundError:
-            return None
-        for p in (nodes_dir / n for n in entries):
-            try:
-                info = json.loads(p.read_text())
-            except PermissionError:
-                # Can't read the registry ≠ node not found. Swallowing this made
-                # a non-root `gw set-segments` report "no node named X" for a
-                # node that exists; propagate so the CLI's handler tells the
-                # truth ("permission denied — try sudo").
-                raise
-            except (OSError, ValueError):
-                continue    # corrupt or concurrently-removed entry: skip it
-            if sanitize(info.get("hostname", "")) == want:
-                return p.stem  # filename is the id_pub hex
+        revoked = self.load_revoked_set()
+        with self._lock:
+            self._gc_recent()
+            for hex_id, entry in self._recent.items():
+                if hex_id in revoked:
+                    continue
+                if sanitize(entry["hostname"]) == want:
+                    return hex_id
+        for rec in self._directory.all():
+            hex_id = rec.id_pub.hex()
+            if hex_id in revoked:
+                continue
+            if sanitize(rec.cred.hostname) != want:
+                continue
+            if self._live_record(hex_id) is not None:
+                return hex_id
         return None

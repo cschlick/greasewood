@@ -232,11 +232,17 @@ class SyncLoop(Loop):
             pass
 
     def _pull_once(self) -> None:
-        # Re-merge the cache file first so records written directly to disk
+        # Re-merge the cache files first so records — and statements minted by
+        # a one-shot CLI (`gw revoke`, `gw set-roles`) into statements.json —
         # are picked up without a daemon restart.
         from .directory import Directory as _Dir
         on_disk = _Dir.load(self._cache_path)
         self._directory.merge(on_disk.all())
+        if self._statements is not None:
+            from .statements import StatementLog as _SL, statements_path
+            disk_stmts = _SL.load(statements_path(self._cache_path.parent),
+                                  self._get_ca_pubs())
+            self._statements.merge(disk_stmts.all(), self._get_ca_pubs())
 
         # Shed records that have been expired past the fleet drop deadline —
         # merge() already refuses stale INCOMING records; this drops resident

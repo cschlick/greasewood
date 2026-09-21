@@ -1,8 +1,11 @@
 """
 Unit tests for `gw revoke` (cmd_revoke) — the CLI wrapper around CA.add_revoke.
 Covers the happy path (id added to revoked.json + hostname freed), bad-hex
-validation, and the missing-ca_key_file refusal.
+validation, and the missing-ca_key_file refusal. Enrollment state is what it
+is in production: the node's record in the on-disk directory cache — the CLI
+builds its CA view from exactly that.
 """
+import datetime as dt
 import json
 import types
 
@@ -10,7 +13,23 @@ import pytest
 
 from greasewood import cli
 from greasewood.ca import CA
-from greasewood.keys import CAKeys, NodeKeys
+from greasewood.directory import Directory
+from greasewood.keys import CAKeys, NodeKeys, derive_addr
+from greasewood.wire import Credential, NodeRecord
+
+
+def _enroll(ca_keys, tmp_path, node, hostname, caps=("mesh",)):
+    """Put the node's record in the on-disk directory cache — the replicated
+    state a real enrollment leaves behind, and what the CLI resolves from."""
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    cred = Credential(id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
+                      addr=derive_addr(node.id_pub_bytes), hostname=hostname,
+                      caps=list(caps), iat=now,
+                      exp=now + dt.timedelta(hours=24)).sign(ca_keys.ca_priv)
+    d = Directory.load(tmp_path / "directory.json")
+    d.put(NodeRecord(id_pub=node.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred).sign(node.id_priv))
+    d.save(tmp_path / "directory.json")
 
 
 def _anchor_cfg(tmp_path, ca_key):
@@ -34,10 +53,9 @@ def test_revoke_adds_id_and_frees_hostname(tmp_path, capsys, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    # Issue a node first so nodes/<id>.json exists → revoke frees its hostname.
-    ca = CA(ca_keys, tmp_path)
+    # Enroll a node (its record in the directory) → revoke frees its hostname.
     node = NodeKeys.generate()
-    ca.issue(node.id_pub_bytes, node.wg_pub_bytes, "db", ["mesh"])
+    _enroll(ca_keys, tmp_path, node, "db")
 
     cfg = _anchor_cfg(tmp_path, ca_key)
     args = types.SimpleNamespace(config=str(cfg), node=node.id_pub_hex)
@@ -56,10 +74,9 @@ def test_revoke_by_hostname(tmp_path, capsys, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    ca = CA(ca_keys, tmp_path)
     a, b = NodeKeys.generate(), NodeKeys.generate()
-    ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "db01", ["mesh"])
-    ca.issue(b.id_pub_bytes, b.wg_pub_bytes, "web1", ["mesh"])
+    _enroll(ca_keys, tmp_path, a, "db01")
+    _enroll(ca_keys, tmp_path, b, "web1")
     cfg = _anchor_cfg(tmp_path, ca_key)     # mesh_domain = test.internal
 
     assert cli.cmd_revoke(types.SimpleNamespace(config=str(cfg), node="db01")) == 0
@@ -79,7 +96,6 @@ def test_revoke_raw_id_not_enrolled(tmp_path, capsys, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    CA(ca_keys, tmp_path)                    # empty registry
     cfg = _anchor_cfg(tmp_path, ca_key)
     stray = "ab" * 32
     assert cli.cmd_revoke(types.SimpleNamespace(config=str(cfg), node=stray)) == 0
@@ -91,7 +107,6 @@ def test_revoke_unknown_hostname_exits(tmp_path, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    CA(ca_keys, tmp_path)
     cfg = _anchor_cfg(tmp_path, ca_key)
     with pytest.raises(SystemExit) as e:
         cli.cmd_revoke(types.SimpleNamespace(config=str(cfg), node="ghost"))
@@ -105,9 +120,8 @@ def test_set_caps_and_roles_echo_resolved_id(tmp_path, capsys, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    ca = CA(ca_keys, tmp_path)
     n = NodeKeys.generate()
-    ca.issue(n.id_pub_bytes, n.wg_pub_bytes, "db01", ["role:mesh"])
+    _enroll(ca_keys, tmp_path, n, "db01", caps=["role:mesh"])
     cfg = _anchor_cfg(tmp_path, ca_key)     # mesh_domain = test.internal
 
     assert cli.cmd_set_caps(types.SimpleNamespace(
@@ -128,9 +142,8 @@ def test_set_roles_now_requests_fleet_renewal(tmp_path, capsys, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    ca = CA(ca_keys, tmp_path)
     n = NodeKeys.generate()
-    ca.issue(n.id_pub_bytes, n.wg_pub_bytes, "db01", ["role:mesh"])
+    _enroll(ca_keys, tmp_path, n, "db01", caps=["role:mesh"])
     cfg = _anchor_cfg(tmp_path, ca_key)
     renew_after = tmp_path / "renew_after"
 
@@ -178,9 +191,8 @@ def test_revoke_writes_durable_membership_event(tmp_path, monkeypatch):
     ca_keys = CAKeys.generate()
     ca_key = tmp_path / "ca.key"
     ca_keys.save(ca_key)
-    ca = CA(ca_keys, tmp_path)
     node = NodeKeys.generate()
-    ca.issue(node.id_pub_bytes, node.wg_pub_bytes, "db", ["mesh"])
+    _enroll(ca_keys, tmp_path, node, "db")
 
     args = types.SimpleNamespace(config=str(_anchor_cfg(tmp_path, ca_key)),
                                  node=node.id_pub_hex)

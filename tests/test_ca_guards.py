@@ -123,17 +123,17 @@ def test_hostname_owner_and_collision(tmp_path):
     ca.issue(a.id_pub_bytes, a.wg_pub_bytes, "web1", ["mesh"])
 
 
-def test_unknown_node_is_typed_not_prose():
-    """Regression: the control plane's re-root fallback fired on the exception
-    MESSAGE text ('unknown node' in str(e)); it now keys on UnknownNodeError,
-    so rewording a message can't silently disable a security-relevant path."""
-    from greasewood.ca import CA, UnknownNodeError
-    import inspect
-    from greasewood import server
+def test_unknown_node_is_typed_not_prose(tmp_path):
+    """UnknownNodeError stays a typed ValueError subclass: callers that need
+    to distinguish "nothing to renew from" (re-enroll) from other refusals
+    key on the type, never on message prose. (The old re-root fallback that
+    motivated the type is gone — renew itself now reads the trusted record —
+    but the typed contract survives it.)"""
+    from greasewood.ca import UnknownNodeError
     assert issubclass(UnknownNodeError, ValueError)   # old catches still work
-    src = inspect.getsource(server._Handler._reroot_reissue)
-    assert "isinstance(orig_err, UnknownNodeError)" in src
-    assert '"unknown node" not in' not in src         # the prose gate is gone
+    ca = _ca(tmp_path)
+    with pytest.raises(UnknownNodeError):
+        ca.renew(_req(NodeKeys.generate()))
 
 
 # --- stale-key guard (key_file) -------------------------------------------

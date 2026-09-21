@@ -47,11 +47,11 @@ def test_set_roles_refuses_anchor(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_require_root", lambda *a, **k: None)
     cfg = _anchor_cfg(tmp_path)
     # enroll a real node so _resolve_node finds it
-    from greasewood.ca import CA
     from greasewood.keys import CAKeys, NodeKeys
-    ca = CA(CAKeys.load(tmp_path / "ca.key"), tmp_path)
+    from tests._membership import enroll_record
     nk = NodeKeys.generate()
-    ca.issue(nk.id_pub_bytes, nk.wg_pub_bytes, "n1", ["role:node"])
+    enroll_record(CAKeys.load(tmp_path / "ca.key"), tmp_path, nk, "n1",
+                  caps=["role:node"])
     args = types.SimpleNamespace(config=str(cfg), node="n1", roles="anchor", now=False)
     with pytest.raises(SystemExit, match="reserved for the anchor"):
         cli.cmd_set_roles(args)
@@ -60,11 +60,11 @@ def test_set_roles_refuses_anchor(tmp_path, monkeypatch):
 def test_set_caps_refuses_role_star(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_require_root", lambda *a, **k: None)
     cfg = _anchor_cfg(tmp_path)
-    from greasewood.ca import CA
     from greasewood.keys import CAKeys, NodeKeys
-    ca = CA(CAKeys.load(tmp_path / "ca.key"), tmp_path)
+    from tests._membership import enroll_record
     nk = NodeKeys.generate()
-    ca.issue(nk.id_pub_bytes, nk.wg_pub_bytes, "n1", ["role:node"])
+    enroll_record(CAKeys.load(tmp_path / "ca.key"), tmp_path, nk, "n1",
+                  caps=["role:node"])
     args = types.SimpleNamespace(config=str(cfg), node="n1", caps="role:*,tls")
     with pytest.raises(SystemExit, match="reserved for the anchor"):
         cli.cmd_set_caps(args)

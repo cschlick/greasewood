@@ -54,13 +54,11 @@ def test_concurrent_same_hostname_issue_yields_one_owner(tmp_path):
     results = _run_barrier(len(nodes), claim)
     ok = [r for r in results if r[0] == "ok"]
 
-    # The authoritative check: exactly one registry file claims the name.
-    owners = []
-    for p in (tmp_path / "nodes").glob("*.json"):
-        if json.loads(p.read_text()).get("hostname") == "dbmaster":
-            owners.append(p.stem)
-    assert len(owners) == 1, f"{len(owners)} nodes claimed 'dbmaster' (want 1)"
+    # The authoritative check: exactly one issue succeeded, and the CA's
+    # hostname claim (the just-issued overlay that bridges the gap until the
+    # winner's record lands in the directory) names exactly that winner.
     assert len(ok) == 1, f"{len(ok)} issue() calls succeeded (want 1)"
+    assert ca.hostname_owner("dbmaster") == ok[0][1].id_pub.hex()
 
 
 def test_atomic_write_survives_concurrent_writers(tmp_path):

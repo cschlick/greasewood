@@ -217,7 +217,10 @@ class TestRerootReissue:
         srv = ControlServer(
             listen="[::1]:0", directory=directory,
             get_ca_pubs=lambda: [c.ca_pub_bytes for c in trusted],
-            get_revoked=set, ca=CA(b_ca, tmp_path),
+            get_revoked=set,
+            ca=CA(b_ca, tmp_path, directory=directory,
+                  get_ca_pubs=lambda: [b_ca.ca_pub_bytes]
+                  + [c.ca_pub_bytes for c in trusted]),
         )
         return srv, srv._server.server_address[1], b_ca
 
@@ -459,9 +462,9 @@ class TestRenewEndpoint:
         directory = Directory()
         directory.put(record)
 
-        ca_obj = CA(ca, tmp_path)
-        # Pre-populate node caps so renewal works
-        ca_obj._save_node_caps(node.id_pub_bytes, "test-node", ["mesh"])
+        # Renewal re-issues from the node's record in the SHARED directory.
+        ca_obj = CA(ca, tmp_path, directory=directory,
+                    get_ca_pubs=lambda: [ca.ca_pub_bytes])
 
         srv = ControlServer(
             listen="[::1]:0",
@@ -508,8 +511,8 @@ class TestRenewalPropagation:
 
         anchor_dir = Directory()          # the anchor's directory
         anchor_dir.put(record)            # node's initial (seq=1) record on the anchor
-        ca_obj = CA(ca, tmp_path)
-        ca_obj._save_node_caps(node.id_pub_bytes, "test-node", ["mesh"])
+        ca_obj = CA(ca, tmp_path, directory=anchor_dir,
+                    get_ca_pubs=lambda: [ca.ca_pub_bytes])
 
         srv = ControlServer(
             listen="[::1]:0", directory=anchor_dir,
@@ -719,8 +722,8 @@ class TestLeaveEndpoint:
         record = _make_record(node, _make_cred(node, ca))
         directory = Directory()
         directory.put(record)
-        ca_obj = CA(ca, tmp_path)
-        ca_obj._save_node_caps(node.id_pub_bytes, "leaver", ["mesh"])
+        ca_obj = CA(ca, tmp_path, directory=directory,
+                    get_ca_pubs=lambda: [ca.ca_pub_bytes])
         cache = tmp_path / "directory.json"
         srv = ControlServer(
             listen="[::1]:0", directory=directory,

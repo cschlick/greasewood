@@ -138,33 +138,31 @@ def test_renew_does_not_self_conflict(tmp_path):
     ca.renew(req)  # no raise — renewal re-issues for the same id
 
 @pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root ignores file perms")
-def test_hostname_owner_unreadable_registry_raises_not_lies(tmp_path):
-    """An unreadable registry must surface PermissionError (the CLI turns it
-    into 'try sudo'), NOT read as 'no node named X' — swallowing it made a
-    non-root `gw set-segments <name>` deny an existing node's existence."""
-    import os
-    ca = _ca(tmp_path)
-    id1, wg1 = _node()
-    ca.issue(id1, wg1, "chat01", ["mesh"])
-    assert ca.hostname_owner("chat01") == id1.hex()
-
-    node_file = next((tmp_path / "nodes").glob("*.json"))
-    os.chmod(node_file, 0o000)                 # registry entry unreadable
-    try:
-        with pytest.raises(PermissionError):
-            ca.hostname_owner("chat01")
-    finally:
-        os.chmod(node_file, 0o600)
-
-    os.chmod(tmp_path / "nodes", 0o000)        # whole registry dir unreadable
-    try:
-        with pytest.raises(PermissionError):
-            ca.hostname_owner("chat01")
-    finally:
-        os.chmod(tmp_path / "nodes", 0o700)
+def test_hostname_owner_reads_replicated_records(tmp_path):
+    """The name→id map is the DIRECTORY now (records are the registry): a CA
+    built over a directory holding a node's record resolves its hostname —
+    across processes and holders, with no private per-anchor file. This is
+    what lets `gw revoke <name>` / `gw set-roles` run on ANY holder."""
+    import datetime as dt
+    from greasewood.directory import Directory
+    from greasewood.keys import NodeKeys, derive_addr
+    from greasewood.wire import Credential, NodeRecord
+    ca_keys = CAKeys.generate()
+    k = NodeKeys.generate()
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                      addr=derive_addr(k.id_pub_bytes), hostname="chat01",
+                      caps=["mesh"], iat=now,
+                      exp=now + dt.timedelta(hours=24)).sign(ca_keys.ca_priv)
+    d = Directory()
+    d.put(NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred).sign(k.id_priv))
+    ca = CA(ca_keys, tmp_path, directory=d)
+    assert ca.hostname_owner("chat01") == k.id_pub_hex
+    assert ca.node_info(k.id_pub_bytes) == ("chat01", ["mesh"])
 
 
-def test_hostname_owner_missing_dir_is_empty_not_error(tmp_path):
-    """No nodes/ dir at all = genuinely empty registry → None, no error."""
-    ca = _ca(tmp_path)                          # nothing issued, no nodes/
+def test_hostname_owner_empty_view_is_empty_not_error(tmp_path):
+    """No records, no overlay = genuinely empty view → None, no error."""
+    ca = _ca(tmp_path)                          # nothing issued, empty directory
     assert ca.hostname_owner("anything") is None

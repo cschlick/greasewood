@@ -248,16 +248,14 @@ class _Handler(BaseHTTPRequestHandler):
         hex_id = req.id_pub.hex()
         rec = self.directory.get(hex_id)
         who = rec.hostname if rec is not None else hex_id[:16]
+        had_record = rec is not None
+        # forget_node mints the replicated tombstone (which is what carries
+        # this departure to every OTHER holder and node), drops the record
+        # from this holder's view, and persists.
         freed = self.ca.forget_node(req.id_pub)
-        dropped = self.directory.remove(hex_id)
-        if dropped and self.cache_path is not None:
-            try:
-                self.directory.save(self.cache_path)
-            except Exception as e:
-                log.warning("failed to persist directory after leave: %s", e)
         from . import audit as _audit
         _audit.event("leave", node=who, id=hex_id[:16],
-                     hostname_freed=freed, record_dropped=dropped)
+                     hostname_freed=freed, record_dropped=had_record)
         log.info("node left voluntarily: %s (hostname freed: %s)", who, freed)
         self._send_json({"status": "left", "hostname_freed": freed})
 
@@ -275,42 +273,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "replay detected (nonce already used)"}, 400)
             return
         try:
+            # CA.renew re-issues from the node's trusted directory record —
+            # which already IS the re-root path: during a CA-migration
+            # overlap, the new CA recertifies the outgoing CA's nodes from
+            # their records with no special fallback here.
             cred = self.ca.renew(req)
         except ValueError as e:
-            cred = self._reroot_reissue(req, e)
-            if cred is None:
-                log.warning("renew rejected: %s", e)
-                self._send_json({"error": str(e)}, 400)
-                return
+            log.warning("renew rejected: %s", e)
+            self._send_json({"error": str(e)}, 400)
+            return
         self._send_json(cred.to_dict())
-
-    def _reroot_reissue(self, req, orig_err):
-        """Re-root fallback. This anchor never enrolled the requester (no local
-        node_info), but a *manual re-root* points existing nodes at a new anchor
-        that didn't issue them. If we hold a directory record for that identity
-        signed by a currently-trusted CA — the outgoing anchor, during the overlap
-        window — re-issue under THIS CA using the record's CA-attested (level-b)
-        hostname + caps. Returns the new Credential, or None to surface the
-        original error.
-
-        Only fires for 'unknown node' — auth, skew, replay, and revocation were
-        already enforced above / in ca.renew. Safe because: the record's cred is
-        verified against the trusted CA set (an attacker can't forge caps/name
-        without a trusted CA key), and the requester proved id_priv possession.
-        """
-        from .ca import UnknownNodeError
-        if not isinstance(orig_err, UnknownNodeError):
-            return None
-        rec = self.directory.get(req.id_pub.hex())
-        if rec is None or rec.cred.id_pub != req.id_pub:
-            return None
-        try:
-            rec.cred.verify(self.get_ca_pubs())   # signed by a currently-trusted CA
-        except ValueError:
-            return None
-        log.info("re-root: re-issuing %s (hostname=%s) from a trusted record",
-                 req.id_pub.hex()[:16], rec.hostname)
-        return self.ca.issue(req.id_pub, req.wg_pub, rec.hostname, list(rec.cred.caps))
 
     def _handle_cert(self, body: dict) -> None:
         import datetime as _dt

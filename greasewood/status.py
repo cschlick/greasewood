@@ -1012,9 +1012,12 @@ def _make_role_applier(cfg):
         from .policy import (GRANTS_BASENAME, parse_assignments,
                              rewrite_assignment, apply_assignments)
         from . import cli as _cli                 # lazy: cli imports status
+        _pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
         ca = CA(CAKeys.load(cfg.ca_key_file,
                             _cli._get_passphrase(cfg.ca_key_passphrase_env)),
-                cfg.data_dir, cfg.credential_ttl)
+                cfg.data_dir, cfg.credential_ttl,
+                dir_cache_path=getattr(cfg, "dir_cache_path", None),
+                get_ca_pubs=(lambda p=_pubs: p) if _pubs else None)
         host = node["hostname"]
         gpath = cfg.data_dir / GRANTS_BASENAME
         declared = None
@@ -1111,9 +1114,12 @@ def _make_revoker(cfg):
         from .ca import CA
         from .keys import CAKeys
         from . import cli as _cli                 # lazy: cli imports status
+        _pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
         ca = CA(CAKeys.load(cfg.ca_key_file,
                             _cli._get_passphrase(cfg.ca_key_passphrase_env)),
-                cfg.data_dir, cfg.credential_ttl)
+                cfg.data_dir, cfg.credential_ttl,
+                dir_cache_path=getattr(cfg, "dir_cache_path", None),
+                get_ca_pubs=(lambda p=_pubs: p) if _pubs else None)
         host = node["hostname"]
         freed = ca.add_revoke(bytes.fromhex(node["id"]))
         return (f"✓ revoked {host} — the daemon evicts it on its next "

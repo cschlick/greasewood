@@ -719,7 +719,8 @@ def test_make_role_applier_anchor_only_and_real_registry(tmp_path):
     kf = tmp_path / "ca.key"
     keys.save(kf)
     k = NodeKeys.generate()
-    CA(keys, tmp_path).issue(k.id_pub_bytes, k.wg_pub_bytes, "nas", ["role:node", "tls"])
+    from tests._membership import enroll_record
+    enroll_record(keys, tmp_path, k, "nas", caps=["role:node", "tls"])
     cfg = _t.SimpleNamespace(role="anchor", ca_key_file=kf, data_dir=tmp_path,
                              credential_ttl=dt.timedelta(hours=24),
                              ca_key_passphrase_env=None)
@@ -830,15 +831,16 @@ def test_make_revoker_real_ca(tmp_path):
     kf = tmp_path / "ca.key"
     keys.save(kf)
     k = NodeKeys.generate()
-    ca = CA(keys, tmp_path)
-    ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "bb", ["role:node"])
+    from tests._membership import enroll_record
+    enroll_record(keys, tmp_path, k, "bb", caps=["role:node"])
     cfg = _t.SimpleNamespace(role="anchor", ca_key_file=kf, data_dir=tmp_path,
                              credential_ttl=dt.timedelta(hours=24),
                              ca_key_passphrase_env=None)
     msg = _make_revoker(cfg)({"id": k.id_pub_bytes.hex(), "hostname": "bb"})
     assert msg.startswith("✓ revoked bb") and "free for reuse" in msg
-    assert CA(keys, tmp_path).is_revoked(k.id_pub_bytes)
-    assert ca.hostname_owner("bb") is None              # name actually freed
+    fresh = CA(keys, tmp_path)                          # re-reads the shared state
+    assert fresh.is_revoked(k.id_pub_bytes)
+    assert fresh.hostname_owner("bb") is None           # name actually freed
 
 
 def test_help_overlay_shows_keys_and_commands_and_any_key_closes():

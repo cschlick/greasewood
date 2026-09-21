@@ -31,13 +31,19 @@ def _anchor_cfg(tmp_path):
 
 
 def _enroll(tmp_path, name, caps):
-    ca = CA(CAKeys.load(tmp_path / "ca.key"), tmp_path)
+    """Seed the node's record in the on-disk directory (the replicated
+    membership state the CLI resolves from). Returns (tmp_path, nk) — the
+    first element feeds _roles_of, which builds a FRESH CA view so it sees
+    the setcaps statements the CLI process minted to disk."""
+    from tests._membership import enroll_record
+    ca_keys = CAKeys.load(tmp_path / "ca.key")
     nk = NodeKeys.generate()
-    ca.issue(nk.id_pub_bytes, nk.wg_pub_bytes, name, caps)
-    return ca, nk
+    enroll_record(ca_keys, tmp_path, nk, name, caps=caps)
+    return tmp_path, nk
 
 
-def _roles_of(ca, nk):
+def _roles_of(tmp_path, nk):
+    ca = CA(CAKeys.load(tmp_path / "ca.key"), tmp_path)
     _, caps = ca.node_info(nk.id_pub_bytes)
     return sorted(c[len("role:"):] for c in caps if c.startswith("role:"))
 
@@ -80,7 +86,7 @@ def test_set_roles_keeps_non_role_caps(tmp_path, monkeypatch):
     cfg = _anchor_cfg(tmp_path)
     ca, nk = _enroll(tmp_path, "gp2", ["role:node", "tls"])
     cli.cmd_set_roles(_args(cfg, node="gp2", roles="admin"))
-    _, caps = ca.node_info(nk.id_pub_bytes)
+    _, caps = CA(CAKeys.load(tmp_path / "ca.key"), tmp_path).node_info(nk.id_pub_bytes)
     assert "tls" in caps
     assert _roles_of(ca, nk) == ["admin", "node"]
 

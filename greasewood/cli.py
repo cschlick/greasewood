@@ -1007,7 +1007,8 @@ def cmd_invite(args) -> int:
         # at enrollment (the joiner can't fix a name it didn't pick). Unpinned
         # names are still checked at enroll, where the node can retry a new one.
         from .ca import CA as _CA
-        owner = _CA(ca_keys, data_dir).hostname_owner(pinned_hostname)
+        owner = _CA(ca_keys, data_dir,
+                    dir_cache_path=cfg.dir_cache_path).hostname_owner(pinned_hostname)
         if owner is not None and not getattr(args, "allow_existing_hostname", False):
             sys.exit(
                 f"hostname {pinned_hostname!r} is already in use (node {owner[:16]}…). "
@@ -2314,22 +2315,30 @@ def cmd_revoke(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _load_anchor_ca(args, cmd: str):
-    """Shared setup for anchor-side registry commands: load config + CA."""
+    """Shared setup for anchor-side membership commands: load config + CA.
+    The CA reads its view from the on-disk directory/statement caches the
+    daemon maintains, and any statement it mints lands in statements.json —
+    where the daemon's sync loop re-merges it within a cycle (and every other
+    holder within a pull), so no restart is needed for the decision to
+    propagate."""
     from .config import load_config
     from .keys import CAKeys
     from .ca import CA
-    # Gate up front: the registry (nodes/*.json) and CA key are root-owned, and
-    # these commands write them. Without this, a non-root run fails partway with
+    # Gate up front: the CA key and statement log are root-owned, and these
+    # commands write them. Without this, a non-root run fails partway with
     # whatever file access breaks first — historically misread as the node not
     # existing at all.
-    _require_root(cmd, "it reads and writes the anchor's registry and CA key")
+    _require_root(cmd, "it reads and writes the anchor's state and CA key")
     cfg = load_config(Path(args.config))
     if cfg.role != "anchor":
         sys.exit(f"gw {cmd} must be run on the anchor (role = anchor)")
     if cfg.ca_key_file is None:
         sys.exit(f"{cmd} requires ca_key_file in [anchor]")
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    return cfg, CA(ca_keys, cfg.data_dir)
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+    return cfg, CA(ca_keys, cfg.data_dir,
+                   get_ca_pubs=lambda: ca_pubs or [ca_keys.ca_pub_bytes],
+                   dir_cache_path=cfg.dir_cache_path)
 
 
 def _resolve_node(ca, cfg, handle: str, *, require_enrolled: bool = True):
@@ -3308,7 +3317,8 @@ def cmd_rename_node(args) -> int:
 # run
 # ---------------------------------------------------------------------------
 
-def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy):
+def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
+                                stmt_log):
     """Bring up the anchor-only services and return (get_revoked, door_watcher):
     load the CA, start the HTTP control plane, and start the enrollment door
     watcher. get_revoked is the live revoke-list reader the reconcile loop uses;
@@ -3324,9 +3334,12 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
         _daemon_fatal(cfg, "anchor role requires ca_key_file in [anchor]")
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
     # key_file arms the stale-key guard: this CA lives as long as the daemon,
-    # and must refuse to sign if ca.key changes on disk underneath it.
+    # and must refuse to sign if ca.key changes on disk underneath it. The
+    # live directory + statement log ARE the registry view it issues from.
     ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl,
-            key_file=Path(cfg.ca_key_file))
+            key_file=Path(cfg.ca_key_file),
+            directory=directory, statements=stmt_log,
+            get_ca_pubs=get_ca_pubs, dir_cache_path=cfg.dir_cache_path)
     get_revoked = ca.load_revoked_set
     log.info("CA loaded, pub=%s...", ca_keys.ca_pub_bytes.hex()[:16])
     # Re-apply door routing in case the machine rebooted since create.
@@ -3376,7 +3389,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
             listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
             ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
             mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
-            get_policy=read_policy)
+            get_policy=read_policy, statements=stmt_log)
     except ControlPlaneAddrInUse as e:
         _daemon_fatal(cfg, f"anchor control plane can't start: {e}")
     server.start()
@@ -3391,13 +3404,14 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy)
     door_watcher.start()
     log.info("door watcher started")
 
-    # Garbage-collect abandoned nodes: the CA stops recertifying (and the
-    # directory sheds) any node that's been expired longer than drop_grace, so a
-    # churned cloud fleet left to expire is forgotten without manual `gw revoke`.
+    # Garbage-collect abandoned nodes: past the fleet drop grace an aged-out
+    # record is pruned, which ends both its visibility and its ability to
+    # renew (renewal re-issues from the record) — a churned cloud fleet left
+    # to expire is forgotten without manual `gw revoke`.
     from .sweep import StaleSweep
-    StaleSweep(ca, directory, cfg.drop_grace, cfg.dir_cache_path,
+    StaleSweep(directory, cfg.dir_cache_path, statements=stmt_log,
                protect=keys.id_pub_hex).start()
-    log.info("stale-node sweep started (drop_grace=%s)", cfg.drop_grace)
+    log.info("stale-node sweep started")
     return get_revoked, door_watcher
 
 
@@ -3492,19 +3506,19 @@ def cmd_run(args) -> int:
                                get_ca_pubs=get_ca_pubs)
     grant_policy.load_cache()
 
-    if cfg.role == "anchor":
-        get_revoked, door_watcher = _start_anchor_control_plane(
-            cfg, keys, directory, get_ca_pubs, grant_policy)
-    else:
-        # Start from the cached copy (if any) and let the SyncLoop refresh it.
-        get_revoked = lambda: _load_revoked(cfg)
-
     # The replicated membership-decision log (revoke/tombstone/setcaps
     # statements — see greasewood.statements). Loaded on every role: plain
     # nodes merge and apply what holders decide; holders additionally mint
     # into it and serve it. Load re-verifies against the CURRENT trusted set.
     from .statements import StatementLog, statements_path
     stmt_log = StatementLog.load(statements_path(cfg.data_dir), get_ca_pubs())
+
+    if cfg.role == "anchor":
+        get_revoked, door_watcher = _start_anchor_control_plane(
+            cfg, keys, directory, get_ca_pubs, grant_policy, stmt_log)
+    else:
+        # Start from the cached copy (if any) and let the SyncLoop refresh it.
+        get_revoked = lambda: _load_revoked(cfg)
 
     # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval
@@ -4080,7 +4094,8 @@ def cmd_policy(args) -> int:
     if assignments is not None:
         from .ca import CA as _CA
         changed, _missing = polmod.apply_assignments(
-            assignments, _CA(ca_keys, cfg.data_dir, cfg.credential_ttl))
+            assignments, _CA(ca_keys, cfg.data_dir, cfg.credential_ttl,
+                             dir_cache_path=cfg.dir_cache_path))
         for host, old, new in changed:
             print(f"  ~ roles {host}: {', '.join(old) or '(none)'} → "
                   f"{', '.join(new) or '(none)'}")
@@ -4250,11 +4265,10 @@ def cmd_anchor_backup(args) -> int:
               "high-entropy passphrase (a diceware phrase is ideal).")
     blob = bak.pack(files, passphrase)
 
-    node_count = sum(1 for n in files if n.startswith("nodes/"))
     if to_stdout:
         sys.stdout.buffer.write(blob)          # binary to stdout; notes to stderr
         sys.stdout.buffer.flush()
-        print(f"streamed anchor backup ({node_count} node(s))", file=sys.stderr)
+        print(f"streamed anchor backup ({len(files)} file(s))", file=sys.stderr)
         return 0
 
     out = Path(args.out) if args.out else \
@@ -4262,7 +4276,9 @@ def cmd_anchor_backup(args) -> int:
     from .keys import atomic_write
     atomic_write(Path(out), blob)          # 0600, atomic: the fleet's root key
     print(f"wrote encrypted anchor backup → {out}")
-    print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
+    print("  CA key + identity + statements/revoke list + door key "
+          "(membership itself lives in the replicated directory — every "
+          "node's record IS its registry entry)")
     print("Store it OFFLINE. Anyone with this file AND the passphrase can "
           "impersonate your CA. Test-restore it before you rely on it.")
     return 0
@@ -4290,9 +4306,10 @@ def cmd_anchor_restore(args) -> int:
     except bak.BackupError as e:
         sys.exit(f"restore failed: {e}")
 
-    node_count = sum(1 for n in written if n.startswith("nodes/"))
     print(f"restored {len(written)} file(s) into {data_dir}")
-    print(f"  CA key + {node_count} enrolled node(s) + revoke list + door key")
+    print("  CA key + identity + statements/revoke list + door key "
+          "(membership itself lives in the replicated directory — every "
+          "node's record IS its registry entry)")
     print("Next: write /etc/greasewood.toml pointing ca_key_file at "
           f"{data_dir / 'ca.key'} (role = anchor), then `sudo gw run`. Because the "
           "CA key is unchanged, existing nodes keep trusting it — no re-root.")
@@ -4361,20 +4378,22 @@ def cmd_anchor_activate(args) -> int:
     if not ca_key_path.exists():
         sys.exit("CA key was not written from the failover blob")
 
-    # Rebuild the anchor's nodes/ registry from the cached directory.
+    # No registry to rebuild: every node's (hostname, caps) live in its
+    # replicated record, which this node's directory cache already holds —
+    # renewal re-issues straight from those. The one change to make is OURS:
+    # this node is becoming an anchor, so mint the setcaps statement that
+    # grants it the anchor roles at its next renewal.
     ca_keys = CAKeys.load(ca_key_path)
-    ca = CA(ca_keys, data_dir, credential_ttl=_parse_duration(args.credential_ttl))
-    directory = Directory.load(cfg.dir_cache_path)
+    ca = CA(ca_keys, data_dir, credential_ttl=_parse_duration(args.credential_ttl),
+            dir_cache_path=cfg.dir_cache_path)
     node_keys = NodeKeys.load_or_generate(data_dir)
-    for rec in directory.all():
-        caps = list(rec.cred.caps)
-        if rec.id_pub == node_keys.id_pub_bytes:
-            # This node is becoming the anchor; ensure it has the anchor roles.
-            for c in ("role:*", "role:anchor"):
-                if c not in caps:
-                    caps.append(c)
-        ca._save_node_caps(rec.id_pub, rec.cred.hostname, caps,
-                           exp=rec.cred.exp, iat=rec.cred.iat)
+    own = ca.node_info(node_keys.id_pub_bytes)
+    if own is not None:
+        caps = list(own[1])
+        for c in ("role:*", "role:anchor"):
+            if c not in caps:
+                caps.append(c)
+        ca.set_caps(node_keys.id_pub_bytes, caps)
 
     # Rewrite this node's config as an anchor.
     control_port = args.control_port
@@ -4426,17 +4445,19 @@ def cmd_anchor_standby(args) -> int:
         sys.exit("anchor-standby requires ca_key_file in [anchor]")
 
     ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
-    ca = CA(ca_keys, cfg.data_dir)
+    _pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+    ca = CA(ca_keys, cfg.data_dir, dir_cache_path=cfg.dir_cache_path,
+            get_ca_pubs=lambda: _pubs or [ca_keys.ca_pub_bytes])
 
     hostname = args.hostname
     owner_hex = ca.hostname_owner(hostname)
     if owner_hex is None:
         sys.exit(f"no enrolled node named {hostname!r} — use `gw invite` for a new node")
-    rec = ca._read_node(bytes.fromhex(owner_hex))
-    if rec is None:
-        sys.exit(f"registry record missing for {hostname!r}")
+    info = ca.node_info(bytes.fromhex(owner_hex))
+    if info is None:
+        sys.exit(f"no live record for {hostname!r}")
 
-    current_caps = list(rec.get("caps", []))
+    current_caps = list(info[1])
     extras = [c.strip() for c in args.caps.split(",") if c.strip()] if args.caps else []
     new_caps = list(dict.fromkeys(current_caps + extras + ["failover"]))
 

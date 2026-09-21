@@ -1,20 +1,19 @@
 """
-greasewood.sweep — the anchor's abandoned-node garbage collector.
+greasewood.sweep — the holder's abandoned-node garbage collector.
 
 Expiry is liveness, not death: an expired-but-not-revoked node is admitted by
-the anchor to recertify itself (see reconcile / renewal). That recert is
+holders to recertify itself (see reconcile / renewal). That recert is
 deliberately unbounded in the short term so a node asleep past its TTL heals
-automatically — but left unbounded forever it means the anchor keeps a
-permanent, ever-growing registry of nodes that will never return (destroyed
-cloud instances left to expire). This loop puts a ceiling on it:
+automatically — but left unbounded forever the fleet would carry records for
+nodes that will never return (destroyed cloud instances left to expire).
 
-  * CA registry (authorization): forget any node whose last-issued credential
-    expired more than `drop_grace` ago — renew() re-issues from the registry, so
-    a forgotten node can no longer renew and must re-enroll through the door.
-  * Directory (visibility): prune the same long-expired records from the served
-    directory so they age out of the fleet's caches (DROP_GRACE, the fleet
-    constant — the anchor is the sync source, so its prune is what lets peers
-    converge).
+With the registry gone, one prune does the whole job: dropping the aged-out
+record ends BOTH the node's visibility and its ability to renew — renewal
+re-issues from the record, so no record means re-enrollment through the door
+(a true re-join, not a reconnect). Every node prunes on the same pure
+function of the record's own exp (directory.DROP_GRACE), so the fleet
+converges with no delete-propagation; the holder's sweep also tidies the
+statement log's own bounded lifetime rules.
 
 Revocation is untouched — that's the instant, authoritative kill for a
 compromised key. This is the lazy sweep for abandonment: no `gw revoke` needed.
@@ -23,7 +22,7 @@ from __future__ import annotations
 
 import logging
 
-from .directory import Directory, DROP_GRACE
+from .directory import Directory
 from .loop import Loop
 
 log = logging.getLogger(__name__)
@@ -35,30 +34,27 @@ _SWEEP_INTERVAL = 3600.0
 
 
 class StaleSweep(Loop):
-    def __init__(self, ca, directory: Directory, drop_grace,
-                 cache_path, interval: float = _SWEEP_INTERVAL,
+    def __init__(self, directory: Directory, cache_path,
+                 statements=None, interval: float = _SWEEP_INTERVAL,
                  protect: "str | None" = None) -> None:
         super().__init__(interval, "sweep")
-        self._ca = ca
         self._directory = directory
-        self._drop_grace = drop_grace      # anchor config → authorization drop
         self._cache_path = cache_path
-        # The anchor's own id_pub hex: the sweep must never reap the anchor
-        # itself. If the anchor's own renewal stalls (clock skew, a wedged
-        # loop) its credential goes stale like anyone's — but sweeping it
-        # deletes the registry entry renewal re-issues from AND prunes the
-        # record every member's directory converges on, turning a recoverable
-        # stall into a permanent, fleet-wide partition.
+        self._statements = statements
+        # This holder's own id_pub hex: the sweep must never reap the holder
+        # itself. If its own renewal stalls (clock skew, a wedged loop) its
+        # credential goes stale like anyone's — but sweeping its record ends
+        # the fleet's path to the control plane, turning a recoverable stall
+        # into a partition.
         self._protect = protect
 
     def _tick(self) -> None:
-        dropped = self._ca.drop_stale(self._drop_grace, protect=self._protect)
-        # Prune the served directory on the fleet-wide constant (DROP_GRACE), so
-        # visibility converges the same way on every node regardless of the
-        # anchor's authorization grace.
         pruned = self._directory.prune_stale(protect=self._protect)
-        if dropped or pruned:
-            log.info("stale sweep: dropped %d abandoned node(s) from the CA, "
-                     "pruned %d record(s) from the directory", len(dropped), pruned)
+        if self._statements is not None:
+            self._statements.prune()
+        if pruned:
+            log.info("stale sweep: pruned %d abandoned record(s) — a return "
+                     "requires re-enrollment (renewal re-issues from the "
+                     "record, and it is gone)", pruned)
             if self._cache_path is not None:
                 self._directory.save(self._cache_path)

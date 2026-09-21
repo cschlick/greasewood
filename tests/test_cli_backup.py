@@ -50,7 +50,7 @@ def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
     out = tmp_path / "anchor.gwbk"
     rc = cli.cmd_anchor_backup(types.SimpleNamespace(config=str(cfg), out=str(out)))
     assert rc == 0 and out.exists()
-    assert "enrolled node" in capsys.readouterr().out
+    assert "CA key" in capsys.readouterr().out
 
     # Restore into a pristine dir; skip the root check.
     monkeypatch.setattr(cli, "_require_root", lambda *_a, **_k: None)
@@ -59,12 +59,12 @@ def test_backup_then_restore_roundtrip(tmp_path, monkeypatch, capsys):
         archive=str(out), data_dir=str(dst), force=False))
     assert rc == 0
 
-    # Same CA key bytes, the node registry, and the revoke list all came back.
+    # Same CA key bytes, and the decisions came back: the revoke list (legacy
+    # file AND its replicated statement, which rode along in statements.json).
     assert (dst / "ca.key").read_bytes() == ca_key.read_bytes()
     restored_ca = CA(CAKeys.load(dst / "ca.key"), dst)
-    node_files = list((dst / "nodes").glob("*.json"))
-    assert len(node_files) == 1
     assert restored_ca.load_revoked_set()          # revoke list survived
+    assert (dst / "statements.json").exists()      # replicated decisions too
 
 
 def test_backup_refuses_non_anchor(tmp_path, monkeypatch):

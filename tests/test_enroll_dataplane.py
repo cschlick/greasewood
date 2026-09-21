@@ -21,23 +21,23 @@ def _framed(data: dict) -> bytes:
 
 
 class _FakeCA:
-    """Records issue/forget calls; `registered` seeds node_info for ids that
+    """Records issue/discard calls; `registered` seeds node_info for ids that
     were already enrolled before the attempt."""
 
     def __init__(self, registered=()):
         self.registered = set(registered)
-        self.forgotten = []
+        self.discarded = []
 
     def node_info(self, id_pub):
         return ("known", ["segment:mesh"]) if id_pub in self.registered else None
 
     def issue(self, id_pub, wg_pub, hostname, caps):
-        self.registered.add(id_pub)          # issue() writes the registry entry
+        self.registered.add(id_pub)          # issue() notes the hostname claim
         return object()
 
-    def forget_node(self, id_pub):
+    def discard_recent(self, id_pub):
         self.registered.discard(id_pub)
-        self.forgotten.append(id_pub)
+        self.discarded.append(id_pub)
         return True
 
 
@@ -92,7 +92,7 @@ def test_failed_install_rolls_back_fresh_registration(monkeypatch):
     joiner = NodeKeys.generate()
     ca = _FakeCA()                                       # nats01 not yet enrolled
     _attempt(monkeypatch, ca, joiner)
-    assert ca.forgotten == [joiner.id_pub_bytes]         # rolled back
+    assert ca.discarded == [joiner.id_pub_bytes]         # rolled back
     assert joiner.id_pub_bytes not in ca.registered      # name free for retry
 
 
@@ -102,7 +102,7 @@ def test_failed_install_keeps_preexisting_registration(monkeypatch):
     joiner = NodeKeys.generate()
     ca = _FakeCA(registered={joiner.id_pub_bytes})       # enrolled before
     _attempt(monkeypatch, ca, joiner)
-    assert ca.forgotten == []                            # untouched
+    assert ca.discarded == []                            # untouched
     assert joiner.id_pub_bytes in ca.registered
 
 

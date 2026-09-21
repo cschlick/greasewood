@@ -361,11 +361,11 @@ class EnrollServer:
         # Issue CA-signed credential. A ValueError here is a refusal (revoked
         # id, or hostname already taken) — report it cleanly to the joiner
         # rather than as an internal error.
-        # Whether this id was registered BEFORE this attempt decides the
-        # rollback below: issue() writes the registry entry that claims the
-        # hostname, and if the enrollment then fails before the joiner receives
-        # its credential, a brand-new registration must be rolled back — or a
-        # ghost squats the name and every retry from a fresh identity (a purged
+        # Whether this id was known BEFORE this attempt decides the rollback
+        # below: issue() notes the hostname claim (the just-issued overlay),
+        # and if the enrollment then fails before the joiner receives its
+        # credential, a brand-new claim must be rolled back — or a ghost
+        # squats the name and every retry from a fresh identity (a purged
         # and re-joined machine) is refused with "hostname already in use".
         was_registered = self._ca.node_info(id_pub_bytes) is not None
         try:
@@ -393,14 +393,16 @@ class EnrollServer:
             # raw command dump. The reconcile loop self-heals the interface
             # within one cycle, so an immediate retry usually succeeds; an anchor
             # restart is the fallback.
-            # Roll back a registration this failed attempt created: the joiner
-            # never received the credential, so the entry only squats the
-            # hostname (field bug: a re-keyed retry got "hostname already in
-            # use" from its own failed first attempt). A pre-existing
-            # registration (re-enroll of a known id) is left alone.
+            # Roll back the hostname claim this failed attempt created: the
+            # joiner never received the credential, so the claim only squats
+            # the name (field bug: a re-keyed retry got "hostname already in
+            # use" from its own failed first attempt). discard_recent, not
+            # forget_node: nothing was replicated yet, so there is nothing to
+            # tombstone — and a pre-existing membership (re-enroll of a known
+            # id, whose record IS replicated) is left alone.
             if not was_registered:
                 try:
-                    self._ca.forget_node(id_pub_bytes)
+                    self._ca.discard_recent(id_pub_bytes)
                 except Exception as e:  # noqa: BLE001
                     log.warning("rollback of failed enrollment failed: %s", e)
             reason = (f"the anchor could not add you as a WireGuard peer — its mesh "

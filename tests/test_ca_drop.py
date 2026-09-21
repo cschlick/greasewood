@@ -1,105 +1,130 @@
 """
-CA.drop_stale — the AUTHORIZATION drop that bounds the indefinite recert of
-expired-but-not-revoked nodes. After a node has been expired longer than
-drop_grace, the CA forgets it (nodes/<id>.json removed), so renew() can no
-longer re-issue from the registry and a return requires a full re-enrollment.
-This is the automatic GC that replaces manual `gw revoke` for an abandoned
-(destroyed cloud) fleet.
+The authorization lifecycle without a registry: the node's replicated record
+IS what renewal re-issues from, so its presence/absence/tombstoning decides
+everything the old nodes/<id>.json drop used to. Once the record ages out (or
+a tombstone ends the membership), renew() refuses — a return requires a full
+re-enrollment through the door, exactly the old drop semantics with the
+mechanism moved into the replicated layer.
 """
 import datetime as dt
-import json
+import secrets
 
-from greasewood.ca import CA
-from greasewood.keys import CAKeys, NodeKeys
-from greasewood.wire import RenewRequest
+import pytest
+
+from greasewood.ca import CA, UnknownNodeError
+from greasewood.directory import Directory
+from greasewood.keys import CAKeys, NodeKeys, derive_addr
+from greasewood.statements import StatementLog
+from greasewood.wire import AnchorStatement, Credential, NodeRecord, RenewRequest
 
 _UTC = dt.timezone.utc
 
 
-def _ca(tmp_path, ttl=dt.timedelta(hours=24)):
-    return CA(CAKeys.generate(), tmp_path, credential_ttl=ttl)
+def _now():
+    return dt.datetime.now(_UTC).replace(microsecond=0)
 
 
-def _node_file(tmp_path, id_pub):
-    return tmp_path / "nodes" / f"{id_pub.hex()}.json"
+def _rec(ca_keys, k, name, iat, ttl_h=24, caps=("mesh",), seq=1):
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                      addr=derive_addr(k.id_pub_bytes), hostname=name,
+                      caps=list(caps), iat=iat,
+                      exp=iat + dt.timedelta(hours=ttl_h)).sign(ca_keys.ca_priv)
+    return NodeRecord(id_pub=k.id_pub_bytes, seq=seq, endpoints=[],
+                      cred=cred).sign(k.id_priv)
 
 
-def test_issue_stamps_exp_and_iat(tmp_path):
+def _req(k, hostname=""):
+    return RenewRequest(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                        nonce=secrets.token_hex(16), ts=_now(),
+                        hostname=hostname).sign(k.id_priv)
+
+
+def _ca(tmp_path, directory=None, statements=None):
+    return CA(CAKeys.generate(), tmp_path, directory=directory or Directory(),
+              statements=statements or StatementLog())
+
+
+def test_renewal_reissues_from_the_replicated_record(tmp_path):
+    """The record carries everything renewal needs — hostname AND caps — so
+    any holder that has synced it can serve the renewal, with no state that
+    ever needs handing over."""
+    ca_keys = CAKeys.generate()
+    k = NodeKeys.generate()
+    d = Directory()
+    d.put(_rec(ca_keys, k, "db01", _now() - dt.timedelta(hours=20),
+               caps=["segment:prod", "tls"]))
+    ca = CA(ca_keys, tmp_path, directory=d, statements=StatementLog())
+    cred = ca.renew(_req(k))
+    assert cred.hostname == "db01"
+    assert set(cred.caps) == {"segment:prod", "tls"}
+
+
+def test_expired_record_still_renews_within_grace(tmp_path):
+    """Expiry is liveness, not death: a node asleep past its TTL recertifies
+    from its (expired) record as long as the record hasn't aged out."""
+    ca_keys = CAKeys.generate()
+    k = NodeKeys.generate()
+    d = Directory()
+    d.put(_rec(ca_keys, k, "sleeper", _now() - dt.timedelta(days=3)))   # expired 2d ago
+    ca = CA(ca_keys, tmp_path, directory=d, statements=StatementLog())
+    assert ca.renew(_req(k)).hostname == "sleeper"
+
+
+def test_no_record_means_reenroll(tmp_path):
+    """The drop consequence: no record (aged out and pruned, or never there)
+    → typed refusal; the node must come back through the door."""
     ca = _ca(tmp_path)
-    k = NodeKeys.generate()
-    cred = ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n1", ["mesh"])
-    rec = json.loads(_node_file(tmp_path, k.id_pub_bytes).read_text())
-    assert rec["exp"] == cred.exp.replace(microsecond=0).isoformat()
-    assert "iat" in rec
-
-
-def test_drop_stale_forgets_only_long_expired(tmp_path):
-    grace = dt.timedelta(days=7)
-    # A short TTL so the issued creds are already close to expiry; we drive the
-    # decision with an explicit `now` rather than sleeping.
-    ca = _ca(tmp_path, ttl=dt.timedelta(hours=1))
-    fresh = NodeKeys.generate()
-    stale = NodeKeys.generate()
-    ca.issue(fresh.id_pub_bytes, fresh.wg_pub_bytes, "fresh", ["mesh"])
-    stale_cred = ca.issue(stale.id_pub_bytes, stale.wg_pub_bytes, "stale", ["mesh"])
-
-    # 'now' is well past stale's exp+grace but the fresh node just renewed at
-    # `later` (so its registry exp is later); to test selectivity, evaluate at a
-    # time past stale's grace but before fresh would be (they share exp, so
-    # re-issue fresh to push its exp forward).
-    later = stale_cred.exp + grace + dt.timedelta(days=1)
-    # Model a live node that kept renewing: rewrite 'fresh's stored exp to
-    # `later`, so its exp+grace is well in the future and it's spared.
-    p = _node_file(tmp_path, fresh.id_pub_bytes)
-    rec = json.loads(p.read_text())
-    rec["exp"] = later.replace(microsecond=0).isoformat()
-    p.write_text(json.dumps(rec))
-
-    dropped = ca.drop_stale(grace, now=later)
-    names = {h for _, h in dropped}
-    assert names == {"stale"}                                   # only the abandoned one
-    assert not _node_file(tmp_path, stale.id_pub_bytes).exists()  # forgotten
-    assert _node_file(tmp_path, fresh.id_pub_bytes).exists()      # kept
-
-
-def test_dropped_node_cannot_renew(tmp_path):
-    """The whole point: once dropped, renew() refuses (unknown node) so the node
-    must re-enroll, not merely reconnect."""
-    import pytest
-    from greasewood.ca import UnknownNodeError
-    ca = _ca(tmp_path, ttl=dt.timedelta(hours=1))
-    k = NodeKeys.generate()
-    cred = ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "gone", ["mesh"])
-    later = cred.exp + dt.timedelta(days=8)
-    assert ca.drop_stale(dt.timedelta(days=7), now=later)        # dropped
-    req = RenewRequest(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes, nonce="n",
-                       ts=dt.datetime.now(_UTC).replace(microsecond=0)).sign(k.id_priv)
     with pytest.raises(UnknownNodeError):
-        ca.renew(req)
+        ca.renew(_req(NodeKeys.generate()))
 
 
-def test_drop_stale_grandfathers_legacy_records(tmp_path):
-    """A pre-drop registry record has no exp field — it must NOT be dropped
-    (renewal will stamp one); silently reaping every legacy node would be a
-    fleet-wide eviction on upgrade."""
-    ca = _ca(tmp_path)
+def test_tombstoned_membership_cannot_renew_but_reenrollment_can(tmp_path):
+    """A tombstone (leave/sweep decided at ANY holder) ends the membership its
+    ts covers: renewal from the old record refuses. The same identity's fresh
+    enrollment — credential issued after the tombstone — renews fine."""
+    ca_keys = CAKeys.generate()
     k = NodeKeys.generate()
-    p = _node_file(tmp_path, k.id_pub_bytes)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"hostname": "legacy", "caps": ["role:mesh"]}))  # no exp
-    dropped = ca.drop_stale(dt.timedelta(days=7),
-                            now=dt.datetime.now(_UTC) + dt.timedelta(days=999))
-    assert dropped == [] and p.exists()
+    d, stmts = Directory(), StatementLog()
+    d.put(_rec(ca_keys, k, "bb", _now() - dt.timedelta(hours=2)))
+    stmts.merge([AnchorStatement(kind="tombstone", id_pub=k.id_pub_bytes,
+                                 ts=_now() - dt.timedelta(hours=1),
+                                 hostname="bb").sign(ca_keys.ca_priv)],
+                [ca_keys.ca_pub_bytes])
+    ca = CA(ca_keys, tmp_path, directory=d, statements=stmts)
+    with pytest.raises(UnknownNodeError):
+        ca.renew(_req(k))
+    # …and its hostname is free for anyone (that is what the tombstone frees).
+    assert ca.hostname_owner("bb") is None
+
+    # bb re-enrolls: a fresh record postdating the tombstone.
+    d.put(_rec(ca_keys, k, "bb", _now(), seq=2))
+    assert ca.renew(_req(k)).hostname == "bb"
 
 
-def test_set_caps_preserves_the_drop_clock(tmp_path):
-    """Editing caps is not a renewal — it must not reset exp/iat, or a `gw
-    set-caps` on an abandoned node would postpone its drop indefinitely."""
-    ca = _ca(tmp_path, ttl=dt.timedelta(hours=1))
+def test_untrusted_record_is_not_a_renewal_source(tmp_path):
+    """A record whose credential no trusted CA signed must never feed
+    issuance: structural merge admits it into the directory (CA-independent by
+    design), but renewal verifies against the trusted set — otherwise a
+    forged-cred record could launder arbitrary caps into a real credential."""
+    ca_keys, evil = CAKeys.generate(), CAKeys.generate()
     k = NodeKeys.generate()
-    cred = ca.issue(k.id_pub_bytes, k.wg_pub_bytes, "n", ["mesh"])
-    before = json.loads(_node_file(tmp_path, k.id_pub_bytes).read_text())["exp"]
-    ca.set_caps(k.id_pub_bytes, ["mesh", "role:db"])
-    after = json.loads(_node_file(tmp_path, k.id_pub_bytes).read_text())
-    assert after["exp"] == before                                # exp unchanged
-    assert "role:db" in after["caps"]                            # caps updated
+    d = Directory()
+    d.put(_rec(evil, k, "root", _now(), caps=["role:*"]))   # evil-signed cred
+    ca = CA(ca_keys, tmp_path, directory=d, statements=StatementLog())
+    with pytest.raises(UnknownNodeError):
+        ca.renew(_req(k))
+
+
+def test_reroot_overlap_renews_from_old_cas_record(tmp_path):
+    """The re-root path with no special code: during the overlap the new
+    holder trusts old+new CA pubs, so the outgoing CA's record is a valid
+    renewal source and the node crosses over on its next renewal."""
+    old_ca, new_ca = CAKeys.generate(), CAKeys.generate()
+    k = NodeKeys.generate()
+    d = Directory()
+    d.put(_rec(old_ca, k, "veteran", _now() - dt.timedelta(hours=20)))
+    ca = CA(new_ca, tmp_path, directory=d, statements=StatementLog(),
+            get_ca_pubs=lambda: [old_ca.ca_pub_bytes, new_ca.ca_pub_bytes])
+    cred = ca.renew(_req(k))
+    cred.verify([new_ca.ca_pub_bytes])          # now signed by the NEW root
+    assert cred.hostname == "veteran"
