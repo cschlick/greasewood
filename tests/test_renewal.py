@@ -135,8 +135,14 @@ def test_next_delay_is_immediate_past_half_life(tmp_path):
     deadlocked with the liveness watchdog: every restart pushed renewal hours
     out, the watchdog killed the daemon 120s later, forever — a crash loop
     that held until the credential expired (first seen on the first
-    non-systemd node, minutes after its migration)."""
-    loop = _loop_with_cred(tmp_path, iat_ago_h=13)      # 13h into a 24h cred
+    non-systemd node, minutes after its migration).
+
+    14h, not 13: the renewal point is half-life ±10% jitter, so on a 24h
+    credential it can legitimately land as late as 13.2h — a 13h fixture sat
+    INSIDE the jitter window and flaked ~8% of runs (CI caught it returning
+    719s, right at the 12h+10% boundary). Past 13.2h the delay is provably
+    the immediate 1–30s."""
+    loop = _loop_with_cred(tmp_path, iat_ago_h=14)      # 14h into a 24h cred
     d = loop._next_delay()
     assert d <= 30.0
 
