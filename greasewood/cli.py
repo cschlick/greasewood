@@ -2321,6 +2321,43 @@ def cmd_revoke(args) -> int:
 # set-caps / set-roles — change an enrolled node's caps on the anchor
 # ---------------------------------------------------------------------------
 
+def _anchor_urls(cfg, directory, own_addr: "str | None" = None,
+                 get_ca_pubs=None) -> "list[str]":
+    """The ANCHOR SET: every control-plane URL this node can use. Configured
+    seeds come first (the bootstrap — always dialable knowledge), then every
+    holder discovered in the replicated directory: a record carrying the
+    anchor roles in a credential signed by a TRUSTED CA (the trust check
+    matters — a structurally-valid but forged record must not steer traffic;
+    such a record also never becomes a WG peer, so its URL would only dangle).
+    Holders exclude themselves so their sync pulls from the OTHER holders.
+    Order is stable (seeds, then holders sorted by address) so retry behavior
+    is predictable; consumers try each in order."""
+    urls: "list[str]" = []
+    for u in list(getattr(cfg, "seeds", []) or []):
+        if u and u not in urls:
+            urls.append(u)
+    root = getattr(cfg, "root_url", "") or ""
+    if root and root not in urls:
+        urls.insert(0, root)
+    port = _control_port(cfg)
+    discovered = []
+    for r in directory.all():
+        if not any(c in ("role:*", "role:anchor") for c in r.cred.caps):
+            continue
+        if own_addr and r.cred.addr == own_addr:
+            continue
+        if get_ca_pubs is not None:
+            try:
+                r.cred.verify(get_ca_pubs(), allow_expired=True)
+            except ValueError:
+                continue
+        discovered.append(f"http://[{r.cred.addr}]:{port}")
+    for u in sorted(discovered):
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
 def _holds_anchor(cfg) -> bool:
     """Does this membership hold anchor authority? The anchor FILE
     (<data_dir>/anchor.gwa) is the authority — any node possessing it
@@ -2537,7 +2574,7 @@ def _control_port(cfg) -> int:
     """The control-plane port from cfg.control_listen (':51902' -> 51902)."""
     try:
         return int(cfg.control_listen.rsplit(":", 1)[1])
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, AttributeError):
         return 51902
 
 
@@ -2614,19 +2651,19 @@ def cmd_leave(args) -> int:
     _require_root("leave", "it stops the daemon and removes the interface")
     cfg = load_config(Path(args.config))
     if _holds_anchor(cfg):
-        sys.exit("an anchor holder can't leave its own mesh — it IS one of "
-                 "the mesh's "
-                 "coordination point. Hand the role to a standby first "
-                 "(anchor-transfer / anchor-activate), or tear the mesh down "
-                 "(see operations.md).")
-    if not cfg.root_url:
-        sys.exit("no anchor URL configured (root_url) — nothing to leave.")
+        sys.exit("an anchor holder can't leave its own mesh — it holds the "
+                 "mesh's authority. Drop the anchor file first "
+                 "(sudo gw anchor drop) if other holders remain, hand the "
+                 "authority over (gw anchor export → adopt elsewhere), or "
+                 "tear the mesh down (see operations.md).")
+    if not (cfg.root_url or cfg.seeds):
+        sys.exit("no anchor URL configured (root_url/seeds) — nothing to leave.")
     key = membership_key(cfg.mesh_domain)
 
     if not args.yes:
         print(f"This node will leave mesh '{key}':")
-        print(f"  anchor forgets it     : {cfg.root_url}  (hostname "
-              f"'{cfg.hostname}' frees immediately; renewals refused)")
+        print(f"  anchor forgets it     : {cfg.root_url or cfg.seeds[0]}  "
+              f"(hostname '{cfg.hostname}' frees immediately; renewals refused)")
         print(f"  daemon                : stopped and removed from boot")
         print(f"  WireGuard interface   : {cfg.wg_interface} destroyed")
         print(f"  local keys/config/data: KEPT — 'gw purge' erases them")
@@ -2643,18 +2680,31 @@ def cmd_leave(args) -> int:
         ts=dt.datetime.now(_UTC).replace(microsecond=0),
     ).sign(keys.id_priv)
 
-    url = f"{cfg.root_url.rstrip('/')}/leave"
-    http_req = urllib.request.Request(
-        url, data=json.dumps(req.to_dict()).encode(),
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(http_req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError) as e:
-        sys.exit(f"couldn't reach the anchor at {url}: {e}\n"
-                 "Leaving needs the anchor reachable (the request must be "
+    # Any holder can accept the departure (its tombstone replicates to the
+    # rest) — try the whole anchor set, configured seeds first.
+    from .directory import Directory as _Dir
+    _targets = _anchor_urls(cfg, _Dir.load(cfg.dir_cache_path),
+                            own_addr=keys.addr)
+    data = None
+    _last_err: "str | None" = None
+    for base in _targets:
+        url = f"{base.rstrip('/')}/leave"
+        http_req = urllib.request.Request(
+            url, data=json.dumps(req.to_dict()).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(http_req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            break
+        except (urllib.error.URLError, OSError) as e:
+            _last_err = f"{url}: {e}"
+            if len(_targets) > 1:
+                print(f"couldn't reach {base} — trying the next holder")
+    if data is None:
+        sys.exit(f"couldn't reach any anchor holder (last: {_last_err})\n"
+                 "Leaving needs a holder reachable (the request must be "
                  "authenticated and delivered) — nothing was changed locally.\n"
-                 "If the anchor is gone for good, there is nothing to leave: "
+                 "If the anchors are gone for good, there is nothing to leave: "
                  "this node ages out of the fleet at credential expiry; "
                  "'gw purge' cleans up this host.")
     if "error" in data:
@@ -3578,7 +3628,14 @@ def cmd_run(args) -> int:
     # is built below; the callback reads it lazily (the first pull is one interval
     # out), so acting on the anchor's fleet renew hint needs no reordering.
     sync = SyncLoop(
-        directory, lambda: cfg.seeds, cfg.dir_cache_path,
+        directory,
+        # The ANCHOR SET, refreshed per pull: configured seeds plus every
+        # holder discovered in the directory. Plain nodes gain failover to
+        # any live holder; holders pull from the OTHER holders (self
+        # excluded), which is how statements/records converge between them.
+        lambda: _anchor_urls(cfg, directory, own_addr=keys.addr,
+                             get_ca_pubs=get_ca_pubs),
+        cfg.dir_cache_path,
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
         expected_domain=cfg.mesh_domain,
         on_policy=grant_policy.offer,
@@ -3698,7 +3755,15 @@ def cmd_run(args) -> int:
         renewal = RenewalLoop(
             node_keys=keys,
             directory=directory,
-            get_anchor_url=lambda: cfg.root_url,
+            # Any holder can serve the renewal — try the whole anchor set.
+            # A holder serves ITSELF first (loopback): always up, and a sole
+            # holder must not depend on a stale root_url pointing elsewhere.
+            get_anchor_url=lambda: (
+                ([f"http://[::1]:{_control_port(cfg)}"]
+                 if _holds_anchor(cfg) else [])
+                + _anchor_urls(cfg, directory, own_addr=keys.addr,
+                               get_ca_pubs=get_ca_pubs)),
+            get_ca_pubs=get_ca_pubs,
             current_cred=own_record.cred,
             hostname=cfg.hostname,
             endpoints=eff_endpoints,

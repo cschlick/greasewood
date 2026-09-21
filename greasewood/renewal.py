@@ -83,13 +83,18 @@ class RenewalLoop(Loop):
         renew_spread: float = 2.0,
         aliases: "list[str] | None" = None,
         on_renew: "Callable[[Credential], None] | None" = None,
+        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
     ) -> None:
         # interval is unused (run() is event-driven — see the module docstring)
         super().__init__(0.0, "renewal")
         self._keys = node_keys
         self._directory = directory
-        # A callable returning the anchor URL to renew against (the configured anchor).
+        # A callable returning the anchor URL(s) to renew against — one URL,
+        # or the discovered anchor set (see _anchor_urls).
         self._get_anchor_url = get_anchor_url
+        # The trusted CA set; when provided, every renewed credential is
+        # verified against it before adoption.
+        self._get_ca_pubs = get_ca_pubs
         self._cred = current_cred
         self._hostname = hostname
         self._endpoints = endpoints
@@ -185,16 +190,47 @@ class RenewalLoop(Loop):
         self._directory.save(self._cache_path)
         return record
 
+    def _anchor_urls(self) -> "list[str]":
+        """The anchor URLs to renew against, normalized to a list. The
+        configured callable may return one URL (a classic single anchor) or
+        the discovered ANCHOR SET (every holder of the anchor file) — any
+        holder can serve the renewal, so the loop tries each in order and a
+        dead holder costs one timeout, not the renewal."""
+        got = self._get_anchor_url()
+        if isinstance(got, str):
+            return [got] if got else []
+        return [u for u in (got or []) if u]
+
     def _renew_and_publish(self) -> Credential:
         """Renew the credential, update the local directory, and re-publish the
-        fresh record to the anchor (the push is not optional — see the module
-        docstring). Raises on any failure so the caller's retry/backoff loop
-        re-attempts the whole step."""
+        fresh record to the SAME holder that renewed us (its statement/record
+        gossip carries both to the rest — the push is not optional, see the
+        module docstring). Tries each anchor URL in order; verifies the
+        returned credential against the trusted CA set when one was provided
+        (a compromised or misconfigured holder must not be able to hand this
+        node a credential the fleet will reject). Raises on total failure so
+        the caller's retry/backoff loop re-attempts the whole step."""
         from .sync import push_record
-        new_cred = _do_renew(self._get_anchor_url(), self._keys)
-        self._cred = new_cred
-        record = self._publish(new_cred)
-        push_record(self._get_anchor_url(), record)
+        urls = self._anchor_urls()
+        if not urls:
+            raise RuntimeError("no anchor URL configured or discovered")
+        last_err: "Exception | None" = None
+        for url in urls:
+            try:
+                new_cred = _do_renew(url, self._keys)
+                if self._get_ca_pubs is not None:
+                    new_cred.verify(self._get_ca_pubs())
+                self._cred = new_cred
+                record = self._publish(new_cred)
+                push_record(url, record)
+                break
+            except (RuntimeError, ValueError) as e:
+                last_err = e
+                if len(urls) > 1:
+                    log.warning("renewal via %s failed (%s) — trying the next "
+                                "holder", url, e)
+        else:
+            raise last_err if last_err is not None else RuntimeError("renewal failed")
         if self._on_renew is not None:
             try:
                 self._on_renew(new_cred)   # adopt any anchor-side role change, live
