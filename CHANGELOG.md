@@ -51,7 +51,18 @@ What makes concurrent holders coherent with no coordination protocol:
   a visible collision; a caps change racing a renewal at a not-yet-synced
   holder can bake late by one cycle; concurrent decisions about one node
   resolve latest-timestamp-wins with both in the audit trail.
-- New commands: `gw anchor status|init|export|adopt|drop`. `gw create` mints
+- **Becoming a holder is two commands, zero file handling:** `sudo gw anchor
+  offer <name>` on any holder seals the anchor file to the target's
+  CA-attested WireGuard key (ephemeral X25519 → HKDF → AES-GCM) and serves it
+  as a single-use, 15-minute offer on the control plane; `sudo gw anchor
+  adopt` on the target collects it (authenticated + replay-guarded like a
+  renewal, refused-without-consuming for any other node), opens it with its
+  own key, installs, and grants itself the anchor roles. Only the machine the
+  operator named can decrypt — the mesh carries ciphertext useless to
+  everyone else — so there is no scp/permissions dance and no passphrase to
+  shuttle. File-based `export`/`adopt <path>` remain for machines that aren't
+  members yet (disaster recovery).
+- New commands: `gw anchor status|init|offer|export|adopt|drop`. `gw create` mints
   the file from birth; legacy `role = anchor` configs keep working untouched
   (`gw anchor init` folds them into the file). `gw anchor-backup` now
   archives anchor.gwa + statements.json; old backups restore byte-for-byte.

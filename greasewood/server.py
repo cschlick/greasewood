@@ -88,6 +88,9 @@ class _Handler(BaseHTTPRequestHandler):
     # /directory beside the records and folded into /revoked; None on a plain
     # node's server-less daemon or an unmigrated anchor.
     statements = None    # StatementLog | None
+    # The holder's data dir — where an outstanding anchor-file offer lives
+    # (anchorfile.write_offer / POST /anchor-claim). None on a non-holder.
+    data_dir: "Path | None" = None
     get_ca_pubs: "callable" = staticmethod(list)
     get_revoked: "callable" = staticmethod(set)
     cache_path: "Path | None" = None
@@ -190,6 +193,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not an anchor"}, 403)
             else:
                 self._handle_renew(body)
+        elif self.path == "/anchor-claim":
+            if self.ca is None or self.data_dir is None:
+                self._send_json({"error": "not an anchor"}, 403)
+            else:
+                self._handle_anchor_claim(body)
         elif self.path == "/cert":
             if self.ca is None:
                 self._send_json({"error": "not an anchor"}, 403)
@@ -258,6 +266,55 @@ class _Handler(BaseHTTPRequestHandler):
                      hostname_freed=freed, record_dropped=had_record)
         log.info("node left voluntarily: %s (hostname freed: %s)", who, freed)
         self._send_json({"status": "left", "hostname_freed": freed})
+
+    def _handle_anchor_claim(self, body: dict) -> None:
+        """A node collecting an anchor-file offer minted FOR IT (`gw anchor
+        offer <name>` on this holder → `gw anchor adopt` on the node). The
+        payload is sealed to the claimant's WireGuard key, so serving it
+        exposes nothing even if misdelivered — the checks here exist to make
+        the offer honest: single-use, time-boxed, and consumed only by the
+        node the operator named. Authentication mirrors /renew (self-sig +
+        skew + replay); a claim for someone else's offer is refused WITHOUT
+        consuming it."""
+        import datetime as _dt
+        from . import anchorfile
+        from .wire import AnchorClaimRequest
+        try:
+            req = AnchorClaimRequest.from_dict(body)
+            req.verify_self_sig()  # authenticate before consuming the nonce
+        except (ValueError, KeyError, TypeError) as e:
+            log.warning("anchor-claim rejected: %s", e)
+            self._send_json({"error": str(e)}, 400)
+            return
+        skew = abs((_dt.datetime.now(_dt.timezone.utc) - req.ts).total_seconds())
+        if skew > 300:
+            self._send_json({"error": f"timestamp skew too large ({skew:.0f}s); "
+                                      "check NTP"}, 400)
+            return
+        if not self.replay.check_and_add(req.nonce):
+            self._send_json({"error": "replay detected (nonce already used)"}, 400)
+            return
+        offer = anchorfile.read_offer(self.data_dir)
+        if offer is None:
+            self._send_json({"error": "no outstanding anchor offer on this "
+                                      "holder (expired, already claimed, or "
+                                      "never minted — run `gw anchor offer "
+                                      "<node>` on it)"}, 404)
+            return
+        if offer["to_id"] != req.id_pub.hex():
+            log.warning("anchor-claim by %s refused: offer is for %s",
+                        req.id_pub.hex()[:16], offer.get("to_hostname", "?"))
+            self._send_json({"error": "the outstanding offer is not for this "
+                                      "node"}, 403)
+            return
+        anchorfile.consume_offer(self.data_dir)          # single-use
+        from . import audit as _audit
+        _audit.event("anchor-offer-claimed",
+                     node=offer.get("to_hostname", ""),
+                     id=req.id_pub.hex()[:16])
+        log.info("anchor offer claimed by %s", offer.get("to_hostname", "?"))
+        self._send_json({"status": "ok", "sealed": offer["sealed"],
+                         "to_hostname": offer.get("to_hostname", "")})
 
     def _handle_renew(self, body: dict) -> None:
         from .wire import RenewRequest
@@ -452,6 +509,7 @@ class ControlServer:
         request_timeout: float = 30.0,
         max_workers: int = 32,
         statements=None,
+        data_dir=None,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -464,6 +522,7 @@ class ControlServer:
         Handler.directory = directory
         Handler.ca = ca
         Handler.statements = statements
+        Handler.data_dir = data_dir
         Handler.get_ca_pubs = staticmethod(get_ca_pubs)
         Handler.get_revoked = staticmethod(get_revoked)
         Handler.cache_path = cache_path

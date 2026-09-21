@@ -467,6 +467,67 @@ class LeaveRequest:
 
 
 # ---------------------------------------------------------------------------
+# AnchorClaimRequest — a node collecting an anchor-file offer sealed to it
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AnchorClaimRequest:
+    """Sent by a node to POST /anchor-claim to collect an anchor-file offer a
+    holder minted FOR IT (`gw anchor offer <name>` → `gw anchor adopt`).
+
+    id_priv possession authenticates the claimant (the RenewRequest
+    discipline: self-signature + nonce + skew-bounded ts). The response is
+    useless to anyone else regardless — the offer is sealed to the target's
+    WireGuard key — so this signature mainly lets the holder refuse to serve
+    (and single-use-consume) the ciphertext for anyone but the intended node.
+
+    The body carries a fixed "claim": "anchor" field as DOMAIN SEPARATION:
+    LeaveRequest signs the same (id_pub, nonce, ts) shape, and without a
+    distinguishing field the two would produce identical canonical bytes — a
+    captured leave signature would verify as a claim and vice versa."""
+    id_pub: bytes
+    nonce: str
+    ts: dt.datetime
+    sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "claim": "anchor",
+            "id_pub": _b64e(self.id_pub),
+            "nonce": self.nonce,
+            "ts": _ts(self.ts),
+        }
+
+    def sign(self, id_priv: Ed25519PrivateKey) -> "AnchorClaimRequest":
+        sig = id_priv.sign(_canonical(self._body_dict()))
+        return replace(self, sig=sig)
+
+    def verify_self_sig(self) -> None:
+        body = _canonical(self._body_dict())
+        pub = Ed25519PublicKey.from_public_bytes(self.id_pub)
+        try:
+            pub.verify(self.sig, body)
+        except InvalidSignature:
+            raise ValueError("invalid anchor-claim self-signature")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["sig"] = _b64e(self.sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AnchorClaimRequest":
+        if _str(d.get("claim", ""), "claim") != "anchor":
+            raise ValueError("not an anchor claim")
+        return cls(
+            id_pub=_b64d_key(d["id_pub"], "id_pub"),
+            nonce=_str(d["nonce"], "nonce"),
+            ts=_parse_ts(d["ts"]),
+            sig=_b64d(d["sig"]),
+        )
+
+
+# ---------------------------------------------------------------------------
 # AnchorStatement — a CA-signed membership decision, replicated like records
 # ---------------------------------------------------------------------------
 

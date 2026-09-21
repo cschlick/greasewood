@@ -63,13 +63,31 @@ trade: every alternative buys consistency with an always-on quorum.
 
 ## Operations
 
+Making another machine a holder is two commands and zero file handling:
+
 ```bash
-sudo gw anchor init                  # legacy anchor → fold ca.key+door.key into the file
-sudo gw anchor export /tmp/a.gwa    # write it for transfer (0600; refuses overwrite)
-scp /tmp/a.gwa gp2:                  # YOUR channel — the root key never rides the mesh
-sudo gw anchor adopt a.gwa           # on gp2: install, grant itself the anchor
-                                     # roles (a replicated setcaps), restart
+sudo gw anchor offer gp2    # on any holder: seal the file to gp2's key, serve it
+sudo gw anchor adopt        # on gp2: collect, decrypt with its own key, install
+```
+
+The offer is sealed to the target's **CA-attested WireGuard key** (ephemeral
+X25519 → HKDF → AES-GCM), so only the machine the operator named can open it
+— the mesh carries ciphertext that is useless to everyone else, including
+other members. It is single-use, expires in 15 minutes, and the claim is
+authenticated, skew-bounded, and replay-guarded exactly like a renewal. The
+operator running `offer <name>` on a holder *is* the authorization; there is
+no passphrase to shuttle and nothing sensitive ever rests outside root-owned
+data dirs.
+
+The rest of the family:
+
+```bash
 gw anchor status                     # holder state here + the fleet's holders
+sudo gw anchor init                  # legacy anchor → fold ca.key+door.key into the file
+sudo gw anchor export /tmp/a.gwa    # manual transfer fallback (0600; refuses
+                                     # overwrite) — for a machine that isn't a
+                                     # mesh member yet, e.g. disaster recovery
+sudo gw anchor adopt a.gwa           # file-based adopt (same checks + role grant)
 sudo gw anchor drop                  # shed the roles, delete this copy
 ```
 
@@ -102,8 +120,8 @@ encryption whenever it rests anywhere but a holder's data dir.
 1. Upgrade the fleet (holders first).
 2. On the anchor: `sudo gw anchor init` — it keeps serving exactly as before
    (the legacy `role = anchor` config still counts; the file now travels).
-3. `sudo gw anchor export` → copy → `sudo gw anchor adopt` on each additional
-   machine you want to manage the mesh from.
+3. `sudo gw anchor offer <name>` there, `sudo gw anchor adopt` on each
+   additional machine you want to manage the mesh from.
 4. Nothing else changes: nodes discover the new holders from the directory on
    their next pulls.
 

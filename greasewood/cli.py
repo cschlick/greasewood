@@ -3493,7 +3493,8 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
             listen_addrs, directory, get_ca_pubs=get_ca_pubs, get_revoked=get_revoked,
             ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
             mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
-            get_policy=read_policy, statements=stmt_log)
+            get_policy=read_policy, statements=stmt_log,
+            data_dir=cfg.data_dir)
     except ControlPlaneAddrInUse as e:
         _daemon_fatal(cfg, f"anchor control plane can't start: {e}")
     server.start()
@@ -4354,6 +4355,63 @@ def _failover_passphrase(confirm: bool) -> bytes:
     return pw.encode()
 
 
+def _claim_anchor_offer(cfg) -> bytes:
+    """`gw anchor adopt` with no path: collect the offer a holder minted for
+    this node (`gw anchor offer <name>` there) over the control plane, and
+    open it with this node's own WireGuard key. Tries every holder in the
+    anchor set — the offer lives on whichever one minted it. Exits with the
+    story on failure; returns the anchor file's bytes on success."""
+    import secrets as _secrets
+    import urllib.error
+    import urllib.request
+    from . import anchorfile
+    from .directory import Directory as _Dir
+    from .keys import NodeKeys
+    from .wire import AnchorClaimRequest
+    keys = NodeKeys.load_or_generate(cfg.data_dir)
+    req = AnchorClaimRequest(
+        id_pub=keys.id_pub_bytes,
+        nonce=_secrets.token_hex(16),
+        ts=dt.datetime.now(_UTC).replace(microsecond=0),
+    ).sign(keys.id_priv)
+    targets = _anchor_urls(cfg, _Dir.load(cfg.dir_cache_path),
+                           own_addr=keys.addr)
+    if not targets:
+        sys.exit("no anchor holders known (root_url/seeds empty and none in "
+                 "the directory) — is this node enrolled and synced?")
+    refusals: "list[str]" = []
+    for base in targets:
+        url = f"{base.rstrip('/')}/anchor-claim"
+        http_req = urllib.request.Request(
+            url, data=json.dumps(req.to_dict()).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(http_req, timeout=15) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                why = json.loads(e.read()).get("error", str(e))
+            except Exception:
+                why = str(e)
+            refusals.append(f"{base}: {why}")
+            continue
+        except (urllib.error.URLError, OSError) as e:
+            refusals.append(f"{base}: {e}")
+            continue
+        if "sealed" not in data:
+            refusals.append(f"{base}: malformed response")
+            continue
+        try:
+            return anchorfile.unseal_with_wg(data["sealed"], keys.wg_priv)
+        except ValueError as e:
+            sys.exit(str(e))
+    detail = "\n".join(f"  {r}" for r in refusals)
+    sys.exit("no holder had an offer for this node:\n" + detail + "\n"
+             "Mint one first — on any holder:  sudo gw anchor offer "
+             f"{cfg.hostname}   (offers are single-use and expire in "
+             f"{int(anchorfile.OFFER_TTL.total_seconds() // 60)}m)")
+
+
 def cmd_anchor(args) -> int:
     """`gw anchor <action>` — manage the ANCHOR FILE, the mesh's portable
     authority: any node whose data dir holds anchor.gwa performs anchor
@@ -4456,12 +4514,59 @@ def cmd_anchor(args) -> int:
                   "then delete this copy.")
         return 0
 
-    if args.action == "adopt":
+    if args.action == "offer":
         if not args.path:
-            sys.exit("adopt needs a source: gw anchor adopt <path> "
-                     "(or '-' to read from stdin)")
-        raw = (sys.stdin.buffer.read() if args.path == "-"
-               else Path(args.path).read_bytes())
+            sys.exit("offer needs a target: gw anchor offer <node> — the "
+                     "hostname (or id hex) of the enrolled node that should "
+                     "become a holder")
+        af = anchorfile.load(cfg.data_dir)
+        if af is None:
+            sys.exit("no anchor file here — on a legacy anchor run "
+                     "`sudo gw anchor init` first")
+        from .ca import CA
+        from .keys import NodeKeys
+        _pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+        ca = CA(af.ca_keys(), cfg.data_dir, dir_cache_path=cfg.dir_cache_path,
+                get_ca_pubs=(lambda: _pubs) if _pubs else None)
+        target_id, target_name = _resolve_node(ca, cfg, args.path)
+        own = NodeKeys.load_or_generate(cfg.data_dir)
+        if target_id == own.id_pub_bytes:
+            sys.exit("that's this node — it already holds the anchor file")
+        # The wg key to seal to comes from the target's CA-attested record:
+        # the CA says this key belongs to that name, so the offer can only be
+        # opened by the machine the operator named.
+        from .directory import Directory as _Dir
+        rec = _Dir.load(cfg.dir_cache_path).get(target_id.hex())
+        if rec is None:
+            sys.exit(f"no record for {target_name!r} in the directory — the "
+                     f"node must be enrolled and have published (is its "
+                     f"daemon running?)")
+        try:
+            rec.cred.verify(_pubs or [af.ca_keys().ca_pub_bytes],
+                            allow_expired=True)
+        except ValueError as e:
+            sys.exit(f"{target_name!r}'s record isn't trusted ({e}) — "
+                     f"refusing to seal the root key to it")
+        sealed = anchorfile.seal_to_wg(rec.cred.wg_pub, af.to_bytes())
+        anchorfile.write_offer(cfg.data_dir, target_id.hex(), target_name,
+                               sealed)
+        from . import audit as _audit
+        if cfg.audit_log is not None:
+            _audit.attach_file(cfg.audit_log)
+        _audit.event("anchor-offer", node=target_name, id=target_id.hex()[:16])
+        mins = int(anchorfile.OFFER_TTL.total_seconds() // 60)
+        print(f"offer minted for {target_name} — sealed to its WireGuard key, "
+              f"single-use, expires in {mins}m.")
+        print(f"On {target_name}:  sudo gw anchor adopt")
+        print("(This holder's daemon serves the claim — it must be running.)")
+        return 0
+
+    if args.action == "adopt":
+        if args.path:
+            raw = (sys.stdin.buffer.read() if args.path == "-"
+                   else Path(args.path).read_bytes())
+        else:
+            raw = _claim_anchor_offer(cfg)
         try:
             af = anchorfile.AnchorFile.from_bytes(raw)
         except ValueError as e:
@@ -5677,20 +5782,28 @@ def build_parser() -> argparse.ArgumentParser:
              "node holding anchor.gwa performs anchor duties (several at "
              "once); copy = transfer, delete = de-anchor")
     sp.add_argument("action",
-                    choices=["status", "init", "export", "adopt", "drop"],
+                    choices=["status", "init", "offer", "adopt", "export",
+                             "drop"],
                     help="status: this node's holder state + the fleet's "
                          "holders (no root). "
                          "init: [sudo] fold a legacy anchor's ca.key + "
                          "door.key into anchor.gwa. "
-                         "export: [sudo, holder] write the file for transfer "
-                         "(PATH, or '-' for a pipe). "
-                         "adopt: [sudo] install an exported file here and "
-                         "grant this node the anchor roles. "
+                         "offer: [sudo, holder] mint a single-use 15-min "
+                         "offer for NODE, sealed to its CA-attested WireGuard "
+                         "key and served over the control plane — no file "
+                         "shuttling. "
+                         "adopt: [sudo] with no argument, collect the offer "
+                         "minted for this node and become a holder; with a "
+                         "PATH (or '-'), install an exported file instead. "
+                         "export: [sudo, holder] write the file for manual "
+                         "transfer (PATH, or '-' for a pipe). "
                          "drop: [sudo, holder] shed the anchor roles and "
                          "delete this copy (cooperative de-anchor)")
     sp.add_argument("path", nargs="?", default=None,
-                    help="export: destination path or '-'; adopt: source "
-                         "path or '-' (stdin)")
+                    help="offer: the target node (hostname / mesh name / id "
+                         "hex); export: destination path or '-'; adopt: "
+                         "optional source path or '-' (default: claim the "
+                         "offer over the mesh)")
     sp.set_defaults(fn=cmd_anchor)
 
     # anchor-backup

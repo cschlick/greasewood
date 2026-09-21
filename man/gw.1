@@ -446,18 +446,18 @@ the new hostname
 .PP
 [sudo, anchor] request a fleet\-wide renewal \(em advertise renew_after=now so cooperating nodes renew (jittered, rate ~constant with mesh size)
 .SS gw anchor
-\fBUsage:\fR gw anchor [\-h] {status,init,export,adopt,drop} [path]
+\fBUsage:\fR gw anchor [\-h] {status,init,offer,adopt,export,drop} [path]
 .PP
 manage the ANCHOR FILE \(em the mesh's portable authority: any node holding anchor.gwa performs anchor duties (several at once); copy = transfer, delete = de\-anchor
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit
 .TP
-\fI{status,init,export,adopt,drop}\fR
-status: this node's holder state + the fleet's holders (no root). init: [sudo] fold a legacy anchor's ca.key + door.key into anchor.gwa. export: [sudo, holder] write the file for transfer (PATH, or '\-' for a pipe). adopt: [sudo] install an exported file here and grant this node the anchor roles. drop: [sudo, holder] shed the anchor roles and delete this copy (cooperative de\-anchor)
+\fI{status,init,offer,adopt,export,drop}\fR
+status: this node's holder state + the fleet's holders (no root). init: [sudo] fold a legacy anchor's ca.key + door.key into anchor.gwa. offer: [sudo, holder] mint a single\-use 15\-min offer for NODE, sealed to its CA\-attested WireGuard key and served over the control plane \(em no file shuttling. adopt: [sudo] with no argument, collect the offer minted for this node and become a holder; with a PATH (or '\-'), install an exported file instead. export: [sudo, holder] write the file for manual transfer (PATH, or '\-' for a pipe). drop: [sudo, holder] shed the anchor roles and delete this copy (cooperative de\-anchor)
 .TP
 \fIPATH\fR
-export: destination path or '\-'; adopt: source path or '\-' (stdin)
+offer: the target node (hostname / mesh name / id hex); export: destination path or '\-'; adopt: optional source path or '\-' (default: claim the offer over the mesh)
 .SS gw anchor\-backup
 \fBUsage:\fR gw anchor\-backup [\-h] [\-\-out PATH]
 .PP
