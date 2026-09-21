@@ -38,8 +38,23 @@ def _parse_renew_after(raw) -> "dt.datetime | None":
         return None
 
 
+def _parse_statements(raw_list) -> list:
+    """Parse the /directory response's statement list, per-entry tolerant (a
+    single malformed statement — or a kind from a newer version — costs that
+    entry, not the pull). Verification happens at merge, not here."""
+    from .wire import AnchorStatement
+    out = []
+    for d in raw_list if isinstance(raw_list, list) else []:
+        try:
+            out.append(AnchorStatement.from_dict(d))
+        except Exception as e:
+            log.debug("skipping one unparseable statement: %s", e)
+    return out
+
+
 def pull_directory(seed_url: str, timeout: float = 10.0):
-    """Fetch (records, renew_after, anchor_now) from a seed's /directory endpoint.
+    """Fetch (records, renew_after, anchor_now, mesh_domain, policy,
+    statements) from a seed's /directory endpoint.
 
     Accepts both the current object shape {"records": [...], "renew_after": ...}
     and a bare list (older anchors), so a mixed-version mesh still syncs. renew_after
@@ -54,8 +69,9 @@ def pull_directory(seed_url: str, timeout: float = 10.0):
             return (records, _parse_renew_after(raw.get("renew_after")),
                     _parse_renew_after(raw.get("now")),
                     raw.get("mesh_domain") or None,
-                    raw.get("policy") or None)
-        return [NodeRecord.from_dict(r) for r in raw], None, None, None, None
+                    raw.get("policy") or None,
+                    _parse_statements(raw.get("statements")))
+        return [NodeRecord.from_dict(r) for r in raw], None, None, None, None, []
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
@@ -118,6 +134,9 @@ class SyncLoop(Loop):
         on_renew_after: "Callable[[dt.datetime], None] | None" = None,
         expected_domain: "str | None" = None,
         on_policy: "Callable[[dict], bool] | None" = None,
+        statements=None,
+        get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
+        own_id_hex: "str | None" = None,
     ) -> None:
         super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
@@ -128,6 +147,15 @@ class SyncLoop(Loop):
         # the configured seeds (the anchor).
         self._get_seeds = get_seeds
         self._cache_path = cache_path
+        # The replicated membership-decision log (StatementLog) plus what its
+        # merge gate needs: the trusted-CA set to verify incoming statements
+        # against, and this node's own id so a tombstone can never make a node
+        # erase ITS OWN record from its own view (which would reset its record
+        # seq and wedge renewal republishing — the same self-protection
+        # prune_stale grew). None disables statement handling entirely.
+        self._statements = statements
+        self._get_ca_pubs = get_ca_pubs or list
+        self._own_id_hex = own_id_hex
         # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
@@ -223,9 +251,10 @@ class SyncLoop(Loop):
         for seed in self._get_seeds():
             try:
                 (records, renew_after, anchor_now, anchor_domain,
-                 policy_dict) = pull_directory(seed)
+                 policy_dict, stmts) = pull_directory(seed)
                 n = self._directory.merge(records)
-                if n:
+                dead = self._apply_statements(stmts)
+                if n or dead:
                     self._directory.save(self._cache_path)
                 # Also pull the anchor's revoke list and cache it locally, so
                 # regular nodes can mark and evict revoked peers immediately.
@@ -243,6 +272,28 @@ class SyncLoop(Loop):
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
+
+    def _apply_statements(self, stmts) -> int:
+        """Merge pulled statements (CA-verified inside the log), persist on
+        change, and apply their one node-side effect: dropping records a
+        tombstone killed — this is how a `gw leave` or sweep decided at ONE
+        holder reaches every view immediately instead of waiting out the
+        credential TTL. Returns the number of records dropped."""
+        if self._statements is None:
+            return 0
+        from .statements import statements_path
+        changed = 0
+        if stmts:
+            changed = self._statements.merge(stmts, self._get_ca_pubs())
+        self._statements.prune()
+        dead = self._statements.drop_dead_records(
+            self._directory, protect=self._own_id_hex)
+        if changed:
+            try:
+                self._statements.save(statements_path(self._cache_path.parent))
+            except OSError as e:
+                log.warning("could not persist statements: %s", e)
+        return dead
 
     def _stamp_sync(self) -> None:
         """Record the time of a successful directory pull, so `gw watch` can

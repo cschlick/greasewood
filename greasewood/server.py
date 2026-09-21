@@ -84,6 +84,10 @@ class _ReplayGuard:
 class _Handler(BaseHTTPRequestHandler):
     directory: "Directory"
     ca: "CA | None" = None
+    # The replicated membership-decision log (anchor-file model). Served in
+    # /directory beside the records and folded into /revoked; None on a plain
+    # node's server-less daemon or an unmigrated anchor.
+    statements = None    # StatementLog | None
     get_ca_pubs: "callable" = staticmethod(list)
     get_revoked: "callable" = staticmethod(set)
     cache_path: "Path | None" = None
@@ -138,6 +142,11 @@ class _Handler(BaseHTTPRequestHandler):
                 # The signed GrantTable dict, or None. Re-read per request so a
                 # `gw policy apply` takes effect without an anchor restart.
                 "policy": self.get_policy(),
+                # CA-signed membership decisions (revoke/tombstone/setcaps),
+                # riding the same pull as records so every holder AND every
+                # node converges on them. Old clients ignore unknown keys.
+                "statements": ([s.to_dict() for s in self.statements.all()]
+                               if self.statements is not None else []),
                 "now": self._now_iso(),
             })
         elif self.path == "/ca-cert":
@@ -152,7 +161,13 @@ class _Handler(BaseHTTPRequestHandler):
             # identities are permanently excluded. Signed/authorized records
             # are the source of truth, but this lets regular nodes mark and
             # evict revoked peers immediately rather than waiting for TTL.
-            self._send_json({"revoked": sorted(self.get_revoked())})
+            # Merged from the legacy revoked.json AND the replicated revoke
+            # statements, so old nodes (which only pull this endpoint) see
+            # revocations minted at ANY holder.
+            merged = set(self.get_revoked())
+            if self.statements is not None:
+                merged |= self.statements.revoked_ids()
+            self._send_json({"revoked": sorted(merged)})
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -464,6 +479,7 @@ class ControlServer:
         get_policy=lambda: None,
         request_timeout: float = 30.0,
         max_workers: int = 32,
+        statements=None,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -475,6 +491,7 @@ class ControlServer:
         Handler.timeout = request_timeout
         Handler.directory = directory
         Handler.ca = ca
+        Handler.statements = statements
         Handler.get_ca_pubs = staticmethod(get_ca_pubs)
         Handler.get_revoked = staticmethod(get_revoked)
         Handler.cache_path = cache_path

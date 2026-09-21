@@ -3499,6 +3499,13 @@ def cmd_run(args) -> int:
         # Start from the cached copy (if any) and let the SyncLoop refresh it.
         get_revoked = lambda: _load_revoked(cfg)
 
+    # The replicated membership-decision log (revoke/tombstone/setcaps
+    # statements — see greasewood.statements). Loaded on every role: plain
+    # nodes merge and apply what holders decide; holders additionally mint
+    # into it and serve it. Load re-verifies against the CURRENT trusted set.
+    from .statements import StatementLog, statements_path
+    stmt_log = StatementLog.load(statements_path(cfg.data_dir), get_ca_pubs())
+
     # Directory sync — pull from the configured seeds (the anchor). The renewal loop
     # is built below; the callback reads it lazily (the first pull is one interval
     # out), so acting on the anchor's fleet renew hint needs no reordering.
@@ -3507,6 +3514,9 @@ def cmd_run(args) -> int:
         on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
         expected_domain=cfg.mesh_domain,
         on_policy=grant_policy.offer,
+        statements=stmt_log,
+        get_ca_pubs=get_ca_pubs,
+        own_id_hex=keys.id_pub_hex,
     )
     sync.start()
 
