@@ -92,7 +92,7 @@ def test_anchor_role_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     with pytest.raises(SystemExit) as e:
         cli.cmd_leave(_cfg(tmp_path, role="anchor"))
-    assert "anchor can't leave" in str(e.value)
+    assert "holder can't leave" in str(e.value)
 
 
 def test_declined_prompt_changes_nothing(tmp_path, monkeypatch, capsys):

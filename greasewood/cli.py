@@ -673,8 +673,18 @@ def cmd_create(args) -> int:
                 print("Then re-run `gw invite` to mint fresh invites.")
 
     # Door keypair (persistent across invites)
-    load_or_generate_door_key(data_dir)
-    log.info("door key ready → %s/door.key", data_dir)
+    door_raw = load_or_generate_door_key(data_dir)
+    log.info("door key ready")
+
+    # The ANCHOR FILE: both root secrets (CA + door key) in one transferable
+    # file. Possession = anchor authority; new meshes are file-based from
+    # birth (the standalone ca.key/door.key remain beside it for downgrade
+    # compatibility). Idempotent: never clobber an existing file on re-create
+    # without --force having already rotated the CA above.
+    from . import anchorfile
+    if anchorfile.load(data_dir) is None or getattr(args, "force", False):
+        anchorfile.AnchorFile.build(mesh_domain, ca_keys, door_raw).save(data_dir)
+        log.info("anchor file ready → %s", anchorfile.anchor_path(data_dir))
 
     # Set up door routing (idempotent — also called in gw run for reboots)
     wgmod.setup_door_routing()
@@ -842,10 +852,8 @@ def cmd_invite(args) -> int:
     from . import wg as wgmod
 
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw invite must be run on the anchor node (role = anchor)")
-    if cfg.ca_key_file is None:
-        sys.exit("invite requires ca_key_file in [anchor]")
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw invite needs anchor authority. {NOT_A_HOLDER_MSG}")
 
     # Preflight: a token is only redeemable if the daemon is up (it hosts the
     # enroll server) with its mesh interface present (it installs the joiner as
@@ -911,8 +919,7 @@ def cmd_invite(args) -> int:
     anchor_door_pub = door_pub_bytes_from_key(door_key_raw)
     door_key_b64 = base64.b64encode(door_key_raw).decode()
 
-    from .keys import CAKeys
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    ca_keys, _guard = _anchor_ca_source(cfg)
 
     # Anchor underlay host(s) for the token (bare addresses; the joiner adds the
     # door port). Carry v6 and/or v4 so a joiner reaches the anchor over whichever
@@ -1111,8 +1118,8 @@ def cmd_close_door(args) -> int:
 
     _require_root("close-door", "it removes the anchor's door window and interface")
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw close-door must be run on the anchor (role = anchor)")
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw close-door needs anchor authority. {NOT_A_HOLDER_MSG}")
 
     window = doormod.read_window(cfg.data_dir)
     wpath = doormod.window_path(cfg.data_dir)
@@ -1182,7 +1189,7 @@ def _anchor_membership(etc: "Path" = Path("/etc")) -> "tuple[str, Path] | None":
     from .config import load_config
     for key, p in _memberships(etc):
         try:
-            if getattr(load_config(p), "role", "node") == "anchor":
+            if _holds_anchor(load_config(p)):
                 return key, p
         except Exception:
             continue
@@ -2314,6 +2321,55 @@ def cmd_revoke(args) -> int:
 # set-caps / set-roles — change an enrolled node's caps on the anchor
 # ---------------------------------------------------------------------------
 
+def _holds_anchor(cfg) -> bool:
+    """Does this membership hold anchor authority? The anchor FILE
+    (<data_dir>/anchor.gwa) is the authority — any node possessing it
+    performs anchor duties, and deleting it de-anchors the machine. A legacy
+    role=anchor config with ca_key_file still counts (unmigrated anchors)."""
+    from . import anchorfile
+    data_dir = getattr(cfg, "data_dir", None)
+    if data_dir is not None:
+        try:
+            if anchorfile.load(data_dir) is not None:
+                return True
+        except ValueError as e:
+            sys.exit(f"anchor file {anchorfile.anchor_path(data_dir)} is "
+                     f"corrupt: {e} — restore it from another holder "
+                     f"(gw anchor export | gw anchor adopt) or a backup")
+        except PermissionError:
+            # Can't read it but it exists → this machine IS a holder; the
+            # caller needing its contents hits the permission error with
+            # context.
+            return anchorfile.anchor_path(data_dir).exists()
+    # A bare role=anchor still counts (legacy configs; the key-needing
+    # operations surface their own error if ca_key_file is also missing).
+    return getattr(cfg, "role", "node") == "anchor"
+
+
+NOT_A_HOLDER_MSG = (
+    "this node holds no anchor authority — no anchor.gwa in its data dir and "
+    "no legacy [anchor] ca_key_file. Run this on a holder, or make this node "
+    "one: `gw anchor export` on a holder, copy the file over YOUR channel "
+    "(scp), `sudo gw anchor adopt <file>` here.")
+
+
+def _anchor_ca_source(cfg):
+    """(CAKeys, guard_path) for anchor-authority operations: the anchor
+    file's CA key when present (guard_path = anchor.gwa, arming CA's
+    stale-key snapshot against the file changing under a live daemon), else
+    the legacy ca.key. Exits with the adoption hint when neither exists."""
+    from . import anchorfile
+    af = anchorfile.load(cfg.data_dir)
+    if af is not None:
+        return af.ca_keys(), anchorfile.anchor_path(cfg.data_dir)
+    if cfg.ca_key_file is None:
+        sys.exit(NOT_A_HOLDER_MSG)
+    from .keys import CAKeys
+    return (CAKeys.load(Path(cfg.ca_key_file),
+                        _get_passphrase(cfg.ca_key_passphrase_env)),
+            Path(cfg.ca_key_file))
+
+
 def _load_anchor_ca(args, cmd: str):
     """Shared setup for anchor-side membership commands: load config + CA.
     The CA reads its view from the on-disk directory/statement caches the
@@ -2330,11 +2386,9 @@ def _load_anchor_ca(args, cmd: str):
     # existing at all.
     _require_root(cmd, "it reads and writes the anchor's state and CA key")
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit(f"gw {cmd} must be run on the anchor (role = anchor)")
-    if cfg.ca_key_file is None:
-        sys.exit(f"{cmd} requires ca_key_file in [anchor]")
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw {cmd} needs anchor authority. {NOT_A_HOLDER_MSG}")
+    ca_keys, _guard = _anchor_ca_source(cfg)
     ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
     return cfg, CA(ca_keys, cfg.data_dir,
                    get_ca_pubs=lambda: ca_pubs or [ca_keys.ca_pub_bytes],
@@ -2559,8 +2613,9 @@ def cmd_leave(args) -> int:
 
     _require_root("leave", "it stops the daemon and removes the interface")
     cfg = load_config(Path(args.config))
-    if cfg.role == "anchor":
-        sys.exit("the anchor can't leave its own mesh — it IS the mesh's "
+    if _holds_anchor(cfg):
+        sys.exit("an anchor holder can't leave its own mesh — it IS one of "
+                 "the mesh's "
                  "coordination point. Hand the role to a standby first "
                  "(anchor-transfer / anchor-activate), or tear the mesh down "
                  "(see operations.md).")
@@ -3330,14 +3385,13 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
     from .enroll import DoorWatcher, EnrollContext
     from . import wg as wgmod
 
-    if not cfg.ca_key_file:
-        _daemon_fatal(cfg, "anchor role requires ca_key_file in [anchor]")
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    ca_keys, guard_path = _anchor_ca_source(cfg)
     # key_file arms the stale-key guard: this CA lives as long as the daemon,
-    # and must refuse to sign if ca.key changes on disk underneath it. The
-    # live directory + statement log ARE the registry view it issues from.
+    # and must refuse to sign if the key (anchor.gwa or legacy ca.key) changes
+    # on disk underneath it. The live directory + statement log ARE the
+    # registry view it issues from.
     ca = CA(ca_keys, cfg.data_dir, cfg.credential_ttl,
-            key_file=Path(cfg.ca_key_file),
+            key_file=guard_path,
             directory=directory, statements=stmt_log,
             get_ca_pubs=get_ca_pubs, dir_cache_path=cfg.dir_cache_path)
     get_revoked = ca.load_revoked_set
@@ -3513,7 +3567,7 @@ def cmd_run(args) -> int:
     from .statements import StatementLog, statements_path
     stmt_log = StatementLog.load(statements_path(cfg.data_dir), get_ca_pubs())
 
-    if cfg.role == "anchor":
+    if _holds_anchor(cfg):
         get_revoked, door_watcher = _start_anchor_control_plane(
             cfg, keys, directory, get_ca_pubs, grant_policy, stmt_log)
     else:
@@ -3927,9 +3981,10 @@ def cmd_policy(args) -> int:
     if args.action == "edit":
         _require_root("policy edit", "grants.toml lives in the root-owned data dir")
         cfg = load_config(Path(args.config))
-        if cfg.role != "anchor":
-            sys.exit("gw policy edit must run on the anchor — grants.toml is "
-                     "authored there; this node only receives the signed policy")
+        if not _holds_anchor(cfg):
+            sys.exit("gw policy edit needs anchor authority — grants.toml is "
+                     "authored on holders; this node only receives the signed "
+                     f"policy. {NOT_A_HOLDER_MSG}")
         gpath = Path(args.file) if args.file else cfg.data_dir / polmod.GRANTS_BASENAME
         if not gpath.exists():
             gpath.write_text(polmod.DEFAULT_GRANTS_TOML)
@@ -3977,10 +4032,8 @@ def cmd_policy(args) -> int:
     from .keys import CAKeys, atomic_write
     _require_root("policy apply", "it signs the table with the CA key")
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw policy apply must be run on the anchor (role = anchor)")
-    if cfg.ca_key_file is None:
-        sys.exit("policy apply requires ca_key_file in [anchor]")
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw policy apply needs anchor authority. {NOT_A_HOLDER_MSG}")
 
     grants_path = Path(args.file) if args.file else cfg.data_dir / polmod.GRANTS_BASENAME
     if not grants_path.exists():
@@ -4082,7 +4135,7 @@ def cmd_policy(args) -> int:
             print("not applied.")
             return 1
 
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    ca_keys, _guard = _anchor_ca_source(cfg)
     table = GrantTable(seq=new_seq, grants=grants).sign(ca_keys.ca_priv)
     atomic_write(cache, json.dumps(table.to_dict(), indent=2), mode=0o644)
     print(f"policy v{new_seq} applied — nodes adopt it on their next directory "
@@ -4191,8 +4244,8 @@ def cmd_renew_all(args) -> int:
     from .config import load_config
     _require_root("renew-all", "it writes the anchor's root-owned renewal state")
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw renew-all must be run on the anchor (role = anchor)")
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw renew-all needs anchor authority. {NOT_A_HOLDER_MSG}")
 
     now = _request_fleet_renewal(cfg)
     print(f"fleet renewal requested: renew_after = {now:%Y-%m-%d %H:%M UTC}")
@@ -4236,6 +4289,195 @@ def _failover_passphrase(confirm: bool) -> bytes:
     return pw.encode()
 
 
+def cmd_anchor(args) -> int:
+    """`gw anchor <action>` — manage the ANCHOR FILE, the mesh's portable
+    authority: any node whose data dir holds anchor.gwa performs anchor
+    duties (several at once — every decision is a replicated CA-signed
+    statement, and issuance reads the replicated directory)."""
+    from .config import load_config
+    from . import anchorfile
+
+    if args.action == "status":
+        cfg = load_config(Path(args.config))
+        p = anchorfile.anchor_path(cfg.data_dir)
+        try:
+            af = anchorfile.load(cfg.data_dir)
+        except PermissionError:
+            print(f"anchor file : present at {p} (run as root to inspect)")
+            af = None
+        except ValueError as e:
+            print(f"anchor file : ⚠ CORRUPT at {p}: {e}")
+            print("  restore it from another holder (gw anchor export → "
+                  "gw anchor adopt) or from a gw anchor-backup archive")
+            return 1
+        else:
+            if af is not None:
+                print(f"anchor file : present — this node is a HOLDER ({p})")
+                print(f"  CA pub    : {af.ca_keys().ca_pub_hex}")
+                if af.created:
+                    print(f"  created   : {af.created}")
+            elif cfg.role == "anchor" and cfg.ca_key_file:
+                print("anchor file : none — LEGACY anchor (role=anchor + "
+                      "ca_key_file). Fold it into the file: sudo gw anchor init")
+            else:
+                print("anchor file : none — this node holds no anchor authority")
+        # The fleet's holders, from the replicated directory (roles ride in
+        # CA-attested credentials, so this view needs no privileged state).
+        from .directory import Directory
+        d = Directory.load(cfg.dir_cache_path)
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        holders = [r for r in d.all()
+                   if any(c in ("role:*", "role:anchor") for c in r.cred.caps)]
+        if holders:
+            print("holders (from the directory):")
+            for r in sorted(holders, key=lambda r: r.hostname):
+                left = (r.cred.exp - now).total_seconds()
+                state = ("cred EXPIRED" if left < 0
+                         else f"cred expires in {int(left // 3600)}h")
+                print(f"  {r.hostname:<12} {r.cred.addr}  ({state})")
+        return 0
+
+    _require_root(f"anchor {args.action}", "it handles the mesh's root keys")
+    cfg = load_config(Path(args.config))
+
+    if args.action == "init":
+        if anchorfile.load(cfg.data_dir) is not None:
+            print(f"anchor file already present at "
+                  f"{anchorfile.anchor_path(cfg.data_dir)} — nothing to do")
+            return 0
+        if not (cfg.role == "anchor" and cfg.ca_key_file):
+            sys.exit("gw anchor init folds a LEGACY anchor's ca.key + door.key "
+                     "into the anchor file — run it on the anchor. (A node "
+                     "becomes a holder with `gw anchor adopt`, not init.)")
+        from .keys import CAKeys
+        from .door import load_or_generate_door_key
+        ca_keys = CAKeys.load(Path(cfg.ca_key_file),
+                              _get_passphrase(cfg.ca_key_passphrase_env))
+        door_raw = load_or_generate_door_key(cfg.data_dir)
+        af = anchorfile.AnchorFile.build(cfg.mesh_domain, ca_keys, door_raw)
+        p = af.save(cfg.data_dir)
+        print(f"anchor file written → {p}")
+        print("This ONE file is now the anchor authority: copy it to another "
+              "node (over ssh/scp — never the mesh) and `sudo gw anchor adopt` "
+              "there to run active/active; delete it (`sudo gw anchor drop`) "
+              "to de-anchor a machine. The legacy ca.key/door.key remain "
+              "beside it untouched.")
+        return 0
+
+    if args.action == "export":
+        from .keys import atomic_write
+        if not args.path:
+            sys.exit("export needs a destination: gw anchor export <path> "
+                     "(or '-' to stream for a pipe)")
+        af = anchorfile.load(cfg.data_dir)
+        if af is None:
+            sys.exit("no anchor file here — on a legacy anchor run "
+                     "`sudo gw anchor init` first")
+        blob = af.to_bytes()
+        if args.path == "-":
+            sys.stdout.buffer.write(blob)
+            print("\n⚠ that was the mesh's ROOT KEY — whoever holds it IS an "
+                  "anchor. Move it over your own channel (ssh), then shred "
+                  "intermediate copies.", file=sys.stderr)
+        else:
+            out = Path(args.path)
+            if out.exists():
+                sys.exit(f"{out} already exists — refusing to overwrite")
+            atomic_write(out, blob, mode=0o600)
+            print(f"exported → {out}")
+            print("⚠ this file IS the mesh's root authority. Copy it to the "
+                  "new holder over ssh/scp, `sudo gw anchor adopt` there, "
+                  "then delete this copy.")
+        return 0
+
+    if args.action == "adopt":
+        if not args.path:
+            sys.exit("adopt needs a source: gw anchor adopt <path> "
+                     "(or '-' to read from stdin)")
+        raw = (sys.stdin.buffer.read() if args.path == "-"
+               else Path(args.path).read_bytes())
+        try:
+            af = anchorfile.AnchorFile.from_bytes(raw)
+        except ValueError as e:
+            sys.exit(f"not adoptable: {e}")
+        if af.mesh_domain != cfg.mesh_domain:
+            sys.exit(f"this anchor file belongs to mesh {af.mesh_domain!r}; "
+                     f"this membership is {cfg.mesh_domain!r} — refusing a "
+                     f"cross-mesh adoption")
+        ca_pub = af.ca_keys().ca_pub_hex
+        if cfg.ca_pubs_hex and ca_pub not in cfg.ca_pubs_hex:
+            sys.exit("this anchor file's CA is not in this node's trusted_pubs "
+                     "— it is not (or no longer) this mesh's root. If this is "
+                     "a deliberate re-root, add the new CA pub to [ca] "
+                     "trusted_pubs first.")
+        p = af.save(cfg.data_dir)
+        print(f"adopted → {p} — this node now holds anchor authority")
+        # Grant ourselves the anchor roles: a replicated setcaps statement,
+        # applied at our next renewal and visible to every holder and node.
+        from .ca import CA
+        from .keys import NodeKeys
+        keys = NodeKeys.load_or_generate(cfg.data_dir)
+        _pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+        ca = CA(af.ca_keys(), cfg.data_dir, dir_cache_path=cfg.dir_cache_path,
+                get_ca_pubs=(lambda: _pubs) if _pubs else None)
+        own = ca.node_info(keys.id_pub_bytes)
+        if own is not None:
+            caps = list(own[1])
+            for c in ("role:*", "role:anchor"):
+                if c not in caps:
+                    caps.append(c)
+            ca.set_caps(keys.id_pub_bytes, caps)
+            print("anchor roles granted (replicated setcaps — adopted at the "
+                  "next credential renewal)")
+        else:
+            print("note: this node has no record in its directory cache yet — "
+                  "its anchor roles will need `gw set-roles` once it has one")
+        if not _service_restart(membership_key(cfg.mesh_domain),
+                                why="to begin serving as an anchor"):
+            print("Restart the daemon to begin serving:")
+            print(f"  {_svc_restart_hint(membership_key(cfg.mesh_domain))}")
+        return 0
+
+    if args.action == "drop":
+        af = anchorfile.load(cfg.data_dir)
+        if af is None:
+            if cfg.role == "anchor" and cfg.ca_key_file:
+                sys.exit("this is a LEGACY anchor (role=anchor + ca_key_file), "
+                         "not a file-holder — `gw anchor init` first if you "
+                         "want file semantics, or decommission it per the "
+                         "operations runbook")
+            print("no anchor file here — nothing to drop")
+            return 0
+        # While we still hold the key: shed our anchor roles via a replicated
+        # setcaps, so the fleet stops treating this node as a holder once its
+        # credential renews.
+        from .ca import CA
+        from .keys import NodeKeys
+        keys = NodeKeys.load_or_generate(cfg.data_dir)
+        _pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+        ca = CA(af.ca_keys(), cfg.data_dir, dir_cache_path=cfg.dir_cache_path,
+                get_ca_pubs=(lambda: _pubs) if _pubs else None)
+        own = ca.node_info(keys.id_pub_bytes)
+        if own is not None:
+            caps = [c for c in own[1] if c not in ("role:*", "role:anchor")]
+            ca.set_caps(keys.id_pub_bytes, caps)
+        anchorfile.anchor_path(cfg.data_dir).unlink()
+        print(f"dropped — {anchorfile.anchor_path(cfg.data_dir)} deleted; "
+              f"this machine no longer holds anchor authority")
+        print("Note: deleting a copy is the COOPERATIVE de-anchor (leave, for "
+              "anchors). It proves nothing about other copies — if this "
+              "machine is no longer trusted, rotate the CA key (re-root) "
+              "instead: knowledge can't be revoked.")
+        if not _service_restart(membership_key(cfg.mesh_domain),
+                                why="to stop serving as an anchor"):
+            print("Restart the daemon to stop serving:")
+            print(f"  {_svc_restart_hint(membership_key(cfg.mesh_domain))}")
+        return 0
+
+    sys.exit(f"unknown anchor action {args.action!r}")
+
+
 def cmd_anchor_backup(args) -> int:
     """Write a single encrypted archive of this anchor's trust state (CA key, the
     nodes/ registry, revoke list, door key). Restoring the same key onto a new
@@ -4245,14 +4487,12 @@ def cmd_anchor_backup(args) -> int:
 
     _require_root("anchor-backup", "it reads the CA key and the anchor registry")
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw anchor-backup must be run on the anchor (role = anchor)")
-    if cfg.ca_key_file is None:
-        sys.exit("anchor-backup requires ca_key_file in [anchor]")
-
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw anchor-backup needs anchor authority. {NOT_A_HOLDER_MSG}")
     files = bak.collect_anchor_state(cfg.data_dir, cfg.ca_key_file)
-    if "ca.key" not in files:
-        sys.exit(f"CA key not found at {cfg.ca_key_file} — nothing to back up")
+    if "ca.key" not in files and "anchor.gwa" not in files:
+        sys.exit("no CA root found (neither anchor.gwa nor ca.key) — "
+                 "nothing to back up")
 
     to_stdout = args.out == "-"                # `-` → stream the blob (for a pipe)
     passphrase = _backup_passphrase(confirm=not to_stdout)
@@ -4439,12 +4679,9 @@ def cmd_anchor_standby(args) -> int:
     import argparse
 
     cfg = load_config(Path(args.config))
-    if cfg.role != "anchor":
-        sys.exit("gw anchor-standby must be run on the anchor (role = anchor)")
-    if cfg.ca_key_file is None:
-        sys.exit("anchor-standby requires ca_key_file in [anchor]")
-
-    ca_keys = CAKeys.load(cfg.ca_key_file, _get_passphrase(cfg.ca_key_passphrase_env))
+    if not _holds_anchor(cfg):
+        sys.exit(f"gw anchor-standby needs anchor authority. {NOT_A_HOLDER_MSG}")
+    ca_keys, _guard = _anchor_ca_source(cfg)
     _pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
     ca = CA(ca_keys, cfg.data_dir, dir_cache_path=cfg.dir_cache_path,
             get_ca_pubs=lambda: _pubs or [ca_keys.ca_pub_bytes])
@@ -5366,6 +5603,29 @@ def build_parser() -> argparse.ArgumentParser:
                              "renew_after=now so cooperating nodes renew (jittered, "
                              "rate ~constant with mesh size)")
     sp.set_defaults(fn=cmd_renew_all)
+
+    # anchor — the anchor FILE (portable authority)
+    sp = sub.add_parser(
+        "anchor",
+        help="manage the ANCHOR FILE — the mesh's portable authority: any "
+             "node holding anchor.gwa performs anchor duties (several at "
+             "once); copy = transfer, delete = de-anchor")
+    sp.add_argument("action",
+                    choices=["status", "init", "export", "adopt", "drop"],
+                    help="status: this node's holder state + the fleet's "
+                         "holders (no root). "
+                         "init: [sudo] fold a legacy anchor's ca.key + "
+                         "door.key into anchor.gwa. "
+                         "export: [sudo, holder] write the file for transfer "
+                         "(PATH, or '-' for a pipe). "
+                         "adopt: [sudo] install an exported file here and "
+                         "grant this node the anchor roles. "
+                         "drop: [sudo, holder] shed the anchor roles and "
+                         "delete this copy (cooperative de-anchor)")
+    sp.add_argument("path", nargs="?", default=None,
+                    help="export: destination path or '-'; adopt: source "
+                         "path or '-' (stdin)")
+    sp.set_defaults(fn=cmd_anchor)
 
     # anchor-backup
     sp = sub.add_parser("anchor-backup",

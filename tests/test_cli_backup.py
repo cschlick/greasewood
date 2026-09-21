@@ -71,7 +71,7 @@ def test_backup_refuses_non_anchor(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)   # gate passes; role check fires
     _, ca_key = _make_anchor(tmp_path)
     cfg = _anchor_cfg(tmp_path, ca_key, role="node")
-    with pytest.raises(SystemExit, match="must be run on the anchor"):
+    with pytest.raises(SystemExit, match="needs anchor authority"):
         cli.cmd_anchor_backup(types.SimpleNamespace(config=str(cfg), out=None))
 
 

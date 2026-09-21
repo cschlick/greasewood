@@ -262,8 +262,15 @@ def decode_token(token: str) -> "DecodedToken":
 def load_or_generate_door_key(data_dir: Path) -> bytes:
     """
     Load the anchor's door WG private key (raw 32 bytes).
-    Generates and saves it at 0600 if it doesn't exist.
+    The anchor FILE (anchor.gwa) is the first source — the door key travels
+    inside it, so every holder serves the same door_pub and any holder's
+    invite verifies against any holder's file. Falls back to the legacy
+    standalone door.key; generates one at 0600 only when neither exists.
     """
+    from . import anchorfile
+    af = anchorfile.load(data_dir)
+    if af is not None:
+        return af.door_key_raw()
     key_path = data_dir / "door.key"
     if key_path.exists():
         return base64.b64decode(key_path.read_bytes().strip())

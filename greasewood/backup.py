@@ -64,8 +64,8 @@ _LOG2N_MAX = 20
 # reproduces the anchor's overlay address, keeping address-based seeds/root_url
 # working (a re-generated identity would give the anchor a new address). They're
 # anchor secrets living in the same encrypted blob, so no extra exposure.
-_ANCHOR_STATE = ["ca.key.pub", "ca.cert.pem", "door.key", "revoked.json",
-                 "statements.json", "id_priv.pem", "wg.key"]
+_ANCHOR_STATE = ["anchor.gwa", "ca.key.pub", "ca.cert.pem", "door.key",
+                 "revoked.json", "statements.json", "id_priv.pem", "wg.key"]
 # Legacy registries (pre-statement anchors) still restore byte-for-byte; the
 # current code never reads them, but a downgrade could.
 _ANCHOR_STATE_GLOBS = ["nodes/*.json"]
@@ -150,9 +150,10 @@ def collect_anchor_state(data_dir, ca_key_file) -> dict[str, bytes]:
     data_dir = Path(data_dir)
     files: dict[str, bytes] = {}
 
-    ca_key_file = Path(ca_key_file)
-    if ca_key_file.exists():
-        files["ca.key"] = ca_key_file.read_bytes()
+    if ca_key_file is not None:
+        ca_key_file = Path(ca_key_file)
+        if ca_key_file.exists():
+            files["ca.key"] = ca_key_file.read_bytes()
 
     for rel in _ANCHOR_STATE:
         p = data_dir / rel
@@ -171,13 +172,14 @@ def collect_failover_state(data_dir, ca_key_file) -> dict[str, bytes]:
     (the registry is rebuilt from the directory cache on activation)."""
     data_dir = Path(data_dir)
     files: dict[str, bytes] = {}
-    ca_key_file = Path(ca_key_file)
-    if ca_key_file.exists():
-        files["ca.key"] = ca_key_file.read_bytes()
-    pub_path = ca_key_file.with_suffix(".pub")
-    if pub_path.exists():
-        files["ca.key.pub"] = pub_path.read_bytes()
-    for rel in ["ca.cert.pem", "door.key", "revoked.json"]:
+    if ca_key_file is not None:
+        ca_key_file = Path(ca_key_file)
+        if ca_key_file.exists():
+            files["ca.key"] = ca_key_file.read_bytes()
+        pub_path = ca_key_file.with_suffix(".pub")
+        if pub_path.exists():
+            files["ca.key.pub"] = pub_path.read_bytes()
+    for rel in ["anchor.gwa", "ca.cert.pem", "door.key", "revoked.json"]:
         p = data_dir / rel
         if p.exists():
             files[rel] = p.read_bytes()

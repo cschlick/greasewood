@@ -68,7 +68,7 @@ def test_require_root_passes_as_root(monkeypatch):
 ])
 def test_anchor_commands_refuse_non_anchor(cmd, fn, tmp_path, monkeypatch):
     """Every anchor-only command run on a role=node config exits with the same clear
-    'must be run on the anchor' message — the root gate passes (faked), then the
+    'needs anchor authority' message — the root gate passes (faked), then the
     role check fires before any mutation."""
     import types
     _as_root(monkeypatch)
@@ -87,7 +87,7 @@ trusted_pubs = []
                               node="n1", caps="tls", roles="mesh")
     with pytest.raises(SystemExit) as e:
         getattr(cli, fn)(ns)
-    assert "must be run on the anchor" in str(e.value)
+    assert "needs anchor authority" in str(e.value)
     # nothing was written (e.g. renew-all's hint file)
     assert not (tmp_path / "renew_after").exists()
 

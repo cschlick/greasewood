@@ -1003,7 +1003,8 @@ def _make_role_applier(cfg):
       the same registry write the CLI performs.
     Either way a fleet renew hint is sent so the node adopts its roles live
     within a poll interval. Returns a human line for the result screen."""
-    if getattr(cfg, "role", "node") != "anchor" or not getattr(cfg, "ca_key_file", None):
+    from . import cli as _cli_gate      # lazy: cli imports status
+    if not _cli_gate._holds_anchor(cfg):
         return None
 
     def _apply(node: dict, roles: list) -> str:
@@ -1013,9 +1014,8 @@ def _make_role_applier(cfg):
                              rewrite_assignment, apply_assignments)
         from . import cli as _cli                 # lazy: cli imports status
         _pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
-        ca = CA(CAKeys.load(cfg.ca_key_file,
-                            _cli._get_passphrase(cfg.ca_key_passphrase_env)),
-                cfg.data_dir, cfg.credential_ttl,
+        _keys, _guard = _cli._anchor_ca_source(cfg)
+        ca = CA(_keys, cfg.data_dir, cfg.credential_ttl,
                 dir_cache_path=getattr(cfg, "dir_cache_path", None),
                 get_ca_pubs=(lambda p=_pubs: p) if _pubs else None)
         host = node["hostname"]
@@ -1107,7 +1107,8 @@ def _make_revoker(cfg):
     `gw revoke`: the CA revoke list + registry forget (which frees the
     hostname). Membership isn't declarative — enrollment is a handshake — so
     unlike roles there is no file for this to front; it mirrors the CLI."""
-    if getattr(cfg, "role", "node") != "anchor" or not getattr(cfg, "ca_key_file", None):
+    from . import cli as _cli_gate      # lazy: cli imports status
+    if not _cli_gate._holds_anchor(cfg):
         return None
 
     def _revoke(node: dict) -> str:
@@ -1115,9 +1116,8 @@ def _make_revoker(cfg):
         from .keys import CAKeys
         from . import cli as _cli                 # lazy: cli imports status
         _pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
-        ca = CA(CAKeys.load(cfg.ca_key_file,
-                            _cli._get_passphrase(cfg.ca_key_passphrase_env)),
-                cfg.data_dir, cfg.credential_ttl,
+        _keys, _guard = _cli._anchor_ca_source(cfg)
+        ca = CA(_keys, cfg.data_dir, cfg.credential_ttl,
                 dir_cache_path=getattr(cfg, "dir_cache_path", None),
                 get_ca_pubs=(lambda p=_pubs: p) if _pubs else None)
         host = node["hostname"]

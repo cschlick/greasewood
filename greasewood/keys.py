@@ -226,11 +226,21 @@ class CAKeys:
 
     @classmethod
     def load(cls, key_path: Path, passphrase: bytes | None = None) -> "CAKeys":
-        priv = serialization.load_pem_private_key(
-            key_path.read_bytes(), password=passphrase
-        )
+        return cls.from_pem(key_path.read_bytes(), passphrase)
+
+    @classmethod
+    def from_pem(cls, pem: bytes, passphrase: bytes | None = None) -> "CAKeys":
+        priv = serialization.load_pem_private_key(pem, password=passphrase)
         pub_bytes = _raw_pub(priv)
         return cls(ca_priv=priv, ca_pub_bytes=pub_bytes)
+
+    def to_pem(self) -> bytes:
+        """Unencrypted PKCS8 PEM — the anchor-file embedding (0600 at rest,
+        same posture as a passphrase-less ca.key)."""
+        return self.ca_priv.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
 
 
 def atomic_write(path: Path, data: "bytes | str", mode: int = 0o600) -> None:
