@@ -81,6 +81,7 @@ nav:
   - Install: install.md
   - Quickstart: quickstart.md
   - Live dashboard: watch.md
+  - The anchor file: anchor.md
   - Access control: access-control.md
   - TLS certificates: tls.md
   - File sharing (NFS): nfs.md

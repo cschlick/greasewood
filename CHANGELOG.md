@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the anchor is now a FILE, and anchors are active/active
+
+**There is no anchor machine anymore.** Anchor authority lives in ONE file,
+`<data_dir>/anchor.gwa` (the CA key + the door key). Any node holding it
+performs anchor duties — several at once, each fully able to invite, revoke,
+re-role, renew, and accept departures. Transfer = copy the file (`gw anchor
+export` → scp → `gw anchor adopt`); redundancy = keep copies; cooperative
+de-anchor = `gw anchor drop` (delete it) — `gw leave`, for anchors. A machine
+you no longer *trust* still needs the re-root: knowledge can't be revoked.
+See the new [docs/anchor.md](docs/anchor.md).
+
+What makes concurrent holders coherent with no coordination protocol:
+
+- **The private registry is gone; the credential IS the registry entry.**
+  Hostname, caps, and expiry ride in each node's CA-signed credential inside
+  its replicated NodeRecord, so issuance (enroll/renew) reads state every
+  holder already converges on. Renewal re-issues from the node's record,
+  verified against the trusted CA set — which also makes the old re-root
+  fallback the *normal* path (a new CA recertifies the outgoing CA's nodes
+  from their records, no special code). The stale sweep collapses to one
+  directory prune: no record = not visible AND not renewable, convergent on
+  every node by construction.
+- **Membership decisions are replicated `AnchorStatement`s** (CA-signed,
+  carried in /directory beside records, merged order-free by everyone):
+  `revoke` (monotone, never lapses — legacy revoked.json remains a merged
+  source forever), `tombstone` (a leave/sweep; kills only credentials issued
+  at or before it, so departed ids re-enroll cleanly — and departures now
+  reach every node on its next sync pull instead of at credential expiry),
+  and `setcaps` (set-roles/set-caps, applied at the subject's next renewal by
+  whichever holder serves it). Statements are re-verified against the
+  current trusted set at every load, so a completed re-root's dropped CA
+  takes its cached decisions with it.
+- **Nodes discover the anchor SET from the directory** (records carrying the
+  anchor roles under a trusted CA) and fail over across it: sync pulls from
+  the first live holder, renewal tries each (verifying the returned
+  credential against the trusted set — a rogue holder can't hand a node a
+  credential the fleet would reject), `gw leave` departs via whichever
+  answers. Holders sync from each other the same way — that IS the
+  inter-holder protocol. `root_url`/`seeds` are now pure bootstrap.
+- **Accepted races, made loud instead of prevented** (no consensus by
+  design): same-hostname enrollments at two holders both succeed and show as
+  a visible collision; a caps change racing a renewal at a not-yet-synced
+  holder can bake late by one cycle; concurrent decisions about one node
+  resolve latest-timestamp-wins with both in the audit trail.
+- New commands: `gw anchor status|init|export|adopt|drop`. `gw create` mints
+  the file from birth; legacy `role = anchor` configs keep working untouched
+  (`gw anchor init` folds them into the file). `gw anchor-backup` now
+  archives anchor.gwa + statements.json; old backups restore byte-for-byte.
+- Enrollment's failed-install rollback no longer touches durable state at
+  all (nothing is persisted at issue time until the joiner's record lands) —
+  the ghost-hostname-squat bug class is structurally gone.
+
 ### Added
 
 - **`gw leave` — a node voluntarily departs the mesh, removing ITSELF from the anchor.** No anchor login, no `revoke`, no waiting for the drop-grace sweep: the node sends a self-signed `LeaveRequest` (identity-key possession is the authentication, nonce+timestamp against replay — the same discipline as renewal) to a new overlay-only `POST /leave`, and the anchor forgets it — registry entry unlinked so the hostname frees immediately and renewals refuse naturally, record dropped from the directory so new syncs stop serving it. Deliberately NOT a revocation: the departing credential stays valid until expiry (revocation's own fleet-wide bound), the node cooperates by tearing its side down — daemon stopped and removed from boot, interface destroyed, hosts block cleaned — and the id can re-enroll later with a fresh invite. Local keys/config/data are kept (`gw purge` erases them), so an accidental leave is recoverable without minting a new identity. The request goes to the anchor FIRST, over the still-up tunnel; a failed or refused request changes nothing locally. Idempotent on the anchor; `event=leave` in the audit trail.

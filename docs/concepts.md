@@ -29,16 +29,21 @@ Shorten `credential_ttl` for a tighter bound.
 
 ## The anchor
 
-The anchor is **just a normal mesh node** that additionally holds the CA key and
-runs a small HTTP **control plane**: `GET /directory`, `POST /publish`, `POST
-/renew`, `GET /health` — bound to its overlay address (reachable only through the
-mesh, never the underlay). There is no separate coordination service, no relays, no SaaS,
-nothing always-on in the data path. Nodes poll `/directory`, merge records by
-highest sequence number, and cache them locally.
+The anchor is **a file, not a machine**: `anchor.gwa`, holding the mesh's CA
+key and door key. Any normal mesh node whose data dir holds it performs
+anchor duties — several at once — by running a small HTTP **control plane**:
+`GET /directory`, `POST /publish`, `POST /renew`, `POST /leave`, `GET
+/health` — bound to its overlay address (reachable only through the mesh,
+never the underlay). There is no separate coordination service, no relays, no
+SaaS, nothing always-on in the data path. Nodes poll `/directory` from any
+live holder, merge records by highest sequence number, and cache them
+locally; membership decisions (revoke / tombstone / caps changes) travel the
+same way, as CA-signed statements anyone can relay and no one can forge.
 
-Because trust is anchored to the CA *key* (not a machine), any node can become
-the anchor — restore the key onto a replacement, or stand up a new CA and re-point
-the fleet. See [Moving the anchor](operations.md#moving-the-anchor-re-root).
+Because trust is anchored to the CA *key* (not a machine), moving or
+replicating the anchor is copying the file — see
+[The anchor file](anchor.md) — and retiring a *distrusted* holder is a key
+rotation: [re-root](operations.md#moving-the-anchor).
 
 ## Direct-or-fail
 
@@ -93,7 +98,7 @@ Every node caches the directory on disk and keeps its tunnels running from that
 cache, so the **anchor can be down for up to one credential lifetime** and existing
 node↔node links are unaffected. The anchor is never in the data path. Only new
 enrollments and credential renewals need a reachable anchor. Restore or replace the
-anchor within that window (see [Moving the anchor](operations.md#moving-the-anchor-re-root) and the
+anchor within that window (see [Moving the anchor](operations.md#moving-the-anchor) and the
 [RUNBOOK](operations.md)) and nothing ever drops.
 
 ## Platforms
@@ -231,7 +236,7 @@ make them worth building:
 - **Threshold CA** — if single-anchor-key compromise becomes unacceptable.
 - **CA cross-signing to smooth re-root** — let the old CA sign a short-lived,
   directory-distributed "also trust the new CA" delegation, so a graceful
-  [re-root](operations.md#moving-the-anchor-re-root) doesn't require pushing the new key into every
+  [re-root](operations.md#moving-the-anchor) doesn't require pushing the new key into every
   node's `trusted_pubs` up front (the config edit becomes a calm, batchable
   follow-up instead of a race against credential expiry). Trigger: re-root friction
   in practice. Would be opt-in, short-lived, and logged, since it loosens the
@@ -244,5 +249,5 @@ node.
 
 **CA trust is a set, not a single key.** The CA (and anchor) is moved by a
 re-root — trust the new key alongside the old during an overlap, then drop the
-old — don't move the private key to a new machine. See [Moving the anchor](operations.md#moving-the-anchor-re-root).
+old — don't move the private key to a new machine. See [Moving the anchor](operations.md#moving-the-anchor).
 

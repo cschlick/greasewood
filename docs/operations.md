@@ -1,12 +1,23 @@
 # Operations
 
-## Moving the anchor (re-root)
+## Moving the anchor
 
-No node is forever-critical: because a node trusts a CA **key**, not a machine,
-any node that holds the CA authority and serves the directory *is* the anchor.
-Moving the anchor is therefore a deliberate **re-root** — swap which CA key the
-fleet trusts — not an automatic handover. `trusted_pubs` is a **set**, so you
-trust the old and new CA during an overlap and the move is non-disruptive.
+**The normal move is a file copy.** Anchor authority lives in the [anchor
+file](anchor.md) — `sudo gw anchor export` on a holder, copy it over your own
+channel, `sudo gw anchor adopt` on the destination. The destination starts
+serving immediately (several holders can serve at once), the source keeps
+serving until you `sudo gw anchor drop` it, and no node's configuration
+changes at any point: the fleet discovers holders from the directory.
+
+Everything below is for the *other* kind of move — the **re-root**, where you
+swap which CA **key** the fleet trusts. You need it when a holder (or a copy
+of the anchor file) is no longer *trusted* — deleting a copy proves nothing
+about other copies, so a compromised machine forces a key rotation.
+
+## Re-root (rotating the CA key)
+
+No key is forever-critical: `trusted_pubs` is a **set**, so you trust the old
+and new CA during an overlap and the move is non-disruptive.
 
 The CA private key never moves: the new anchor generates its own key, and you push
 the new *public* key into every node's `trusted_pubs`. Migrating from anchor **A**
@@ -85,11 +96,13 @@ failure); it reports the fix if it fires.
 
 ## What to back up
 
-**Use `sudo gw anchor-backup` (anchor only).** It writes ONE passphrase-encrypted
-file (AES-GCM, scrypt-derived key) containing the whole anchor state — the CA key,
-the `nodes/` registry (hostname/caps per identity), `revoked.json`, the door
-key, and the anchor's own node identity (`id_priv.pem`/`wg.key`, so a restore keeps
-the anchor's overlay address). Move that file **offline**. The passphrase comes
+**Use `sudo gw anchor-backup` (any holder).** It writes ONE passphrase-encrypted
+file (AES-GCM, scrypt-derived key) containing the whole anchor state — the
+[anchor file](anchor.md) (CA + door keys), `statements.json` (the replicated
+membership decisions), `revoked.json`, and the holder's own node identity
+(`id_priv.pem`/`wg.key`, so a restore keeps its overlay address). Per-node
+membership itself needs no backing up: every node's hostname/caps ride in its
+replicated record, rebuilt from any member on the first sync. Move that file **offline**. The passphrase comes
 from a prompt, or `$GW_BACKUP_PASSPHRASE` for a cron job:
 
 ```
@@ -112,7 +125,7 @@ The pieces, if you back up by hand instead:
 - **`/var/lib/greasewood/ca.key`** (anchor only) — the one irreplaceable secret;
   losing it means re-rooting the whole fleet.
 - The CA public key / `[ca] trusted_pubs` — also kept in every node's config.
-- `/var/lib/greasewood/nodes/` (anchor) — hostname/caps per identity.
+- `/var/lib/greasewood/statements.json` — replicated membership decisions (revoke/tombstone/setcaps).
 - `/var/lib/greasewood/revoked.json` and `/var/lib/greasewood/door.key` (anchor).
 
 `id_priv.pem` / `wg.key` on a node are **not** worth backing up — recover a lost
