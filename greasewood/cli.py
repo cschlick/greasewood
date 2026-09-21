@@ -3514,8 +3514,8 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
     # to expire is forgotten without manual `gw revoke`.
     from .sweep import StaleSweep
     StaleSweep(directory, cfg.dir_cache_path, statements=stmt_log,
-               protect=keys.id_pub_hex).start()
-    log.info("stale-node sweep started")
+               protect=keys.id_pub_hex, grace=cfg.drop_grace).start()
+    log.info("stale-node sweep started (drop_grace=%s)", cfg.drop_grace)
     return get_revoked, door_watcher
 
 
@@ -4725,7 +4725,8 @@ def cmd_anchor_activate(args) -> int:
     print(f"  CA pub key   : {ca_pub_hex}")
     print(f"  control URL  : http://[{node_keys.addr}]:{control_port}")
     print(f"  files written: {', '.join(written)}")
-    print(f"  registry     : {directory.size()} node(s) rebuilt from {cfg.dir_cache_path}")
+    print("  membership   : served from the replicated directory "
+          f"({cfg.dir_cache_path}) — nothing to rebuild")
     if not _service_restart(membership_key(cfg.mesh_domain),
                           why="to serve the control plane + door"):
         print("\nStart the daemon to serve the control plane:")

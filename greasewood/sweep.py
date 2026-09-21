@@ -36,11 +36,18 @@ _SWEEP_INTERVAL = 3600.0
 class StaleSweep(Loop):
     def __init__(self, directory: Directory, cache_path,
                  statements=None, interval: float = _SWEEP_INTERVAL,
-                 protect: "str | None" = None) -> None:
+                 protect: "str | None" = None, grace=None) -> None:
         super().__init__(interval, "sweep")
         self._directory = directory
         self._cache_path = cache_path
         self._statements = statements
+        # The holder's authorization grace ([anchor] drop_grace). Defaults to
+        # the fleet constant; a holder configured shorter refuses renewals
+        # sooner. Keep it identical across holders — a shorter-grace holder
+        # can re-learn a pruned record from a longer-grace one until the
+        # fleet deadline passes.
+        from .directory import DROP_GRACE
+        self._grace = grace if grace is not None else DROP_GRACE
         # This holder's own id_pub hex: the sweep must never reap the holder
         # itself. If its own renewal stalls (clock skew, a wedged loop) its
         # credential goes stale like anyone's — but sweeping its record ends
@@ -49,7 +56,8 @@ class StaleSweep(Loop):
         self._protect = protect
 
     def _tick(self) -> None:
-        pruned = self._directory.prune_stale(protect=self._protect)
+        pruned = self._directory.prune_stale(grace=self._grace,
+                                             protect=self._protect)
         if self._statements is not None:
             self._statements.prune()
         if pruned:
