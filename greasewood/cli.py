@@ -3363,12 +3363,16 @@ def cmd_rename_node(args) -> int:
     except FileNotFoundError:
         sys.exit("this node isn't enrolled yet (no keys) — run 'gw join' first")
 
-    anchor_url = cfg.root_url
-    if not anchor_url:
-        sys.exit("no anchor URL known — is this node enrolled and the mesh up?")
+    # Any holder can serve the rename (it's a renewal with a hostname) — try
+    # the whole anchor set, like renewal and leave do. A holder's REFUSAL
+    # (name taken, pinned) is final and not retried elsewhere: every holder
+    # answers from the same replicated view, so shopping the request around
+    # would only race the very uniqueness check that refused it.
+    targets = _anchor_urls(cfg, Directory.load(cfg.dir_cache_path),
+                           own_addr=keys.addr)
+    if not targets:
+        sys.exit("no anchor holders known — is this node enrolled and the mesh up?")
 
-    # Ask the anchor to re-issue under the new name (same authenticated path as
-    # renewal; the hostname field turns it into a rename).
     req = RenewRequest(
         id_pub=keys.id_pub_bytes,
         wg_pub=keys.wg_pub_bytes,
@@ -3378,19 +3382,32 @@ def cmd_rename_node(args) -> int:
     ).sign(keys.id_priv)
 
     body = json.dumps(req.to_dict()).encode()
-    url = f"{anchor_url.rstrip('/')}/renew"
-    http_req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(http_req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
+    data = None
+    anchor_url = None
+    last_err = None
+    for base in targets:
+        http_req = urllib.request.Request(
+            f"{base.rstrip('/')}/renew", data=body,
+            headers={"Content-Type": "application/json"})
         try:
-            data = json.loads(e.read())
-        except Exception:
-            data = {"error": f"HTTP {e.code}"}
-    except urllib.error.URLError as e:
-        sys.exit(f"could not reach the anchor at {anchor_url}: {e} — is the mesh up?")
+            with urllib.request.urlopen(http_req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            anchor_url = base
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                data = json.loads(e.read())
+            except Exception:
+                data = {"error": f"HTTP {e.code}"}
+            anchor_url = base
+            break                     # an answer (even a refusal) is final
+        except (urllib.error.URLError, OSError) as e:
+            last_err = f"{base}: {e}"
+            if len(targets) > 1:
+                print(f"couldn't reach {base} — trying the next holder")
+    if data is None:
+        sys.exit(f"could not reach any anchor holder (last: {last_err}) — "
+                 f"is the mesh up?")
     if "error" in data:
         sys.exit(f"rename rejected by anchor: {data['error']}")
 
