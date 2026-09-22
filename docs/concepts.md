@@ -200,9 +200,14 @@ reconcile settled the topology (+2/−1, 7 peers) with the per-peer `+peer`/
 only when membership actually changes (a re-verified endpoint isn't a
 transition), so steady state stays silent.
 
-And you don't have to read raw logs: **`gw narrate` translates the trail into
-plain English** — grouping the commands of each operation and explaining what
-each did and why:
+And you don't have to read raw logs. **`gw explain <node>` tells the story**:
+it merges this machine's audit events, the mesh's replicated membership
+decisions (revoke/tombstone/caps changes — visible even when decided on
+another holder), the credential history, and peers' endpoint testimony into
+one chronological narrative plus a current-state verdict — "what happened to
+bb?" as a command instead of four files and a reconstruction. And **`gw
+narrate` translates the raw trail into plain English** — grouping the
+commands of each operation and explaining what each did and why:
 
 ```
 $ gw narrate --since 2h

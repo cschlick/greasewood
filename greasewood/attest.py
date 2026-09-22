@@ -67,14 +67,16 @@ class AttestLog:
         self._lock = threading.Lock()
         self._by_pair: dict[tuple[str, str], EndpointAttestation] = {}
 
-    def merge(self, attestations, known_attester) -> int:
+    def merge(self, attestations, known_attester,
+              now: "dt.datetime | None" = None) -> int:
         """Merge incoming testimony. Each entry must carry a valid
         self-signature AND come from a known mesh member (`known_attester`:
         id_pub_hex → bool — a live record exists; holders pass a directory
         lookup) — so junk from a never-enrolled key can't pad the log. Stale
         entries (past MAX_AGE, or older than what we hold) are ignored.
-        Returns the number accepted."""
-        now = dt.datetime.now(_UTC)
+        Returns the number accepted. `now` is injectable for callers
+        replaying evidence on their own clock (tests, gw explain)."""
+        now = now or dt.datetime.now(_UTC)
         accepted = 0
         with self._lock:
             for a in attestations:
@@ -108,10 +110,13 @@ class AttestLog:
         with self._lock:
             return list(self._by_pair.values())
 
-    def confirmations_for(self, subject_hex: str) -> "dict[str, list[str]]":
+    def confirmations_for(self, subject_hex: str,
+                          now: "dt.datetime | None" = None) -> "dict[str, list[str]]":
         """endpoint → [attester id_pub_hex, ...] of FRESH testimony about one
-        node — the display shape: who confirms which address."""
-        now = dt.datetime.now(_UTC)
+        node — the display shape: who confirms which address. `now` lets a
+        caller with its own clock (gw explain's story time) judge freshness
+        consistently."""
+        now = now or dt.datetime.now(_UTC)
         out: dict[str, list[str]] = {}
         with self._lock:
             for (att, sub), a in self._by_pair.items():

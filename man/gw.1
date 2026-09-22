@@ -1,4 +1,4 @@
-.TH GW 1 "2026-09-21" "greasewood 0.4.0" "User Commands"
+.TH GW 1 "2026-09-22" "greasewood 0.4.0" "User Commands"
 .SH NAME
 gw \- Minimal WireGuard mesh overlay \(em direct\-or\-fail; IPv6\-only overlay, v4\-or\-v6 underlay
 .SH SYNOPSIS
@@ -386,6 +386,22 @@ also delete the placed key/cert/ca files (default: leave them \(em a service may
 \fBUsage:\fR gw cert\-status [\-h]
 .PP
 show every daemon\-managed TLS cert (expiry, renewal, SANs, files, profile) from the manifest
+.SS gw explain
+\fBUsage:\fR gw explain [\-h] [\-\-since DUR] [\-\-audit PATH] [NODE ...]
+.PP
+the story of a node (or a pair): audit events, replicated membership decisions, credential history, and peer endpoint testimony, merged into one timeline + a current\-state verdict
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fINODE\fR
+hostname / mesh name / id\-hex prefix; two names = the pair; none = this node
+.TP
+\fB\-\-since\fR \fIDUR\fR
+how far back the timeline reaches (e.g. 2h, 7d; default 24h)
+.TP
+\fB\-\-audit\fR \fIPATH\fR
+audit log to read (default: <data_dir>/audit.log)
 .SS gw narrate
 \fBUsage:\fR gw narrate [\-h] [\-\-since DUR] [\-\-peer NAME] [\-\-grep TEXT] [\-\-failures] [\-\-raw] [\-\-stats] [\-\-no\-color] [source]
 .PP

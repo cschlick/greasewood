@@ -116,6 +116,7 @@ from .daemon import (  # noqa: F401
     _start_anchor_control_plane, cmd_run,
 )
 from .parser import (  # noqa: F401
+    cmd_explain,
     _EVERYDAY_COMMANDS, _cmd_bare, _resolve_editor,
     build_parser, cmd_config, cmd_narrate,
     cmd_policy, main,

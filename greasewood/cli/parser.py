@@ -27,6 +27,85 @@ log = logging.getLogger("greasewood")
 # presentation — watch, diagnose, the roster — lives in status.py)
 # ---------------------------------------------------------------------------
 
+def cmd_explain(args) -> int:
+    """Tell the story of a node (or a pair) from the evidence this machine
+    already holds — the audit trail, the replicated membership decisions, the
+    directory, and peers' endpoint testimony — merged into one chronological
+    narrative plus a current-state verdict. Read-only; no root (a live
+    `wg show` detail appears when permitted, and is omitted otherwise)."""
+    from ..config import load_config, _parse_duration
+    from ..directory import Directory
+    from ..statements import StatementLog, statements_path
+    from ..attest import AttestLog, attest_path
+    from ..keys import _own_identity
+    from .. import explain as X
+    from .. import narrate as N
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        sys.exit(f"no config at {cfg_path} — explain reads this node's caches")
+    cfg = load_config(cfg_path)
+
+    now = dt.datetime.now(_UTC)
+    since = now - _parse_duration(args.since)
+
+    audit_path = Path(args.audit) if args.audit else (
+        cfg.audit_log or (cfg.data_dir / "audit.log"))
+    entries = []
+    try:
+        entries = [e for e in (N.parse_line(ln) for ln in
+                               audit_path.read_text(errors="replace").splitlines())
+                   if e is not None]
+    except (FileNotFoundError, OSError):
+        pass                       # a story without local audit is still a story
+
+    directory = Directory.load(cfg.dir_cache_path)
+    ca_pubs = [bytes.fromhex(h) for h in cfg.ca_pubs_hex]
+    stmts = StatementLog.load(statements_path(cfg.data_dir), ca_pubs)
+    attns = AttestLog.load(attest_path(cfg.data_dir), lambda _h: True)
+
+    live_peers = None
+    try:
+        from .. import wg as wgmod
+        live_peers = wgmod.get_peers(cfg.wg_interface)
+    except Exception:  # noqa: BLE001 — non-root / no interface: omit, don't fail
+        live_peers = None
+
+    grants = None
+    try:
+        from ..policy import POLICY_BASENAME
+        from ..wire import GrantTable
+        grants = GrantTable.from_dict(json.loads(
+            (cfg.data_dir / POLICY_BASENAME).read_text())).grants
+    except Exception:  # noqa: BLE001
+        grants = None
+
+    own_id, _own_addr = _own_identity(cfg.data_dir)
+    names = list(getattr(args, "node", []) or [])
+    if len(names) > 2:
+        sys.exit("explain takes at most two nodes (a pair)")
+    if not names:
+        if own_id is None:
+            sys.exit("this node has no identity yet — name a node to explain")
+        subjects = [X.resolve_subject(own_id, directory, stmts)]
+        if subjects[0].id_hex is None:
+            subjects[0].hostname = cfg.hostname
+            subjects[0].id_hex = own_id
+    else:
+        subjects = [X.resolve_subject(n, directory, stmts) for n in names]
+    for s in subjects:
+        if s.id_hex is None and s.record is None:
+            sys.exit(f"nothing known here about {s.hostname!r} — not in the "
+                     f"directory, no remembered decision names it. (`gw watch` "
+                     f"lists current members; an id-hex prefix also works.)")
+
+    print(X.build_story(subjects, audit_entries=entries, directory=directory,
+                        statements=stmts, attestations=attns,
+                        live_peers=live_peers, grants=grants,
+                        own_id=own_id, since=since, now=now))
+    return 0
+
+
 def cmd_narrate(args) -> int:
     """Read the data-plane command trail and translate it into plain English —
     what greasewood did to the kernel's network state, when, why, and whether it
@@ -759,6 +838,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cli.cmd_cert_status)
 
     # narrate — translate the data-plane command trail into plain English
+    sp = sub.add_parser("explain",
+                        help="the story of a node (or a pair): audit events, "
+                             "replicated membership decisions, credential "
+                             "history, and peer endpoint testimony, merged "
+                             "into one timeline + a current-state verdict")
+    sp.add_argument("node", nargs="*", metavar="NODE",
+                    help="hostname / mesh name / id-hex prefix; two names = "
+                         "the pair; none = this node")
+    sp.add_argument("--since", metavar="DUR", default="24h",
+                    help="how far back the timeline reaches (e.g. 2h, 7d; "
+                         "default 24h)")
+    sp.add_argument("--audit", metavar="PATH", default=None,
+                    help="audit log to read (default: <data_dir>/audit.log)")
+    sp.set_defaults(fn=cli.cmd_explain)
+
     sp = sub.add_parser("narrate",
                         help="translate the ip/wg command trail (audit.log) into a "
                              "plain-English story of what greasewood did and why")
