@@ -45,8 +45,10 @@ build-backend = "setuptools.build_meta"
 
 # Pin the package — the repo has other top-level dirs (systemd/, tests/) that
 # would otherwise confuse setuptools' flat-layout auto-discovery.
-[tool.setuptools]
-packages = ["greasewood"]
+[tool.setuptools.packages.find]
+# Auto-discover subpackages (greasewood.cli, and whatever splits next) — an
+# explicit list silently ships a wheel with no CLI the moment one appears.
+include = ["greasewood*"]
 
 [tool.setuptools.package-data]
 greasewood = ["profiles/*.toml"]
