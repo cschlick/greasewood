@@ -455,6 +455,19 @@ the new hostname
 \fBUsage:\fR gw renew\-all [\-h]
 .PP
 [sudo, anchor] request a fleet\-wide renewal \(em advertise renew_after=now so cooperating nodes renew (jittered, rate ~constant with mesh size)
+.SS gw upgrade\-all
+\fBUsage:\fR gw upgrade\-all [\-h] [\-\-version X.Y.Z] [\-\-sha256 HEX]
+.PP
+[sudo, anchor] announce a release for the fleet: a CA\-signed, sha256\-pinned statement nodes with auto_upgrade=true install (jittered) on their next pull; everyone else shows it in gw watch
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-version\fR \fIX.Y.Z\fR
+release to announce (default: the version THIS holder runs \(em upgrade here first, then announce)
+.TP
+\fB\-\-sha256\fR \fIHEX\fR
+pin the release tarball's sha256 directly instead of downloading and hashing it now
 .SS gw anchor
 \fBUsage:\fR gw anchor [\-h] {status,init,offer,adopt,export,drop} [path]
 .PP

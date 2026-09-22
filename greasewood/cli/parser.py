@@ -896,6 +896,20 @@ def build_parser() -> argparse.ArgumentParser:
                              "rate ~constant with mesh size)")
     sp.set_defaults(fn=cli.cmd_renew_all)
 
+    # upgrade-all — announce a release for the fleet
+    sp = sub.add_parser(
+        "upgrade-all",
+        help="[sudo, anchor] announce a release for the fleet: a CA-signed, "
+             "sha256-pinned statement nodes with auto_upgrade=true install "
+             "(jittered) on their next pull; everyone else shows it in gw watch")
+    sp.add_argument("--version", default=None, metavar="X.Y.Z",
+                    help="release to announce (default: the version THIS "
+                         "holder runs — upgrade here first, then announce)")
+    sp.add_argument("--sha256", default=None, metavar="HEX",
+                    help="pin the release tarball's sha256 directly instead "
+                         "of downloading and hashing it now")
+    sp.set_defaults(fn=cli.cmd_upgrade_all)
+
     # anchor — the anchor FILE (portable authority)
     sp = sub.add_parser(
         "anchor",

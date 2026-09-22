@@ -145,6 +145,7 @@ class SyncLoop(Loop):
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         own_id_hex: "str | None" = None,
         attestations=None,
+        on_upgrade_hint=None,
     ) -> None:
         super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
@@ -170,6 +171,10 @@ class SyncLoop(Loop):
         # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
+        # Called with the newest fleet upgrade announcement after each
+        # successful pull — a level, like renew_after. The receiver
+        # (upgrade.UpgradeManager) owns all policy: opt-in, jitter, backoff.
+        self._on_upgrade_hint = on_upgrade_hint
         # Offered the raw signed-policy dict from each pull; the receiver
         # (policy.GrantPolicy.offer) verifies + adopts. Sync stays dumb.
         self._on_policy = on_policy
@@ -271,6 +276,7 @@ class SyncLoop(Loop):
                  policy_dict, stmts, attns) = pull_directory(seed)
                 n = self._directory.merge(records)
                 dead = self._apply_statements(stmts)
+                self._offer_upgrade_hint()
                 self._apply_attestations(attns)
                 if n or dead:
                     self._directory.save(self._cache_path)
@@ -290,6 +296,17 @@ class SyncLoop(Loop):
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
+
+    def _offer_upgrade_hint(self) -> None:
+        if self._on_upgrade_hint is None or self._statements is None:
+            return
+        hint = self._statements.upgrade_hint()
+        if hint is None:
+            return
+        try:
+            self._on_upgrade_hint(hint)
+        except Exception:
+            log.exception("upgrade-hint handler failed (sync unaffected)")
 
     def _apply_attestations(self, attns) -> None:
         if self._attestations is None:

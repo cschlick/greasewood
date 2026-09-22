@@ -612,7 +612,12 @@ class AnchorClaimRequest:
 #   setcaps   — the operator changed this node's caps (set-roles/set-caps).
 #               Applied by whichever holder serves the node's next renewal.
 #               Latest ts wins per id.
-STATEMENT_KINDS = ("revoke", "tombstone", "setcaps")
+#   upgrade   — the operator announced a release for the fleet to install
+#               (gw upgrade-all). Subject id is the announcing CA's own pub;
+#               the payload pins version + the release tarball's sha256, so
+#               the signal can only ever name a specific published artifact.
+#               Latest ts wins; nodes act only when opted in (auto_upgrade).
+STATEMENT_KINDS = ("revoke", "tombstone", "setcaps", "upgrade")
 
 
 @dataclass
@@ -638,16 +643,23 @@ class AnchorStatement:
     ts: dt.datetime      # when the decision was made (merge order)
     caps: list[str] = field(default_factory=list)   # setcaps payload; else []
     hostname: str = ""   # informational (audit/narrate); not load-bearing
+    # upgrade payload ({"version": ..., "sha256": ...}); {} for other kinds
+    upgrade: dict = field(default_factory=dict)
     ca_sig: bytes = field(default=b"", repr=False)
 
     def _body_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "caps": sorted(self.caps),
             "hostname": self.hostname,
             "id_pub": _b64e(self.id_pub),
             "kind": self.kind,
             "ts": _ts(self.ts),
         }
+        # Only when present, so every statement signed before the field
+        # existed keeps its exact signed body (and its valid signature).
+        if self.upgrade:
+            d["upgrade"] = {k: self.upgrade[k] for k in sorted(self.upgrade)}
+        return d
 
     def sign(self, ca_priv: Ed25519PrivateKey) -> "AnchorStatement":
         sig = ca_priv.sign(_canonical(self._body_dict()))
@@ -683,12 +695,21 @@ class AnchorStatement:
             # version doesn't understand must not be half-processed (merged,
             # persisted, re-served) with its semantics silently ignored.
             raise ValueError(f"unknown statement kind {kind!r}")
+        upgrade = d.get("upgrade", {})
+        if not isinstance(upgrade, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in upgrade.items()):
+            raise ValueError("upgrade payload must be a str->str object")
+        if kind == "upgrade" and not (upgrade.get("version")
+                                      and upgrade.get("sha256")):
+            raise ValueError("upgrade statement needs version + sha256")
         return cls(
             kind=kind,
             id_pub=_b64d_key(d["id_pub"], "id_pub"),
             ts=_parse_ts(d["ts"]),
             caps=_str_list(d.get("caps", []), "caps"),
             hostname=_str(d.get("hostname", ""), "hostname"),
+            upgrade=dict(upgrade),
             ca_sig=_b64d(d["ca_sig"]),
         )
 

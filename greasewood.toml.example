@@ -65,6 +65,13 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 hosts_sync = true
 mesh_domain = "myfleet.internal"
 
+# Act on the fleet's CA-signed release announcements (gw upgrade-all on a
+# holder): download the pinned release tarball, verify its sha256 against the
+# announcement, reinstall (pipx installs only), restart the daemon. OPT-IN,
+# default off. With it on, whoever holds the anchor file can cause this node
+# to install a release they pin; off, announcements only surface in gw watch.
+# auto_upgrade = true
+
 # Extra service names this node publishes, as bare labels under its OWN mesh
 # name — each becomes "<label>.<hostname>.<mesh_domain>" in every node's
 # /etc/hosts, pointing at this node. `gw cert-request` appends one automatically

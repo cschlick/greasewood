@@ -17,6 +17,10 @@ Merge model, per (kind, subject id):
               untouched, so departed ids can return through the door.
   setcaps   — latest ts wins. Consulted by whichever holder serves the
               subject's next renewal.
+  upgrade   — latest ts wins. A fleet release announcement (gw upgrade-all);
+              the subject id is the announcing CA's own pub, and nodes act on
+              it only when opted in (auto_upgrade). A level, not an edge: an
+              offline node sees it when it returns, like the renew hint.
 
 Convergence needs no consensus: statements are individually authentic
 (CA-signed), the merge is order-free (set-union + latest-ts), and every party
@@ -29,7 +33,9 @@ never lapse). A tombstone older than the fleet drop grace is pruned — any
 record it could still kill expired long past the grace and was dropped by the
 directory's own deadline. A setcaps is pruned once a tombstone or revoke at
 or after its ts ends the membership it applied to (a re-enrolled node's caps
-come from its new enrollment).
+come from its new enrollment). An upgrade hint is one slot per CA — tiny,
+kept until a newer announcement replaces it (a node at or past the version
+simply no-ops on it).
 """
 from __future__ import annotations
 
@@ -111,6 +117,14 @@ class StatementLog:
         with self._lock:
             s = self._stmts.get(("setcaps", id_pub_hex))
             return (list(s.caps), s.ts) if s else None
+
+    def upgrade_hint(self) -> "AnchorStatement | None":
+        """The newest fleet upgrade announcement (gw upgrade-all), or None.
+        Keyed per announcing CA like every statement; across CAs (a re-root's
+        overlap window) the latest ts wins, same as concurrent holders."""
+        with self._lock:
+            hints = [s for (k, _), s in self._stmts.items() if k == "upgrade"]
+        return max(hints, key=lambda s: s.ts) if hints else None
 
     def is_dead(self, id_pub_hex: str, cred_iat: dt.datetime) -> bool:
         """Does a tombstone end the membership a credential with this iat

@@ -515,11 +515,38 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
         lines.append(f"audit    : {cfg.audit_log}  (ip/wg/nft commands + "
                      f"'grep event=' for topology/policy changes)")
     lines += _self_health_lines(cfg, directory, own_id)
+    lines += _upgrade_hint_lines(cfg)
     lines += _anchor_alarm_lines(directory, own_id)
     lines += _hostname_collision_lines(directory)
     if cfg.role == "anchor":                       # the door only exists here
         lines += _door_status_lines(cfg)
     return lines
+
+
+def _upgrade_hint_lines(cfg) -> list:
+    """One header line when the fleet has a release announcement (gw
+    upgrade-all) newer than this node's running version. Read from the
+    replicated statement cache (0644 — no root), CA-verified at load like
+    every statement. Quiet when up to date: the hint is a level, and a node
+    at the version has nothing to say about it."""
+    from .statements import StatementLog, statements_path
+    from .upgrade import is_newer
+    try:
+        ca_pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
+        stmt = StatementLog.load(statements_path(cfg.data_dir),
+                                 ca_pubs).upgrade_hint()
+    except Exception:
+        return []
+    if stmt is None:
+        return []
+    target = stmt.upgrade.get("version", "")
+    if not target or not is_newer(target, _version()):
+        return []
+    if getattr(cfg, "auto_upgrade", False):
+        how = "auto_upgrade on — the daemon installs it after a short jitter"
+    else:
+        how = "auto_upgrade off — install with: sudo gw upgrade"
+    return [f"{'upgrade':<9}: v{target} announced for the fleet ({how})"]
 
 
 def _reach_confirmation_lines(cfg, own_id: str, advertised) -> list:
@@ -1916,6 +1943,24 @@ def _self_health_lines(cfg, directory, own_id) -> list:
 _SNAPSHOT_SCHEMA = "gw.watch/v2"
 
 
+def _upgrade_hint_json(cfg) -> "dict | None":
+    """The newest upgrade announcement as {'version','sha256','announced'},
+    or None — the --json face of _upgrade_hint_lines, but unconditional (a
+    monitor wants the level even when this node is already at the version)."""
+    from .statements import StatementLog, statements_path
+    try:
+        ca_pubs = [bytes.fromhex(h) for h in getattr(cfg, "ca_pubs_hex", [])]
+        stmt = StatementLog.load(statements_path(cfg.data_dir),
+                                 ca_pubs).upgrade_hint()
+    except Exception:
+        return None
+    if stmt is None:
+        return None
+    return {"version": stmt.upgrade.get("version", ""),
+            "sha256": stmt.upgrade.get("sha256", ""),
+            "announced": _iso_z(stmt.ts)}
+
+
 def _iso_z(t) -> "str | None":
     """A dt → 'YYYY-MM-DDTHH:MM:SSZ' (UTC, second precision), or None."""
     if t is None:
@@ -2076,6 +2121,9 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
         "mesh": {
             "domain": cfg.mesh_domain,
             "interface": cfg.wg_interface,
+            # The newest fleet release announcement (gw upgrade-all), or None.
+            # Additive since v2; consumers compare against self.version.
+            "upgrade": _upgrade_hint_json(cfg),
         },
         "policy": policy,
         "daemon": {

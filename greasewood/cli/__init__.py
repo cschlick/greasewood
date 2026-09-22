@@ -51,6 +51,7 @@ from .. import platform as gwplat           # noqa: F401
 from ..config import membership_key, render_config          # noqa: F401
 from ..keys import (_key_file_warnings, _own_identity,      # noqa: F401
                     _secret_key_paths)
+from ..upgrade import UpgradeManager                        # noqa: F401
 
 _UTC = dt.timezone.utc
 log = logging.getLogger("greasewood")
@@ -106,6 +107,7 @@ from .anchorcmds import (  # noqa: F401
     cmd_anchor_activate, cmd_anchor_backup, cmd_anchor_promote,
     cmd_anchor_restore, cmd_anchor_standby, cmd_anchor_transfer,
     cmd_renew_all,
+    cmd_upgrade_all,
 )
 from .certcmds import (  # noqa: F401
     _cert_already_current, _load_cert_profile, _print_cert_noop,

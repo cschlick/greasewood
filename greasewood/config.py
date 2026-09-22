@@ -39,6 +39,12 @@ class Config:
     # stable GUA). false pins them — set when the operator gave an explicit
     # --endpoint, which auto-detection must never override.
     endpoint_auto: bool
+    # Act on the fleet's CA-signed upgrade announcements (gw upgrade-all):
+    # download the pinned release tarball, verify its sha256 against the
+    # announcement, reinstall, restart the daemon. OPT-IN and default OFF —
+    # with it on, whoever holds the anchor file can cause this node to install
+    # a release they pin; off, announcements only surface in gw watch/logs.
+    auto_upgrade: bool
     # Extra service names this node publishes into the mesh's /etc/hosts, as
     # bare labels under its own mesh name (e.g. ["pg"] → pg.<hostname>.<domain>).
     # `gw cert-request` appends one automatically for a subdomain --san.
@@ -217,6 +223,7 @@ def load_config(path: Path) -> Config:
         root_url=net.get("root_url", ""),
 
         hosts_sync=bool(net.get("hosts_sync", True)),
+        auto_upgrade=bool(net.get("auto_upgrade", False)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
         aliases=list(net.get("aliases", [])),
         audit_log=audit_log,

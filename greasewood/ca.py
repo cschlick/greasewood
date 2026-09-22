@@ -405,14 +405,25 @@ class CA:
                     log.warning("could not persist directory after forget: %s", e)
         return had_recent or dropped
 
+    def announce_upgrade(self, version: str, sha256: str) -> AnchorStatement:
+        """Mint the fleet upgrade announcement (gw upgrade-all): a CA-signed
+        statement pinning a release version AND the sha256 of its published
+        tarball, so the signal can only ever name that specific artifact.
+        Subject id is this CA's own pub (one slot; latest announcement wins).
+        Rides the ordinary statement gossip; nodes act only when opted in
+        (auto_upgrade) and verify the hash before installing."""
+        return self._mint("upgrade", self._keys.ca_pub_bytes,
+                          upgrade={"version": version, "sha256": sha256})
+
     def _mint(self, kind: str, id_pub: bytes, caps: "list[str] | None" = None,
-              hostname: str = "") -> AnchorStatement:
+              hostname: str = "", upgrade: "dict | None" = None) -> AnchorStatement:
         """Sign one AnchorStatement, add it to the log, persist the log."""
         from .statements import statements_path
         stmt = AnchorStatement(
             kind=kind, id_pub=id_pub,
             ts=dt.datetime.now(_UTC).replace(microsecond=0),
             caps=list(caps or []), hostname=hostname,
+            upgrade=dict(upgrade or {}),
         ).sign(self._keys.ca_priv)
         self._statements.add(stmt)
         try:

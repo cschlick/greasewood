@@ -126,6 +126,17 @@ Additional control-plane protections:
   dependency to degrade, and identical on every platform. (Up to 0.6 an
   optional nftables layer, `enforce_ports`, realized port scopes; a 0.7
   daemon deletes any leftover `table inet greasewood_<mesh>` at startup.)
+- **Fleet auto-upgrade is opt-in, pinned, and downgrade-proof.** `gw
+  upgrade-all` announces a release as a CA-signed statement carrying the
+  version and the sha256 of its published tarball. Only nodes with
+  `auto_upgrade = true` (default **off**) act: they download that artifact
+  from the project's fixed release URL, verify the hash, and refuse anything
+  older than what they run. The signal cannot express commands or arbitrary
+  payloads — so even a compromised anchor file can, at most, move opted-in
+  nodes *forward* to a release that genuinely exists in the project's
+  repository (installing arbitrary code would additionally require
+  compromising the repository itself, the same trust a manual `gw upgrade`
+  already places in it). Nodes without the opt-in only display announcements.
 
 ## Accepted risks / non-goals
 

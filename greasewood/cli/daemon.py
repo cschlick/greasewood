@@ -290,6 +290,11 @@ def cmd_run(args) -> int:
         get_ca_pubs=get_ca_pubs,
         own_id_hex=keys.id_pub_hex,
         attestations=att_log,
+        # Fleet upgrade announcements (gw upgrade-all). The manager owns all
+        # policy — opt-in (auto_upgrade), hash pinning, jitter, backoff — so
+        # a node with the default config only ever logs the hint.
+        on_upgrade_hint=cli.UpgradeManager(
+            cfg, cli.membership_key(cfg.mesh_domain)).offer,
     )
     sync.start()
 

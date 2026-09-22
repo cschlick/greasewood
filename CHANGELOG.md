@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`gw upgrade-all` — one command upgrades the fleet.** A holder announces a
+  release as a CA-signed statement pinning the version **and the sha256 of its
+  published tarball**, replicated over the ordinary statement gossip. Nodes
+  that opt in (`auto_upgrade = true` under `[network]`, default **off**)
+  download that exact artifact on their next directory pull, verify the hash,
+  reinstall (fetch-before-uninstall, pipx installs only), and restart their
+  daemon after a short jitter; offline nodes act when they return, and
+  everyone else — including the default config — only shows the announcement
+  in `gw watch` (a new `upgrade :` header line, and `mesh.upgrade` in the
+  `--json` snapshot). Downgrades are refused, and the artifact comes from the
+  project's fixed release URL, so even a compromised anchor file can at most
+  fast-forward opted-in nodes to a release that genuinely exists — the trust
+  delta is stated in SECURITY.md. The version defaults to what the announcing
+  holder runs: upgrade it by hand first (the canary), then announce.
+
 ## [0.7.0] - 2026-09-21
 
 ### Added

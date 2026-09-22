@@ -199,6 +199,25 @@ Do it in this order:
    The anchor can be upgraded anytime — nodes run from cache while it restarts
    (offline-tolerant), so there's no fleet-wide window from the anchor alone.
 
+**The fleet, without ten SSH sessions:** once a holder is upgraded and verified
+(steps 1–5 — it is the canary), announce the release from it:
+
+```
+sudo gw upgrade-all
+```
+
+That mints one CA-signed statement pinning the version and the sha256 of its
+published tarball, replicated over the ordinary statement gossip. Every node
+with `auto_upgrade = true` under `[network]` (opt-in, default off) downloads
+that exact artifact on its next directory pull, verifies the hash, reinstalls
+(fetch-before-uninstall, same as `gw upgrade`), and restarts its daemon after
+a short jitter so the fleet doesn't restart in the same second; an offline
+node acts when it returns. Nodes without the opt-in — and brew Macs, distro
+packages, dev checkouts — show the announcement in `gw watch` and wait for
+you. The trust delta is stated plainly in [Security](security.md): with
+auto_upgrade on, whoever holds the anchor file can cause that node to install
+a release they pin — the signal cannot express anything else.
+
 **Rollback:** `sudo pip install greasewood==<old-version>` then restart. Because
 the live process is untouched until you restart, if the new `gw` CLI misbehaves
 you can downgrade *before* restarting and never disturb the tunnel at all.

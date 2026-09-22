@@ -136,6 +136,66 @@ def cmd_renew_all(args) -> int:
 
 
 
+def cmd_upgrade_all(args) -> int:
+    """
+    [anchor] Announce a release for the fleet to install. Mints one CA-signed
+    `upgrade` statement pinning the version AND the sha256 of its published
+    GitHub tarball, replicated over the ordinary statement gossip. Nodes with
+    `auto_upgrade = true` download that exact artifact, verify the hash, and
+    reinstall + restart after a jittered delay; everyone else surfaces the
+    announcement in `gw watch` and the log. Pull-based, a level not an edge —
+    an offline node acts when it returns.
+
+    The version defaults to what THIS holder runs: the natural flow is
+    `sudo gw upgrade` here first (the canary), then `gw upgrade-all` to bring
+    the fleet to it.
+    """
+    from ..upgrade import RELEASE_URL
+    cfg, ca = cli._load_anchor_ca(args, "upgrade-all")
+    version = (args.version or cli._version()).lstrip("v")
+    if "+" in version or not version[:1].isdigit():
+        sys.exit(f"'{version}' is not a release version — this holder seems to "
+                 "run a dev build. Pass the version explicitly: "
+                 "gw upgrade-all --version X.Y.Z")
+
+    url = RELEASE_URL.format(version=version)
+    if args.sha256:
+        sha = args.sha256.lower()
+    else:
+        # Hash the exact artifact nodes will download, so the announcement can
+        # only ever name that specific published tarball.
+        import hashlib
+        import urllib.error
+        import urllib.request
+        print(f"hashing the release artifact: {url}")
+        h = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                for chunk in iter(lambda: resp.read(1 << 20), b""):
+                    h.update(chunk)
+        except urllib.error.URLError as e:
+            sys.exit(f"could not fetch the release tarball ({e}).\n"
+                     f"Is v{version} tagged and pushed to GitHub? (An "
+                     "unreleased version cannot be announced — nodes would "
+                     "have nothing to install.)")
+        sha = h.hexdigest()
+
+    stmt = ca.announce_upgrade(version, sha)
+    from .. import audit
+    if cfg.audit_log is not None:
+        audit.attach_file(cfg.audit_log)
+    audit.event("upgrade-all", version=version, sha256=sha[:16])
+    print(f"announced: greasewood v{version}  (sha256 {sha[:16]}…, "
+          f"ts {stmt.ts:%Y-%m-%d %H:%M UTC})")
+    print("Nodes with auto_upgrade = true (under [network]) install it after a "
+          "short jitter\non their next directory pull; offline nodes act when "
+          "they return. Everyone else\nshows the announcement in gw watch — "
+          "upgrade those by hand (sudo gw upgrade).")
+    return 0
+
+
+
+
 # ---------------------------------------------------------------------------
 # anchor-backup / anchor-restore  (encrypted CA + registry snapshot)
 # ---------------------------------------------------------------------------
