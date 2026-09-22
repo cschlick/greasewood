@@ -52,9 +52,14 @@ def _parse_statements(raw_list) -> list:
     return out
 
 
+def _parse_attestations_field(raw_list) -> list:
+    from .attest import parse_attestations
+    return parse_attestations(raw_list)
+
+
 def pull_directory(seed_url: str, timeout: float = 10.0):
     """Fetch (records, renew_after, anchor_now, mesh_domain, policy,
-    statements) from a seed's /directory endpoint.
+    statements, attestations) from a seed's /directory endpoint.
 
     Accepts both the current object shape {"records": [...], "renew_after": ...}
     and a bare list (older anchors), so a mixed-version mesh still syncs. renew_after
@@ -70,8 +75,10 @@ def pull_directory(seed_url: str, timeout: float = 10.0):
                     _parse_renew_after(raw.get("now")),
                     raw.get("mesh_domain") or None,
                     raw.get("policy") or None,
-                    _parse_statements(raw.get("statements")))
-        return [NodeRecord.from_dict(r) for r in raw], None, None, None, None, []
+                    _parse_statements(raw.get("statements")),
+                    _parse_attestations_field(raw.get("attestations")))
+        return ([NodeRecord.from_dict(r) for r in raw],
+                None, None, None, None, [], [])
     except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
         raise RuntimeError(f"pull from {url} failed: {e}") from e
 
@@ -137,6 +144,7 @@ class SyncLoop(Loop):
         statements=None,
         get_ca_pubs: "Callable[[], list[bytes]] | None" = None,
         own_id_hex: "str | None" = None,
+        attestations=None,
     ) -> None:
         super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
@@ -156,6 +164,9 @@ class SyncLoop(Loop):
         self._statements = statements
         self._get_ca_pubs = get_ca_pubs or list
         self._own_id_hex = own_id_hex
+        # Peers' endpoint testimony (attest.AttestLog), merged from pulls so
+        # every node's watch can show confirmed-vs-advertised. None disables.
+        self._attestations = attestations
         # Called with the anchor's fleet-wide renew hint (renew_after) after each
         # successful pull; the renewal loop decides whether/when to act on it.
         self._on_renew_after = on_renew_after
@@ -257,9 +268,10 @@ class SyncLoop(Loop):
         for seed in self._get_seeds():
             try:
                 (records, renew_after, anchor_now, anchor_domain,
-                 policy_dict, stmts) = pull_directory(seed)
+                 policy_dict, stmts, attns) = pull_directory(seed)
                 n = self._directory.merge(records)
                 dead = self._apply_statements(stmts)
+                self._apply_attestations(attns)
                 if n or dead:
                     self._directory.save(self._cache_path)
                 # Also pull the anchor's revoke list and cache it locally, so
@@ -278,6 +290,29 @@ class SyncLoop(Loop):
                 return
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
+
+    def _apply_attestations(self, attns) -> None:
+        if self._attestations is None:
+            return
+        from .attest import attest_path
+
+        def _known(hex_id: str) -> bool:
+            rec = self._directory.get(hex_id)
+            if rec is None:
+                return False
+            try:
+                rec.cred.verify(self._get_ca_pubs(), allow_expired=True)
+            except ValueError:
+                return False
+            return True
+
+        changed = self._attestations.merge(attns, _known) if attns else 0
+        self._attestations.prune()
+        if changed:
+            try:
+                self._attestations.save(attest_path(self._cache_path.parent))
+            except OSError as e:
+                log.warning("could not persist attestations: %s", e)
 
     def _apply_statements(self, stmts) -> int:
         """Merge pulled statements (CA-verified inside the log), persist on

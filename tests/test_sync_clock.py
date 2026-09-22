@@ -35,7 +35,7 @@ def test_pull_directory_returns_anchor_time(tmp_path):
     srv.start()
     try:
         (records, renew_after, anchor_now, _dom, _policy,
-         _stmts) = pull_directory(f"http://[::1]:{port}")
+         _stmts, _attns) = pull_directory(f"http://[::1]:{port}")
         assert records == [] and renew_after is None
         assert anchor_now is not None and anchor_now.tzinfo is not None
         assert abs((dt.datetime.now(_UTC) - anchor_now).total_seconds()) < 30
@@ -91,7 +91,7 @@ def test_sync_loop_caches_revoked_list(tmp_path, monkeypatch):
     from greasewood import sync as syncmod
     a = NodeKeys.generate()
     monkeypatch.setattr(syncmod, "pull_directory",
-                        lambda url, timeout=10.0: ([], None, None, None, None, []))
+                        lambda url, timeout=10.0: ([], None, None, None, None, [], []))
     monkeypatch.setattr(syncmod, "pull_revoked",
                         lambda url, timeout=5.0: {a.id_pub_hex})
 

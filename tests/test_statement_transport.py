@@ -52,7 +52,8 @@ def test_directory_serves_statements_and_revoked_merges_them():
     stmts.add(_stmt(ca, "revoke", victim, hostname="mole"))
     srv, port = _holder(Directory(), stmts, ca)
     try:
-        _r, _ra, _now_, _dom, _pol, pulled = pull_directory(f"http://[::1]:{port}")
+        (_r, _ra, _now_, _dom, _pol, pulled,
+         _attns) = pull_directory(f"http://[::1]:{port}")
         assert [s.kind for s in pulled] == ["revoke"]
         pulled[0].verify([ca.ca_pub_bytes])           # signature survives transport
         with urllib.request.urlopen(f"http://[::1]:{port}/revoked", timeout=5) as resp:

@@ -939,6 +939,32 @@ def cmd_invite(args) -> int:
             sys.exit("could not detect a public address; use --endpoint <addr>")
     endpoint = ",".join(anchor_hosts)
 
+    # Sanity-check the hosts going into the token against peer TESTIMONY: if
+    # peers attest to reaching this holder, but never at any of these hosts,
+    # the token likely embeds a mirage (the VPN-/128 class) and the joiner
+    # will hang dialing it. Advisory only — a fresh mesh has no testimony.
+    try:
+        from .attest import AttestLog, attest_path
+        from .keys import NodeKeys as _NK
+        _own = _NK.load_or_generate(data_dir)
+        _conf = AttestLog.load(attest_path(data_dir),
+                               lambda _h: True).confirmations_for(_own.id_pub_hex)
+        if _conf:
+            def _host_of(ep: str) -> str:
+                ep = ep.rsplit(":", 1)[0] if not ep.startswith("[") \
+                    else ep[1:ep.index("]")]
+                return ep
+            confirmed_hosts = {_host_of(e) for e in _conf}
+            if not (set(anchor_hosts) & confirmed_hosts):
+                print(f"⚠ no peer currently confirms reaching this holder at "
+                      f"{', '.join(anchor_hosts)} — peers attest "
+                      f"{', '.join(sorted(confirmed_hosts))} instead. The "
+                      f"token may embed an unreachable door (see `gw watch`'s "
+                      f"confirmed line); consider --endpoint with a working "
+                      f"address.")
+    except Exception as e:  # noqa: BLE001 — advisory, never blocks an invite
+        log.debug("could not check endpoint confirmations: %s", e)
+
     window = cfg.door_window
 
     # The anchor decides caps + roles HERE and issues them to whoever redeems the
@@ -3467,7 +3493,7 @@ def cmd_rename_node(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
-                                stmt_log):
+                                stmt_log, att_log=None):
     """Bring up the anchor-only services and return (get_revoked, door_watcher):
     load the CA, start the HTTP control plane, and start the enrollment door
     watcher. get_revoked is the live revoke-list reader the reconcile loop uses;
@@ -3538,7 +3564,7 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
             ca=ca, cache_path=cfg.dir_cache_path, tls_cert_ttl=cfg.tls_cert_ttl,
             mesh_domain=cfg.mesh_domain, get_renew_after=read_renew_after,
             get_policy=read_policy, statements=stmt_log,
-            data_dir=cfg.data_dir)
+            data_dir=cfg.data_dir, attestations=att_log)
     except ControlPlaneAddrInUse as e:
         _daemon_fatal(cfg, f"anchor control plane can't start: {e}")
     server.start()
@@ -3662,9 +3688,26 @@ def cmd_run(args) -> int:
     from .statements import StatementLog, statements_path
     stmt_log = StatementLog.load(statements_path(cfg.data_dir), get_ca_pubs())
 
+    # Peers' endpoint testimony (see greasewood.attest). Loaded on every
+    # role: nodes merge what holders serve (for watch's confirmed/mirage
+    # display); holders additionally accept POST /attest and serve the log.
+    from .attest import AttestLog, AttestLoop, attest_path
+
+    def _known_attester(hex_id: str) -> bool:
+        rec = directory.get(hex_id)
+        if rec is None:
+            return False
+        try:
+            rec.cred.verify(get_ca_pubs(), allow_expired=True)
+        except ValueError:
+            return False
+        return True
+
+    att_log = AttestLog.load(attest_path(cfg.data_dir), _known_attester)
+
     if _holds_anchor(cfg):
         get_revoked, door_watcher = _start_anchor_control_plane(
-            cfg, keys, directory, get_ca_pubs, grant_policy, stmt_log)
+            cfg, keys, directory, get_ca_pubs, grant_policy, stmt_log, att_log)
     else:
         # Start from the cached copy (if any) and let the SyncLoop refresh it.
         get_revoked = lambda: _load_revoked(cfg)
@@ -3690,8 +3733,19 @@ def cmd_run(args) -> int:
         statements=stmt_log,
         get_ca_pubs=get_ca_pubs,
         own_id_hex=keys.id_pub_hex,
+        attestations=att_log,
     )
     sync.start()
+
+    # Testify about the endpoints this node's live tunnels actually ride —
+    # ground truth for the fleet's confirmed/mirage display. A holder hands
+    # its own testimony to itself first (loopback); everyone else, to the
+    # first live holder. Diagnostic layer: failures are debug-quiet.
+    AttestLoop(keys, directory, cfg.wg_interface,
+               lambda: (([f"http://[::1]:{_control_port(cfg)}"]
+                         if _holds_anchor(cfg) else [])
+                        + _anchor_urls(cfg, directory, own_addr=keys.addr,
+                                       get_ca_pubs=get_ca_pubs))).start()
 
     # Name resolution via a managed /etc/hosts block (opt-in). When off, remove
     # any block we left behind before (clean opt-out).

@@ -91,6 +91,10 @@ class _Handler(BaseHTTPRequestHandler):
     # The holder's data dir — where an outstanding anchor-file offer lives
     # (anchorfile.write_offer / POST /anchor-claim). None on a non-holder.
     data_dir: "Path | None" = None
+    # Aggregated endpoint attestations (attest.AttestLog): peers' testimony
+    # about which endpoints actually carry handshakes. Served in /directory;
+    # accepted at POST /attest. None on a non-holder.
+    attestations = None    # AttestLog | None
     get_ca_pubs: "callable" = staticmethod(list)
     get_revoked: "callable" = staticmethod(set)
     cache_path: "Path | None" = None
@@ -150,6 +154,10 @@ class _Handler(BaseHTTPRequestHandler):
                 # node converges on them. Old clients ignore unknown keys.
                 "statements": ([s.to_dict() for s in self.statements.all()]
                                if self.statements is not None else []),
+                # Peers' endpoint testimony — reachability as verified fact,
+                # for gw watch's confirmed/mirage display. Old clients ignore.
+                "attestations": ([a.to_dict() for a in self.attestations.all()]
+                                 if self.attestations is not None else []),
                 "now": self._now_iso(),
             })
         elif self.path == "/ca-cert":
@@ -193,6 +201,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not an anchor"}, 403)
             else:
                 self._handle_renew(body)
+        elif self.path == "/attest":
+            if self.ca is None or self.attestations is None:
+                self._send_json({"error": "not an anchor"}, 404)
+            else:
+                self._handle_attest(body)
         elif self.path == "/anchor-claim":
             if self.ca is None or self.data_dir is None:
                 self._send_json({"error": "not an anchor"}, 403)
@@ -266,6 +279,34 @@ class _Handler(BaseHTTPRequestHandler):
                      hostname_freed=freed, record_dropped=had_record)
         log.info("node left voluntarily: %s (hostname freed: %s)", who, freed)
         self._send_json({"status": "left", "hostname_freed": freed})
+
+    def _handle_attest(self, body: dict) -> None:
+        """Accept a node's endpoint testimony batch. Each attestation is
+        self-signed and must come from a live mesh member (a trusted record
+        in the directory) — enforced inside AttestLog.merge, along with the
+        freshness window and latest-wins. Nothing here is trust-relevant, so
+        a mixed batch is fine: good entries land, bad ones drop."""
+        from . import attest as attmod
+        parsed = attmod.parse_attestations(body.get("attestations"))
+
+        def _known(hex_id: str) -> bool:
+            rec = self.directory.get(hex_id)
+            if rec is None:
+                return False
+            try:
+                rec.cred.verify(self.get_ca_pubs(), allow_expired=True)
+            except ValueError:
+                return False
+            return True
+
+        accepted = self.attestations.merge(parsed, _known)
+        self.attestations.prune()
+        if accepted and self.data_dir is not None:
+            try:
+                self.attestations.save(attmod.attest_path(self.data_dir))
+            except Exception as e:
+                log.warning("could not persist attestations: %s", e)
+        self._send_json({"status": "ok", "accepted": accepted})
 
     def _handle_anchor_claim(self, body: dict) -> None:
         """A node collecting an anchor-file offer minted FOR IT (`gw anchor
@@ -510,6 +551,7 @@ class ControlServer:
         max_workers: int = 32,
         statements=None,
         data_dir=None,
+        attestations=None,
     ) -> None:
         listens = [listen] if isinstance(listen, str) else list(listen)
 
@@ -523,6 +565,7 @@ class ControlServer:
         Handler.ca = ca
         Handler.statements = statements
         Handler.data_dir = data_dir
+        Handler.attestations = attestations
         Handler.get_ca_pubs = staticmethod(get_ca_pubs)
         Handler.get_revoked = staticmethod(get_revoked)
         Handler.cache_path = cache_path

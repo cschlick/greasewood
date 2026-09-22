@@ -85,6 +85,31 @@ An **anchor** must be reachable (it serves the control plane), so in order for a
 to become the anchor, it must have a reachable external address. So
 `anchor-promote` refuses on a node that knows it advertises no endpoint.
 
+### Endpoint attestations — reachability as verified fact
+
+Advertised endpoints are heuristic **claims**, and the field has proven how
+convincing a wrong claim can look: a VM-internal address and a VPN's shared
+"global" /128 were both advertised confidently and both dead. The mesh,
+meanwhile, generates ground truth continuously — every fresh WireGuard
+handshake proves the endpoint that tunnel rides *works right now*.
+
+Attestations publish that truth. Every couple of minutes each node signs one
+statement per live tunnel — "my link to S currently rides E", read straight
+from `wg show` — and hands the batch to a holder. Holders keep the newest
+testimony per (attester, subject), verified and membership-gated, aging out
+after 30 minutes, and serve it in `/directory` so every node converges on it.
+
+`gw watch` then shows the comparison on the `confirmed` line: **✓ confirmed
+by N peers** when testimony matches the advertisement, or the **mirage
+warning** when peers reach the node only at some *other* address — the exact
+signature of both field incidents, now a header line instead of an outage
+investigation. `gw invite` runs the same check on the hosts it is about to
+bake into a token and warns before a joiner can hang on them.
+
+Attestations are testimony about reachability only — they never feed
+issuance, policy, or peering, so the worst a dishonest member can do is
+distort a diagnostic display.
+
 
 ## Names
 

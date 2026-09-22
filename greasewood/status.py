@@ -527,6 +527,32 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     return lines
 
 
+def _reach_confirmation_lines(cfg, own_id: str, advertised) -> list:
+    """One line comparing this node's advertised endpoints with what peers
+    ATTEST they actually reach it at (attestations.json, maintained by the
+    daemon's sync from holder pulls). Silent with no testimony at all (a new
+    or single-node mesh has nothing to compare)."""
+    from .attest import AttestLog, attest_path
+    log_ = AttestLog.load(attest_path(cfg.data_dir), lambda _h: True)
+    conf = log_.confirmations_for(own_id)
+    if not conf:
+        return []
+    advertised = set(advertised)
+    matched = {e: v for e, v in conf.items() if e in advertised}
+    if matched:
+        n = len({a for v in matched.values() for a in v})
+        which = ", ".join(sorted(matched))
+        return [f"{'confirmed':<9}: ✓ by {n} peer{'s' if n != 1 else ''} "
+                f"at {which}"]
+    elsewhere = ", ".join(sorted(conf))
+    n = len({a for v in conf.values() for a in v})
+    return [f"{'confirmed':<9}: ⚠ NO peer confirms the advertised "
+            f"endpoint{'s' if len(advertised) != 1 else ''} — {n} peer"
+            f"{'s' if n != 1 else ''} reach this node at {elsewhere} instead. "
+            f"The advertisement may be a mirage (VPN/VM address, stale "
+            f"detection); peers relying on it can't dial in."]
+
+
 def _hostname_collision_lines(directory) -> list:
     """A LOUD header warning when two LIVE identities claim one hostname —
     the active/active design's accepted enrollment race, which is only
@@ -1898,6 +1924,13 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     reach = ("advertises an endpoint (dialable)" if endpoints
              else "no endpoint (outbound-only — you dial peers)")
     lines.append(f"{'reach':<9}: {reach}")
+    # Peer testimony vs the advertisement: advertised endpoints are heuristic
+    # CLAIMS (the field has produced a VM ULA and a shared VPN /128, both
+    # convincing and both dead); attestations are packets that flowed. When
+    # peers confirm an advertised endpoint, say so; when they only ever reach
+    # this node somewhere ELSE, that is the mirage signature — shout it.
+    if endpoints and own_id:
+        lines += _reach_confirmation_lines(cfg, own_id, endpoints)
 
     n = len(cfg.ca_pubs_hex)
     lines.append(f"{'trust':<9}: {n} trusted CA{'' if n == 1 else 's'} · "

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Endpoint attestations — reachability as verified fact.** Advertised endpoints are heuristic claims (the field produced a VM-internal ULA and a VPN's shared /128, both convincing, both dead); every fresh WireGuard handshake is ground truth. Each node now signs testimony per live tunnel ("my link to S rides E", straight from `wg show`) every ~2 minutes and hands it to a holder (`POST /attest`); holders aggregate (self-signed, membership-gated, latest-wins, 30-minute freshness) and serve it in `/directory`, where every node's sync picks it up. `gw watch` gains a `confirmed` line: ✓ by N peers when testimony matches the advertisement, or a loud MIRAGE warning when peers only ever reach the node at some *other* address — the exact signature of both incidents, now a header line instead of an outage. `gw invite` runs the same check on the hosts it bakes into a token and warns before a joiner can hang on them. Attestations are diagnostic only — they never feed issuance, policy, or peering.
+
 ### Fixed
 
 - **The fleet-renew hint gossips between holders.** `gw renew-all` on holder A only nudged the nodes whose first-success sync happened to pull from A; holders now adopt a newer `renew_after` seen in pulls from other holders (latest-wins, like statements), so the hint reaches every node from whichever holder it polls.

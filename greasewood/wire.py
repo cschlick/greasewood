@@ -467,6 +467,75 @@ class LeaveRequest:
 
 
 # ---------------------------------------------------------------------------
+# EndpointAttestation — a peer's testimony that an endpoint actually works
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EndpointAttestation:
+    """One node's testimony: "my live WireGuard tunnel to `subject` currently
+    rides `endpoint`" — signed by the ATTESTER's identity key, derived from
+    nothing but its own kernel state (a fresh handshake and the endpoint
+    `wg show` reports for that peer).
+
+    This is what turns advertised endpoints from claims into verified facts.
+    Advertisement is self-asserted and heuristic — the field has produced a
+    VM-internal ULA and a VPN's shared /128, both of which LOOKED fine and
+    were unreachable — while an attestation is ground truth: packets flowed.
+    Consumers compare the two: an advertised endpoint no peer confirms is a
+    mirage warning in `gw watch`; the address peers DO confirm is displayed
+    beside it.
+
+    Trust: an attestation is testimony about REACHABILITY only — it never
+    feeds issuance or policy, so a lying member can at worst distort a
+    diagnostic display. The self-signature stops impersonation of the
+    attester; freshness bounds (ts) age testimony out; latest-per-
+    (attester, subject) merge keeps the log bounded by mesh size squared."""
+    attester: bytes      # who observed (32-byte Ed25519 pub)
+    subject: bytes       # whose endpoint worked
+    endpoint: str        # as wg reports it: "[v6]:port" or "v4:port"
+    ts: dt.datetime
+    sig: bytes = field(default=b"", repr=False)
+
+    def _body_dict(self) -> dict[str, Any]:
+        return {
+            "attest": "endpoint",       # domain separation from other id-signed bodies
+            "attester": _b64e(self.attester),
+            "endpoint": self.endpoint,
+            "subject": _b64e(self.subject),
+            "ts": _ts(self.ts),
+        }
+
+    def sign(self, id_priv: Ed25519PrivateKey) -> "EndpointAttestation":
+        sig = id_priv.sign(_canonical(self._body_dict()))
+        return replace(self, sig=sig)
+
+    def verify_self_sig(self) -> None:
+        body = _canonical(self._body_dict())
+        pub = Ed25519PublicKey.from_public_bytes(self.attester)
+        try:
+            pub.verify(self.sig, body)
+        except InvalidSignature:
+            raise ValueError("invalid endpoint-attestation signature")
+
+    def to_dict(self) -> dict[str, Any]:
+        d = self._body_dict()
+        d["sig"] = _b64e(self.sig)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EndpointAttestation":
+        if _str(d.get("attest", ""), "attest") != "endpoint":
+            raise ValueError("not an endpoint attestation")
+        return cls(
+            attester=_b64d_key(d["attester"], "attester"),
+            subject=_b64d_key(d["subject"], "subject"),
+            endpoint=_str(d["endpoint"], "endpoint"),
+            ts=_parse_ts(d["ts"]),
+            sig=_b64d(d["sig"]),
+        )
+
+
+# ---------------------------------------------------------------------------
 # AnchorClaimRequest — a node collecting an anchor-file offer sealed to it
 # ---------------------------------------------------------------------------
 
