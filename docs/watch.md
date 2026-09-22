@@ -15,7 +15,13 @@ return, and a one-line firewall summary — all redrawing in place.
 Bare **`sudo gw`** in a terminal opens this view. Its layout, top to bottom:
 
 - **A node header** — this box's identity, credential expiry, trust, and daemon
-  freshness.
+  freshness. It also carries the alarms that must not hide in a roster cell:
+  a `confirmed` line comparing this node's *advertised* endpoint against what
+  peers **attest** they actually reach it at (✓ by N peers — or the mirage
+  warning when peers only ever reach it somewhere else; see
+  [endpoint attestations](networking.md#endpoint-attestations--reachability-as-verified-fact)),
+  an expired-**anchor** warning with the partition countdown, and a hostname
+  `COLLISION` line when two live identities claim one name.
 - **A firewall summary** — one line by default (press `f`, or `--firewall`, for
   the full host-rule check and greasewood's own nftables table). The host-
   firewall verdict stays verbatim, so a blocked port is as loud collapsed as

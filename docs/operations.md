@@ -55,18 +55,40 @@ Disaster SOPs for a greasewood fleet. Commands assume the default
 `/etc/greasewood_myfleet.toml` and data dir `/var/lib/greasewood`. Read
 [security.md](security.md) for the trust model these procedures rest on.
 
-## First, debug it: `gw diagnose`
+## First, debug it: explain → diagnose → narrate
 
-Before any recovery, find out what's actually wrong. `gw diagnose` is a
-**pairwise** tool: it lays up to two named nodes plus the anchor side by side and
-explains, per pair, whether a tunnel can form — and if not, which factor blocks
-it. (Fleet-wide link state is `gw watch`; diagnose is the focused deep-dive.)
+Before any recovery, find out what's actually wrong. Three instruments, in
+escalating depth — start at the top:
+
+```
+gw explain bb --since 2d    # the STORY: what happened + what the record says now
+sudo gw diagnose bb         # the LIVE PROBE: actively test the pair, as root
+gw narrate --peer bb        # the MICROSCOPE: every command executed, verbatim
+```
+
+**`gw explain`** (no root) merges what this machine witnessed, what the mesh
+decided (revokes/leaves/role changes replicate, so they show up here even
+when another holder decided them), the credential history, and peers'
+endpoint testimony into one timeline plus a current-state verdict. Most
+questions — "why did bb disappear?", "did that role change land?", "is its
+advertised endpoint real?" — end here.
+
+**`gw diagnose`** is the **pairwise, active** tool: it lays up to two named
+nodes plus the anchor side by side and explains, per pair, whether a tunnel
+can form *right now* — live pings, firewall directionality, the path-MTU
+blackhole probe. Reach for it when explain's story says things *should*
+work but packets say otherwise. (Fleet-wide link state is `gw watch`;
+diagnose is the focused deep-dive.)
 
 ```
 sudo gw diagnose            # this host ↔ the anchor
 sudo gw diagnose db01       # this host ↔ db01   (+ anchor as reference)
 sudo gw diagnose db01 web1  # db01 ↔ web1        (+ anchor as reference)
 ```
+
+**`gw narrate`** translates the raw audit trail — every `ip`/`wg`/`nft`
+command, exit code, and reason — when you need the exact operation a story
+line summarized (explain's failure markers point you there).
 
 The comparison table shows each node's overlay/underlay addresses, reachability,
 roles, credential, and firewall for the mesh UDP port. **Only this host's

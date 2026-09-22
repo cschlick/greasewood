@@ -32,10 +32,13 @@ past the point of practicality, and wanted the simplest possible upgrade.
   for a credential lifetime, nodes run from cache.
 - **[Hands-off.](networking.md#firewall)** Never automatically configures your
   main firewall. Port access control lives on a dedicated table.
-- **[Auditable.](concepts.md#auditable)** Pure Python, one dependency. Fanatical
-  logging.
-- **[Self-contained.](concepts.md#the-anchor)** The coordination anchor is just
-  a normal node. Any node can become the anchor.
+- **[It explains itself.](concepts.md#auditable)** Pure Python, one dependency.
+  Every state change is a logged command with its reason; `gw explain <node>`
+  tells the story, `gw narrate` translates the raw trail, and peers *attest*
+  which endpoints really work.
+- **[Self-contained.](anchor.md)** The coordination anchor is a **file**, not
+  a machine: any node holding `anchor.gwa` serves anchor duties — several at
+  once — and handing it to another node is two commands over the mesh itself.
 
 ## Start here
 

@@ -142,8 +142,9 @@ Additional control-plane protections:
 - **Issued TLS service certs are a separate, longer window.** A leaf lives for
   `tls_cert_ttl` (default 7d) and is **not** CRL-revocable, so a revoked node
   keeps a CA-valid, `verify-full`-trusted service cert until that leaf expires —
-  potentially several credential TTLs. Re-issuance *is* blocked (`gw revoke`
-  deletes the registry entry, so `/cert` refuses), and the revoked node loses
+  potentially several credential TTLs. Re-issuance *is* blocked (a revoked
+  identity has no live membership to issue against, so `/cert` refuses), and
+  the revoked node loses
   mesh reachability within one credential TTL, so exploiting the tail needs an
   off-mesh path to the service. Set `tls_cert_ttl ≤ credential_ttl` if a service
   cert must not outlive mesh membership.
