@@ -11,7 +11,7 @@ the full reference.
 | Command            | sudo? | What it does                                              |
 |--------------------|-------|-----------------------------------------------------------|
 | `create`        | yes   | One-shot anchor bootstrap: CA, door key, routing, self-cred. |
-| `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). Port enforcement (grant port scopes, nftables) is on by default; `--no-enforce-ports` (or `enforce_ports=false`) disables it for an nft-less host. See [Access control](access-control.md#access-control-roles--grants). |
+| `run`              | yes   | Start the daemon (WireGuard iface, control plane, loops). Which peers it tunnels to is the grant table's decision — see [Access control](access-control.md#access-control-roles--grants). |
 | `invite`           | yes   | Open a 15-min door window, print a single-use join token. `--standing` opens a [standing door](quickstart.md#provisioning-many-nodes) instead: one token, any number of enrollments, until `close-door`. |
 | `close-door`       | yes   | Close the current door window — permanently invalidates its token (standing or single-use); enrolled nodes unaffected. |
 | `join <token>`     | yes   | Enroll this machine using a token from `invite`.          |

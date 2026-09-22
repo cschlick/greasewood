@@ -63,14 +63,15 @@ def test_config_unknown_key_errors(tmp_path):
 # The `gw firewall` subcommand is gone; the recommended-posture printer it used
 # lives on (create/join print it at setup), and the host-firewall port CHECK
 # moved to gw watch (see test_watch_main_firewall.py).
-def test_firewall_help_enforce_on_recommends_two_udp_plus_coarse_admit(capsys):
-    cli._print_firewall_help(51900, 51902, "gw-pm", enforce_ports=True)
+def test_firewall_help_anchor_recommends_underlay_overlay_and_door(capsys):
+    cli._print_firewall_help(51900, 51902, "gw-pm")
     out = capsys.readouterr().out
     assert "51900, 51901" in out                        # the two underlay UDP ports
-    assert 'iifname "gw-*" accept' in out               # coarse admit — greasewood filters
-    # the overlay ports are greasewood's table's job now, not the firewall's
+    assert 'iifname "gw-pm" accept' in out              # coarse overlay admit
+    # the coarse admit covers the control plane — no per-port rule needed
     assert 'iifname "gw-pm" tcp dport 51902' not in out
-    assert 'iifname "gw-door" tcp dport 51903' not in out
+    assert 'iifname "gw-door" tcp dport 51903 accept' in out   # enrollment
+    assert 'iifname "gw-door" drop' in out              # door carries ONLY enrollment
 
 
 def test_firewall_help_node_role_omits_the_anchor_only_door_port(capsys):
@@ -80,14 +81,4 @@ def test_firewall_help_node_role_omits_the_anchor_only_door_port(capsys):
     out = capsys.readouterr().out
     assert "udp dport 51900 accept" in out
     assert "51901" not in out                          # NOT the door port
-    assert 'iifname "gw-*" accept' in out              # coarse overlay admit
-
-
-def test_firewall_help_enforce_off_recommends_the_four_ports(capsys):
-    cli._print_firewall_help(51900, 51902, "gw-pm", enforce_ports=False)
-    out = capsys.readouterr().out
-    # enforcement off → the operator gates the overlay ports themselves
-    assert "51900, 51901" in out
-    assert 'iifname "gw-pm" tcp dport 51902' in out     # control plane
-    assert 'iifname "gw-door" tcp dport 51903' in out   # enrollment
-    assert 'iifname "gw-door" drop' in out              # door lockdown stays operator's job
+    assert 'iifname "gw-pm" accept' in out             # coarse overlay admit

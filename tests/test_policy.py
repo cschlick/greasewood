@@ -258,14 +258,11 @@ def test_unmatched_tags_flags_typos():
 
 def test_default_grants_toml_is_default_closed_admin_ssh():
     """The starting grants.toml is DEFAULT-CLOSED: a single active grant,
-    `admin -> [anchor, node] : tcp/22`. Not fully open — enforcement realizes a
-    secure star. The commented alternatives are just comments, so exactly one
-    grant parses."""
-    from greasewood.portfilter import _fully_open
+    `admin -> [anchor, node] : tcp/22` — a secure star, not a flat mesh. The
+    commented alternatives are just comments, so exactly one grant parses."""
     grants = policy.parse_grants_toml(policy.DEFAULT_GRANTS_TOML)
     assert grants == [{"from": ["admin"], "to": ["anchor", "node"],
                        "ports": ["tcp/22"]}]
-    assert not _fully_open(grants)
     # admin (the anchor) reaches every node; two ordinary nodes do NOT peer.
     assert policy.peers_allowed(["role:admin"], ["role:node"], grants)
     assert not policy.peers_allowed(["role:node"], ["role:node"], grants)

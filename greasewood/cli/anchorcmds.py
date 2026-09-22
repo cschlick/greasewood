@@ -75,8 +75,7 @@ def cmd_anchor_promote(args) -> int:
         listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
         seeds=cfg.seeds, root_url=cfg.root_url, hosts_sync=cfg.hosts_sync,
         mesh_domain=cfg.mesh_domain, trusted_pubs=trusted,
-        enforce_ports=cfg.enforce_ports,          # preserve the operator's choices
-        endpoint_auto=cfg.endpoint_auto,
+        endpoint_auto=cfg.endpoint_auto,          # preserve the operator's choice
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
                 "door_port": cfg.door_port}))
@@ -647,7 +646,7 @@ def cmd_anchor_activate(args) -> int:
         listen_port=cfg.listen_port, overlay_prefix=cfg.overlay_prefix,
         seeds=[], root_url=f"http://[::1]:{control_port}",
         hosts_sync=cfg.hosts_sync, mesh_domain=cfg.mesh_domain,
-        trusted_pubs=[ca_pub_hex], enforce_ports=cfg.enforce_ports,
+        trusted_pubs=[ca_pub_hex],
         endpoint_auto=cfg.endpoint_auto,
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,

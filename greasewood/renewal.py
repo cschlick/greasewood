@@ -110,7 +110,7 @@ class RenewalLoop(Loop):
         self._acted_renew_after: "dt.datetime | None" = None
         # Called with the fresh Credential after a renewal — the daemon adopts
         # any role change the anchor made (via set-roles) into its LIVE peering
-        # + port-enforcement decisions, no restart. The renewed cred is the
+        # decisions, no restart. The renewed cred is the
         # authoritative role source; local_caps follows it.
         self._on_renew = on_renew
 

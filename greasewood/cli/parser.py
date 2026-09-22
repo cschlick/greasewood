@@ -404,7 +404,7 @@ def cmd_policy(args) -> int:
     for a, b in removed:
         print(f"  - tunnel {a} ↔ {b}")
     if not created and not removed:
-        print("  tunnels: (no change — port scopes only)")
+        print("  tunnels: (no change)")
 
     if not getattr(args, "yes", False):
         answer = input("apply? [y/N] ").strip().lower()
@@ -628,13 +628,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run
     sp = sub.add_parser("run", help="[sudo] start the daemon (creates WireGuard interface)")
-    sp.add_argument("--no-enforce-ports", dest="no_enforce_ports",
-                    action="store_true",
-                    help="run WITHOUT nftables port enforcement (on by default). "
-                         "For a host with no usable nftables — grants still "
-                         "control which tunnels exist; port scopes go advisory. "
-                         "The persistent form is `enforce_ports = false` under "
-                         "[network] (systemd runs `gw run` with no flags).")
     sp.set_defaults(fn=cli.cmd_run)
 
     # watch — live mesh view by default; --snapshot for a static one-shot

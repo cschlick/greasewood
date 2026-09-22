@@ -77,20 +77,6 @@ def _render(**kw):
     return render_config(**base)
 
 
-def test_render_config_writes_enforce_ports_explicitly(tmp_path):
-    # create/join write the key explicitly (chosen from nftables presence), so
-    # the operator always sees it and an nft-less host is unambiguously off.
-    assert "enforce_ports = false" in _render(enforce_ports=False)
-    assert "enforce_ports = true" in _render(enforce_ports=True)
-
-
-def test_render_config_enforce_ports_round_trips(tmp_path):
-    p = _write(tmp_path, _render(enforce_ports=False))
-    assert load_config(p).enforce_ports is False
-    p = _write(tmp_path, _render(enforce_ports=True))
-    assert load_config(p).enforce_ports is True
-
-
 def test_endpoint_auto_round_trips_and_defaults_true(tmp_path):
     # Explicit both ways (create/join write it; false when --endpoint was given).
     assert load_config(_write(tmp_path, _render(endpoint_auto=False))).endpoint_auto is False

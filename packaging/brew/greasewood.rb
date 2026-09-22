@@ -56,9 +56,9 @@ class Greasewood < Formula
       Both install a launchd daemon (com.greasewood.<mesh>) that starts at
       boot and restarts on failure. Logs: /var/log/greasewood/<mesh>.log
 
-      Port enforcement (the grant table's port scopes) is not available on
-      macOS yet — a pf backend is planned. Tunnel-level access control is
-      fully enforced.
+      Access control (which machines can talk — the grant table, enforced
+      as tunnel existence) works fully on macOS. What flows inside a tunnel
+      is your host firewall's business, on every platform.
     EOS
   end
 

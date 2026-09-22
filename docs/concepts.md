@@ -111,11 +111,12 @@ has no kernel module) over a `utun`, drives `ifconfig`/`route` instead of
 `ip`, and is supervised by launchd. One seam (`greasewood.platform` + the
 per-OS halves of `wg.py` and `service.py`) answers "which OS"; the control
 plane, crypto, directory, enrollment, and policy layers are byte-identical.
-The one capability gap: [port enforcement](access-control.md) is
-nftables-only until a pf backend lands, so macOS nodes run their port scopes
-advisory — tunnel existence is still fully policy-enforced. The
-[macOS guide](macos.md) has the details. Anything else (BSDs, Windows) would
-need another data-plane backend and supervisor, and is out of scope.
+There is no capability gap by design: greasewood decides which machines can
+talk (tunnel existence, pure software), and leaves what flows *inside* a
+tunnel to each host's own firewall — so [access control](access-control.md)
+is identical on every platform. The [macOS guide](macos.md) has the
+platform details. Anything else (BSDs, Windows) would need another
+data-plane backend and supervisor, and is out of scope.
 
 ## Greasy
 

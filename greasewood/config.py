@@ -34,13 +34,6 @@ class Config:
     # TLS cert name (gw cert-request), so a node's address name == its cert SAN.
     hosts_sync: bool
     mesh_domain: str
-    # Enforce the grant table's port scopes with nftables (greasewood's own
-    # table, mesh interface only). ON by default; the shipped default policy is
-    # closed (a secure star — only role:admin can SSH nodes), so enforcement
-    # realizes that from the first boot. Set false ONLY on a host without usable
-    # nftables — the daemon otherwise refuses to start rather than run silently
-    # unenforced.
-    enforce_ports: bool
     # Re-detect this node's advertised underlay endpoint(s) periodically and
     # re-advertise when they change (e.g. an IPv6 prefix renumbering swaps the
     # stable GUA). false pins them — set when the operator gave an explicit
@@ -135,7 +128,7 @@ def render_config(*, hostname: str, data_dir, role: str, caps: list,
                   endpoints: "list | None" = None, interface: str,
                   listen_port: int, overlay_prefix: str, seeds: list,
                   root_url: str, hosts_sync: bool, mesh_domain: str,
-                  trusted_pubs: list, enforce_ports: bool = True,
+                  trusted_pubs: list,
                   endpoint_auto: bool = True,
                   anchor: "dict | None" = None) -> str:
     """The ONE writer of /etc/greasewood_<name>.toml — create, join, and
@@ -160,10 +153,6 @@ overlay_prefix = "{overlay_prefix}"
 seeds = {json.dumps(list(seeds))}
 root_url = {json.dumps(root_url or "")}
 hosts_sync = {"true" if hosts_sync else "false"}
-# Per-port enforcement of the grant table via greasewood's own nftables table.
-# Chosen at create/join from whether nftables was usable then: false on a host
-# without it (grants still gate which tunnels exist; port scopes stay advisory).
-enforce_ports = {"true" if enforce_ports else "false"}
 mesh_domain = "{mesh_domain}"
 
 [ca]
@@ -228,7 +217,6 @@ def load_config(path: Path) -> Config:
         root_url=net.get("root_url", ""),
 
         hosts_sync=bool(net.get("hosts_sync", True)),
-        enforce_ports=bool(net.get("enforce_ports", True)),
         mesh_domain=net.get("mesh_domain", "gw.internal"),
         aliases=list(net.get("aliases", [])),
         audit_log=audit_log,

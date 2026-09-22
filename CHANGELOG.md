@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gw explain [node [node]] [--since 24h]` — the story, on demand.** One command merges the four memories this machine already holds — the audit trail's events and operations (told in `gw narrate`'s language), the replicated membership decisions (a revoke/leave/caps-change shows up here even when it was decided on another holder), the credential history, and peers' endpoint testimony — into a chronological narrative plus a current-state verdict (credential, confirmations or the mirage warning, live handshake when permitted, and for a pair: whether policy even allows the tunnel). Departed nodes still resolve by name through the tombstone's memory, so `gw explain bb` works *after* bb left. Read-only, no root.
 - **Endpoint attestations — reachability as verified fact.** Advertised endpoints are heuristic claims (the field produced a VM-internal ULA and a VPN's shared /128, both convincing, both dead); every fresh WireGuard handshake is ground truth. Each node now signs testimony per live tunnel ("my link to S rides E", straight from `wg show`) every ~2 minutes and hands it to a holder (`POST /attest`); holders aggregate (self-signed, membership-gated, latest-wins, 30-minute freshness) and serve it in `/directory`, where every node's sync picks it up. `gw watch` gains a `confirmed` line: ✓ by N peers when testimony matches the advertisement, or a loud MIRAGE warning when peers only ever reach the node at some *other* address — the exact signature of both incidents, now a header line instead of an outage. `gw invite` runs the same check on the hosts it bakes into a token and warns before a joiner can hang on them. Attestations are diagnostic only — they never feed issuance, policy, or peering.
 
+### Removed
+
+- **Port enforcement is gone — greasewood filters no ports, on any platform.**
+  The doctrine sharpened: greasewood decides *which machines can talk* (tunnel
+  existence, derived from the grant table — pure software, byte-identical on
+  Linux and macOS); what flows *inside* a granted tunnel is the host firewall's
+  business. The nftables layer that realized each grant's `ports` list
+  (`portfilter.py`, the per-mesh `table inet greasewood_<mesh>`, the
+  `enforce_ports` config key and `--no-enforce-ports` flag, the
+  enforcement-degraded breadcrumb) is removed, along with the pf backend that
+  was planned to mirror it on macOS — that question is now answered "no, by
+  design" instead of "not yet". A grant's `ports` field remains valid syntax
+  and is displayed as the connection's recorded intent. Upgrading is
+  automatic: a 0.7 daemon deletes any leftover legacy table at startup, and
+  `gw watch` strips one from its host-firewall view in the meantime. The
+  firewall guidance (`gw firewall`, docs) now recommends admitting the overlay
+  coarsely — the grant table already decided who is on it — and narrowing per
+  port yourself if you want to; `gw watch` treats either posture as healthy.
+  The `--json` snapshot schema bumps to `gw.watch/v2` (the
+  `mesh.enforce_ports` / `mesh.enforcement_degraded` keys left).
+
 ### Changed
 
 - **`cli.py` (6,080 lines) is now the `greasewood.cli` package** — nine modules cut along the command families: `_common` (gates, membership slots, anchor authority), `netdetect` (the twice-bitten address heuristics, finally in their own tested home), `svc`, `bootstrap` (create/invite/join + the door dance), `membership`, `anchorcmds`, `certcmds`, `daemon` (the `cmd_run` assembly), and `parser`. Pure refactor: zero behavior change, the full suite passes untouched. The package namespace stays the single address — every name re-exported, cross-module helpers called late-bound through it — so `from greasewood import cli; cli.<anything>` (including every monkeypatch in the test suite) works exactly as before.

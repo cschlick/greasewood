@@ -80,71 +80,6 @@ def test_two_outbound_only_not_flagged(capsys):
 
 
 # ---------------------------------------------------------------------------
-# gw watch: the greasewood nftables table, shown verbatim (command + output)
-# ---------------------------------------------------------------------------
-
-def _cfg(enforce=True):
-    import types
-    return types.SimpleNamespace(enforce_ports=enforce, mesh_domain="pm.internal",
-                                 caps=["role:api"])
-
-
-def test_nft_table_lines_shows_command_then_raw_output(monkeypatch):
-    import subprocess, types
-    from greasewood import status
-    raw = ("table inet greasewood_pm {\n"
-           "\tchain meshfilter {\n"
-           "\t\tiifname \"gw-pm\" accept\n"
-           "\t}\n}")
-    monkeypatch.setattr(status.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 0, raw, ""))
-    lines = status._nft_table_lines(_cfg())
-    assert lines[0] == "$ sudo nft list table inet greasewood_pm"   # literal command
-    assert lines[1:] == raw.splitlines()                            # verbatim output
-
-
-def test_nft_table_lines_off(monkeypatch):
-    from greasewood import status
-    out = "\n".join(status._nft_table_lines(_cfg(enforce=False)))
-    assert out.startswith("$ sudo nft list table inet greasewood_pm")
-    assert "enforcement off" in out
-
-
-def test_nft_table_lines_needs_root(monkeypatch):
-    import subprocess
-    from greasewood import status
-    monkeypatch.setattr(status.os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(status.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied"))
-    out = "\n".join(status._nft_table_lines(_cfg()))
-    assert "run as root" in out
-
-
-def test_nft_table_lines_missing_table_as_root(monkeypatch):
-    import subprocess
-    from greasewood import status
-    monkeypatch.setattr(status.os, "geteuid", lambda: 0)
-    # nft's real error is multi-line (message + command echo + a ^^^ caret) —
-    # it must collapse to ONE line so it can't bleed into the roster layout.
-    multiline = ("Error: No such file or directory\n"
-                 "list table inet greasewood_pm\n                ^^^^^^^^^^^^^")
-    monkeypatch.setattr(status.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", multiline))
-    lines = status._nft_table_lines(_cfg())
-    assert len(lines) == 2                       # command line + ONE note
-    assert "not present" in lines[1] and "^" not in lines[1]
-
-
-def test_nft_table_lines_nft_absent(monkeypatch):
-    from greasewood import status
-    def boom(*a, **k):
-        raise FileNotFoundError()
-    monkeypatch.setattr(status.subprocess, "run", boom)
-    out = "\n".join(status._nft_table_lines(_cfg()))
-    assert "nft not installed" in out
-
-
-# ---------------------------------------------------------------------------
 # gw watch live view — scroll math + viewport windowing (the TUI groundwork)
 # ---------------------------------------------------------------------------
 
@@ -176,8 +111,7 @@ def test_key_action_map_covers_keys_and_arrows():
     assert s._KEY_ACTIONS[b"h"] == "toggle_header"
 
 
-def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
-                               "table inet greasewood_pm {", "}"),
+def _mk_app(header, rows,
             fw=("main firewall : udp/51900 + gw-* overlay allowed ✓",
                 "  $ sudo nft list ruleset | grep -E '51900|gw-'",
                 "    udp dport 51900 accept")):
@@ -185,7 +119,6 @@ def _mk_app(header, rows, nft=("$ sudo nft list table inet greasewood_pm",
     app = s._WatchApp.__new__(s._WatchApp)
     app._header = list(header)
     app._fw_lines = list(fw)
-    app._nft_lines = list(nft)
     app._chrome = []
     app._rows, app._off, app._up = rows, 0, len(rows)
     app._show_nft = True
@@ -257,9 +190,6 @@ def test_toggle_nft_collapses_the_top_block():
     collapsed = app._top_lines()
     assert len(collapsed) < len(expanded)              # collapsing shrinks the pinned top
     assert any("(f to expand" in ln for ln in collapsed)   # still shows how to expand
-    assert any("own table" in ln for ln in collapsed)      # gw-table state, one clause
-    # the whole firewall area is ONE line collapsed — that's the point
-    assert len(expanded) - len(collapsed) >= len(app._nft_lines)
     assert any("main firewall" in ln for ln in collapsed)  # verdict stays verbatim
 
 
@@ -447,29 +377,14 @@ def test_firewall_summary_rows():
     from greasewood.status import _firewall_summary_lines as fsl
     fw = ["main firewall : ⚠ udp/51910, gw-* overlay BLOCKED by default-drop "
           "— daemon likely UNREACHABLE inbound", "  $ nft ...", "    (no rule)"]
-    nft_ok = ["$ sudo nft list table inet greasewood_pm",
-              "table inet greasewood_pm {",
-              '        iifname "gw-pm" tcp dport 22 accept',
-              '        iifname "gw-pm" drop', "}"]
-    rows = fsl(fw, nft_ok, "f")
-    # three rows: verbatim verdict / own-table state / how to expand
-    assert rows[0] == fw[0]
-    assert rows[1].startswith("own table") and "✓" in rows[1] and "(2 rules)" in rows[1]
-    assert rows[2] == "(f to expand — raw nft rules)"
-    # the two labels' colons align (that's what makes the rows scannable)
-    assert rows[0].index(":") == rows[1].index(":")
-    # missing table is loud
-    nft_missing = [nft_ok[0], "  (table not present — the daemon isn't running "
-                   "yet, or hasn't applied enforcement; ...)"]
-    assert any("MISSING" in r for r in fsl(fw, nft_missing, "f"))
-    # enforcement off with no host check still yields labeled rows
-    nft_off = [nft_ok[0], "  (port enforcement off — enforce_ports=false; no table)"]
-    rows_off = fsl([], nft_off, "--firewall")
-    assert rows_off[0].startswith("own table") and "port enforcement off" in rows_off[0]
-    assert rows_off[1] == "(--firewall to expand — raw nft rules)"
+    rows = fsl(fw, "f")
+    # two rows: the verdict VERBATIM (a blocked port stays exactly as loud
+    # collapsed as expanded) + how to expand
+    assert rows == [fw[0], "(f to expand — raw nft rules)"]
+    # the snapshot spelling of the expand hint
+    assert fsl(fw, "--firewall")[1] == "(--firewall to expand — raw nft rules)"
     # nothing to say → no rows (nft absent entirely)
-    assert fsl([], [], "f") == []
-    assert fsl([], [nft_ok[0], "  (nft not installed)"], "f") == []
+    assert fsl([], "f") == []
 
 
 # ---------------------------------------------------------------------------

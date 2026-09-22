@@ -178,15 +178,9 @@ show this help message and exit
 \fB\-\-yes\fR, \fB\-y\fR
 skip confirmation prompt
 .SS gw run
-\fBUsage:\fR gw run [\-h] [\-\-no\-enforce\-ports]
+\fBUsage:\fR gw run [\-h]
 .PP
 [sudo] start the daemon (creates WireGuard interface)
-.TP
-\fB\-h\fR, \fB\-\-help\fR
-show this help message and exit
-.TP
-\fB\-\-no\-enforce\-ports\fR
-run WITHOUT nftables port enforcement (on by default). For a host with no usable nftables \(em grants still control which tunnels exist; port scopes go advisory. The persistent form is `enforce_ports = false` under [network] (systemd runs `gw run` with no flags).
 .SS gw watch
 \fBUsage:\fR gw watch [\-h] [\-\-snapshot] [\-\-json] [\-\-by\-role] [\-\-interval SECS] [\-\-all] [\-\-firewall] [\-\-total]
 .PP

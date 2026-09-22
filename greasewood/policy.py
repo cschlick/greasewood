@@ -14,9 +14,11 @@ reported by `gw watch`, configured by nothing.
 
 The table DERIVES the tunnel topology: a WireGuard peer link exists between
 two nodes iff some grant connects their tags, in either direction (tunnels
-are symmetric; the grant's direction matters to the port filter, not to link
-existence). Tunnels are therefore minimal by construction — the peer graph is
-the projection of the policy, never a link wider.
+are symmetric). Tunnels are therefore minimal by construction — the peer
+graph is the projection of the policy, never a link wider. What greasewood
+enforces is tunnel EXISTENCE — which machines can talk at all. A grant's
+`ports` list is the recorded intent of the connection; enforcing it is the
+host firewall's business (greasewood filters no ports, on any platform).
 
 Two rules live BENEATH the table, in code, deliberately not expressible or
 deletable in grants.toml:
@@ -75,9 +77,10 @@ DEFAULT_GRANTS_TOML = """\
 # greasewood grant table — the mesh's access policy.
 #
 # A grant is a sentence about TAGS:  from = [...] -> to = [...] : ports = [...]
-# A flow is allowed iff some grant covers it; there is NO deny rule — you omit
-# the grant instead. Grants govern BOTH which tunnels exist and which ports are
-# open. A node with no inbound grant is reachable by no one, yet is NOT isolated:
+# A tunnel exists iff some grant covers it; there is NO deny rule — you omit
+# the grant instead. Grants govern WHICH TUNNELS EXIST; the `ports` list is
+# the recorded intent (greasewood filters no ports — gate ports with the host
+# firewall). A node with no inbound grant is reachable by no one, yet is NOT isolated:
 # it can still DIAL OUT to anything it has a `from <me> -> to <them>` grant for
 # (replies ride the established tunnel).
 #
@@ -94,9 +97,9 @@ DEFAULT_GRANTS_TOML = """\
 #
 # ALWAYS ON, hardwired, NOT editable here (policy must never be able to sever
 # the channel that distributes policy):
-#   * every node <-> anchor, tcp/51902   — the control plane (carries THIS file)
-#   * the enrollment door,   tcp/51903   — join-time only
-#   * established/related replies, and ICMPv6
+#   * every node <-> anchor — the tunnel carrying the control plane
+#     (tcp/51902, which distributes THIS file)
+#   * the enrollment door (tcp/51903) — join-time only
 #
 # Edit below, then:  sudo gw policy apply  (previews tunnel changes, signs with
 # the CA key, publishes). Changes take effect ONLY after apply.

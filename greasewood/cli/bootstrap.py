@@ -147,7 +147,7 @@ def cmd_create(args) -> int:
         overlay_prefix=overlay_prefix, seeds=[],
         root_url=f"http://[::1]:{control_port}",
         hosts_sync=getattr(args, "hosts_sync", True), mesh_domain=mesh_domain,
-        trusted_pubs=[ca_pub_hex], enforce_ports=cli._enforce_ports_default(),
+        trusted_pubs=[ca_pub_hex],
         endpoint_auto=(args.endpoint is None),   # pinned iff --endpoint was given
         anchor={"ca_key_file": ca_key_path, "control_port": control_port,
                 "credential_ttl": args.credential_ttl,
@@ -1167,7 +1167,6 @@ def cmd_join(args) -> int:
         seeds=[anchor_overlay_url] if anchor_overlay_url else [],
         root_url=anchor_overlay_url or "", hosts_sync=hosts_sync,
         mesh_domain=mesh_domain, trusted_pubs=[ca_pub_hex],
-        enforce_ports=cli._enforce_ports_default(),
         endpoint_auto=(args.endpoint is None)))   # pinned iff --endpoint was given
     log.info("wrote config → %s", cfg_path)
 

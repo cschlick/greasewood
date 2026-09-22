@@ -45,19 +45,17 @@ def test_host_grant_targets_one_machine():
     assert not m.tunnel("bb", "other") and not m.tunnel("nas", "other")
 
 
-def test_port_filter_same_tunnel_open_and_closed():
+def test_reachable_is_tunnel_existence_every_port():
+    # greasewood filters no ports: a granted tunnel carries EVERY port (the
+    # grant's ports list is recorded intent, gated by the host firewall, which
+    # the chaos containers don't run); no tunnel carries none.
     g = [Grant(("web",), ("srv",), ("tcp/80",))]
-    m = _mesh(Node("w", ("web",)), Node("s", ("srv",)), grants=g)
+    m = _mesh(Node("w", ("web",)), Node("s", ("srv",)), Node("o", ("other",)),
+              grants=g)
     assert m.tunnel("w", "s")
-    assert m.reachable("w", "s", 80)                      # granted port
-    assert not m.reachable("w", "s", 5432)               # ungranted port
-    assert m.port_blocked("w", "s", 5432)                # tunnel up, port closed
-
-
-def test_wildcard_port_opens_all():
-    g = [Grant(("m",), ("*",), ("*",))]
-    m = _mesh(Node("mon", ("m",)), Node("x", ("web",)), grants=g)
-    assert m.reachable("mon", "x", 22) and m.reachable("mon", "x", 9999)
+    assert m.reachable("w", "s", 80) and m.reachable("w", "s", 5432)
+    assert not m.tunnel("w", "o")
+    assert not m.reachable("w", "o", 80)                 # no tunnel => no port
 
 
 def test_revoked_and_dead_form_no_tunnels():

@@ -88,8 +88,8 @@ def verify(fleet, sample_ports=None) -> list:
     Checks, over the effective membership:
       - tunnel(a,b): a WireGuard peer is installed on BOTH ends iff the model
         says a tunnel should exist (and ping agrees for expected-up pairs)
-      - reachable(c,s,port): a fresh connection succeeds iff granted; a
-        tunnel-up-but-ungranted port is blocked (the port filter)
+      - reachable(c,s,port): a fresh TCP connection succeeds iff a tunnel
+        exists (greasewood filters no ports — tunnel existence IS the policy)
     Service probing is sampled (full all-pairs-all-ports is O(n^2 * ports));
     the tunnel check is exhaustive."""
     problems = []
@@ -113,15 +113,16 @@ def verify(fleet, sample_ports=None) -> list:
                 problems.append(f"TUNNEL LEAK {a}<->{b}: model forbids a tunnel "
                                 f"but a ping succeeded")
 
-    # 2. the PORT FILTER — sampled client/server/port triples.
+    # 2. TCP over the tunnels — sampled client/server/port triples.
     #
-    # The filter's signature is REFUSED-vs-TIMEOUT, independent of whether a
-    # service actually listens: a GRANTED port is accepted, so the SYN reaches
-    # the host stack — OPEN if a listener answers, REFUSED (RST) if not; either
-    # way the packet ARRIVED. An UNGRANTED port is DROPPED, so the SYN never
-    # reaches the stack — TIMEOUT. So "did the packet reach the host?" is
-    # exactly what the filter decides, and testing that (not "is a service up")
-    # isolates greasewood's actual responsibility from the test's listeners.
+    # The signature is REACHED-vs-TIMEOUT, independent of whether a service
+    # actually listens: with a tunnel up the SYN reaches the host stack — OPEN
+    # if a listener answers, REFUSED (RST) if not; either way the packet
+    # ARRIVED. Without a tunnel there is no path at all — TIMEOUT. greasewood
+    # filters no ports (that is the host firewall's business, and these
+    # containers run none), so "did the packet reach the host?" tests exactly
+    # what greasewood decides: tunnel existence — over real TCP, not just the
+    # ping the topology check uses.
     ports = sample_ports if sample_ports is not None \
         else [22, 80, 443, 2049, 5432, 6379, 8000]
     hosts = fleet._nonanchor()
@@ -136,13 +137,9 @@ def verify(fleet, sample_ports=None) -> list:
         got = probe(fleet.cids[c], fleet.overlays[s], port, timeout=3.0)
         reached = got in ("OPEN", "EMPTY", "REFUSED")   # SYN hit the host stack
         if m.reachable(c, s, port):
-            if not reached:                             # granted but DROPPED
-                problems.append(f"GRANTED PORT DROPPED {c}->{s}:{port} got {got}"
-                                f" — model grants it; the filter wrongly blocked it")
-        elif m.tunnel(c, s):
-            if reached:                                 # ungranted but PASSED
-                problems.append(f"PORT FILTER LEAK {c}->{s}:{port} got {got}"
-                                f" — ungranted on an existing tunnel, filter let it through")
+            if not reached:                             # tunnel up but DROPPED
+                problems.append(f"TUNNEL TCP DROPPED {c}->{s}:{port} got {got}"
+                                f" — a tunnel exists; the SYN never reached the host")
         else:
             if reached:                                 # no tunnel but connected
                 problems.append(f"NO-TUNNEL SERVICE {c}->{s}:{port} got {got}"

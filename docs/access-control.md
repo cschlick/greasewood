@@ -152,8 +152,8 @@ the real table from its first run — the mesh never operates on an implicit
 default.
 
 With a policy applied, a tunnel exists between two nodes **only if some grant
-connects their roles** (either direction — tunnels are symmetric; the grant's
-direction is for port filtering). Tunnels are **minimal by construction**:
+connects their roles** (either direction — tunnels are symmetric).
+Tunnels are **minimal by construction**:
 delete a grant and its tunnels are torn down on the next sync; peers,
 keepalives, and handshake exposure all shrink to the grant graph. Two `web`
 nodes have no tunnel unless someone writes `web -> web`, client and server
@@ -183,24 +183,21 @@ Properties to rely on:
   credential — a node can't talk its way into a role it wasn't issued, nor be
   forced into a link it denies.
 
-**Port enforcement is on by default.** The daemon realizes each grant's
-`ports` in **greasewood's own** `table inet greasewood_<mesh>`, scoped to the
-mesh interface: it default-denies mesh traffic and admits only the granted
-flows (server-side inbound; a client's replies ride `ct established`, so the
-asymmetry needs no rule). A fresh anchor ships **default-closed** — a secure
-star where only `role:admin` (the anchor) can SSH nodes; you open services by
-writing grants. Enforcement is a policy *state*, always installed, not a mode
-you switch on.
+**What greasewood enforces is tunnel existence — and only that.** A grant's
+`ports` list is the *recorded intent* of the connection (`gw watch` and
+`gw policy show` display it), but greasewood filters no ports, on any
+platform: which machines can talk at all is its decision; what flows inside
+an established tunnel is the host firewall's business. This is a deliberate
+boundary, not a gap — it keeps access control pure software (no packet
+filter to install, no nftables dependency, no per-OS backend), and it means
+a fresh mesh is still **default-closed** in the way that matters: a node
+with no grant has *no tunnel*, and nothing to firewall.
 
-It writes **only** its own table on `gw-<mesh>` — never your host firewall,
-never a physical NIC — so it can only ever *tighten*, and it presupposes
-you've admitted the overlay (`iifname "gw-<mesh>" accept`, or no host
-firewall; `gw firewall` advises exactly that). The table **persists across
-daemon restarts** (fail closed); `gw purge` removes it.
-
-Because enforcement is on by default, **nftables must be usable** — the daemon
-refuses to start rather than run silently unenforced. A host without it sets
-`enforce_ports = false` under `[network]` (or a one-off `gw run
---no-enforce-ports`): grants still gate which *tunnels* exist, but port scopes
-go advisory.
+To scope ports inside granted tunnels, use the host firewall on the node
+that serves them — `gw firewall` prints the recommended posture, and the
+coarse `iifname "gw-<mesh>" accept` it suggests is exactly where you'd
+substitute narrower per-port rules. (Versions up to 0.6 could also realize
+port scopes in an nftables table of greasewood's own, `enforce_ports`; that
+layer is gone, and a 0.7 daemon deletes any leftover
+`table inet greasewood_<mesh>` at startup.)
 

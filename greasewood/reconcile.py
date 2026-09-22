@@ -6,7 +6,7 @@ whether a WireGuard peer should be installed or removed. Apply the diff to
 the live kernel state using granular wg-set operations.
 
 This is the only code that touches the data plane. Membership, liveness,
-revocation, key rotation, and ACL enforcement all express themselves as
+revocation, key rotation, and access policy all express themselves as
 the single question "does this WG peer get installed or removed," computed
 locally with no agreement or coordination required.
 """
@@ -485,7 +485,6 @@ class ReconcileLoop(Loop):
         ensure_iface: "Callable[[], None] | None" = None,
         data_dir: "Path | None" = None,
         on_reachable: "Callable[[list[str]], None] | None" = None,
-        port_enforcer=None,   # portfilter.PortFilter | None (opt-in --enforce-ports)
         policy_refresh=None,  # callable: reload the grant table from disk each cycle
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
@@ -504,7 +503,6 @@ class ReconcileLoop(Loop):
         # fails (door enrollments included) until a restart. With this hook the
         # loop self-heals: each cycle re-checks and recreates if it's gone.
         self._ensure_iface = ensure_iface
-        self._port_enforcer = port_enforcer
         self._policy_refresh = policy_refresh
         self._directory = directory
         self._local_id_pub = local_id_pub
@@ -603,11 +601,6 @@ class ReconcileLoop(Loop):
         sd_watchdog_ping()        # …and the same heartbeat to systemd's watchdog
         self._reconcile_version()
         self._maybe_publish_reachable(reachable)
-        if self._port_enforcer is not None:
-            # trusted = the fully-verified records; the enforcer maps their
-            # roles → source addresses under the active grant table. Same set
-            # the hosts block is built from, so filter and names never disagree.
-            self._port_enforcer.apply(trusted)
         if self._hosts_domain:
             try:
                 # Only fully-verified records (never directory.all()): a revoked
@@ -771,35 +764,6 @@ def clear_daemon_fatal(data_dir) -> None:
         pass
 
 
-def enforce_degraded_path(data_dir) -> "Path":
-    return Path(data_dir) / "enforce_degraded.json"
 
-
-def write_enforce_degraded(data_dir, reason: str) -> None:
-    """Record that the daemon is running with enforce_ports=true but WITHOUT port
-    enforcement (nftables unusable) — it degrades to open rather than crash-loop,
-    so this is the only signal the operator gets that the mesh is unfiltered.
-    Surfaced in `gw watch` and the --json snapshot. (H2)"""
-    try:
-        enforce_degraded_path(data_dir).write_text(json.dumps({
-            "ts": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-            "reason": reason,
-        }))
-    except OSError:
-        pass
-
-
-def read_enforce_degraded(data_dir) -> "dict | None":
-    try:
-        d = json.loads(enforce_degraded_path(data_dir).read_text())
-        return d if isinstance(d, dict) and "reason" in d else None
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-
-
-def clear_enforce_degraded(data_dir) -> None:
-    """Enforcement is healthy (or deliberately off) — clear the breadcrumb."""
-    try:
-        enforce_degraded_path(data_dir).unlink(missing_ok=True)
     except OSError:
         pass

@@ -98,7 +98,7 @@ Additional control-plane protections:
   an expired credential drops out of resolution the same way — **except on the
   anchor**, which deliberately admits expired-but-not-revoked records so a lapsed
   node can renew over its tunnel. On the *anchor host* such a node's name keeps
-  resolving (and its address keeps passing the port filter) until it is revoked
+  resolving (and its tunnel to the anchor stays up) until it is revoked
   or aged past the drop-grace window (default 7d); on every other node it drops
   within one credential TTL as stated. Revoke to drop a name immediately.
 - **Caps/roles are anchor-decided, not self-asserted** — a node's capabilities
@@ -116,17 +116,16 @@ Additional control-plane protections:
   deliberate re-root (a config change to that set), not an automatic runtime
   handoff, so a decommissioned or leaked anchor key cannot inject itself into the
   fleet's trust; it stays trusted only as long as it's in `trusted_pubs`.
-- **Port enforcement (grants → nftables)** — a second layer *below* tunnel
-  existence: on by default, the daemon realizes each grant's port scopes in
-  **greasewood's own** `table inet greasewood_<mesh>`, scoped to the mesh
-  interface — it never touches your own firewall or a physical NIC, so it can
-  only ever *tighten* mesh traffic. A fresh anchor ships **default-closed** (only
-  granted flows pass). The table persists across daemon stop/crash (fail closed),
-  removed only by `gw purge`. Caveats worth knowing: `enforce_ports = false` opts
-  a host out (grants still gate which *tunnels* exist; per-port scopes go
-  advisory), and if nftables is unusable while `enforce_ports = true` the daemon
-  degrades to unenforced with a loud error rather than crash-looping — an
-  operational gap to monitor, not a remote exposure.
+- **Ports are the host firewall's business — deliberately.** greasewood's
+  access control stops at tunnel existence: a peer the grant table doesn't
+  connect has *no tunnel*, and so no path to any port. What flows inside a
+  granted tunnel is filtered by each host's own firewall, which greasewood
+  never edits (`gw firewall` prints the recommended posture; `gw watch`
+  checks it). A grant's `ports` list is recorded intent, not an enforced
+  scope. This keeps the enforcement surface pure software — no packet-filter
+  dependency to degrade, and identical on every platform. (Up to 0.6 an
+  optional nftables layer, `enforce_ports`, realized port scopes; a 0.7
+  daemon deletes any leftover `table inet greasewood_<mesh>` at startup.)
 
 ## Accepted risks / non-goals
 
@@ -171,9 +170,8 @@ What a non-root local user still **cannot** do:
 
 So a co-tenant gets **network reachability to the mesh**, not the node's identity.
 If that reachability itself is unacceptable, enforce it at the OS layer — greasewood
-never edits *your* firewall or underlay rules, and its only nftables state is the
-mesh-scoped table above ([What is enforced](#what-is-enforced)); a per-user gate
-is yours to add (e.g. an `nftables` owner-match on the `gw-<mesh>` interface).
+never edits *your* firewall or underlay rules, and installs no packet filter of
+its own ([What is enforced](#what-is-enforced)); a per-user gate is yours to add (e.g. an `nftables` owner-match on the `gw-<mesh>` interface).
 
 
 ## Reporting

@@ -10,9 +10,9 @@ usually bolt on by hand (Kerberos, per-host exports, firewall rules per pair).
 
 **The one thing to understand: the grant table _is_ the share ACL.** NFSv4.1+
 speaks on a single port (`tcp/2049` — no rpcbind/portmapper dance), and the
-[port filter](access-control.md#access-control-roles--grants) already decides, per role, who can
-reach that port over addresses that can't be spoofed (cryptokey routing pins
-address ↔ key). So the NFS config below is **static — written once, never
+[grant table](access-control.md#access-control-roles--grants) already decides, per role, who has
+a tunnel to reach it at all, over addresses that can't be spoofed (cryptokey
+routing pins address ↔ key). So the NFS config below is **static — written once, never
 edited as the fleet changes**. Export to the whole overlay /64 and let grants
 do the gating: adding a node to `role:worker` grants it the share; revoking a
 node revokes it, on the same reconcile cycle that tears down its tunnel. No
@@ -99,9 +99,9 @@ a service forever when the tunnel is down.
 firewall](networking.md#firewall), and `nfsd` listens on all addresses — so whether
 `tcp/2049` is reachable from the *underlay* is decided by your own host
 firewall, exactly like SSH. Two things protect you meanwhile: the exports line
-admits only the overlay /64 (an underlay client is refused the mount), and the
-port filter admits only granted roles within the mesh. But scope your underlay
-firewall as you would for any service.
+admits only the overlay /64 (an underlay client is refused the mount), and
+within the mesh only granted roles have a tunnel to arrive on. But scope your
+underlay firewall as you would for any service.
 
 > **What about NFS over TLS?** Linux 6.4+ can run NFS inside TLS (RPC-with-TLS,
 > RFC 9289): `xprtsec=mtls` on the mount, `xprtsec=mtls` in the exports line,

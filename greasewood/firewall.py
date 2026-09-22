@@ -41,28 +41,23 @@ class Rule:
 
 
 def anchor_rules(listen_port: int = 51900, control_port: int = 51902,
-                 mesh_iface: str = "gw-mesh",
-                 enforce_ports: bool = True) -> list[Rule]:
+                 mesh_iface: str = "gw-mesh") -> list[Rule]:
     """The inbound accepts an anchor needs, as CHECKABLE port rules.
 
-    The two underlay WireGuard UDP ports are always required (they arrive on the
-    physical NIC before any tunnel, so greasewood's overlay-scoped table can't
-    admit them). The control plane (gw-<mesh>) and enrollment (gw-door) are
-    overlay ports: when enforcement is ON (the default) greasewood's own nftables
-    table owns them — the operator just coarsely admits the overlay (`iifname
-    "gw-*" accept`, printed by _print_firewall_help) and greasewood filters it,
-    so they aren't listed here. When enforcement is OFF, greasewood installs no
-    table, so the operator must gate them and they ARE checked."""
+    The two underlay WireGuard UDP ports arrive on the physical NIC before any
+    tunnel; the control plane (gw-<mesh>) and enrollment (gw-door) are overlay
+    ports. greasewood installs no packet filter of its own (which machines can
+    talk at all is the grant table's job, enforced as tunnel existence), so
+    the operator gates all of these and all are checked."""
     from .door import DOOR_PORT, DOOR_IFACE, ENROLL_PORT
     rules = [
         Rule("udp", listen_port, None, "mesh WireGuard"),
         Rule("udp", DOOR_PORT, None, "enrollment door (WireGuard)"),
     ]
-    if not enforce_ports:
-        rules += [
-            Rule("tcp", control_port, mesh_iface, "control plane (when anchor)"),
-            Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when anchor)"),
-        ]
+    rules += [
+        Rule("tcp", control_port, mesh_iface, "control plane (when anchor)"),
+        Rule("tcp", ENROLL_PORT, DOOR_IFACE, "enrollment exchange (when anchor)"),
+    ]
     return rules
 
 

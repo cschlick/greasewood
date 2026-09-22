@@ -69,9 +69,9 @@ def _wg_set(*args: str, key: str) -> None:
     _run("wg", "set", *args, input=key.strip() + "\n")
 
 
-# The data-plane binaries every state-changing command needs, per OS. `nft` is
-# deliberately absent on Linux: portfilter degrades explicitly when it's
-# missing (NftUnavailable), so it gates a feature, not the tool itself. macOS
+# The data-plane binaries every state-changing command needs, per OS. `nft`
+# is deliberately absent on Linux: greasewood installs no packet filter (it
+# only reads rulesets for display, degrading gracefully). macOS
 # needs wireguard-go (userspace — no kernel WireGuard) alongside the same `wg`;
 # ifconfig/route are always present in /sbin.
 def _required_tools() -> tuple:
@@ -306,40 +306,6 @@ def wg_interface_ports() -> dict:
     return out
 
 
-def nft_load(script: str) -> None:
-    """Apply an nft ruleset document atomically via `nft -f -`. Used ONLY for
-    greasewood's own `table inet greasewood` (port enforcement) — the one place
-    greasewood writes firewall state, and only when --enforce-ports is set."""
-    t0 = time.monotonic()
-    try:
-        r = subprocess.run(["nft", "-f", "-"], input=script,
-                           capture_output=True, text=True, check=True)
-        audit.record_command(("nft", "-f", "-"), r.returncode,
-                             int((time.monotonic() - t0) * 1000), r.stdout, r.stderr)
-    except subprocess.CalledProcessError as e:
-        audit.record_command(("nft", "-f", "-"), e.returncode,
-                             int((time.monotonic() - t0) * 1000),
-                             e.stdout or "", e.stderr or "", failed=True)
-        if e.stderr:
-            log.error("nft -f failed: %s", e.stderr.strip())
-        raise
-
-
-def nft_delete_table(table: str) -> None:
-    """Remove one of our own inet tables (idempotent — a missing table is fine)."""
-    _run("nft", "delete", "table", "inet", table, check=False)
-
-
-def nft_table_exists(table: str) -> bool:
-    """True if our inet table is present in the LIVE ruleset. Read-only, so it
-    goes straight to `nft` (not audited like a mutation). Lets the port enforcer
-    notice its table was wiped out from under it (e.g. an operator's `nft -f`
-    that begins with `flush ruleset`) and re-assert it."""
-    r = subprocess.run(["nft", "list", "table", "inet", table],
-                       capture_output=True, text=True)
-    return r.returncode == 0
-
-
 def interface_exists(iface: str) -> bool:
     """True if `iface` currently exists. Linux: read-only `ip link show` (lands
     at DEBUG in the audit trail, not the durable log). macOS: the logical name
@@ -486,8 +452,8 @@ def setup_door_routing() -> None:
     So on macOS this ASSERTS forwarding is off (net.inet6.ip6.forwarding) and
     warns loudly if something else turned it on — the same guarantee, without
     pf. (The guest still can't spoof: WireGuard allowed-ips. The third layer,
-    locking the anchor's own ports, is the packet-filter layer on BOTH OSes —
-    nftables on Linux, the future pf backend on macOS.)
+    locking the anchor's own ports, is the operator's host firewall — the door
+    carries ONLY enrollment; `gw firewall` prints the posture.)
     """
     if gwplat.IS_MACOS:
         _assert_no_forwarding()

@@ -13,8 +13,9 @@
 #
 #  Semantics — allow-only, and the table DERIVES the topology:
 #    · a tunnel exists between two nodes iff some grant connects their roles
-#      (either direction — tunnels are symmetric; direction matters to port
-#      filtering, enforced by default; set enforce_ports=false to opt out)
+#      (either direction — tunnels are symmetric)
+#    · the `ports` list is the connection's recorded intent; greasewood
+#      filters no ports — gate ports with the host firewall on each node
 #    · a node with no inbound grant is reachable by no one, yet is NOT isolated:
 #      it can still DIAL OUT wherever a `from <me> -> to <them>` grant allows
 #      (the reply rides the established tunnel)
@@ -22,9 +23,9 @@
 #    · a deny rule is NOT expressible — omit the grant instead
 #    · hardwired beneath the table, never editable here (policy must never sever
 #      the channel that distributes policy):
-#        every node <-> anchor  tcp/51902   the control plane (carries this file)
-#        the enrollment door     tcp/51903   join-time only
-#        established replies, ICMPv6
+#        every node <-> anchor — the tunnel carrying the control plane
+#        (tcp/51902, which distributes this file)
+#        the enrollment door (tcp/51903) — join-time only
 #
 #  A from/to entry is a ROLE name, `host:<name>` (ONE specific machine, by its
 #  CA-attested hostname), or '*' (every node). Host grants skip the ceremony of

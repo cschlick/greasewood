@@ -9,11 +9,13 @@ README's stated rules, from scratch — greasewood and this model must agree by
 each being correct, not by sharing code.
 
 The model tracks the declared state (members, their roles, the grant table) and
-answers three questions the driver checks against the live containers:
+answers two questions the driver checks against the live containers:
 
   tunnel(a, b)          should a WireGuard peer link exist between them?
   reachable(c, s, port) should a fresh TCP connection c -> s:port succeed?
-  port_blocked(c, s, p) a tunnel exists but this specific port is ungranted
+                        (== tunnel(c, s): greasewood filters no ports — what
+                        it enforces is tunnel existence, and inside a tunnel
+                        every port reaches the host stack)
 
 Everything here is plain data + pure functions — unit-tested in the normal
 suite (tests/test_chaos_model.py), no containers involved.
@@ -24,8 +26,8 @@ from dataclasses import dataclass, field, replace
 
 
 # A service is just a well-known TCP port with a familiar name. The chaos test
-# runs a trivial TCP listener on each — the point is exercising greasewood's
-# PORT FILTER across many ports and roles, not the services' own behavior.
+# runs a trivial TCP listener on each — the point is proving TCP rides every
+# tunnel the grant table creates (and only those), not the services' behavior.
 SERVICE_PORTS = {
     "ssh": 22,
     "http": 80,
@@ -150,43 +152,13 @@ class MeshModel:
         return any(self._grant_connects(g, ta, tb) or self._grant_connects(g, tb, ta)
                    for g in self.grants)
 
-    def _port_open(self, c: str, s: str, port: int) -> bool:
-        """Server s accepts a fresh connection from client c on `port`?
-        Inbound enforcement on the server side: some grant c -> s covering the
-        port (or a fully-open policy). The anchor's control/door ports are
-        hardwired but no SERVICE port is, so this covers the service catalog
-        cleanly."""
-        if self.grants is None:
-            return True                            # flat mesh, no port filter
-        sn, cn = self.nodes[s], self.nodes[c]
-        s_tags, c_tags = sn.tags(), cn.tags()
-        for g in self.grants:
-            src = "*" in g.src or bool(c_tags & set(g.src))
-            dst = "*" in g.dst or bool(s_tags & set(g.dst))
-            if src and dst and self._ports_cover(g.ports, port):
-                return True
-        return False
-
-    @staticmethod
-    def _ports_cover(spec: tuple, port: int) -> bool:
-        for p in spec:
-            if p == "*":
-                return True
-            proto, _, num = p.partition("/")
-            if num.isdigit() and int(num) == port:
-                return True
-        return False
-
     def reachable(self, c: str, s: str, port: int) -> bool:
         """A fresh TCP connection c -> s:port should succeed iff a tunnel
-        exists AND the port is granted (both are necessary; the port filter
-        can't pass traffic on a tunnel that doesn't exist)."""
-        return self.tunnel(c, s) and self._port_open(c, s, port)
-
-    def port_blocked(self, c: str, s: str, port: int) -> bool:
-        """A tunnel exists but THIS port is ungranted — the port filter's job.
-        The sharpest test: same tunnel, one port open and another closed."""
-        return self.tunnel(c, s) and not self._port_open(c, s, port)
+        exists. greasewood filters no ports (a grant's ports list is recorded
+        intent; enforcing it is the host firewall's business, and the chaos
+        containers run none) — so inside a tunnel every port reaches the host
+        stack, and without one nothing does."""
+        return self.tunnel(c, s)
 
     # -- convenient views for the driver --
 

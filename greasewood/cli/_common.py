@@ -97,7 +97,7 @@ def _get_passphrase(env_var: str | None) -> bytes | None:
 
 def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
                          mesh_iface: str = "gw-mesh", header: bool = True,
-                         enforce_ports: bool = True, role: str = "anchor") -> None:
+                         role: str = "anchor") -> None:
     """
     Print (never apply) the recommended firewall posture for THIS node's role.
     greasewood binds its control/enroll planes only to the overlay + loopback, so
@@ -120,10 +120,11 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
             print(f"udp/{listen_port} (mesh WireGuard) and udp/{DOOR_PORT} (enrollment door).")
         else:
             print(f"udp/{listen_port} (mesh WireGuard).")
-        print("Port enforcement (the grant table's port scopes) is not available on")
-        print("macOS yet — a pf backend is planned; tunnel-level access control is")
-        print("fully enforced. The enrollment door is isolated by WireGuard keys +")
-        print("IPv6 forwarding staying off (greasewood checks and warns).")
+        print("Which machines can talk is enforced by the grant table (tunnel")
+        print("existence); what flows inside a tunnel is your host firewall's")
+        print("business — greasewood filters no ports, on any platform. The")
+        print("enrollment door is isolated by WireGuard keys + IPv6 forwarding")
+        print("staying off (greasewood checks and warns).")
         return
     if header:
         print(f"Firewall (greasewood never edits it). Recommended posture for {who}.")
@@ -135,47 +136,17 @@ def _print_firewall_help(listen_port: int = 51900, control_port: int = 51902,
     else:
         print(f"  udp dport {listen_port} accept              # WireGuard (underlay: mesh)")
     print("  iifname \"lo\" accept                    # this host talks to itself")
-    if enforce_ports:
-        # Enforcement on (default): greasewood's own nftables table filters the
-        # overlay interfaces (control plane, enrollment + door lockdown, and the
-        # grant-derived ports). The firewall just admits the overlay so that
-        # table can act — it can only tighten what you admit, never open it.
-        print("  iifname \"gw-*\" accept                  # admit the overlay; greasewood's")
-        print("                                         # nftables table filters the ports on it")
-    elif is_anchor:
-        # Enforcement off on an anchor: greasewood installs no table, so YOU gate
-        # its overlay ports. (These need nftables too; if you have it, prefer
-        # leaving enforce_ports on and greasewood applies all of this.)
-        print("  # (these need nftables; if you have it, prefer enforce_ports = true)")
-        print(f"  iifname \"{mesh_iface}\" tcp dport {control_port} accept   # control plane")
+    # Both roles admit the overlay coarsely: the grant table already decided
+    # who is ON it (tunnel existence), and what flows inside a tunnel is the
+    # host firewall's business — narrow this admit yourself if you want to.
+    # The coarse admit also covers the anchor's control plane (tcp/51902).
+    print(f"  iifname \"{mesh_iface}\" accept          # admit the overlay "
+          "(the grant table decided who's on it)")
+    if is_anchor:
+        # The door is the one overlay iface kept narrow: strangers dial it.
         print(f"  iifname \"{DOOR_IFACE}\" tcp dport {ENROLL_PORT} accept   # enrollment")
         print(f"  iifname \"{DOOR_IFACE}\" drop                    # door carries ONLY enrollment")
-    else:
-        # Enforcement off on a plain node: no greasewood overlay service to gate,
-        # just admit the overlay coarsely (no table to filter it).
-        print(f"  iifname \"{mesh_iface}\" accept          # admit the overlay (no table filters it)")
 
-
-
-
-def _enforce_ports_default() -> bool:
-    """The enforce_ports value to write into a fresh config (create/join): on
-    iff nftables is usable on this host right now. An nft-less host is written
-    `enforce_ports = false` explicitly, so its daemon never trips the startup
-    guard — the restart-loop this avoids."""
-    from ..portfilter import nft_usable
-    if not gwplat.port_enforcement_available():
-        log.warning("port enforcement is not available on %s yet (a pf backend "
-                    "is planned) — writing enforce_ports = false (port scopes "
-                    "advisory; grants still gate which tunnels exist).",
-                    gwplat.os_name())
-        return False
-    if nft_usable():
-        return True
-    log.warning("nftables not usable here — writing enforce_ports = false "
-                "(port scopes advisory; grants still gate which tunnels exist). "
-                "Install nftables and set enforce_ports = true to enforce ports.")
-    return False
 
 
 
@@ -198,49 +169,6 @@ def _daemon_fatal(cfg, msg: str):
         log.warning("could not write daemon-fatal breadcrumb: %s", e)
     sys.exit(msg)
 
-
-
-
-def _make_port_enforcer(cfg, args, grant_policy):
-    """Decide port enforcement for `gw run`: return a PortFilter (enforcing) or
-    None (unenforced). `gw create`/`gw join` write [network] enforce_ports
-    explicitly (on iff nftables was usable then); --no-enforce-ports overrides
-    for this run.
-
-    Crucially this NEVER raises or exits on a missing/broken nftables — it
-    degrades to None with a loud error. Exiting here would be a systemd restart
-    loop that never resolves (exactly the bug an nft-less host hit). An
-    unenforced node still peers per policy — grants gate which tunnels exist
-    regardless; only the per-port scopes within them drop to advisory."""
-    from .. import reconcile as _rec
-    if not (cfg.enforce_ports and not getattr(args, "no_enforce_ports", False)):
-        log.info("port enforcement OFF (enforce_ports=false): grants still "
-                 "control which tunnels exist; port scopes are advisory")
-        _rec.clear_enforce_degraded(cfg.data_dir)    # OFF is deliberate, not degraded
-        return None
-    from ..portfilter import (PortFilter, NftUnavailable, ensure_available,
-                             table_name)
-    from ..config import membership_key
-    try:
-        ensure_available()
-    except NftUnavailable as e:
-        log.error("port enforcement requested (enforce_ports=true) but "
-                  "nftables is unusable: %s", e)
-        log.error("running WITHOUT port enforcement to avoid a crash loop — "
-                  "install nftables, or set `enforce_ports = false` under "
-                  "[network] in %s to make this the intended state.",
-                  getattr(args, "config", "the config"))
-        # Leave a breadcrumb so the unfiltered state is VISIBLE in gw watch /
-        # --json, not just a line in the journal. (H2)
-        _rec.write_enforce_degraded(cfg.data_dir, str(e))
-        return None
-    log.info("port enforcement ON: greasewood's own nftables table on %s "
-             "(realizing the grant table — default-closed on a fresh anchor)",
-             cfg.wg_interface)
-    _rec.clear_enforce_degraded(cfg.data_dir)        # healthy
-    return PortFilter(table_name(membership_key(cfg.mesh_domain)),
-                      cfg.wg_interface, _control_port(cfg), cfg.caps, grant_policy,
-                      local_hostname=cfg.hostname)
 
 
 

@@ -13,9 +13,6 @@ byte-identical and swaps only the OS-touching pieces:
                   macOS: assert IPv6 forwarding is off (no policy routing needed)
     services      greasewood.service's ServiceManager backends
                   (systemd | OpenRC | launchd), selected by service.detect()
-    port enforce  Linux: nftables (greasewood's own table)
-                  macOS: not yet — a pf backend is a later add-on; ports run
-                  advisory (tunnel existence is still policy-enforced)
 
 This module is the ONE place that answers "which OS", so the rest of the code
 branches on a named capability, not on scattered platform.system() checks.
@@ -47,12 +44,4 @@ def require_supported() -> None:
         sys.exit(f"greasewood supports Linux and macOS; this host is {_SYSTEM}.")
 
 
-def port_enforcement_available() -> bool:
-    """Can this host run greasewood's own packet-filter port enforcement?
 
-    Linux: yes (nftables). macOS: not yet — the pf backend is a planned
-    add-on, so on macOS `enforce_ports` is unavailable and the mesh runs with
-    ports advisory (tunnel existence is still enforced by the grant table;
-    only the per-port layer is absent). The door stays isolated regardless,
-    via WireGuard keys + IPv6-forwarding-off (see wg.setup_door_routing)."""
-    return IS_LINUX

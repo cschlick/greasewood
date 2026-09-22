@@ -1,10 +1,9 @@
 """
-No-nftables host — a materially different surface. greasewood must degrade
-cleanly: never crash, never claim a firewall check it can't make, and (when set
-up correctly) run UNENFORCED. Everything that touches nft changes here — the
-watch firewall blocks, the diagnose firewall verdict, port-enforcement
-availability, and the setup advisory. The distro CI containers all HAVE nft, so
-this path isn't exercised end-to-end elsewhere; these tests pin the behavior.
+No-nftables host — greasewood installs no packet filter of its own, but it
+still READS the host's ruleset for display (watch's firewall block, diagnose's
+verdict), and those readers must degrade cleanly: never crash, never claim a
+check they can't make. The distro CI containers all HAVE nft, so this path
+isn't exercised end-to-end elsewhere; these tests pin the behavior.
 """
 import datetime as dt
 import logging
@@ -13,7 +12,7 @@ import types
 
 import pytest
 
-from greasewood import status, firewall, portfilter
+from greasewood import status, firewall
 
 _UTC = dt.timezone.utc
 
@@ -35,9 +34,9 @@ def no_nft(monkeypatch):
     monkeypatch.setattr(subprocess, "run", run)
 
 
-def _cfg(role="node", enforce=False):
+def _cfg(role="node"):
     return types.SimpleNamespace(role=role, listen_port=51900, wg_interface="gw-pm",
-                                 enforce_ports=enforce, mesh_domain="pm.internal",
+                                 mesh_domain="pm.internal",
                                  control_listen=":51902")
 
 
@@ -45,12 +44,6 @@ def _cfg(role="node", enforce=False):
 
 def test_load_ruleset_is_none(no_nft):
     assert firewall._load_ruleset() is None
-
-
-def test_nft_usable_false_and_ensure_available_raises(no_nft):
-    assert portfilter.nft_usable() is False
-    with pytest.raises(portfilter.NftUnavailable, match="not installed"):
-        portfilter.ensure_available()
 
 
 def test_firewall_check_degrades_to_advisory_not_alarm(no_nft):
@@ -64,18 +57,6 @@ def test_firewall_check_degrades_to_advisory_not_alarm(no_nft):
 def test_watch_host_firewall_block_is_omitted(no_nft):
     # Nothing to check against → the whole "main firewall" block disappears.
     assert status._main_firewall_lines(_cfg("anchor")) == []
-
-
-def test_gw_table_block_says_enforcement_off_when_unenforced(no_nft):
-    # The realistic no-nft host: create/join wrote enforce_ports=false.
-    lines = status._nft_table_lines(_cfg(enforce=False))
-    assert any("port enforcement off" in l for l in lines)
-
-
-def test_gw_table_block_says_not_installed_when_misconfigured(no_nft):
-    # enforce_ports=true but nft absent (a misconfig) → honest "nft not installed".
-    lines = status._nft_table_lines(_cfg(enforce=True))
-    assert any("nft not installed" in l for l in lines)
 
 
 def test_diagnose_self_firewall_verdict_is_unknowable(no_nft):
@@ -101,7 +82,6 @@ caps = ["role:mesh"]
 endpoint_auto = false
 [network]
 interface = "gw-pm"
-enforce_ports = false
 seeds = []
 mesh_domain = "pm.internal"
 [ca]
@@ -120,5 +100,4 @@ trusted_pubs = ["{ca.ca_pub_hex}"]
     out = capsys.readouterr().out
     assert rc == 0
     assert "main firewall" not in out           # host-firewall block omitted (no nft)
-    assert "port enforcement off" in out         # gw-table block honest about no table
     assert "api1" in out                          # the roster still renders

@@ -22,10 +22,11 @@ Bare **`sudo gw`** in a terminal opens this view. Its layout, top to bottom:
   [endpoint attestations](networking.md#endpoint-attestations--reachability-as-verified-fact)),
   an expired-**anchor** warning with the partition countdown, and a hostname
   `COLLISION` line when two live identities claim one name.
-- **A firewall summary** — one line by default (press `f`, or `--firewall`, for
-  the full host-rule check and greasewood's own nftables table). The host-
-  firewall verdict stays verbatim, so a blocked port is as loud collapsed as
-  expanded.
+- **A firewall summary** — one line by default (press `f`, or `--firewall`,
+  for the full host-rule check). The verdict stays verbatim, so a blocked
+  port is as loud collapsed as expanded. greasewood installs no packet
+  filter of its own — this checks *your* firewall against what the mesh
+  needs.
 - **The peer roster** — the fleet on the left (name, address, roles, expiry),
   this node's view on the right (link state, rate, latency). Colored: `●` green
   for a live link, latency heat (green fast, yellow slow), loud red for

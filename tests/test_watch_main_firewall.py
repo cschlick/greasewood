@@ -32,9 +32,9 @@ def _admit_iface(pat="gw-*"):
         {"accept": None}]}}
 
 
-def _cfg(role="node", enforce=True):
+def _cfg(role="node"):
     return types.SimpleNamespace(role=role, listen_port=51900, wg_interface="gw-pm",
-                                 enforce_ports=enforce, mesh_domain="pm.internal",
+                                 mesh_domain="pm.internal",
                                  control_listen=":51902")
 
 
@@ -97,10 +97,12 @@ def test_verdict_is_line0_so_collapse_keeps_it_visible(monkeypatch):
     assert status._main_firewall_lines(_cfg("node"))[0].startswith("main firewall : ⚠")
 
 
-def test_greasewoods_own_table_excluded_from_host_rules(monkeypatch):
-    """Regression: the host-firewall view must NOT echo greasewood's OWN table.
-    Its gw-pm/gw-door/51902 rules match the 'gw-' grep and were masquerading as
-    rules the operator wrote (the operator only put the two `filter` rules)."""
+def test_legacy_gw_table_excluded_from_host_rules(monkeypatch):
+    """A LEGACY (<=0.6) port-enforcement table must not echo into the host-
+    firewall view during the upgrade window (the daemon deletes it at startup,
+    but watch may render first). Its gw-pm/gw-door rules match the 'gw-' grep
+    and would masquerade as rules the operator wrote (the operator only put
+    the two `filter` rules)."""
     raw = (
         'table inet filter {\n'
         '\tchain input {\n'
@@ -121,11 +123,13 @@ def test_greasewoods_own_table_excluded_from_host_rules(monkeypatch):
                                   _accept("udp", 51901), _admit_iface()), raw=raw)
     lines = status._main_firewall_lines(_cfg("anchor"))
     body = [l.strip() for l in lines]
+    # the coarse gw-* admit satisfies the overlay tcp needs → healthy verdict
+    assert "✓" in lines[0]
     # the operator's two rules ARE shown
     assert "udp dport { 51900, 51901 } accept" in body
     assert 'iifname "gw-*" accept' in body
-    # greasewood's OWN table rules are NOT shown as host-firewall rules
-    assert not any("51902" in l for l in body)
+    # the legacy table's rules are NOT shown as host-firewall rules
+    assert not any("tcp dport 51902" in l for l in body)
     assert not any("gw-door" in l for l in body)
     assert not any('iifname "gw-pm"' in l for l in body)
     # and the copy-paste command reproduces the exclusion

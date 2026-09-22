@@ -140,8 +140,8 @@ class Fleet:
     # -- underlay partitions: a blackhole route to the peer's UNDERLAY /128 on
     # each end kills the WireGuard path (single advertised endpoint per node, so
     # no rotation escape) without touching nftables — no collision with
-    # greasewood's own table or the port filter. Both directions, since a
-    # handshake needs the round trip.
+    # anything nftables-level. Both directions, since a handshake needs the
+    # round trip.
 
     def _blackhole(self, on_host: str, target_host: str, add: bool) -> None:
         addr = self.underlays.get(target_host)
@@ -257,25 +257,15 @@ def op_heal(fleet: Fleet) -> str:
 
 
 def op_flush_nftables(fleet: Fleet) -> str:
-    """`nft flush ruleset` on a node — wipes greasewood's own table (as an
-    operator's `nft -f` with a leading flush would). The port filter must
-    reinstall on the next reconcile; the model is unchanged. Fail-open, then
-    recover — waits for the table to reappear."""
+    """`nft flush ruleset` on a node — wipes the host's whole nftables state.
+    greasewood installs no packet filter, so this must be a NON-EVENT: nothing
+    of greasewood's to lose or reinstall, every tunnel unaffected. The model is
+    unchanged; the next verify pass proves the decoupling."""
     hosts = fleet._nonanchor()
     if not hosts:
         return "flush: no node"
     h = fleet.rng.choice(hosts)
-    if pexec(fleet.cids[h], "sh", "-c",
-             "grep -q enforce_ports.*false /etc/greasewood_*.toml", check=False
-             ).returncode == 0:
-        return f"flush: {h} has enforcement off"
     pexec(fleet.cids[h], "nft", "flush", "ruleset", check=False)
-    for _ in range(20):                               # wait for reinstall
-        if pexec(fleet.cids[h], "sh", "-c",
-                 "nft list tables 2>/dev/null | grep -q greasewood", check=False
-                 ).returncode == 0:
-            break
-        time.sleep(2)
     return f"nft flush on {h}"
 
 

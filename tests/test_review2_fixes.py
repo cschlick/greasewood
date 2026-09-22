@@ -1,12 +1,10 @@
 """
 Fixes for the applicable findings from the second Security review (SECURITY_REVIEW2):
-  M1  - control-port accept is anchor-only            (see test_portfilter.py)
   L1  - single-use door window written 0600           (atomic_write, see cli)
   L2  - audit log created 0600 (no umask TOCTOU)
   L3  - /etc/hosts temp via mkstemp                    (see hosts._atomic_write)
   L4  - invite screens merged caps for reserved roles
   L5  - joiner hostname bounded before the PoP check
-  H2  - unenforced-but-enforce_ports=true is a visible breadcrumb
 """
 import base64
 import logging
@@ -72,38 +70,6 @@ def test_enroll_accepts_a_normal_hostname():
     j = NodeKeys.generate()
     _idp, _wgp, host, _ = _srv()._validate_request(_req(j, "web1"))
     assert host == "web1"
-
-
-# ---- H2: enforcement-degraded breadcrumb + visibility ---------------------
-
-def test_enforce_degraded_breadcrumb_roundtrip(tmp_path):
-    from greasewood import reconcile as r
-    assert r.read_enforce_degraded(tmp_path) is None
-    r.write_enforce_degraded(tmp_path, "nftables not installed")
-    d = r.read_enforce_degraded(tmp_path)
-    assert d and "nftables not installed" in d["reason"]
-    r.clear_enforce_degraded(tmp_path)
-    assert r.read_enforce_degraded(tmp_path) is None
-
-
-def test_make_port_enforcer_records_degraded_state(tmp_path, monkeypatch):
-    from greasewood import cli, reconcile
-    from greasewood.portfilter import NftUnavailable
-
-    def _unusable():
-        raise NftUnavailable("nftables (nft) is not installed")
-    monkeypatch.setattr("greasewood.portfilter.ensure_available", _unusable)
-    cfg = types.SimpleNamespace(enforce_ports=True, wg_interface="gw-pm",
-                                mesh_domain="pm.internal", caps=["role:mesh"],
-                                control_listen=":51902", data_dir=str(tmp_path))
-    out = cli._make_port_enforcer(cfg, types.SimpleNamespace(config="x"), None)
-    assert out is None                                   # degraded to unenforced
-    assert reconcile.read_enforce_degraded(tmp_path) is not None   # ...and it's VISIBLE
-
-    # enforce_ports=false is deliberate, not degraded → no breadcrumb
-    off = types.SimpleNamespace(**{**cfg.__dict__, "enforce_ports": False})
-    cli._make_port_enforcer(off, types.SimpleNamespace(config="x"), None)
-    assert reconcile.read_enforce_degraded(tmp_path) is None
 
 
 # ---- L4: invite screens merged caps (via the shared reserved-role guard) ---

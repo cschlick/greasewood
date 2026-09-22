@@ -1,7 +1,7 @@
 """
 Service traffic for the chaos test: a trivial TCP listener per service port,
 and a prober that answers "can client C open a fresh connection to server S on
-port P?" — which is exactly what greasewood's port filter governs.
+port P?" — reachability over the tunnels the grant table creates.
 
 Real sshd/postgres/nfsd would drag in their own config surfaces; the property
 under test is greasewood's, so a bare listener on the familiar port is the
@@ -59,7 +59,7 @@ try:
     data = s.recv(16)
     print("OPEN" if data else "EMPTY")
 except socket.timeout:
-    print("TIMEOUT")           # dropped by the port filter (default-deny)
+    print("TIMEOUT")           # no path — no tunnel exists to carry it
 except ConnectionRefusedError:
     print("REFUSED")           # reached the host, nothing listening
 except OSError as e:

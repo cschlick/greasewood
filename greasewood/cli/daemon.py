@@ -124,6 +124,28 @@ def _start_anchor_control_plane(cfg, keys, directory, get_ca_pubs, grant_policy,
 
 
 
+def _cleanup_legacy_port_table(cfg) -> None:
+    """Port enforcement is gone (0.7.0): greasewood decides which tunnels
+    exist; what flows inside them is the host firewall's business. A fleet
+    upgrading from <=0.6 still carries the old per-mesh nftables table — left
+    alone it would silently keep filtering ports forever — so remove it once,
+    best-effort, at startup. Harmless where nft or the table is absent."""
+    if cli.gwplat.IS_MACOS:
+        return
+    key = cli.membership_key(cfg.mesh_domain)
+    safe = "".join(c if c.isalnum() else "_" for c in key)
+    try:
+        r = cli.subprocess.run(["nft", "delete", "table", "inet",
+                            f"greasewood_{safe}"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            log.info("removed the legacy port-enforcement nftables table "
+                     "(greasewood_%s) — port scoping is the host firewall's "
+                     "job now", safe)
+    except FileNotFoundError:
+        pass
+
+
 def cmd_run(args) -> int:
     cli._require_root("run")
     cli._require_tools()
@@ -309,7 +331,7 @@ def cmd_run(args) -> int:
                                  push_to=cfg.seeds, quiet_push=True):
             log.debug("published reachable set (%d live links)", len(reachable))
 
-    port_enforcer = cli._make_port_enforcer(cfg, args, grant_policy)
+    _cleanup_legacy_port_table(cfg)
 
     recon = ReconcileLoop(
         iface=cfg.wg_interface,
@@ -324,7 +346,6 @@ def cmd_run(args) -> int:
         ensure_iface=_ensure_mesh_iface,
         data_dir=cfg.data_dir,
         on_reachable=_publish_reachable,
-        port_enforcer=port_enforcer,
         policy_refresh=grant_policy.refresh_from_cache,
         local_hostname=cfg.hostname,
         # Self-reported running version for `gw watch`. Not signed (omitted from
@@ -337,7 +358,7 @@ def cmd_run(args) -> int:
     # Roles live in the CA-signed credential, not the config file. The loops were
     # built with cfg.caps, but the credential is authoritative — so adopt its
     # roles now (in case the anchor changed them while we were down) and on every
-    # renewal, feeding the reconcile loop + port enforcer live. That's what makes
+    # renewal, feeding the reconcile loop live. That's what makes
     # `gw set-roles` + `gw renew-all` take full effect with no restart. A routine
     # renewal (roles unchanged) is a no-op, so this is quiet in steady state.
     _applied_caps = [sorted(cfg.caps)]
@@ -348,8 +369,6 @@ def cmd_run(args) -> int:
             return
         _applied_caps[0] = sorted(caps)
         recon.set_local_caps(caps)
-        if port_enforcer is not None:
-            port_enforcer.set_local_caps(caps)
         roles = [c[len("role:"):] for c in caps if c.startswith("role:")]
         log.info("roles changed by the anchor — adopted live from the credential: "
                  "%s (no restart needed)", roles or "(none)")

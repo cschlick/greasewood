@@ -773,11 +773,10 @@ def cmd_purge(args) -> int:
     except Exception as e:
         failed.append(f"door routing: {e}")
 
-    # Remove greasewood's own nftables table (port enforcement). It PERSISTS
-    # across daemon stop by design (fail closed); purge is its explicit
-    # teardown. Idempotent — a no-op if enforcement was never on.
-    from ..portfilter import table_name as _nft_table
-    _tbl = _nft_table(key)                        # membership_key(cfg.mesh_domain)
+    # Remove the LEGACY (<=0.6) port-enforcement nftables table if one is
+    # still around — greasewood no longer filters ports, and the daemon also
+    # deletes this at startup; purge covers a host that never restarted.
+    _tbl = "greasewood_" + "".join(c if c.isalnum() else "_" for c in key)
     chk = subprocess.run(["nft", "list", "table", "inet", _tbl], capture_output=True)
     if chk.returncode == 0:
         subprocess.run(["nft", "delete", "table", "inet", _tbl], capture_output=True)

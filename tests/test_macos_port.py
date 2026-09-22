@@ -49,13 +49,11 @@ def _recorder(monkeypatch, stdout=""):
 def test_linux_capabilities_under_the_suite_pin():
     # The conftest pins the seam to Linux for the rest of the suite — assert
     # the pinned world is the Linux one.
-    assert gwplat.port_enforcement_available()
     assert wg.resolve_iface("gw-pm") == "gw-pm"       # identity on Linux
     assert wg._required_tools() == ("wg", "ip")
 
 
 def test_macos_capabilities(macos):
-    assert not gwplat.port_enforcement_available()    # pf backend not built
     assert wg._required_tools() == ("wg", "wireguard-go")
 
 
@@ -269,14 +267,6 @@ def test_local_families_via_route_get(macos, monkeypatch):
     assert cli._local_families() == {6}
 
 
-def test_enforce_ports_defaults_off_on_macos(macos, caplog):
-    import logging
-    from greasewood import cli
-    with caplog.at_level(logging.WARNING, logger="greasewood"):
-        assert cli._enforce_ports_default() is False
-    assert any("pf backend" in r.message for r in caplog.records)
-
-
 def test_require_supported_accepts_macos(macos):
     gwplat.require_supported()                       # must not exit
 
@@ -286,7 +276,7 @@ def test_firewall_help_macos_says_nothing_to_configure(macos, capsys):
     cli._print_firewall_help(51900, role="node")
     out = capsys.readouterr().out
     assert "runs no packet filter" in out          # (wraps across lines)
-    assert "nftables" not in out.split("pf backend")[0]   # no nft rules offered
+    assert "nftables" not in out                   # no nft rules offered
 
 
 # ---------------------------------------------------------------------------
