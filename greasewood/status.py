@@ -521,8 +521,38 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
                      f"'grep event=' for topology/policy changes)")
     lines += _self_health_lines(cfg, directory, own_id)
     lines += _anchor_alarm_lines(directory, own_id)
+    lines += _hostname_collision_lines(directory)
     if cfg.role == "anchor":                       # the door only exists here
         lines += _door_status_lines(cfg)
+    return lines
+
+
+def _hostname_collision_lines(directory) -> list:
+    """A LOUD header warning when two LIVE identities claim one hostname —
+    the active/active design's accepted enrollment race, which is only
+    acceptable because it is loud: the docs promise 'visible collision, re-run
+    one join', and a dim pair of roster rows isn't loud. One expired side is
+    NOT a collision (a stale record aging out under a re-enrolled name is the
+    normal life cycle); both sides live means two holders really did race."""
+    from .hosts import sanitize
+    if directory is None:
+        return []
+    now = dt.datetime.now(_UTC)
+    by_name: dict = {}
+    for r in directory.all():
+        if now >= r.cred.exp:
+            continue                       # expired claims are aging out
+        by_name.setdefault(sanitize(r.cred.hostname), []).append(r)
+    lines = []
+    for name, recs in sorted(by_name.items()):
+        if len(recs) < 2:
+            continue
+        ids = ", ".join(sorted(r.id_pub.hex()[:12] + "…" for r in recs))
+        lines.append(
+            f"{'COLLISION':<9}: ⚠ hostname {name!r} is claimed by "
+            f"{len(recs)} live identities ({ids}) — two holders raced an "
+            f"enrollment. Keep one; re-join or rename the other "
+            f"(gw rename-node), or revoke the impostor.")
     return lines
 
 

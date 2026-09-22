@@ -2494,6 +2494,33 @@ def _request_fleet_renewal(cfg) -> "dt.datetime":
     return now
 
 
+def _adopt_renew_after(cfg, ts: "dt.datetime") -> bool:
+    """Holder-side gossip for the fleet-renew hint: when a pull from ANOTHER
+    holder carries a renew_after newer than what this holder serves, persist
+    it locally (latest-wins) so this holder's /directory carries it too.
+    Without this, `gw renew-all` on holder A only nudged the nodes whose
+    first-success sync happened to pull from A — nodes syncing from holder B
+    never saw the hint. With it, the hint converges across holders exactly
+    like statements do, and every node gets it from whichever holder it polls.
+    Returns True when the local hint advanced."""
+    path = cfg.data_dir / "renew_after"
+    try:
+        current = dt.datetime.fromisoformat(path.read_text().strip())
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=_UTC)
+    except (FileNotFoundError, ValueError, OSError):
+        current = None
+    if current is not None and ts <= current:
+        return False
+    try:
+        path.write_text(ts.isoformat())
+    except OSError as e:
+        log.warning("could not persist gossiped renew_after: %s", e)
+        return False
+    log.info("adopted fleet renew hint from another holder (renew_after=%s)", ts)
+    return True
+
+
 def _grants_naming_role(cfg, role: str) -> str:
     """Human lines for the active grants that name `role` — the concrete
     coverage a host loses when it leaves that role. '' when there is no
@@ -3654,7 +3681,10 @@ def cmd_run(args) -> int:
         lambda: _anchor_urls(cfg, directory, own_addr=keys.addr,
                              get_ca_pubs=get_ca_pubs),
         cfg.dir_cache_path,
-        on_renew_after=lambda ts: renewal.maybe_renew_after(ts) if renewal else None,
+        on_renew_after=lambda ts: (
+            renewal.maybe_renew_after(ts) if renewal else None,
+            _adopt_renew_after(cfg, ts) if _holds_anchor(cfg) else None,
+        ),
         expected_domain=cfg.mesh_domain,
         on_policy=grant_policy.offer,
         statements=stmt_log,

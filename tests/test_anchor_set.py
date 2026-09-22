@@ -137,3 +137,33 @@ def test_single_url_string_still_works(tmp_path, monkeypatch):
     """Back-compat: a get_anchor_url returning one string behaves as before."""
     keys, ca, loop = _loop(tmp_path, "http://only:1")
     assert loop._anchor_urls() == ["http://only:1"]
+
+
+# ---------------------------------------------------------------------------
+# the fleet-renew hint gossips between holders (latest-wins)
+# ---------------------------------------------------------------------------
+
+def test_adopt_renew_after_latest_wins(tmp_path):
+    cfg = types.SimpleNamespace(data_dir=tmp_path)
+    t1 = dt.datetime(2026, 9, 21, 12, 0, tzinfo=_UTC)
+    t2 = t1 + dt.timedelta(minutes=5)
+
+    assert cli._adopt_renew_after(cfg, t1) is True       # nothing local → adopt
+    assert (tmp_path / "renew_after").read_text().strip() == t1.isoformat()
+    assert cli._adopt_renew_after(cfg, t1) is False      # equal → no-op
+    assert cli._adopt_renew_after(cfg, t2) is True       # newer → advance
+    assert (tmp_path / "renew_after").read_text().strip() == t2.isoformat()
+    assert cli._adopt_renew_after(cfg, t1) is False      # older → keep t2
+    assert (tmp_path / "renew_after").read_text().strip() == t2.isoformat()
+
+
+def test_adopt_renew_after_replaces_own_older_hint(tmp_path):
+    """A holder that ran its own `gw renew-all` last week still adopts a
+    NEWER hint gossiped from another holder — the file is one latest-wins
+    value, not per-holder state."""
+    cfg = types.SimpleNamespace(data_dir=tmp_path)
+    old = dt.datetime(2026, 9, 14, 8, 0, tzinfo=_UTC)
+    (tmp_path / "renew_after").write_text(old.isoformat())
+    newer = dt.datetime(2026, 9, 21, 9, 0, tzinfo=_UTC)
+    assert cli._adopt_renew_after(cfg, newer) is True
+    assert (tmp_path / "renew_after").read_text().strip() == newer.isoformat()

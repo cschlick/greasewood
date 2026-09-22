@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The fleet-renew hint gossips between holders.** `gw renew-all` on holder A only nudged the nodes whose first-success sync happened to pull from A; holders now adopt a newer `renew_after` seen in pulls from other holders (latest-wins, like statements), so the hint reaches every node from whichever holder it polls.
+- **Hostname collisions alarm in the watch header.** The active/active enrollment race was documented as "accepted but loud" — it now actually is: two LIVE identities claiming one sanitized name raise a COLLISION header line naming both ids and the fix; a stale expired record aging out under a re-enrolled name stays quiet (normal lifecycle).
+- Dropped the CI bottle-chain job: GitHub's macOS runners lag the OS a version, so their bottles carry the wrong tag for current Macs and it failed (harmlessly, redly) on every release. Bottles are built by hand per the formula's documented procedure; the release workflow now ends green at the GitHub Release.
+
 ## [0.6.0] - 2026-09-21
 
 ### Changed — the anchor is now a FILE, and anchors are active/active

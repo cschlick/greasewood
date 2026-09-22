@@ -411,3 +411,44 @@ def test_healthy_anchor_and_expired_plain_node_stay_quiet():
     d.put(NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
                      cred=cred).sign(k.id_priv))
     assert status._anchor_alarm_lines(d, own_id=None) == []
+
+
+# ---------------------------------------------------------------------------
+# the hostname-collision alarm — the accepted race, made actually loud
+# ---------------------------------------------------------------------------
+
+def _record_named(hostname, hours_to_exp=12):
+    from greasewood.keys import derive_addr
+    now = dt.datetime.now(_UTC).replace(microsecond=0)
+    k, ca = NodeKeys.generate(), CAKeys.generate()
+    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
+                      addr=derive_addr(k.id_pub_bytes), hostname=hostname,
+                      caps=["role:node"],
+                      iat=now + dt.timedelta(hours=hours_to_exp) - dt.timedelta(hours=24),
+                      exp=now + dt.timedelta(hours=hours_to_exp)).sign(ca.ca_priv)
+    return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
+                      cred=cred).sign(k.id_priv)
+
+
+def test_two_live_claims_on_one_name_alarm():
+    d = Directory()
+    d.put(_record_named("db01"))
+    d.put(_record_named("DB01"))          # sanitized collision counts too
+    lines = status._hostname_collision_lines(d)
+    assert len(lines) == 1
+    assert "db01" in lines[0] and "2 live identities" in lines[0]
+    assert "raced" in lines[0]
+
+
+def test_expired_side_is_not_a_collision():
+    """A stale record aging out under a re-enrolled name is the NORMAL
+    lifecycle (purge + rejoin with a fresh identity) — no alarm."""
+    d = Directory()
+    d.put(_record_named("bb"))
+    d.put(_record_named("bb", hours_to_exp=-3))          # old claim, expired
+    assert status._hostname_collision_lines(d) == []
+    # and distinct names never alarm
+    d2 = Directory()
+    d2.put(_record_named("a"))
+    d2.put(_record_named("b"))
+    assert status._hostname_collision_lines(d2) == []
