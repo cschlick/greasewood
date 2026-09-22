@@ -431,8 +431,8 @@ def test_cmd_join_second_leg_framing_is_in_scope():
     src = inspect.getsource(cli.cmd_join)
     # the second leg calls send_msg/recv_msg — they must be imported inside cmd_join
     assert "send_msg" in src and "recv_msg" in src
-    assert "from .door import recv_msg, send_msg" in src or \
-           "from .door import send_msg, recv_msg" in src
+    assert "from ..door import recv_msg, send_msg" in src or \
+           "from ..door import send_msg, recv_msg" in src
 
 
 def test_create_writes_explicit_default_grants(tmp_path, monkeypatch):
