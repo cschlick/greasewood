@@ -33,19 +33,18 @@ greasewood host with no firewall is therefore no more exposed than a plain
 WireGuard host with no firewall. The rules below matter only on a host that runs
 a **default-drop** policy and so must explicitly *allow* those ports through.
 
-On a default-drop host, allow (nftables) — greasewood never edits your
-firewall, and it installs no packet filter of its own. Which machines can
-reach this host at all is the grant table's decision (a peer without a grant
-has no tunnel to arrive on); what flows *inside* a tunnel is your firewall's
-business, and the coarse overlay admit below is where you'd narrow it:
+On a default-drop host, allow (nftables). With port enforcement on (the
+default), greasewood's own nftables table filters the overlay interfaces
+(control plane, enrollment + door lockdown, and the grant-derived ports), so
+your firewall just opens the two underlay UDP ports and **admits** the overlay —
+greasewood does the rest:
 
 | Interface  | Rule                          | Purpose                              |
 |------------|-------------------------------|--------------------------------------|
 | underlay   | `udp dport 51900 accept`      | mesh WireGuard                       |
-| underlay   | `udp dport 51901 accept`      | enrollment door (during join, anchor only) |
+| underlay   | `udp dport 51901 accept`      | enrollment door (during join)        |
 | `lo`       | `iifname "lo" accept`         | the host talks to itself (`::1:51902`)|
-| `gw-*`     | `iifname "gw-*" accept`       | admit the overlay — the grant table decided who's on it |
-| `gw-door`  | `iifname "gw-door" tcp dport 51903 accept`, then `iifname "gw-door" drop` | anchor only: the door carries ONLY enrollment |
+| `gw-*`     | `iifname "gw-*" accept`       | admit the overlay; greasewood's table filters the ports on it |
 
 ```
 udp dport { 51900, 51901 } accept
@@ -53,11 +52,17 @@ iifname "lo" accept
 iifname "gw-*" accept
 ```
 
-The coarse `iifname "gw-*" accept` admits everything arriving over
-established tunnels — reasonable, because only granted peers have a tunnel.
-To scope ports per-peer or per-service, replace it with narrower rules
-(e.g. `iifname "gw-<mesh>" tcp dport 22 accept`); `gw watch` treats either
-posture as healthy as long as the control plane and door stay reachable.
+That coarse `iifname "gw-*" accept` is required in a default drop context to allow
+traffic to reach greasewood's overlay table (greasewood's table can only
+*tighten* what your firewall admits, never open it). Greasewood's table then scopes the control plane to `gw-<mesh>`,
+locks `gw-door` to enrollment only, and applies the grant table's port scopes.
+
+**If you turn enforcement off** (`enforce_ports = false`), greasewood installs
+no table and the grant table's port scopes run advisory on this host — gate
+ports with your own firewall instead. The table's purpose is central port
+policy (edit grants.toml on the anchor instead of ssh-ing into each box), so
+opting a host out just moves that job back to the host. macOS is always in
+this mode: the layer is nftables-only, Linux-only by design.
 
 **Multi-user hosts:** the overlay is host-wide, *any* local user can use the
 tunnel once it's up (identity is per-machine, not per-user). To restrict which

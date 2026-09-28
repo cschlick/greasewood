@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Port enforcement is back — Linux-only, by design.** 0.7.0 removed the
+  nftables layer to avoid ever maintaining a macOS pf backend; that threw out
+  working, field-tested central port management to dodge hypothetical work.
+  Reinstated as it stood at 0.6 (with every security-review fix): the daemon
+  realizes each grant's `ports` list in greasewood's own
+  `table inet greasewood_<mesh>`, default-on (`enforce_ports = true`),
+  default-closed from the shipped grant table, fail-closed across restarts,
+  degrade-loudly when nftables is unusable. The platform line is now drawn
+  honestly instead of aspirationally: the per-port layer is **Linux-only —
+  no pf backend, ever**; a macOS node runs its port scopes advisory while
+  tunnel existence stays fully enforced everywhere (which was the actual
+  field behavior all along). The 0.7 legacy-table cleanup is gone with it,
+  and the `--json` snapshot keeps schema v2 — `mesh.enforce_ports` /
+  `mesh.enforcement_degraded` return additively, beside `mesh.upgrade`.
+
 ### Added
 
 - **`gw upgrade-all` — one command upgrades the fleet.** A holder announces a

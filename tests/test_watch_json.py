@@ -78,8 +78,8 @@ def _run_json(cfg):
 
 def test_schema_and_top_level(tmp_path):
     doc = _run_json(_setup(tmp_path))
-    # v2: the port-enforcement keys (enforce_ports, enforcement_degraded) left
-    # the snapshot when greasewood stopped filtering ports.
+    # v2 since 0.7.0; the enforcement keys returned additively in 0.8 (still
+    # v2 — added keys don't break a versioned consumer), beside mesh.upgrade.
     assert doc["schema"] == "gw.watch/v2"
     assert doc["generated_at"].endswith("Z")
     assert doc["self"]["hostname"] == "web1"

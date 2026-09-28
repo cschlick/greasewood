@@ -65,6 +65,15 @@ root_url = "http://[fd8d:e5c1:db1a:7:XXXX:XXXX:XXXX:XXXX]:51902"
 hosts_sync = true
 mesh_domain = "myfleet.internal"
 
+# Enforce the grant table's PORT scopes with nftables (greasewood's own table,
+# mesh interface only — never your host firewall). ON by default; Linux-only
+# BY DESIGN (a macOS node runs its port scopes advisory — no pf backend).
+# The shipped default policy is default-closed (admin-only SSH), so
+# enforcement realizes a secure star from the first boot. Set false ONLY on
+# a Linux host with no usable nftables — otherwise the daemon degrades
+# loudly to unenforced (visible in gw watch). `gw purge` removes the table.
+enforce_ports = true
+
 # Act on the fleet's CA-signed release announcements (gw upgrade-all on a
 # holder): download the pinned release tarball, verify its sha256 against the
 # announcement, reinstall (pipx installs only), restart the daemon. OPT-IN,

@@ -504,6 +504,11 @@ def _watch_header(cfg, directory, own_id, own_addr) -> list:
     recon = _reconcile_freshness(cfg)              # daemon-liveness heartbeat (all roles)
     if recon:
         lines.append(f"daemon   : {recon}")
+    from . import reconcile as _rec                 # port enforcement degraded? (H2)
+    degraded = _rec.read_enforce_degraded(cfg.data_dir)
+    if degraded:
+        lines.append(f"enforce  : ⚠ port enforcement DOWN — running UNFILTERED "
+                     f"(enforce_ports=true but nftables unusable: {degraded['reason']})")
     # Where to look when the daemon line above is unhappy: the daemon log —
     # journal or file, whichever this host's service backend writes — and the
     # audit file (every ip/wg/nft command it ran).
@@ -636,6 +641,34 @@ def _anchor_alarm_lines(directory, own_id) -> list:
     return lines
 
 
+def _nft_table_lines(cfg) -> list:
+    """The greasewood nftables table shown verbatim in `gw watch`: the literal
+    `nft list table` command, then its raw output. No summary — what the kernel
+    holds, exactly as `nft` prints it (we run without sudo since watch is already
+    root; the displayed command keeps sudo so it's copy-pasteable elsewhere)."""
+    from .portfilter import table_name
+    from .config import membership_key
+    tbl = table_name(membership_key(cfg.mesh_domain))
+    cmd = [f"$ sudo nft list table inet {tbl}"]
+
+    if not getattr(cfg, "enforce_ports", True):
+        return cmd + ["  (port enforcement off — enforce_ports=false; no table)"]
+    try:
+        r = subprocess.run(["nft", "list", "table", "inet", tbl],
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return cmd + ["  (nft not installed)"]
+    if r.returncode == 0:
+        return cmd + r.stdout.rstrip("\n").splitlines()
+    if os.geteuid() != 0:
+        return cmd + ["  (run as root to read the table)"]
+    # nft's "no such table" error is THREE lines (message + a command echo + a
+    # caret) — collapsing it to one keeps it from bleeding into the roster. The
+    # usual cause is the daemon not running yet (it installs the table each
+    # reconcile), so say that rather than echo nft's raw diagnostic.
+    return cmd + ["  (table not present — the daemon isn't running yet, or "
+                  "hasn't applied enforcement; it's (re)installed on reconcile)"]
+
 
 def _collapse_header_lines(header: list) -> list:
     """The collapsed header keeps the rule + the compact identity lines
@@ -648,15 +681,29 @@ def _collapse_header_lines(header: list) -> list:
     return header
 
 
-def _firewall_summary_lines(fw_lines: list, expand: str) -> list:
-    """The COLLAPSED firewall area: the host-firewall verdict VERBATIM
-    (fw_lines[0] — so a blocked port stays exactly as loud collapsed as
-    expanded) plus the expand hint. greasewood installs no packet filter of
-    its own — the host firewall IS the whole firewall story. Returns [] when
-    there is nothing to say (nft absent)."""
+def _firewall_summary_lines(fw_lines: list, nft_lines: list, expand: str) -> list:
+    """The COLLAPSED firewall area: a few aligned rows, not one dense line.
+    Row 1 is the host-firewall verdict VERBATIM (fw_lines[0] — so a blocked
+    port stays exactly as loud collapsed as expanded); row 2 is the state of
+    greasewood's own table, its colon aligned under the verdict's; the last
+    row says how to expand to the raw rules. Returns [] when there's nothing
+    to say (nft absent → both inputs empty)."""
     rows = []
     if fw_lines:
         rows.append(fw_lines[0])
+    body = nft_lines[1] if len(nft_lines) > 1 else ""
+    label = f"{'own table':<13} : "                 # aligns with "main firewall : "
+    if body.startswith("table inet"):
+        n = sum(1 for ln in nft_lines[1:]
+                if "accept" in ln or ln.strip().endswith("drop"))
+        rows.append(label + f"✓ enforcing the grant table ({n} rules)")
+    elif "enforcement off" in body:
+        rows.append(label + "port enforcement off (enforce_ports=false)")
+    elif "run as root" in body:
+        rows.append(label + "needs root to read")
+    elif "table not present" in body:
+        rows.append(label + "MISSING — daemon running?")
+    if rows:
         rows.append(f"({expand} to expand — raw nft rules)")
     return rows
 
@@ -707,7 +754,8 @@ def _main_firewall_lines(cfg) -> list:
 
     iface = cfg.wg_interface
     if getattr(cfg, "role", "node") == "anchor":
-        rules = fw.anchor_rules(cfg.listen_port, _cfg_control_port(cfg), iface)
+        rules = fw.anchor_rules(cfg.listen_port, _cfg_control_port(cfg),
+                                iface, getattr(cfg, "enforce_ports", True))
     else:
         rules = fw.node_rules(cfg.listen_port)
     ports = sorted({r.port for r in rules})
@@ -716,11 +764,9 @@ def _main_firewall_lines(cfg) -> list:
     # — a default-drop host drops gw-* before our table ever sees it.
     portlist = ", ".join(f"{r.proto}/{r.port}" for r in rules)
     need = f"{portlist} + gw-* overlay"
+    from .portfilter import table_name
     from .config import membership_key
-    # Legacy (<=0.6) port-enforcement tables are stripped from the display
-    # during the upgrade window (the daemon deletes them at startup).
-    _key = membership_key(cfg.mesh_domain)
-    gw_table = "greasewood_" + "".join(c if c.isalnum() else "_" for c in _key)
+    gw_table = table_name(membership_key(cfg.mesh_domain))
     # The shown command strips greasewood's own table too, so it reproduces
     # exactly what's displayed (only the operator's rules).
     cmd = (f"  $ sudo nft list ruleset | sed '/^table inet {gw_table} /,/^}}/d' "
@@ -745,12 +791,8 @@ def _main_firewall_lines(cfg) -> list:
         lines = [f"main firewall : input policy ACCEPT — {need} not blocked ✓", cmd]
         return lines + (["    " + ln for ln in raw] or ["    (no matching rule)"])
 
-    # An overlay-iface rule (control plane on gw-<mesh>, enrollment on gw-door)
-    # is satisfied by EITHER its exact per-port accept OR a coarse admit of
-    # that interface — `iifname "gw-*" accept` reaches both, and is the
-    # recommended posture. Only a rule satisfied by neither is truly blocked.
-    missing = [r for r in fw.missing_rules(ruleset, rules)
-               if not (r.iif and fw.admits_iface(ruleset, r.iif))]
+    missing = [r for r in rules
+               if r.port in {m.port for m in fw.missing_rules(ruleset, rules)}]
     overlay_ok = fw.admits_iface(ruleset, iface)
 
     # LOUD when blocked — and the complaint carries the exact nft rule(s) to fix
@@ -1015,7 +1057,7 @@ def _role_editor_lines(r: dict) -> list:
         lines += [f"  + tunnel {name} ↔ {h}" for h in d["added"]]
         lines += [f"  - tunnel {name} ↔ {h}" for h in d["removed"]]
         if not d["added"] and not d["removed"]:
-            lines.append("  tunnels: (no change)")
+            lines.append("  tunnels: (no change — port scopes may still change)")
         lines += ["",
                   "applies at each node's next renewal; a fleet renew hint is "
                   "sent, so it lands within a poll interval",
@@ -1304,6 +1346,7 @@ class _WatchApp:
         # instantly without a re-fetch.
         self._header: list = []          # role/addr/door/...
         self._fw_lines: list = []        # host-firewall port check (line 0 = verdict)
+        self._nft_lines: list = []       # the raw `nft list table` block
         self._chrome: list = []          # roster title/column-header/separator
         self._rows: list = []            # scrollable: one line per peer
         self._up = 0                     # live-link count (for the footer)
@@ -1388,6 +1431,7 @@ class _WatchApp:
                         + _watch_header(self._cfg, directory, self._own_id,
                                         self._own_addr))
         self._fw_lines = _main_firewall_lines(self._cfg)
+        self._nft_lines = _nft_table_lines(self._cfg)
         self._chrome = roster[:sep + 1]
         self._rows = roster[sep + 1:]
 
@@ -1401,11 +1445,11 @@ class _WatchApp:
         header = self._header if self._show_header else _collapse_header_lines(self._header)
         if not self._show_header and len(header) < len(self._header):
             header = header + ["(h to expand — full header)"]
-        fw = self._fw_lines
+        fw, nft = self._fw_lines, self._nft_lines
         if self._show_nft:
-            area = fw
+            area = fw + ([""] if fw and nft else []) + nft
         else:
-            area = _firewall_summary_lines(fw, "f")
+            area = _firewall_summary_lines(fw, nft, "f")
         # Labeled rules seam the three sections; a host with no firewall story
         # gets no empty "firewall" section, just header → peers.
         fw_sec = (["", _rule("firewall")] + area) if area else []
@@ -1937,9 +1981,10 @@ def _self_health_lines(cfg, directory, own_id) -> list:
     return lines
 
 
-# v2 (0.7.0): the mesh.enforce_ports / mesh.enforcement_degraded keys are
-# gone — greasewood no longer filters ports (topology is the policy; ports
-# are the host firewall's business).
+# v2 (0.7.0) briefly dropped mesh.enforce_ports / mesh.enforcement_degraded
+# with the port-enforcement removal; 0.8 reinstated enforcement (Linux-only)
+# and the keys returned ADDITIVELY, alongside mesh.upgrade — still v2, since
+# added keys don't break a versioned consumer.
 _SNAPSHOT_SCHEMA = "gw.watch/v2"
 
 
@@ -2124,6 +2169,10 @@ def _watch_snapshot_dict(cfg, own_id, own_addr) -> dict:
             # The newest fleet release announcement (gw upgrade-all), or None.
             # Additive since v2; consumers compare against self.version.
             "upgrade": _upgrade_hint_json(cfg),
+            "enforce_ports": bool(getattr(cfg, "enforce_ports", True)),
+            # True = enforce_ports is on but nftables is unusable, so the daemon
+            # is running UNFILTERED (see gw watch). (H2)
+            "enforcement_degraded": rmod.read_enforce_degraded(cfg.data_dir) is not None,
         },
         "policy": policy,
         "daemon": {
@@ -2199,11 +2248,11 @@ def cmd_watch(args) -> int:
     # Firewall area: a 1-line summary by default (the host-firewall verdict
     # stays verbatim, so a blocked port is as loud collapsed as expanded);
     # --firewall prints the full host-rule check + greasewood's table.
-    fw_lines = _main_firewall_lines(cfg)
+    fw_lines, nft_lines = _main_firewall_lines(cfg), _nft_table_lines(cfg)
     if getattr(args, "firewall", False):
-        fw_area = fw_lines
+        fw_area = fw_lines + nft_lines
     else:
-        fw_area = _firewall_summary_lines(fw_lines, "--firewall")
+        fw_area = _firewall_summary_lines(fw_lines, nft_lines, "--firewall")
     if fw_area:
         print()
         rule("firewall")

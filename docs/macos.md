@@ -9,12 +9,14 @@ OS-touching pieces differ, behind [one seam](concepts.md#platforms):
 | WireGuard | in-kernel | [wireguard-go](https://git.zx2c4.com/wireguard-go/about/) (userspace) on a `utun` |
 | iface tools | `ip` (iproute2) | `ifconfig` / `route` |
 | supervisor | systemd (or OpenRC) | launchd (`com.greasewood.<mesh>`) |
-| packet filter | none — greasewood never installs one | none — same, by design |
+| port enforcement | nftables, on by default | **none, by design** — no pf backend; ports run advisory |
 
-There is no capability gap: greasewood's access control is *which tunnels
-exist* (the grant table, checked in the reconcile loop — pure software,
-identical on every platform). What flows inside a tunnel is the host
-firewall's business, on macOS as everywhere else.
+The last row is a deliberate scope line, not a to-do: the grant table still
+fully decides *which tunnels exist* (that check is in the reconcile loop, not
+the packet filter, so it's identical on every platform), while the finer
+per-port layer inside those tunnels is Linux-only — on macOS, scope ports
+with the host firewall if you need to. `gw watch` and the config say so
+plainly.
 
 ## Install
 
@@ -113,6 +115,13 @@ brew upgrade greasewood   # or: brew install cschlick/tap/greasewood
 
 ```bash
 mkdir -p /tmp/gwmig && tar xzf node-backup.tgz -C /tmp/gwmig && sudo cp -a /tmp/gwmig/var/lib/greasewood_<mesh> /var/lib/ && sudo cp /tmp/gwmig/etc/greasewood_<mesh>.toml /etc/
+```
+
+macOS has no nftables, so the port filter must go advisory or the daemon
+will refuse to start:
+
+```bash
+sudo sed -i '' 's/^enforce_ports = true/enforce_ports = false/' /etc/greasewood_<mesh>.toml
 ```
 
 Adopt the config — this writes and starts the launchd daemon:
