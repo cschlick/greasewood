@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -443,13 +444,36 @@ def launchd_available() -> bool:
     return gwplat.IS_MACOS and shutil.which("launchctl") is not None
 
 
+def _brew_linked_gw() -> "str | None":
+    """The Homebrew-linked `gw` launcher, when THIS interpreter runs from a
+    Homebrew keg — else None. A keg path is VERSIONED
+    (.../Cellar/greasewood/0.6.0/...): pinned into a plist it strands the
+    daemon on old code through every `brew upgrade`, and dangles outright once
+    the old keg rots (field incident: a python@3.13 bump removed the 0.6.0
+    keg's libexec/bin/python3.13, KeepAlive had nothing to exec, and the Mac
+    dropped off the mesh). `<prefix>/bin/gw` is the one path brew re-points at
+    every upgrade, so a job launched through it always boots the CURRENT
+    release — for brew, the wrapper is the stable thing and the interpreter
+    is the moving one, the exact inverse of the pipx rationale below."""
+    m = re.match(r"(.*)/Cellar/greasewood/[^/]+/", sys.executable or "")
+    if not m:
+        return None
+    gw = Path(m.group(1)) / "bin" / "gw"
+    return str(gw) if gw.exists() else None
+
+
 def _launchd_daemon_argv(cfg_path, exec_argv: "list | None" = None) -> list:
-    """ProgramArguments for the daemon. Prefer `<interpreter> -m greasewood`
-    over the `gw` console-script path — same rationale as service_exec(): the
-    absolute interpreter survives a moved/regenerated wrapper, so the job can't
-    dangle after a reinstall. exec_argv overrides (tests / refresh)."""
+    """ProgramArguments for the daemon. On a Homebrew install, the brew-linked
+    `gw` launcher (see _brew_linked_gw). Everywhere else, prefer
+    `<interpreter> -m greasewood` over the `gw` console-script path — same
+    rationale as service_exec(): the absolute interpreter survives a
+    moved/regenerated wrapper, so the job can't dangle after a reinstall.
+    exec_argv overrides (tests / refresh)."""
+    brew_gw = _brew_linked_gw()
     if exec_argv:
         head = list(exec_argv)
+    elif brew_gw:
+        head = [brew_gw]
     elif sys.executable:
         head = [sys.executable, "-m", "greasewood"]
     else:

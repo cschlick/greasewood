@@ -84,6 +84,30 @@ def test_plist_defaults_to_interpreter_module_form(macos, monkeypatch):
     assert d["ProgramArguments"][:3] == ["/venv/bin/python", "-m", "greasewood"]
 
 
+def test_plist_uses_the_brew_linked_gw_on_a_keg_install(macos, monkeypatch,
+                                                        tmp_path):
+    """A Homebrew keg interpreter path is VERSIONED — pinned into the plist it
+    stranded a field Mac on 0.6 through two upgrades, then dangled entirely
+    when a python@3.13 bump rotted the old keg (the daemon could not restart).
+    On brew, the job must launch through `<prefix>/bin/gw`, the symlink brew
+    re-points at every upgrade."""
+    keg_py = tmp_path / "Cellar" / "greasewood" / "0.8.0" / "libexec" / "bin" / "python3.13"
+    keg_py.parent.mkdir(parents=True)
+    keg_py.touch()
+    linked = tmp_path / "bin" / "gw"
+    linked.parent.mkdir()
+    linked.touch()
+    monkeypatch.setattr(service.sys, "executable", str(keg_py))
+    d = plistlib.loads(service.render_launchd_plist("home", "/etc/gw.toml"))
+    assert d["ProgramArguments"] == [str(linked), "-c", "/etc/gw.toml", "run"]
+
+    # ...but only when the linked launcher actually exists — a keg python with
+    # no linked gw (mid-upgrade, `brew unlink`) falls back to interpreter form.
+    linked.unlink()
+    d = plistlib.loads(service.render_launchd_plist("home", "/etc/gw.toml"))
+    assert d["ProgramArguments"][:3] == [str(keg_py), "-m", "greasewood"]
+
+
 def test_label_and_config_derivation(macos):
     assert service.launchd_label("home") == "com.greasewood.home"
     assert str(service.launchd_plist_path("home")).endswith(

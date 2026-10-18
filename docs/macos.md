@@ -79,6 +79,24 @@ no per-port relays. The Mac *is* the node.
 - **Laptops behave like laptops.** A Mac without a public address is
   outbound-only — it dials peers, keepalives hold the path, and
   `endpoint_auto` re-advertises if it gains one. Nothing to configure.
+- **Upgrades: restart the daemon, and beware pre-0.9 plists.** `brew upgrade
+  greasewood` replaces the package but never the running daemon — restart it
+  to run the new code: `sudo launchctl kickstart -k system/com.greasewood.<mesh>`.
+  Plists written by greasewood ≤0.8 pinned a *versioned* keg path, so the
+  daemon silently kept its install-time version across upgrades — and once
+  the old keg rotted (a python@3.13 bump) it couldn't start at all. Repair:
+
+  ```bash
+  sudo plutil -replace ProgramArguments -json '["/opt/homebrew/bin/gw","-c","/etc/greasewood_<mesh>.toml","run"]' /Library/LaunchDaemons/com.greasewood.<mesh>.plist
+  ```
+
+  ```bash
+  sudo launchctl bootout system/com.greasewood.<mesh> 2>/dev/null; sudo launchctl bootstrap system /Library/LaunchDaemons/com.greasewood.<mesh>.plist
+  ```
+
+  (0.9+ writes the plist through `/opt/homebrew/bin/gw`, the symlink brew
+  re-points at every upgrade, so this never recurs; `sudo gw service enable`
+  also rewrites it in that form.)
 
 ## Migrating a node out of the Lima VM
 

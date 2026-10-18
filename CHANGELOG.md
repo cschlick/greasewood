@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A brew Mac's launchd daemon no longer pins a versioned keg path.** The
+  plist's ProgramArguments used `sys.executable`, which on Homebrew is
+  `.../Cellar/greasewood/<version>/libexec/bin/python3.13` — so the daemon
+  kept running the install-time release through every `brew upgrade` (a field
+  Mac sat on 0.6 across two releases), and when a python@3.13 bump rotted the
+  old keg's venv the job had nothing left to exec and the Mac dropped off the
+  mesh. On a keg install the plist now launches through `<prefix>/bin/gw`,
+  the symlink brew re-points at every upgrade: for brew the wrapper is the
+  stable thing and the interpreter is the moving one — the exact inverse of
+  the pipx rationale the old code applied everywhere. Existing Macs heal on
+  their next `gw service enable` (or hand-edit the plist; the repair is two
+  commands in docs/macos.md).
+
 ## [0.8.0] - 2026-09-28
 
 ### Changed
