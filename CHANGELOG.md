@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gw join` on a lapsed member of its own mesh now says the real recovery.**
+  A node whose credential expired is NOT ejected — holders keep
+  expired-but-not-revoked records through the drop grace exactly so it can
+  renew in place (`sudo gw renew`, or just run the daemon). But an operator
+  reaching for a fresh invite was met by the generic can't-join-from-an-anchor
+  message, whose ip-rule override is a dead end for this case (field
+  incident: an expired anchor Mac). When the token's mesh is the host's own,
+  the guard now says "already a member — renew, don't join" and points at
+  `gw explain`; joining a *different* mesh keeps the old message.
+
 - **A brew Mac's launchd daemon no longer pins a versioned keg path.** The
   plist's ProgramArguments used `sys.executable`, which on Homebrew is
   `.../Cellar/greasewood/<version>/libexec/bin/python3.13` — so the daemon

@@ -908,7 +908,35 @@ def cmd_join(args) -> int:
     anchored = cli._anchor_membership()
     if anchored:
         from ..door import DOOR_TABLE, GUEST_DOOR_IP
+        from ..config import membership_key
         akey, apath = anchored
+        if token_domain and membership_key(token_domain) == akey:
+            from ..config import load_config as _lc
+            try:
+                _host = _lc(apath).hostname
+            except Exception:
+                _host = "<this-host>"
+            # The trap this really is: a member of 'akey' whose credential
+            # lapsed, reaching for `gw join` as the recovery. It never is —
+            # a join would mint a NEW identity (new key, new address) while
+            # the old one still owns the hostname. Expired is not ejected:
+            # holders keep expired-but-not-revoked records through the drop
+            # grace precisely so a lapsed member can renew in place, and an
+            # anchor host can even self-issue. (Field incident: an anchor
+            # Mac expired while its daemon was down and the operator was
+            # steered here by the generic other-mesh message below.)
+            sys.exit(
+                f"this host is already a member of mesh '{akey}' ({apath}) — "
+                f"and an anchor for it. Joining your OWN mesh is never the "
+                f"recovery: it would mint a brand-new identity while the "
+                f"current one still owns this hostname. If this node's "
+                f"credential expired (it was off too long), it is NOT ejected "
+                f"— renew in place:\n"
+                f"  sudo gw renew            # immediate (an anchor self-issues)\n"
+                f"or just make sure the daemon is running; it renews an "
+                f"expired credential promptly on its own. `gw explain "
+                f"{_host}` tells this node's story if something else is "
+                f"wrong.")
         sys.exit(
             f"this host is the anchor for mesh '{akey}' ({apath}). A host can't be "
             f"an anchor AND join another mesh — the enrollment door (gw-door, table "

@@ -54,3 +54,28 @@ def test_cmd_join_refuses_on_anchor_host(monkeypatch):
     assert "anchor for mesh 'pm'" in msg
     assert "blackhole" in msg and "gw-door" in msg          # names the reason
     assert "ip -6 rule del" in msg                          # gives the override
+
+
+def test_cmd_join_own_mesh_points_at_renew_not_the_override(monkeypatch,
+                                                            tmp_path):
+    """The trap: a member whose credential EXPIRED reaches for `gw join` with
+    a fresh invite to its own mesh. Join is never that recovery (it would mint
+    a new identity), and the generic anchor message's ip-rule override is a
+    dead end there — this case must say `gw renew` and never suggest the
+    override. (Field incident: an expired anchor Mac.)"""
+    _write_cfg(tmp_path, "pm", "anchor")
+    monkeypatch.setattr(cli, "_require_root", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_anchor_membership",
+                        lambda *a, **k: ("pm", tmp_path / "greasewood_pm.toml"))
+    import greasewood.door as door
+    monkeypatch.setattr(door, "decode_token", lambda t: (
+        b"\x00" * 32, b"\x11" * 32, "anchor.host", b"s" * 32, 51901,
+        "pm.internal", []))                      # the host's OWN mesh domain
+    args = types.SimpleNamespace(token="gw1.sometoken", roles=None)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_join(args)
+    msg = str(ei.value)
+    assert "already a member" in msg
+    assert "gw renew" in msg                     # the actual recovery
+    assert "pmh" in msg                          # names the node for gw explain
+    assert "ip -6 rule del" not in msg           # no dead-end override here
