@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Credentials default to a 30-day lifetime** (was 24h). A laptop off for a
+  couple of weeks now comes back without ceremony: nodes renew at ~half the
+  TTL, so two weeks dark is always within a valid credential, and even past
+  expiry a node renews in place through the drop grace (field incident: an
+  anchor Mac expired after a day off while its daemon was down). The security
+  trade is stated where it matters: a *reachable* node learns a revocation
+  within a sync pull regardless of TTL — the TTL only bounds how long an
+  UNREACHABLE node keeps trusting a stale cache. Shorten `credential_ttl`
+  under `[anchor]` if that bound matters to you; existing meshes keep
+  whatever their config says. The never-read `renew_before` key is gone from
+  the config template (renewal has always scheduled from the credential's
+  half-life; old configs carrying the key parse fine, it was simply ignored).
+
 ### Fixed
 
 - **`gw join` on a lapsed member of its own mesh now says the real recovery.**

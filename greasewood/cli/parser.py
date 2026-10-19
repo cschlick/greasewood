@@ -502,7 +502,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--caps", default="",
                     help="extra ability caps for the anchor (it always carries "
                          "role:* to reach every node), e.g. 'tls'")
-    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="30d",
+                    help="credential lifetime (default 30d — a laptop off for "
+                         "a couple of weeks comes back without ceremony; "
+                         "shorten for a tighter revocation bound on "
+                         "UNREACHABLE nodes — reachable ones learn revokes "
+                         "within a sync pull regardless)")
     sp.add_argument("--force", action="store_true", help="overwrite existing CA key")
     sp.add_argument("--no-hosts-sync", dest="hosts_sync", action="store_false",
                     help="don't maintain the managed /etc/hosts block "
@@ -768,7 +773,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("anchor-promote",
                         help="[sudo] turn this enrolled node into an anchor (generate CA key, set role=anchor)")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
-    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="30d",
+                    help="credential lifetime (default 30d — a laptop off for "
+                         "a couple of weeks comes back without ceremony; "
+                         "shorten for a tighter revocation bound on "
+                         "UNREACHABLE nodes — reachable ones learn revokes "
+                         "within a sync pull regardless)")
     sp.set_defaults(fn=cli.cmd_anchor_promote)
 
     # cert-request (on a node with the 'tls' capability)
@@ -976,7 +986,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "rewrite this node as the anchor")
     sp.add_argument("--control-port", dest="control_port", type=int, default=51902)
     sp.add_argument("--door-port", dest="door_port", type=int, default=51901)
-    sp.add_argument("--credential-ttl", dest="credential_ttl", default="24h")
+    sp.add_argument("--credential-ttl", dest="credential_ttl", default="30d",
+                    help="credential lifetime (default 30d — a laptop off for "
+                         "a couple of weeks comes back without ceremony; "
+                         "shorten for a tighter revocation bound on "
+                         "UNREACHABLE nodes — reachable ones learn revokes "
+                         "within a sync pull regardless)")
     sp.add_argument("--force", action="store_true",
                     help="overwrite an existing ca.key / config")
     sp.set_defaults(fn=cli.cmd_anchor_activate)

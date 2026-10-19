@@ -13,7 +13,7 @@ Membership is a **CA-signed credential with an expiry**
 **Two signed objects:**
 
 - **Credential** — signed by the CA. Binds `id_pub`, `wg_pub`, overlay address,
-  hostname, capabilities, and an expiry. Slow-moving (default 24h TTL).
+  hostname, capabilities, and an expiry. Slow-moving (default 30d TTL).
 - **NodeRecord** — signed by the node's own `id_priv`. Carries the credential
   plus fast-moving facts (endpoints, a sequence number) Its `hostname` is read
   from the credential. This is what gets published to other nodes through a directory.

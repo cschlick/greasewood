@@ -74,7 +74,6 @@ class Config:
     ca_key_passphrase_env: str | None
     control_listen: str
     credential_ttl: dt.timedelta
-    renew_before: dt.timedelta
     door_window: dt.timedelta
     tls_cert_ttl: dt.timedelta
     # How long past expiry the anchor keeps recertifying an expired-but-not-
@@ -181,7 +180,6 @@ trusted_pubs = {json.dumps(list(trusted_pubs))}
 ca_key_file = "{anchor["ca_key_file"]}"
 control_listen = ":{anchor["control_port"]}"
 credential_ttl = "{anchor["credential_ttl"]}"
-renew_before = "12h"
 door_window = "15m"
 # Past this much time expired, an un-revoked node is dropped from the CA and
 # must re-enroll (not just renew). Raise it for a fleet of long-dormant hosts;
@@ -245,8 +243,7 @@ def load_config(path: Path) -> Config:
         ca_key_file=Path(anchor["ca_key_file"]).expanduser() if "ca_key_file" in anchor else None,
         ca_key_passphrase_env=anchor.get("ca_key_passphrase_env"),
         control_listen=anchor.get("control_listen", ":51902"),
-        credential_ttl=_duration(anchor, "credential_ttl", "24h"),
-        renew_before=_duration(anchor, "renew_before", "12h"),
+        credential_ttl=_duration(anchor, "credential_ttl", "30d"),
         door_window=_duration(anchor, "door_window", "15m"),
         tls_cert_ttl=_duration(anchor, "tls_cert_ttl", "7d"),
         drop_grace=_duration(anchor, "drop_grace", "7d"),

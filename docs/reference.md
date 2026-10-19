@@ -76,7 +76,7 @@ trusted_pubs = ["<hex Ed25519 CA pubkey>"]   # a set, to allow CA migration
 [anchor]                        # anchor role only
 ca_key_file    = "/var/lib/greasewood/ca.key"
 control_listen = ":51902"
-credential_ttl = "24h"
+credential_ttl = "30d"
 ```
 
 ### Roles

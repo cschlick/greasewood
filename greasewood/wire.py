@@ -5,7 +5,7 @@ Two are mesh STATE (what a reader trusts):
 
 Credential (CA-signed, §5.1):
   id_pub, wg_pub, addr, hostname, caps, iat, exp → ca_sig covers all of these.
-  The only thing the CA ever signs. Short-lived (~24h). Slow path.
+  The only thing the CA ever signs. Expiring (default 30d). Slow path.
 
 NodeRecord (self-signed by id_priv, §5.2):
   id_pub, seq, endpoints, cred (+ optional aliases/reachable) → sig covers all

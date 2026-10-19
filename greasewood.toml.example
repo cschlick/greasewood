@@ -121,13 +121,14 @@ control_listen = ":51902"
 # for new tokens. Default is adjacent to the mesh port (51900/51901).
 door_port = 51901
 
-# Credential lifetime. Revoking = not renewing; revoked node falls out
-# fleet-wide when its last credential hits exp.
-credential_ttl = "24h"
-
-# Renewal is triggered at ~half the remaining TTL. With 24h TTL, nodes
-# renew around the 12h mark, giving 12h of retry window before expiry.
-renew_before = "12h"
+# Credential lifetime. Nodes renew at ~half of it (jittered), so a machine
+# can sit dark for TTL/2 guaranteed — and after expiry it still renews in
+# place through drop_grace (expired is not ejected; see below). The default
+# is sized so a laptop off for a couple of weeks comes back without ceremony.
+# Revocation: a REACHABLE node learns a revoke within a sync pull; the TTL
+# only bounds how long an unreachable node keeps trusting a stale cache —
+# shorten it if that bound matters to you.
+credential_ttl = "30d"
 
 # Lifetime of x509 TLS service certs issued via `gw cert-request` (§12).
 # Short-lived; the node daemon auto-renews each requested cert at ~half this TTL
