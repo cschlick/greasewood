@@ -545,16 +545,24 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
 # ---------------------------------------------------------------------------
 
 def _anchor_urls(cfg, directory, own_addr: "str | None" = None,
-                 get_ca_pubs=None) -> "list[str]":
+                 get_ca_pubs=None, exclude_self: bool = False) -> "list[str]":
     """The ANCHOR SET: every control-plane URL this node can use. Configured
     seeds come first (the bootstrap — always dialable knowledge), then every
     holder discovered in the replicated directory: a record carrying the
     anchor roles in a credential signed by a TRUSTED CA (the trust check
     matters — a structurally-valid but forged record must not steer traffic;
     such a record also never becomes a WG peer, so its URL would only dangle).
-    Holders exclude themselves so their sync pulls from the OTHER holders.
+    A holder's own discovered record is always excluded (own_addr).
     Order is stable (seeds, then holders sorted by address) so retry behavior
-    is predictable; consumers try each in order."""
+    is predictable; consumers try each in order.
+
+    exclude_self=True additionally drops CONFIGURED URLs that point at this
+    node itself — loopback, or its own overlay address. The create-anchor's
+    config has root_url = http://[::1]:<port> (it renews against itself), and
+    with first-success failover a URL for *yourself* always "succeeds": the
+    original anchor spent its life syncing with itself and never pulled the
+    second holder's decisions. Sync uses this; renewal/attest/leave keep the
+    loopback deliberately (a holder serves itself first)."""
     urls: "list[str]" = []
     for u in list(getattr(cfg, "seeds", []) or []):
         if u and u not in urls:
@@ -578,6 +586,22 @@ def _anchor_urls(cfg, directory, own_addr: "str | None" = None,
     for u in sorted(discovered):
         if u not in urls:
             urls.append(u)
+    if exclude_self:
+        import ipaddress
+        from urllib.parse import urlsplit
+
+        def _norm(h: "str | None") -> str:
+            if not h:
+                return ""
+            try:
+                return ipaddress.ip_address(h).compressed
+            except ValueError:
+                return h.lower()
+
+        self_hosts = {"localhost", _norm("::1"), _norm("127.0.0.1")}
+        if own_addr:
+            self_hosts.add(_norm(own_addr))
+        urls = [u for u in urls if _norm(urlsplit(u).hostname) not in self_hosts]
     return urls
 
 

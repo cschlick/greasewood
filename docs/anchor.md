@@ -42,6 +42,12 @@ holder:
 A statement is as unforgeable in transit as a credential, so any node can
 relay one; verification against the trusted CA set gates every merge.
 
+The transport is load-shaped to match: a plain node pulls until **one** live
+holder answers (failover — any holder serves the converged view), while a
+holder pulls **every** other holder each cycle — each holder mints decisions
+only it has, so holder-to-holder sync can never settle for the first source
+that answers, and a holder never counts its own URL as a source.
+
 ## The accepted races
 
 Active/active with no consensus means a small set of races are *accepted and

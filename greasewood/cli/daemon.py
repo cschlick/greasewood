@@ -251,12 +251,15 @@ def cmd_run(args) -> int:
     # out), so acting on the anchor's fleet renew hint needs no reordering.
     sync = SyncLoop(
         directory,
-        # The ANCHOR SET, refreshed per pull: configured seeds plus every
-        # holder discovered in the directory. Plain nodes gain failover to
-        # any live holder; holders pull from the OTHER holders (self
-        # excluded), which is how statements/records converge between them.
+        # The SYNC SOURCES, refreshed per pull: configured seeds plus every
+        # holder discovered in the directory, minus anything pointing at this
+        # node itself (exclude_self — the create-anchor's own root_url is
+        # loopback, and a self-pull "succeeding" must never shadow a real
+        # source). Plain nodes gain failover to any live holder; holders pull
+        # from ALL the other holders (pull_all below), which is how
+        # statements/records converge between them.
         lambda: cli._anchor_urls(cfg, directory, own_addr=keys.addr,
-                             get_ca_pubs=get_ca_pubs),
+                             get_ca_pubs=get_ca_pubs, exclude_self=True),
         cfg.dir_cache_path,
         on_renew_after=lambda ts: (
             renewal.maybe_renew_after(ts) if renewal else None,
@@ -273,6 +276,10 @@ def cmd_run(args) -> int:
         # a node with the default config only ever logs the hint.
         on_upgrade_hint=cli.UpgradeManager(
             cfg, cli.membership_key(cfg.mesh_domain)).offer,
+        # Holders pull EVERY source per cycle (each other holder has decisions
+        # only it minted); plain nodes keep first-success failover. A callable
+        # so adopting/dropping the anchor file mid-run changes semantics live.
+        pull_all=lambda: cli._holds_anchor(cfg),
     )
     sync.start()
 

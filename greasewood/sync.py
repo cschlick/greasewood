@@ -146,6 +146,7 @@ class SyncLoop(Loop):
         own_id_hex: "str | None" = None,
         attestations=None,
         on_upgrade_hint=None,
+        pull_all: "Callable[[], bool] | None" = None,
     ) -> None:
         super().__init__(interval, "sync")
         # This member's mesh domain, compared against the anchor's advertisement
@@ -178,6 +179,15 @@ class SyncLoop(Loop):
         # Offered the raw signed-policy dict from each pull; the receiver
         # (policy.GrantPolicy.offer) verifies + adopts. Sync stays dumb.
         self._on_policy = on_policy
+        # Pull semantics, decided per cycle. False/None (a plain node): the
+        # seeds are FAILOVER — any live holder serves the merged truth, so the
+        # first success ends the cycle and fleet load stays ~one pull per node.
+        # True (an anchor holder): the seeds are the OTHER holders, each with
+        # decisions only it has minted — convergence requires pulling EVERY
+        # one, every cycle. First-success on a holder is the two-holders-
+        # that-never-converged bug: whichever source answers first (often a
+        # configured URL) permanently shadows the rest.
+        self._pull_all = pull_all
         self._last_skew_warn: float | None = None
         self._warned_domain: str | None = None
 
@@ -270,7 +280,16 @@ class SyncLoop(Loop):
         if pruned:
             self._directory.save(self._cache_path)
 
-        for seed in self._get_seeds():
+        pull_all = bool(self._pull_all and self._pull_all())
+        seeds = self._get_seeds()
+        if pull_all and not seeds:
+            # A holder with no other holder to pull from: its own log IS the
+            # mesh's current view. Stamp freshness so watch doesn't flag a
+            # sole anchor as stale. (Plain nodes with no seeds stay unstamped
+            # — they really do have no view of the fleet.)
+            self._stamp_sync()
+            return
+        for seed in seeds:
             try:
                 (records, renew_after, anchor_now, anchor_domain,
                  policy_dict, stmts, attns) = pull_directory(seed)
@@ -293,7 +312,8 @@ class SyncLoop(Loop):
                     self._on_renew_after(renew_after)
                 if self._on_policy and policy_dict is not None:
                     self._on_policy(policy_dict)
-                return
+                if not pull_all:
+                    return            # failover: one live holder is enough
             except RuntimeError as e:
                 log.warning("sync from %s failed: %s", seed, e)
 
