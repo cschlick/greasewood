@@ -252,14 +252,13 @@ def cmd_run(args) -> int:
     sync = SyncLoop(
         directory,
         # The SYNC SOURCES, refreshed per pull: configured seeds plus every
-        # holder discovered in the directory, minus anything pointing at this
-        # node itself (exclude_self — the create-anchor's own root_url is
-        # loopback, and a self-pull "succeeding" must never shadow a real
-        # source). Plain nodes gain failover to any live holder; holders pull
-        # from ALL the other holders (pull_all below), which is how
-        # statements/records converge between them.
+        # holder discovered in the directory. Plain nodes gain failover to
+        # any live holder; holders pull from ALL of them (pull_all below) —
+        # including their own loopback root_url, which is HOW a holder's
+        # daemon learns its own CLI's renew-all hint and upgrade-all
+        # announcement. Under pull_all that self-pull shadows nothing.
         lambda: cli._anchor_urls(cfg, directory, own_addr=keys.addr,
-                             get_ca_pubs=get_ca_pubs, exclude_self=True),
+                             get_ca_pubs=get_ca_pubs),
         cfg.dir_cache_path,
         on_renew_after=lambda ts: (
             renewal.maybe_renew_after(ts) if renewal else None,

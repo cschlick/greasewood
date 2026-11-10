@@ -1,21 +1,23 @@
 """
 Active/active holders must CONVERGE: each holder mints decisions only it has,
-so a holder's sync must pull EVERY other holder per cycle — first-success
-failover there is the two-holders-that-never-converged bug (the original
-anchor's own root_url is loopback, a self-pull always "succeeds", and the
-second holder's statements never landed anywhere). Plain nodes keep failover.
+so a holder's sync must pull EVERY source per cycle — first-success failover
+there is the two-holders-that-never-converged bug (the original anchor's own
+root_url is loopback, a self-pull always "succeeds", and the second holder's
+statements never landed anywhere). Plain nodes keep failover. The holder's
+own loopback deliberately STAYS a source: pulling it is how a holder's
+daemon hears its own CLI's renew-all hint and upgrade-all announcement
+(the graceful-reroot regression: with self excluded, `gw renew-all` on the
+new anchor never made the new anchor itself renew).
 """
 import datetime as dt
-import types
 
-from greasewood import cli
 from greasewood import sync as syncmod
 from greasewood.directory import Directory
-from greasewood.keys import CAKeys, NodeKeys, derive_addr
+from greasewood.keys import CAKeys, NodeKeys
 from greasewood.server import ControlServer
 from greasewood.statements import StatementLog
 from greasewood.sync import SyncLoop
-from greasewood.wire import AnchorStatement, Credential, NodeRecord
+from greasewood.wire import AnchorStatement
 
 _UTC = dt.timezone.utc
 
@@ -29,11 +31,11 @@ def _stmt(ca, kind, node, hostname=""):
                            hostname=hostname).sign(ca.ca_priv)
 
 
-def _holder(ca, stmts):
+def _holder(ca, stmts, renew_after=None):
     srv = ControlServer(
         listen="[::1]:0", directory=Directory(),
         get_ca_pubs=lambda: [ca.ca_pub_bytes], get_revoked=set,
-        statements=stmts,
+        statements=stmts, get_renew_after=lambda: renew_after,
     )
     srv.start()
     return srv, f"http://[::1]:{srv._server.server_address[1]}"
@@ -122,48 +124,37 @@ def test_plain_node_with_no_sources_stays_unstamped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# the sync-source list: a node must never count ITSELF as a source
+# the self-pull is a FEATURE under pull_all: a holder's own loopback root_url
+# stays a source, because pulling it is how the daemon hears its own CLI
 # ---------------------------------------------------------------------------
 
-def _rec(ca, k, name, caps):
-    now = _now()
-    cred = Credential(id_pub=k.id_pub_bytes, wg_pub=k.wg_pub_bytes,
-                      addr=derive_addr(k.id_pub_bytes), hostname=name,
-                      caps=caps, iat=now,
-                      exp=now + dt.timedelta(hours=24)).sign(ca.ca_priv)
-    return NodeRecord(id_pub=k.id_pub_bytes, seq=1, endpoints=[],
-                      cred=cred).sign(k.id_priv)
-
-
-def _cfg(seeds=(), root=""):
-    return types.SimpleNamespace(seeds=list(seeds), root_url=root,
-                                 control_listen=":51902")
-
-
-def test_exclude_self_drops_loopback_and_own_configured_urls():
-    """THE create-anchor regression: its config has root_url=http://[::1],
-    first in the anchor set, and a self-pull always succeeds — so with
-    failover it synced with itself forever and never pulled the second
-    holder. exclude_self strips loopback and own-address URLs."""
+def test_holder_hears_its_own_renew_hint_through_the_self_pull(tmp_path):
+    """The graceful-reroot regression: `gw renew-all` on a holder writes the
+    hint its own control plane serves — the daemon only acts on it via a
+    pull. A holder whose first source is itself must BOTH fire the hint
+    AND still converge with the other holder behind it (first-success here
+    was the original never-converged bug)."""
     ca = CAKeys.generate()
-    me, other = NodeKeys.generate(), NodeKeys.generate()
-    my_addr = derive_addr(me.id_pub_bytes)
-    d = Directory()
-    d.put(_rec(ca, me, "router", ["role:*"]))
-    d.put(_rec(ca, other, "melvin", ["role:anchor"]))
-    cfg = _cfg(seeds=["http://localhost:51902", "http://127.0.0.1:51902",
-                      f"http://[{my_addr}]:51902"],
-               root="http://[::1]:51902")
-    urls = cli._anchor_urls(cfg, d, own_addr=my_addr,
-                            get_ca_pubs=lambda: [ca.ca_pub_bytes],
-                            exclude_self=True)
-    assert urls == [f"http://[{derive_addr(other.id_pub_bytes)}]:51902"]
+    victim = NodeKeys.generate()
+    hint = _now().isoformat()
+    srv_self, url_self = _holder(ca, StatementLog(), renew_after=hint)
+    other_stmts = StatementLog()
+    other_stmts.add(_stmt(ca, "revoke", victim))
+    srv_other, url_other = _holder(ca, other_stmts)
 
-
-def test_without_exclude_self_loopback_stays():
-    """Default semantics unchanged: renewal/attest/leave deliberately keep a
-    holder's loopback (it serves itself first; a sole holder must not depend
-    on a root_url pointing elsewhere)."""
-    cfg = _cfg(root="http://[::1]:51902")
-    urls = cli._anchor_urls(cfg, Directory())
-    assert urls == ["http://[::1]:51902"]
+    me = NodeKeys.generate()
+    local = StatementLog()
+    hints = []
+    loop = SyncLoop(Directory(), lambda: [url_self, url_other],
+                    tmp_path / "directory.json",
+                    statements=local,
+                    get_ca_pubs=lambda: [ca.ca_pub_bytes],
+                    own_id_hex=me.id_pub_hex,
+                    on_renew_after=hints.append,
+                    pull_all=lambda: True)
+    try:
+        loop._pull_once()
+    finally:
+        srv_self.stop(); srv_other.stop()
+    assert hints and hints[0].isoformat() == hint      # own hint delivered
+    assert local.revoked_ids() == {victim.id_pub_hex}  # ...and still converged

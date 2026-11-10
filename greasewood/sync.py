@@ -182,11 +182,14 @@ class SyncLoop(Loop):
         # Pull semantics, decided per cycle. False/None (a plain node): the
         # seeds are FAILOVER — any live holder serves the merged truth, so the
         # first success ends the cycle and fleet load stays ~one pull per node.
-        # True (an anchor holder): the seeds are the OTHER holders, each with
-        # decisions only it has minted — convergence requires pulling EVERY
-        # one, every cycle. First-success on a holder is the two-holders-
-        # that-never-converged bug: whichever source answers first (often a
-        # configured URL) permanently shadows the rest.
+        # True (an anchor holder): the sources are the holders — the other
+        # holders each hold decisions only they minted, and the holder's OWN
+        # loopback is how its daemon hears its own CLI's renew/upgrade hints
+        # — so convergence requires pulling EVERY one, every cycle.
+        # First-success on a holder is the two-holders-that-never-converged
+        # bug: the create-anchor's own root_url is loopback, first in the
+        # list, a self-pull always succeeds, and the second holder was never
+        # pulled at all.
         self._pull_all = pull_all
         self._last_skew_warn: float | None = None
         self._warned_domain: str | None = None

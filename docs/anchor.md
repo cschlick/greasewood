@@ -44,9 +44,11 @@ relay one; verification against the trusted CA set gates every merge.
 
 The transport is load-shaped to match: a plain node pulls until **one** live
 holder answers (failover — any holder serves the converged view), while a
-holder pulls **every** other holder each cycle — each holder mints decisions
-only it has, so holder-to-holder sync can never settle for the first source
-that answers, and a holder never counts its own URL as a source.
+holder pulls **every** source each cycle — the other holders because each
+mints decisions only it has, and its own loopback because that is how a
+holder's daemon hears its own CLI's `renew-all` and `upgrade-all`. Holder
+sync can never settle for the first source that answers: a self-pull always
+"succeeds", and first-success would shadow the real holders behind it.
 
 ## The accepted races
 

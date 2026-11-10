@@ -25,18 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Two anchor holders now actually converge: a holder's sync pulls EVERY
-  other holder, and never itself.** The sync loop stopped at the first
-  source that answered — correct failover for a plain node, but the
-  create-anchor's own `root_url` is loopback and sits first in the list, so
-  the original anchor "synced" with itself forever and never pulled the
-  second holder (field incident: role changes made on the second holder
-  minted fine, gossiped nowhere, and silently never took effect — nodes
-  renew against the original anchor, which never heard them). Holders now
-  pull every other holder each cycle, and URLs pointing at the node itself
-  (loopback or its own overlay address) are excluded from sync sources.
-  Plain nodes keep first-success failover. Both holders need this release
-  for two-way convergence; decisions stuck on one holder flow out on its
-  first fixed pull.
+  source each cycle.** The sync loop stopped at the first source that
+  answered — correct failover for a plain node, but the create-anchor's own
+  `root_url` is loopback and sits first in the list, and a pull of yourself
+  always succeeds: the original anchor "synced" with itself forever and
+  never pulled the second holder (field incident: role changes made on the
+  second holder minted fine, gossiped nowhere, and silently never took
+  effect — nodes renew against the original anchor, which never heard
+  them). Holders now pull every source per cycle — the other holders, and
+  still their own loopback, which is deliberately kept: it is how a
+  holder's daemon hears its own CLI's `renew-all` hint and `upgrade-all`
+  announcement. Plain nodes keep first-success failover. Both holders need
+  this release for two-way convergence; decisions stuck on one holder flow
+  out on its first fixed pull.
 
 - **`gw join` on a lapsed member of its own mesh now says the real recovery.**
   A node whose credential expired is NOT ejected — holders keep
