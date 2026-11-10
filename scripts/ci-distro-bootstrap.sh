@@ -19,7 +19,15 @@ elif command -v dnf >/dev/null 2>&1; then            # Fedora, RHEL/Rocky/Alma
     dnf install -y python3 git
     dnf install -y python3.12 2>/dev/null || true
 elif command -v pacman >/dev/null 2>&1; then         # Arch
-    pacman -Sy --noconfirm python git
+    # The openssl→openssl-3 package rename: an archlinux:latest image that
+    # predates the rename still has the files under the OLD package's
+    # ownership, and pacman refuses the new package's identical files.
+    # Overwriting exactly those two paths is the standard remedy for Arch
+    # rename transitions (same sonames, same files). Harmless once images
+    # ship openssl-3, and droppable then.
+    pacman -Sy --noconfirm \
+        --overwrite usr/lib/libcrypto.so.3 --overwrite usr/lib/libssl.so.3 \
+        python git
 elif command -v zypper >/dev/null 2>&1; then         # openSUSE
     zypper --non-interactive install python3 git
 elif command -v apk >/dev/null 2>&1; then            # Alpine (install.sh needs apk support)
