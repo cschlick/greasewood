@@ -218,6 +218,27 @@ def _wait_iface_gone(cid: str, iface: str, timeout: int = 20) -> bool:
     return False
 
 
+def _anchor_forensics(anchor_cid: str) -> str:
+    """Everything needed to diagnose a door failure from the CI log alone:
+    the anchor daemon's log tail (DoorWatcher/EnrollServer lines live there)
+    plus the door artifacts on disk. Best-effort: never raises."""
+    out = ["--- anchor forensics ---"]
+    for label, argv in [
+        ("daemon log tail", ["sh", "-c", "tail -n 120 /tmp/gw.log 2>/dev/null"]),
+        ("door artifacts", ["sh", "-c",
+                            "ls -la /var/lib/greasewood_*/door_window.json "
+                            "/var/lib/greasewood_*/door_status.json 2>/dev/null; "
+                            "cat /var/lib/greasewood_*/door_window.json 2>/dev/null"]),
+        ("ifaces", ["sh", "-c", "ip -br link 2>/dev/null"]),
+    ]:
+        try:
+            r = pexec(anchor_cid, *argv, check=False)
+            out.append(f"[{label}]\n{r.stdout.strip()}\n{r.stderr.strip()}".rstrip())
+        except Exception as e:  # noqa: BLE001
+            out.append(f"[{label}] unavailable: {e}")
+    return "\n".join(out)
+
+
 def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6: str, *,
                     hostname: str | None = None, caps: str | None = None,
                     roles: str | None = None,
@@ -257,14 +278,17 @@ def door_enroll_via(anchor_cid: str, anchor_ipv6: str, node_cid: str, node_ipv6:
         if check:
             assert j.returncode == 0, (
                 f"gw join failed (rc={j.returncode}):\n"
-                f"stdout: {j.stdout}\nstderr: {j.stderr}"
+                f"stdout: {j.stdout}\nstderr: {j.stderr}\n"
+                f"{_anchor_forensics(anchor_cid)}"
             )
 
         if j.returncode == 0:
             # On success the anchor closes the window and destroys gw-door; wait for
             # that before releasing the lock so the next invite doesn't race it.
-            assert _wait_iface_gone(anchor_cid, "gw-door"), \
-                "anchor did not tear down gw-door after enrollment"
+            assert _wait_iface_gone(anchor_cid, "gw-door"), (
+                "anchor did not tear down gw-door after enrollment\n"
+                f"{_anchor_forensics(anchor_cid)}"
+            )
         else:
             # A failed attempt deliberately leaves the door open for retries.
             # Force-close it for test isolation: drop the window file and let
