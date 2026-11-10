@@ -86,7 +86,9 @@ class EnrollServer:
     def __init__(
         self,
         ctx: "EnrollContext",
-        on_done: Callable[[], None],
+        on_done: "Callable[..., None]",   # called with the close reason:
+                                          # "enrolled" | "expired" |
+                                          # "attempts_exhausted" | "superseded"
         *,
         timeout_secs: float = 900.0,
         max_attempts: int = 3,
@@ -248,7 +250,7 @@ class EnrollServer:
                     self._srv.close()
                 except Exception:
                     pass
-            self._on_done()
+            self._on_done(close_reason)
 
     def _handle(self, conn: socket.socket, peer_ip: str, attempts_left: int) -> bool:
         """One enrollment attempt, as a narrative: validate the request →
@@ -611,30 +613,55 @@ class DoorWatcher(Loop):
             window_menu = win.allowed_roles  # role menu joiners may self-select
             window_hostname = win.hostname  # pinned at invite, or None
 
-            def on_done():
-                # Only delete the window if it still belongs to this session.
-                # If gw invite ran again while we were waiting, the new window has
-                # a different expiry — leave it so the DoorWatcher can start a
-                # fresh EnrollServer for the new token. The DoorWatcher's next
-                # tick destroys the (now window-less) gw-door — we deliberately
-                # do NOT destroy it here, to avoid racing a fresh invite that may
-                # have just recreated the interface.
-                # A STANDING window is never deleted here: its server exits only
-                # on daemon shutdown / close-door / supersede, and the window
-                # must survive (it's what re-opens the door on the next boot).
+            def on_done(reason: str = "superseded"):
+                # A completed single-use enrollment ("enrolled") CONSUMES the
+                # window on disk, whatever it now holds: the door interface
+                # always carries the LATEST invite's keys, so the join can
+                # only have ridden the current window's token. Deleting only
+                # a byte-identical window wedged the door OPEN: when the file
+                # changed between this server's start and the join (an invite
+                # landing inside the watcher's tick gap), the live window was
+                # left behind, the next tick started a new server on it, and
+                # every later enrollment was served one window behind —
+                # mismatching forever, the interface never torn down. The
+                # cost of consuming: an invite minted in the instant between
+                # the join and this callback dies unused (re-invite; warned
+                # below). Every other close reason keeps the conservative
+                # rule — only the window this server was started from may be
+                # deleted. A STANDING window on disk is never deleted here:
+                # it must survive server exits (it re-opens the door on the
+                # next boot).
                 if not standing:
+                    current, unreadable = None, False
                     try:
                         current = json.loads(window_path.read_text())
-                        if current.get("expires") == expires_str:
-                            window_path.unlink(missing_ok=True)
                     except FileNotFoundError:
                         pass
                     except Exception:
+                        unreadable = True
+                    if unreadable or (
+                            current is not None
+                            and current.get("expires") == expires_str):
+                        window_path.unlink(missing_ok=True)
+                    elif (reason == "enrolled" and current is not None
+                          and not current.get("standing")):
+                        log.warning(
+                            "door window changed under a completing "
+                            "enrollment — consumed it with the enrollment; "
+                            "if that was a fresh `gw invite`, its token is "
+                            "dead: run `gw invite` again")
                         window_path.unlink(missing_ok=True)
                 with self._lock:
-                    self._enroll = None
-                log.info("standing door: enroll server stopped" if standing
-                         else "door enrollment complete, window closed")
+                    # A LATE callback from a superseded server must not
+                    # clobber its successor's registration (the orphaned
+                    # successor would never be stopped, and the next tick
+                    # would stack another server on the same port).
+                    if self._enroll is srv:
+                        self._enroll = None
+                if standing:
+                    log.info("standing door: enroll server stopped")
+                else:
+                    log.info("door window closed (%s)", reason)
 
             srv = EnrollServer(
                 self._ctx, on_done,

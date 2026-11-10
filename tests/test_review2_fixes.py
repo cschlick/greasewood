@@ -41,7 +41,7 @@ def _srv():
     from greasewood.keys import NodeKeys
     ctx = EnrollContext(ca=_CA(), directory=types.SimpleNamespace(get=lambda *a: None),
                         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    return EnrollServer(ctx, lambda: None)
+    return EnrollServer(ctx, lambda *_: None)
 
 
 def _req(joiner, hostname):

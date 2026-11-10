@@ -51,7 +51,7 @@ def _attempt(monkeypatch, ca, joiner):
     ctx = EnrollContext(
         ca=ca, directory=types.SimpleNamespace(get=lambda *a: None),
         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    srv = EnrollServer(ctx, lambda: None)
+    srv = EnrollServer(ctx, lambda *_: None)
     from greasewood.wire import enroll_pop_body
     id_sig = base64.b64encode(joiner.id_priv.sign(
         enroll_pop_body(joiner.id_pub_bytes, joiner.wg_pub_bytes, "nats01"))).decode()
@@ -117,7 +117,7 @@ def test_second_leg_bug_is_loud_but_never_fails_enrollment(monkeypatch, caplog):
     from greasewood.directory import Directory
     ctx = EnrollContext(ca=None, directory=Directory(),
                         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    srv = EnrollServer(ctx, lambda: None)
+    srv = EnrollServer(ctx, lambda *_: None)
     monkeypatch.setattr(enroll, "_recv_msg", lambda conn: {"record": {}})
 
     def boom(_d):
@@ -139,7 +139,7 @@ def test_second_leg_bad_record_is_quiet(monkeypatch, caplog):
     from greasewood.directory import Directory
     ctx = EnrollContext(ca=None, directory=Directory(),
                         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    srv = EnrollServer(ctx, lambda: None)
+    srv = EnrollServer(ctx, lambda *_: None)
     # missing "record" key → KeyError, the expected reject path
     monkeypatch.setattr(enroll, "_recv_msg", lambda conn: {})
     monkeypatch.setattr(enroll, "_send_msg", lambda conn, msg: None)
@@ -165,7 +165,7 @@ def test_successful_enrollment_emits_membership_event(monkeypatch, caplog):
     ctx = EnrollContext(
         ca=_FakeCA(), directory=types.SimpleNamespace(get=lambda *a: None),
         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    srv = EnrollServer(ctx, lambda: None)
+    srv = EnrollServer(ctx, lambda *_: None)
     ours, theirs = socket.socketpair()
     try:
         with caplog.at_level(logging.INFO, logger="greasewood.audit"):

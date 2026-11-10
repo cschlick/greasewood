@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A single-use enrollment now consumes the door window on disk — the door
+  can no longer wedge open.** The completion handler only deleted the window
+  file when it was byte-identical to the one its enroll server started from;
+  if an invite rewrote it in the gap between the DoorWatcher's tick and the
+  join completing, the live window was left behind, the next tick started a
+  new server on it, and from then on every enrollment was served one window
+  behind — mismatching forever, `gw-door` never torn down (surfaced as CI's
+  recurring "anchor did not tear down gw-door", worst on slow runners).
+  Since the door interface always carries the latest invite's keys, a
+  completed join can only have ridden the current window's token — so an
+  enrolled close now deletes the current window whatever it holds (warning
+  loudly if a just-minted invite's token dies with it; standing windows are
+  never touched), every other close keeps the conservative
+  only-my-own-window rule, and a superseded server's late exit no longer
+  clobbers its successor's registration.
+
 - **Two anchor holders now actually converge: a holder's sync pulls EVERY
   source each cycle.** The sync loop stopped at the first source that
   answered — correct failover for a plain node, but the create-anchor's own

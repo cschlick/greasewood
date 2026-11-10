@@ -49,7 +49,7 @@ def _enroll(monkeypatch, *, base_caps, menu, requested):
     ca = _CapturingCA()
     ctx = EnrollContext(ca=ca, directory=types.SimpleNamespace(get=lambda *a: None),
                         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    srv = EnrollServer(ctx, lambda: None, caps=base_caps, allowed_roles=menu)
+    srv = EnrollServer(ctx, lambda *_: None, caps=base_caps, allowed_roles=menu)
     joiner = NodeKeys.generate()
     ours, theirs = socket.socketpair()
     try:

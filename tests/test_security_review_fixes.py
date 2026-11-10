@@ -27,7 +27,7 @@ class _CA:
 def _srv():
     ctx = EnrollContext(ca=_CA(), directory=types.SimpleNamespace(get=lambda *a: None),
                         node_keys=NodeKeys.generate(), wg_iface="gw-mesh")
-    return EnrollServer(ctx, lambda: None)
+    return EnrollServer(ctx, lambda *_: None)
 
 
 def _signed_req(joiner, hostname="n1", wg_pub=None, roles=()):

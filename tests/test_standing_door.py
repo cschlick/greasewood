@@ -117,7 +117,7 @@ def test_enroll_server_standing_stays_open_after_success(tmp_path, monkeypatch):
     ctx = enroll.EnrollContext(
         ca=None, directory=Directory(), node_keys=NodeKeys.generate(),
         wg_iface="gw-mesh", data_dir=tmp_path)
-    srv = enroll.EnrollServer(ctx, lambda: handled.append("done"), standing=True)
+    srv = enroll.EnrollServer(ctx, lambda *_: handled.append("done"), standing=True)
 
     # Bind on loopback instead of ANCHOR_DOOR_IP so the test needs no interface.
     real_socket = socket.socket
