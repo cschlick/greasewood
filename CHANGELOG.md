@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`gw upgrade-all` actually works on a systemd fleet: the daemon's own
+  sandbox was blocking the reinstall.** Two walls, found by reproducing the
+  fleet in systemd containers: Debian's pipx stats `$HOME/.local/pipx` at
+  import — before reading arguments, even with `PIPX_HOME` set — and under
+  the unit's `ProtectHome=yes` that stat on `/root` is a fatal
+  `PermissionError`; past that, `ProtectSystem=yes` leaves the app-symlink
+  dir (`/usr/local/bin`) read-only, so `pipx uninstall` dies on EROFS.
+  Interactive `sudo gw upgrade` never hit either (no sandbox), which is why
+  the failure only existed inside the daemon. Fixes: the upgrade subprocess
+  runs with `HOME` pointed at its own workdir, and the unit template gains a
+  `ReadWritePaths=` pass-through for the pipx home and bin dir, rendered
+  from the actual install (omitted on non-pipx installs — the sandbox stays
+  as tight as before). The daemon's startup self-heal rewrites installed
+  units to the new template, and `gw upgrade` now asks the freshly
+  installed version to refresh the unit before restarting — so ONE manual
+  upgrade round per box fixes it permanently. Until then, a node whose unit
+  predates the pass-through logs one clear line naming the blocked path and
+  the way out, instead of crash-retrying hourly.
+
 ## [0.9.0] - 2026-11-10
 
 ### Changed

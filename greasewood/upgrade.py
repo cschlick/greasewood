@@ -176,9 +176,27 @@ class UpgradeManager:
                             "manages pipx installs only; on macOS run: "
                             "brew upgrade greasewood", target)
             return
-        if self._pipx_env() is None:
+        env = self._pipx_env()
+        if env is None:
             self._note_once(stmt.ts, "release v%s announced — this greasewood "
                             "isn't pipx-managed, upgrade it by hand", target)
+            return
+        # Preflight the service sandbox: a unit written before the
+        # ReadWritePaths pass-through leaves the pipx app-symlink dir
+        # read-only (ProtectSystem=yes), so the reinstall would fail from
+        # inside the daemon every retry. Say so ONCE, with the way out —
+        # `gw upgrade` by hand also refreshes the unit, so the next
+        # announcement installs itself. Only an exists-but-unwritable path
+        # counts: that is the sandbox's signature, not a missing dir.
+        blocked = next((p for p in env
+                        if Path(p).exists() and not os.access(p, os.W_OK)),
+                       None)
+        if blocked is not None:
+            self._note_once(stmt.ts, "release v%s announced — this daemon's "
+                            "service sandbox denies writing %s, so it cannot "
+                            "reinstall itself. One manual round fixes that "
+                            "for good (it also refreshes the service unit): "
+                            "sudo gw upgrade", target, blocked)
             return
         with self._lock:
             if self._timer is not None:
@@ -245,7 +263,12 @@ class UpgradeManager:
 
         # From here the uninstall window is open; on failure the verified
         # tarball is KEPT so the logged recovery command points at a real file.
-        run_env = {**os.environ, **pipx_env}
+        # HOME points at the workdir: pipx stats $HOME/.local/pipx AT IMPORT,
+        # even with PIPX_HOME set, and under the unit's ProtectHome=yes that
+        # stat on /root is EACCES — pipx dies before reading argv. The workdir
+        # is statable and writable, and pip's caches land inside the dir
+        # that's swept anyway.
+        run_env = {**os.environ, **pipx_env, "HOME": str(workdir)}
         uninstall = ["pipx", "uninstall", "greasewood"]
         install = ["pipx", "install", str(tarball)]
         for step in (uninstall, install):

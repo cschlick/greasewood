@@ -11,6 +11,7 @@ import datetime as dt
 import hashlib
 import subprocess
 import types
+from pathlib import Path
 
 import pytest
 
@@ -161,6 +162,65 @@ def test_non_pipx_install_is_note_only(tmp_path, caplog):
         mgr.offer(_hint(ca, "0.8.0"))
     assert mgr._timer is None
     assert any("isn't pipx-managed" in r.message for r in caplog.records)
+
+
+def test_sandbox_blocked_path_is_note_only(tmp_path, caplog, monkeypatch):
+    """A unit written before the ReadWritePaths pass-through leaves the pipx
+    bin dir read-only for the daemon — the attempt would fail every hourly
+    retry. Preflight turns that into ONE clear note with the way out."""
+    import logging
+    ca = CAKeys.generate()
+    ro = tmp_path / "robin"
+    ro.mkdir()
+    mgr, _ = _mgr(tmp_path, auto=True, env=(tmp_path / "pipxhome", ro))
+    monkeypatch.setattr(up.os, "access",
+                        lambda p, m: Path(p) != ro)      # ro dir unwritable
+    with caplog.at_level(logging.INFO, logger="greasewood.upgrade"):
+        mgr.offer(_hint(ca, "0.8.0"))
+        mgr.offer(_hint(ca, "0.8.0"))
+    assert mgr._timer is None                            # never attempts
+    notes = [r for r in caplog.records if "sandbox denies writing" in r.message]
+    assert len(notes) == 1 and "sudo gw upgrade" in notes[0].message
+
+
+def test_missing_pipx_dirs_do_not_trip_the_preflight(tmp_path):
+    """Only exists-but-unwritable (the sandbox signature) blocks; a dir that
+    simply doesn't exist yet must not stop the attempt."""
+    ca = CAKeys.generate()
+    mgr, _ = _mgr(tmp_path, auto=True,
+                  env=(tmp_path / "nope", tmp_path / "alsonope"))
+    try:
+        mgr.offer(_hint(ca, "0.8.0"))
+        assert mgr._timer is not None
+    finally:
+        if mgr._timer is not None:
+            mgr._timer.cancel()
+
+
+def test_upgrade_runs_pipx_with_home_in_the_workdir(tmp_path, monkeypatch):
+    """pipx stats $HOME/.local/pipx at import even with PIPX_HOME set; under
+    the unit's ProtectHome=yes a /root HOME is EACCES and pipx dies before
+    argv. The subprocess env must point HOME at the statable workdir."""
+    payload = b"tarball"
+    sha = hashlib.sha256(payload).hexdigest()
+
+    def fake_fetch(version, dest_dir, timeout=0):
+        p = dest_dir / f"greasewood-{version}.tar.gz"
+        p.write_bytes(payload)
+        return p
+
+    envs = []
+    monkeypatch.setattr(up, "fetch_release", fake_fetch)
+    monkeypatch.setattr(up.subprocess, "run",
+                        lambda step, **k: envs.append(k.get("env", {})) or
+                        subprocess.CompletedProcess(step, 0, "", ""))
+    mgr, _ = _mgr(tmp_path, auto=True)
+    mgr._upgrade("0.8.0", sha)
+    assert envs, "no pipx steps ran"
+    for e in envs:
+        assert e["HOME"].startswith(str(tmp_path))       # the workdir, not /root
+        assert "gw-autoupgrade-" in e["HOME"]
+        assert e["PIPX_HOME"] == "h" and e["PIPX_BIN_DIR"] == "b"
 
 
 def test_macos_is_note_only(tmp_path, caplog, monkeypatch):

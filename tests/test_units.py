@@ -12,10 +12,13 @@ from greasewood.cli import _SERVICE_UNIT
 
 _REPO = Path(__file__).parent.parent
 _EXEC = "/usr/local/bin/gw"
+# The canonical sandbox pass-through: what _sandbox_rw_line() renders on the
+# documented fleet layout (pipx at /opt/pipx, apps linked in /usr/local/bin).
+_RW = "ReadWritePaths=-/opt/pipx -/usr/local/bin\n"
 
 
 def test_service_template_directives():
-    body = _SERVICE_UNIT.format(exec=_EXEC)
+    body = _SERVICE_UNIT.format(exec=_EXEC, rw_paths=_RW)
     assert "ExecStart=/usr/local/bin/gw -c /etc/greasewood_%i.toml run" in body
     # Only start once this membership is configured; recover from failure.
     assert "ConditionPathExists=/etc/greasewood_%i.toml" in body
@@ -30,7 +33,33 @@ def test_repo_template_matches_embedded():
     """The committed systemd/ file must match what `gw install-service` writes,
     so manual install and pip install agree."""
     svc = (_REPO / "systemd" / "greasewood@.service").read_text()
-    assert svc.strip() == _SERVICE_UNIT.format(exec=_EXEC).strip()
+    assert svc.strip() == _SERVICE_UNIT.format(exec=_EXEC, rw_paths=_RW).strip()
+
+
+def test_sandbox_rw_line_renders_the_pipx_paths(monkeypatch):
+    """A pipx-managed install gets its home + bin dir passed through the unit
+    sandbox ('-' = ignore if missing); any other install gets no line at all —
+    the sandbox stays as tight as before."""
+    from greasewood import service
+    monkeypatch.setattr(service, "_pipx_install_env",
+                        lambda: (Path("/opt/pipx"), Path("/usr/local/bin")))
+    assert service._sandbox_rw_line() == _RW
+    monkeypatch.setattr(service, "_pipx_install_env", lambda: None)
+    assert service._sandbox_rw_line() == ""
+
+
+def test_write_unit_renders_sandbox_passthrough(tmp_path, monkeypatch):
+    """The written unit carries the pass-through exactly when the install is
+    pipx-managed — the regression that made upgrade-all fail fleet-wide: the
+    daemon's own `pipx uninstall` hit the read-only /usr/local/bin."""
+    import subprocess
+    from greasewood import service
+    monkeypatch.setattr(service, "_pipx_install_env",
+                        lambda: (Path("/opt/pipx"), Path("/usr/local/bin")))
+    service.write_systemd_unit(
+        tmp_path, _EXEC,
+        run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    assert _RW.strip() in (tmp_path / "greasewood@.service").read_text()
 
 
 def test_watchdog_ping_sends_datagram(tmp_path, monkeypatch):

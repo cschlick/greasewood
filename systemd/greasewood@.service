@@ -44,6 +44,12 @@ NotifyAccess=main
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=yes
+# Auto-upgrade (gw upgrade-all) reinstalls the package from INSIDE the daemon:
+# pipx must write its venv home and the app-symlink dir, and the symlink dir
+# is usually /usr/local/bin — read-only under ProtectSystem=yes. These two
+# pass-throughs are rendered from the actual install when it is pipx-managed
+# and omitted otherwise ('-' ignores a path that doesn't exist).
+ReadWritePaths=-/opt/pipx -/usr/local/bin
 ProtectHome=yes
 PrivateTmp=yes
 ProtectControlGroups=yes

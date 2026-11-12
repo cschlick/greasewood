@@ -83,7 +83,12 @@ NotifyAccess=main
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=yes
-ProtectHome=yes
+# Auto-upgrade (gw upgrade-all) reinstalls the package from INSIDE the daemon:
+# pipx must write its venv home and the app-symlink dir, and the symlink dir
+# is usually /usr/local/bin — read-only under ProtectSystem=yes. These two
+# pass-throughs are rendered from the actual install when it is pipx-managed
+# and omitted otherwise ('-' ignores a path that doesn't exist).
+{rw_paths}ProtectHome=yes
 PrivateTmp=yes
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
@@ -137,6 +142,43 @@ def service_exec() -> str:
     return shutil.which("gw") or os.path.realpath(sys.argv[0])
 
 
+def _pipx_install_env() -> "tuple[Path, Path] | None":
+    """Where pipx put THIS install: ``(PIPX_HOME, PIPX_BIN_DIR)``, or None if we
+    aren't running from a pipx venv.
+
+    Read off the running interpreter rather than assumed: a pipx venv lives at
+    ``<PIPX_HOME>/venvs/<package>``, and the app symlink that launched us sits
+    in PIPX_BIN_DIR. Fleet installs deliberately use a non-default PIPX_HOME
+    (``/opt/pipx``, so root's install isn't buried in a user's home) — guessing
+    the default would install a SECOND copy elsewhere while the service kept
+    running the old one, which is exactly the confusion this command exists to
+    end.
+    """
+    venv = Path(sys.prefix)
+    if venv.parent.name != "venvs":
+        return None                      # apt/rpm, a dev checkout, or a venv we don't own
+    home = venv.parent.parent
+    exe = shutil.which("gw") or sys.argv[0]
+    bin_dir = Path(exe).parent if os.path.isabs(exe) else Path("/usr/local/bin")
+    # If PATH found the venv's own bin, that's not the shared bin dir pipx links
+    # into — fall back rather than point PIPX_BIN_DIR inside the venv.
+    if home in bin_dir.parents or bin_dir == venv / "bin":
+        bin_dir = Path("/usr/local/bin")
+    return home, bin_dir
+
+
+def _sandbox_rw_line() -> str:
+    """The unit's ReadWritePaths pass-through for a pipx-managed install (empty
+    otherwise): without it, ProtectSystem=yes leaves the pipx app-symlink dir
+    (usually under /usr/local) read-only and the daemon-side reinstall of
+    `gw upgrade-all` fails at `pipx uninstall` with EROFS."""
+    env = _pipx_install_env()
+    if env is None:
+        return ""
+    home, bin_dir = env
+    return f"ReadWritePaths=-{home} -{bin_dir}\n"
+
+
 def systemd_available() -> bool:
     """True only when this host is actually running systemd — `systemctl` on
     PATH AND /run/systemd/system present (the canonical sd_booted() check). A
@@ -152,7 +194,8 @@ def write_systemd_unit(unit_dir: Path, exec_path: str, *,
     Returns the systemctl path (None if this host has no systemd)."""
     run = run or systemctl_run            # resolve at call time (monkeypatchable)
     unit_dir.mkdir(parents=True, exist_ok=True)
-    (unit_dir / "greasewood@.service").write_text(SYSTEMD_UNIT.format(exec=exec_path))
+    (unit_dir / "greasewood@.service").write_text(
+        SYSTEMD_UNIT.format(exec=exec_path, rw_paths=_sandbox_rw_line()))
     systemctl = shutil.which("systemctl")
     if systemctl:
         run([systemctl, "daemon-reload"], check=False)
@@ -173,7 +216,8 @@ def refresh_systemd_unit(unit_dir: Path, desired_exec: str, *,
     try:
         if not tmpl.exists():
             return False
-        if tmpl.read_text() == SYSTEMD_UNIT.format(exec=desired_exec):
+        if tmpl.read_text() == SYSTEMD_UNIT.format(exec=desired_exec,
+                                                   rw_paths=_sandbox_rw_line()):
             return False
         write_systemd_unit(unit_dir, desired_exec, run=run)
         log.info("systemd unit template updated to this greasewood version "

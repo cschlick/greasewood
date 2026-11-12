@@ -73,29 +73,9 @@ _REPO_URL = "https://github.com/cschlick/greasewood"
 
 
 
-def _pipx_install_env() -> "tuple[Path, Path] | None":
-    """Where pipx put THIS install: ``(PIPX_HOME, PIPX_BIN_DIR)``, or None if we
-    aren't running from a pipx venv.
-
-    Read off the running interpreter rather than assumed: a pipx venv lives at
-    ``<PIPX_HOME>/venvs/<package>``, and the app symlink that launched us sits
-    in PIPX_BIN_DIR. Fleet installs deliberately use a non-default PIPX_HOME
-    (``/opt/pipx``, so root's install isn't buried in a user's home) — guessing
-    the default would install a SECOND copy elsewhere while the service kept
-    running the old one, which is exactly the confusion this command exists to
-    end.
-    """
-    venv = Path(sys.prefix)
-    if venv.parent.name != "venvs":
-        return None                      # apt/rpm, a dev checkout, or a venv we don't own
-    home = venv.parent.parent
-    exe = shutil.which("gw") or sys.argv[0]
-    bin_dir = Path(exe).parent if os.path.isabs(exe) else Path("/usr/local/bin")
-    # If PATH found the venv's own bin, that's not the shared bin dir pipx links
-    # into — fall back rather than point PIPX_BIN_DIR inside the venv.
-    if home in bin_dir.parents or bin_dir == venv / "bin":
-        bin_dir = Path("/usr/local/bin")
-    return home, bin_dir
+# Lives in service.py now (the unit template renders the pipx paths into its
+# sandbox pass-through); re-exported here for the callers and test seams.
+_pipx_install_env = service._pipx_install_env
 
 
 
@@ -242,6 +222,15 @@ def cmd_upgrade(args) -> int:
         v = subprocess.run([str(gw), "--version"], capture_output=True, text=True)
         if v.returncode == 0:
             print(f"\ninstalled: {v.stdout.strip()}")
+        # The new version may ship service-template changes the restart below
+        # should already run under (e.g. the sandbox pass-through that lets
+        # auto-upgrade reinstall from inside the daemon). Only the NEW code
+        # knows its template — have the freshly installed gw rewrite it
+        # (`service enable` writes idempotently and daemon-reloads; on an
+        # already-active unit it changes nothing else). Best-effort: a
+        # failure here never fails the upgrade.
+        subprocess.run([str(gw), "-c", str(args.config), "service", "enable"],
+                       env=run_env, capture_output=True, text=True)
     if not cli._service_restart(key, why="to run the new code"):
         print(f"restart the daemon to run the new code:\n  {_svc_restart_hint(key)}")
     if workdir is not None:
