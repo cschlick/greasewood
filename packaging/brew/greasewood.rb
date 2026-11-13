@@ -22,6 +22,11 @@ class Greasewood < Formula
   # their bottles would carry the wrong tag for current Macs — hence by hand.)
   # The block is (re)added after the release's bottle is built; a stale
   # previous-version block would make brew chase a bottle that doesn't exist.
+  bottle do
+    root_url "https://raw.githubusercontent.com/cschlick/homebrew-tap/main/bottles"
+    rebuild 1
+    sha256 arm64_tahoe: "05c164503dca3b0192fa1f3efd608421b35652576908f3f36df5c20e81262a7c"
+  end
   head "https://github.com/cschlick/greasewood.git", branch: "main"
 
   depends_on "python@3.13"
