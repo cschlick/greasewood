@@ -10,8 +10,8 @@
 class Greasewood < Formula
   desc "Minimal self-hosted WireGuard mesh overlay"
   homepage "https://github.com/cschlick/greasewood"
-  url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.9.1.tar.gz"
-  sha256 "0c88f09c518df290824f95c934d782bc726a5a6530dcf44849836569add1f19d" # pinned by release-brew.sh
+  url "https://github.com/cschlick/greasewood/archive/refs/tags/v0.9.2.tar.gz"
+  sha256 "657416df2cf56e4a5b7aef2ec95e03e959c37a60333137bea6d19f03495055cb" # pinned by release-brew.sh
   license "MIT"
 
   # Bottle hosted in the tap (bottles/ dir) — built by hand on macOS/arm64
