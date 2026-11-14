@@ -79,9 +79,12 @@ no per-port relays. The Mac *is* the node.
 - **Laptops behave like laptops.** A Mac without a public address is
   outbound-only — it dials peers, keepalives hold the path, and
   `endpoint_auto` re-advertises if it gains one. Nothing to configure.
-- **Upgrades: restart the daemon, and beware pre-0.9 plists.** `brew upgrade
-  greasewood` replaces the package but never the running daemon — restart it
-  to run the new code: `sudo launchctl kickstart -k system/com.greasewood.<mesh>`.
+- **Upgrades: `sudo gw upgrade`, and beware pre-0.9 plists.** It prints and
+  runs the whole sequence — the brew steps as your own account (Homebrew
+  refuses root), then the new version re-bootstraps the daemon as root. The
+  by-hand equivalent, should you ever need it: `brew upgrade greasewood`
+  replaces the package but never the running daemon — restart it to run the
+  new code: `sudo launchctl kickstart -k system/com.greasewood.<mesh>`.
   Plists written by greasewood ≤0.8 pinned a *versioned* keg path, so the
   daemon silently kept its install-time version across upgrades — and once
   the old keg rotted (a python@3.13 bump) it couldn't start at all. Repair:
