@@ -226,3 +226,107 @@ def test_non_root_is_refused_before_anything_runs(tmp_path, monkeypatch,
         cli.cmd_upgrade(_args(tmp_path))
     assert "needs root" in str(e.value)
     assert runs.calls == []
+
+
+# ---------------------------------------------------------------- brew (macOS)
+
+
+@pytest.fixture
+def brew_layout(tmp_path, monkeypatch):
+    """Pretend we're running from a Homebrew keg, invoked via sudo: brew and
+    the stable linked gw both live in the prefix's bin, and SUDO_USER names
+    the account the brew steps must drop back to."""
+    bin_dir = tmp_path / "opt" / "homebrew" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "brew").write_text("#!/bin/sh\n")
+    (bin_dir / "gw").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(cli, "_brew_install",
+                        lambda: (bin_dir / "brew", bin_dir / "gw"))
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_USER", "pat")
+    return bin_dir
+
+
+def test_brew_detection_requires_brew_beside_the_linked_gw(tmp_path, monkeypatch):
+    # The linked gw proves "this is a keg"; brew missing beside it means we
+    # can't drive the upgrade, so the command must fall through to its
+    # not-ours refusal rather than invent a brew path.
+    from greasewood import service
+    from greasewood.cli import svc
+    gw = tmp_path / "bin" / "gw"
+    gw.parent.mkdir()
+    gw.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(service, "_brew_linked_gw", lambda: str(gw))
+    assert svc._brew_install() is None
+    (tmp_path / "bin" / "brew").write_text("#!/bin/sh\n")
+    assert svc._brew_install() == (tmp_path / "bin" / "brew", gw)
+    monkeypatch.setattr(service, "_brew_linked_gw", lambda: None)
+    assert svc._brew_install() is None
+
+
+def test_brew_runs_as_the_invoking_user_and_restarts_as_root(tmp_path, monkeypatch,
+                                                             brew_layout):
+    """The split the two sides force: brew refuses root, launchctl requires
+    it — so the brew steps run as SUDO_USER and the restart (the NEW gw's own
+    `service enable`, which re-bootstraps the launchd job) stays root."""
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    args = _args(tmp_path)
+    assert cli.cmd_upgrade(args) == 0
+    drop = ["sudo", "-u", "pat", "-H", str(brew_layout / "brew")]
+    assert runs.calls[0] == drop + ["update"]
+    assert runs.calls[1] == drop + ["upgrade", "greasewood"]
+    # the restart comes from the freshly installed gw, not the running one
+    assert runs.calls[-1] == [str(brew_layout / "gw"), "-c", args.config,
+                              "service", "enable"]
+
+
+def test_brew_leg_refuses_github_and_pinned_refs(tmp_path, monkeypatch,
+                                                 brew_layout):
+    # brew installs the formula's release — pretending otherwise would
+    # silently install something else than asked.
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    for kw in (dict(source="github"), dict(ref="0.3.1")):
+        with pytest.raises(SystemExit) as e:
+            cli.cmd_upgrade(_args(tmp_path, **kw))
+        assert "Homebrew-managed" in str(e.value)
+    assert runs.calls == []
+
+
+def test_brew_leg_needs_an_invoking_user_to_drop_to(tmp_path, monkeypatch,
+                                                    brew_layout):
+    # A direct root shell has nobody to run brew as: refuse up front and name
+    # the by-hand split instead of half-running.
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    monkeypatch.delenv("SUDO_USER")
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_upgrade(_args(tmp_path))
+    msg = str(e.value)
+    assert "brew update && brew upgrade greasewood" in msg
+    assert "launchctl kickstart" in msg
+    assert runs.calls == []
+
+
+def test_brew_failure_stops_before_the_restart(tmp_path, monkeypatch, brew_layout):
+    # brew keeps the current install when it fails, and we must not then
+    # restart the daemon as if something changed.
+    runs = _Runs(rc=1)
+    _patch_run(monkeypatch, runs)
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_upgrade(_args(tmp_path))
+    assert "nothing was changed" in str(e.value)
+    assert not any("enable" in c for c in runs.calls)
+
+
+def test_brew_plan_is_printed_and_declining_changes_nothing(tmp_path, monkeypatch,
+                                                            brew_layout, capsys):
+    runs = _Runs()
+    _patch_run(monkeypatch, runs)
+    monkeypatch.setattr("builtins.input", lambda *_: "n")
+    assert cli.cmd_upgrade(_args(tmp_path, yes=False)) == 1
+    out = capsys.readouterr().out
+    assert "upgrade greasewood" in out and "service enable" in out
+    assert "sudo -u pat" in out
+    assert runs.calls == []

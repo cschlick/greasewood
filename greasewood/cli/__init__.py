@@ -81,7 +81,7 @@ from .netdetect import (  # noqa: F401
 )
 from .svc import (  # noqa: F401
     _REPO_URL, _SERVICE_UNIT, _SYSTEMCTL_TIMEOUT,
-    _UNIT_DIR, _membership_service, _pipx_install_env,
+    _UNIT_DIR, _brew_install, _membership_service, _pipx_install_env,
     _print_daemon_guidance, _prune_dangling_apps, _refresh_service_template,
     _service_backend, _service_exec, _service_restart,
     _svc_restart_hint, _systemctl_run, _systemd_available,

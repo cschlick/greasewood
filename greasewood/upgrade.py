@@ -174,7 +174,7 @@ class UpgradeManager:
         if gwplat.IS_MACOS:
             self._note_once(stmt.ts, "release v%s announced — auto_upgrade "
                             "manages pipx installs only; on macOS run: "
-                            "brew upgrade greasewood", target)
+                            "sudo gw upgrade", target)
             return
         env = self._pipx_env()
         if env is None:

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`sudo gw upgrade` now works on a Homebrew Mac too** — no more remembering
+  the brew + launchctl pair. It prints and runs the exact commands: the brew
+  steps dropped back to the invoking user (Homebrew refuses root), then the
+  freshly installed gw's own `service enable`, which rewrites the launchd
+  plist and re-bootstraps the daemon as root — so a release can ship
+  service-config changes on macOS the same way the pipx leg does on Linux.
+  The daemon's "release announced" note on macOS now points there.
+
 ## [0.9.1] - 2026-11-12
 
 ### Fixed

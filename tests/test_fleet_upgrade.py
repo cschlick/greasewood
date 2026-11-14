@@ -232,7 +232,9 @@ def test_macos_is_note_only(tmp_path, caplog, monkeypatch):
     with caplog.at_level(logging.INFO, logger="greasewood.upgrade"):
         mgr.offer(_hint(ca, "0.8.0"))
     assert mgr._timer is None
-    assert any("brew upgrade" in r.message for r in caplog.records)
+    # The note points at `sudo gw upgrade` — which on a Mac drives brew and
+    # the launchd restart itself (svc._cmd_upgrade_brew).
+    assert any("sudo gw upgrade" in r.message for r in caplog.records)
 
 
 def test_auto_on_schedules_exactly_one_jittered_attempt(tmp_path):

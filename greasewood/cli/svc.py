@@ -1,4 +1,4 @@
-"""greasewood.cli.svc — Service management: the systemd/OpenRC/launchd seam's CLI side (gw service), template refresh, restarts, and gw upgrade (pipx reinstall)."""
+"""greasewood.cli.svc — Service management: the systemd/OpenRC/launchd seam's CLI side (gw service), template refresh, restarts, and gw upgrade (pipx reinstall / brew upgrade)."""
 import datetime as dt
 import logging
 import os
@@ -80,6 +80,21 @@ _pipx_install_env = service._pipx_install_env
 
 
 
+def _brew_install() -> "tuple[Path, Path] | None":
+    """(brew, gw) launchers when THIS greasewood runs from a Homebrew keg —
+    else None. Both come from the brew prefix's bin, the one place brew
+    re-points at every upgrade (see service._brew_linked_gw for why the keg
+    path itself must never be used)."""
+    linked = service._brew_linked_gw()
+    if linked is None:
+        return None
+    gw = Path(linked)
+    brew = gw.parent / "brew"
+    return (brew, gw) if brew.exists() else None
+
+
+
+
 def _prune_dangling_apps(bin_dir: Path, venv: Path) -> list:
     """Remove app symlinks in PIPX_BIN_DIR that point into this venv but no
     longer resolve — entry points the package USED to declare.
@@ -112,11 +127,15 @@ def _prune_dangling_apps(bin_dir: Path, venv: Path) -> list:
 def cmd_upgrade(args) -> int:
     """[sudo] Reinstall greasewood in place, then restart this mesh's daemon.
 
-    A clean uninstall+install, not ``pipx upgrade``: upgrading in place has been
-    seen to leave the previous version's ``__pycache__`` behind in the venv, so
-    the running code doesn't always match what was installed. Two sources — the
-    published PyPI release (default) or the git repo (``--from github``), the
-    latter for running a fix that isn't released yet.
+    On a pipx install (Linux fleet): a clean uninstall+install, not ``pipx
+    upgrade`` — upgrading in place has been seen to leave the previous
+    version's ``__pycache__`` behind in the venv, so the running code doesn't
+    always match what was installed. Two sources — the published PyPI release
+    (default) or the git repo (``--from github``), the latter for running a
+    fix that isn't released yet.
+
+    On a Homebrew install (macOS): brew carries the payload and launchd the
+    restart — see _cmd_upgrade_brew.
 
     Always prints the exact commands and asks before running any of them: the
     uninstall step briefly removes ``gw`` from a machine you may well be
@@ -124,6 +143,9 @@ def cmd_upgrade(args) -> int:
     """
     from ..config import load_config
 
+    brew = cli._brew_install()
+    if brew is not None:
+        return _cmd_upgrade_brew(args, *brew)
     env = _pipx_install_env()
     if env is None:
         sys.exit("'gw upgrade' only manages a pipx install, and this greasewood "
@@ -235,6 +257,83 @@ def cmd_upgrade(args) -> int:
         print(f"restart the daemon to run the new code:\n  {_svc_restart_hint(key)}")
     if workdir is not None:
         shutil.rmtree(workdir, ignore_errors=True)
+    return 0
+
+
+
+
+def _cmd_upgrade_brew(args, brew: Path, gw: Path) -> int:
+    """The macOS leg of ``gw upgrade``: brew carries the payload, launchd the
+    restart. Same contract as the pipx leg — print the exact commands, confirm,
+    run — with the one split the two sides force: Homebrew REFUSES to run as
+    root while launchctl REQUIRES it, so the brew steps drop back to the
+    invoking user (SUDO_USER) and the restart stays root.
+
+    The restart is the freshly installed gw's own ``service enable``: on
+    launchd that rewrites this membership's plist and re-bootstraps the job
+    (bootout → bootstrap → kickstart), so a release can ship service-config
+    changes and still have the daemon come back under them — the exact
+    parallel of the pipx leg's post-install ``service enable`` + restart.
+    """
+    from ..config import load_config
+
+    if args.source == "github":
+        sys.exit("this greasewood is Homebrew-managed — 'gw upgrade' here "
+                 "installs the formula's released version, so there is no "
+                 "'--from github'.\nAn unreleased build on a Mac:\n"
+                 "  brew reinstall --HEAD cschlick/tap/greasewood")
+    if args.ref:
+        sys.exit("this greasewood is Homebrew-managed — brew installs the "
+                 "formula's current release, not a chosen version.")
+
+    cli._require_root("upgrade", "it reinstalls the package and restarts the service")
+    cfg = load_config(Path(args.config))
+    key = membership_key(cfg.mesh_domain)
+    label = service.launchd_label(key)
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user or sudo_user == "root":
+        # root with no user to drop to (direct root shell, su): brew would
+        # refuse us outright. Name the by-hand split instead of half-running.
+        sys.exit("Homebrew refuses to run as root, and there is no invoking "
+                 "user to run it as (SUDO_USER is unset).\nRun 'sudo gw "
+                 "upgrade' from your normal account — or by hand:\n"
+                 "  brew update && brew upgrade greasewood\n"
+                 f"  sudo launchctl kickstart -k system/{label}")
+
+    drop = ["sudo", "-u", sudo_user, "-H"]
+    brew_steps = [drop + [str(brew), "update"],
+                  drop + [str(brew), "upgrade", "greasewood"]]
+    enable = [str(gw), "-c", str(args.config), "service", "enable"]
+
+    print(f"greasewood {_version()}  →  upgrade via Homebrew\n")
+    for step in brew_steps + [enable]:
+        print(f"  {' '.join(step)}")
+    print(f"\nThe last step restarts the daemon for '{key}' — the mesh drops "
+          "for a moment on this Mac.\n")
+    if not args.yes and input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("cancelled — nothing changed.")
+        return 1
+
+    for step in brew_steps:
+        print(f"\n$ {' '.join(step)}")
+        if subprocess.run(step).returncode != 0:
+            # brew leaves the current install in place when it fails, and the
+            # daemon was never touched — nothing to recover, just re-run.
+            sys.exit(f"\n'{' '.join(step)}' failed — nothing was changed: brew "
+                     "keeps the current install when an upgrade fails, and the "
+                     "daemon wasn't restarted. Re-run once the cause (usually "
+                     "network) is fixed.")
+
+    v = subprocess.run([str(gw), "--version"], capture_output=True, text=True)
+    if v.returncode == 0:
+        print(f"\ninstalled: {v.stdout.strip()}")
+
+    print(f"\n$ {' '.join(enable)}")
+    if subprocess.run(enable).returncode != 0:
+        print("restart the daemon yourself to run the new code:\n"
+              f"  sudo launchctl kickstart -k system/{label}")
+        return 1
     return 0
 
 
