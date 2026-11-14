@@ -250,7 +250,10 @@ def _render_roster(nodes, cfg, have_live, is_root,
         is_self, peers, live = n["is_self"], n["peer_expected"], n.get("live")
         installed = bool(live and live.get("installed"))
         up = bool(live and live.get("up"))
-        ver = n["version"]
+        # 'auto' beside the version: this machine follows `gw upgrade-all`
+        # (auto_upgrade on AND an install the auto path manages). Its absence
+        # means a manual `sudo gw upgrade` is this box's only path.
+        ver = n["version"] + (" auto" if n.get("auto_upgrade") else "")
         # How the traffic travels: ip6 / ip4 for a live direct tunnel.
         # A dash elsewhere keeps the column from implying a path that doesn't exist.
         via = (live or {}).get("via") or "—"
@@ -2071,8 +2074,13 @@ def _node_view(r, cfg, now, now_epoch, own_id, own_caps, live_peers, grants,
     if is_self:
         running = _rmod.read_daemon_version(data_dir) if data_dir else None
         entry["version"] = running or _version()
+        # Computed fresh, not read from the record: a just-flipped config
+        # shows here immediately, before the daemon has republished.
+        from . import upgrade as _upmod
+        entry["auto_upgrade"] = _upmod.auto_upgrade_active(cfg)
     else:
         entry["version"] = r.version or "?"
+        entry["auto_upgrade"] = r.auto_upgrade
     if live_peers is not None:
         wg_pub_b64 = base64.b64encode(r.cred.wg_pub).decode()
         lp = live_peers.get(wg_pub_b64)

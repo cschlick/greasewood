@@ -226,6 +226,13 @@ class NodeRecord:
     # mixed-version fleets interoperate while the new column still works. Omitted
     # from the wire when empty; a tampered version only affects display.
     version: str = ""
+    # This daemon follows `gw upgrade-all` announcements: the config flag,
+    # qualified by the auto path's scope (Linux + pipx-managed install — see
+    # upgrade.auto_upgrade_active). Self-asserted display field exactly like
+    # `version`: NOT covered by the self-signature (omitted from _body_dict)
+    # and omitted from the wire when False, so old/new records interop and a
+    # tampered flag only affects what `gw watch` shows.
+    auto_upgrade: bool = False
     # Underlay address families this node can ORIGINATE from ([4], [6], [4, 6]).
     # Self-observed and self-asserted; a node behind NAT advertises no endpoint
     # at all, so "it can't be dialled" says nothing about whether IT can dial US.
@@ -327,6 +334,8 @@ class NodeRecord:
         d["sig"] = _b64e(self.sig)
         if self.version:
             d["version"] = self.version
+        if self.auto_upgrade:
+            d["auto_upgrade"] = True
         if self.families:
             d["families"] = sorted(self.families)
         return d
@@ -342,6 +351,7 @@ class NodeRecord:
             reachable=_str_list(d.get("reachable", []), "reachable"),
             relay=bool(d.get("relay", False)),
             version=_str(d.get("version", ""), "version"),
+            auto_upgrade=bool(d.get("auto_upgrade", False)),
             families=sorted({int(f) for f in d.get("families", []) if f in (4, 6)}),
             sig=_b64d(d["sig"]),
         )

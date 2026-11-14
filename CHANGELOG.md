@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`gw watch` shows which machines follow `gw upgrade-all`:** nodes that
+  would act on an announcement carry `auto` beside their version in the
+  roster (and `auto_upgrade` in the `--json` nodes). It is the *effective*
+  state — the config flag qualified by the auto path's scope (Linux +
+  pipx-managed install) — so a Mac with the flag set stays unmarked, honestly.
+  Self-asserted and unsigned like the version field, republished whenever it
+  drifts from the config, interoperable with older records either way.
+
 - **`sudo gw upgrade` now works on a Homebrew Mac too** — no more remembering
   the brew + launchctl pair. It prints and runs the exact commands: the brew
   steps dropped back to the invoking user (Homebrew refuses root), then the

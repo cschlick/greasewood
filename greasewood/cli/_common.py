@@ -500,6 +500,7 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
     from ..wire import NodeRecord
     from ..sync import push_record
     from .. import reconcile as _rmod
+    from .. import upgrade as _up
     existing = directory.get(keys.id_pub_hex)
     if existing is None and cred is None:
         return None
@@ -522,6 +523,11 @@ def _republish_own_record(cfg, keys, directory, *, cred=None, endpoints=None,
         aliases=carry(aliases, "aliases", _config_aliases(cfg)),
         reachable=carry(reachable, "reachable", []),
         version=version or "",
+        # Like families below: re-detected at every publish, never carried —
+        # the record tracks the config/install truth of the moment, so
+        # flipping auto_upgrade in the config shows up fleet-wide on the next
+        # republish (the reconcile loop forces one when the flag drifts).
+        auto_upgrade=_up.auto_upgrade_active(cfg),
         # Which underlay families we can ORIGINATE on, re-detected rather than
         # carried. It is an unsigned display field (like version) used for
         # diagnostics; it does not affect peering decisions.

@@ -442,3 +442,79 @@ def test_watch_header_shows_the_announcement(tmp_path, monkeypatch):
     # at (or past) the version → quiet
     monkeypatch.setattr(status, "_version", lambda: "0.8.0")
     assert status._upgrade_hint_lines(cfg) == []
+
+
+# ---------------------------------------------------------------------------
+# the roster indicator: which machines follow upgrade-all
+# ---------------------------------------------------------------------------
+
+
+def _signed_record(auto=False):
+    from greasewood.keys import derive_addr
+    from greasewood.wire import Credential, NodeRecord
+    ca, node = CAKeys.generate(), NodeKeys.generate()
+    cred = Credential(id_pub=node.id_pub_bytes, wg_pub=node.wg_pub_bytes,
+                      addr=derive_addr(node.id_pub_bytes), hostname="n1",
+                      caps=["role:node"], iat=_now(),
+                      exp=_now() + dt.timedelta(days=1)).sign(ca.ca_priv)
+    rec = NodeRecord(id_pub=node.id_pub_bytes, seq=1, endpoints=[],
+                     cred=cred, auto_upgrade=auto).sign(node.id_priv)
+    return ca, rec
+
+
+def test_auto_upgrade_flag_rides_the_record_unsigned():
+    """The flag round-trips, is omitted from the wire when off (so old and new
+    records interop), and is NOT in the signed body — a record received from
+    an older node, or one whose flag was flipped in transit, still verifies.
+    Display-only: tampering can at worst mislabel the roster."""
+    from greasewood.wire import NodeRecord
+    _, off = _signed_record(auto=False)
+    assert "auto_upgrade" not in off.to_dict()
+    ca, on = _signed_record(auto=True)
+    d = on.to_dict()
+    assert d["auto_upgrade"] is True
+    back = NodeRecord.from_dict(d)
+    assert back.auto_upgrade
+    back.verify([ca.ca_pub_bytes], set())
+    d["auto_upgrade"] = False                      # flip: signature unaffected
+    NodeRecord.from_dict(d).verify([ca.ca_pub_bytes], set())
+
+
+def test_auto_upgrade_active_is_the_effective_flag(monkeypatch):
+    """What the record advertises is "would this daemon act on an
+    announcement", not the raw config bit: the flag, qualified by the offer
+    path's scope gates (macOS is note-only; only pipx installs are managed).
+    A Mac with auto_upgrade=true must NOT show 'auto' — it won't follow."""
+    from greasewood import platform as gwplat
+    cfg = types.SimpleNamespace(auto_upgrade=True)
+    monkeypatch.setattr(gwplat, "IS_MACOS", False)
+    monkeypatch.setattr(up, "_pipx_env", lambda: (Path("/h"), Path("/b")))
+    assert up.auto_upgrade_active(cfg) is True
+    assert up.auto_upgrade_active(types.SimpleNamespace(auto_upgrade=False)) is False
+    monkeypatch.setattr(up, "_pipx_env", lambda: None)
+    assert up.auto_upgrade_active(cfg) is False    # not a pipx install
+    monkeypatch.setattr(up, "_pipx_env", lambda: (Path("/h"), Path("/b")))
+    monkeypatch.setattr(gwplat, "IS_MACOS", True)
+    assert up.auto_upgrade_active(cfg) is False    # macOS is note-only
+
+
+def test_reconcile_republishes_when_the_auto_flag_drifts(tmp_path):
+    """Flipping auto_upgrade in the config (daemon restart) must reach the
+    fleet without waiting for the next renewal: the version-drift reconciler
+    also compares the flag and forces a republish."""
+    from greasewood.directory import Directory
+    from greasewood.reconcile import ReconcileLoop
+    calls = []
+    d = Directory()
+    ca, rec = _signed_record(auto=False)
+    d.put(rec)
+    loop = ReconcileLoop("gw-x", d, rec.id_pub, [], lambda: [], lambda: set(),
+                         data_dir=tmp_path,
+                         republish_version=lambda ver: calls.append(ver),
+                         auto_upgrade=True)
+    loop._reconcile_version()
+    assert calls == [None]                 # republish forced; version kept as-is
+    calls.clear()
+    loop._auto_upgrade = False             # record (False) now matches
+    loop._reconcile_version()
+    assert calls == []                     # …and matching state stays quiet

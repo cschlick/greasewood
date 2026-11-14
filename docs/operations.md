@@ -214,7 +214,11 @@ that exact artifact on its next directory pull, verifies the hash, reinstalls
 a short jitter so the fleet doesn't restart in the same second; an offline
 node acts when it returns. Nodes without the opt-in — and brew Macs, distro
 packages, dev checkouts — show the announcement in `gw watch` and wait for
-you. The trust delta is stated plainly in [Security](security.md): with
+you. The roster says in advance which is which: machines that will follow
+the announcement carry `auto` beside their version in `gw watch` (the
+*effective* state — a Mac or non-pipx install never shows it, whatever its
+config says), so what's left after an `upgrade-all` is exactly the unmarked
+rows. The trust delta is stated plainly in [Security](security.md): with
 auto_upgrade on, whoever holds the anchor file can cause that node to install
 a release they pin — the signal cannot express anything else.
 

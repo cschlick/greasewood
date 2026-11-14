@@ -114,6 +114,20 @@ def _pipx_env():
     return svc._pipx_install_env()
 
 
+def auto_upgrade_active(cfg) -> bool:
+    """Would THIS install act on an upgrade announcement? The config flag,
+    qualified by the offer path's scope gates (macOS is note-only; only pipx
+    installs are managed). This is what a node publishes in its record and
+    what `gw watch` marks 'auto' — the roster answers "which machines follow
+    gw upgrade-all?" with the effective truth, not the raw flag."""
+    from . import platform as gwplat
+    if not getattr(cfg, "auto_upgrade", False):
+        return False
+    if gwplat.IS_MACOS:
+        return False
+    return _pipx_env() is not None
+
+
 def _self_restart(key: str) -> bool:
     """Restart this mesh's daemon FROM INSIDE the daemon. systemd gets
     `--no-block`: a blocking restart would SIGTERM the very process waiting

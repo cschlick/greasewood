@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..keys import _key_file_warnings, _secret_key_paths
 from ..status import _load_revoked, _version
+from .. import upgrade as _up
 
 # The package namespace is the late-binding seam: cross-module helpers are
 # called as cli.<name> so a monkeypatch on the package (the tests' historic
@@ -342,6 +343,10 @@ def cmd_run(args) -> int:
         # _body_dict) so older peers that don't parse it still verify.
         republish_version=lambda ver: cli._republish_own_record(
             cfg, keys, directory, version=ver, push_to=cfg.seeds, quiet_push=True),
+        # The effective flag this record should advertise ('auto' in the
+        # roster). The republish above re-detects it; this copy is only the
+        # drift detector's reference.
+        auto_upgrade=_up.auto_upgrade_active(cfg),
     )
     recon.start()
 

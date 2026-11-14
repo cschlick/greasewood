@@ -199,3 +199,52 @@ def test_revoked_node_is_flagged_in_json_and_text(tmp_path):
     out = buf.getvalue()
     assert "api1" in out and "REVOKED" in out
     assert "old1" in out and "EXPIRED" in out        # expired node still shown
+
+
+def test_auto_upgrade_indicator(tmp_path):
+    """Nodes publishing auto_upgrade carry it into the JSON snapshot, and the
+    text roster marks them 'auto' beside the version — so `gw watch` answers
+    "which machines will follow gw upgrade-all?" at a glance. A node without
+    the flag (older, or auto off) shows a plain version: same display either
+    way, because neither will act on an announcement."""
+    import io
+    ca = CAKeys.generate()
+    me = NodeKeys.load_or_generate(tmp_path)
+    (tmp_path / "gw.toml").write_text(f"""[node]
+hostname = "web1"
+data_dir = "{tmp_path}"
+role = "node"
+[network]
+interface = "gw-mesh"
+mesh_domain = "gw.internal"
+seeds = []
+[ca]
+trusted_pubs = ["{ca.ca_pub_hex}"]
+""")
+    cfg = load_config(tmp_path / "gw.toml")
+    directory = Directory()
+    directory.put(_rec(me, _cred(ca, me, "web1", ["node"])))
+    fleet = NodeKeys.generate()
+    directory.put(NodeRecord(id_pub=fleet.id_pub_bytes, seq=1, endpoints=[],
+                             cred=_cred(ca, fleet, "nas", ["node"]),
+                             version="9.9.9",
+                             auto_upgrade=True).sign(fleet.id_priv))
+    manual = NodeKeys.generate()
+    directory.put(NodeRecord(id_pub=manual.id_pub_bytes, seq=1, endpoints=[],
+                             cred=_cred(ca, manual, "mac1", ["node"]),
+                             version="9.9.9").sign(manual.id_priv))
+    directory.save(cfg.dir_cache_path)
+
+    by = {n["hostname"]: n for n in _run_json(cfg)["nodes"]}
+    assert by["nas"]["auto_upgrade"] is True
+    assert by["mac1"]["auto_upgrade"] is False
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert status.cmd_watch(types.SimpleNamespace(
+            config=str(tmp_path / "gw.toml"))) == 0
+    out = buf.getvalue()
+    nas_line = next(l for l in out.splitlines() if "nas" in l)
+    mac_line = next(l for l in out.splitlines() if "mac1" in l)
+    assert "9.9.9 auto" in nas_line
+    assert "auto" not in mac_line

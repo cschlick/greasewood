@@ -490,6 +490,7 @@ class ReconcileLoop(Loop):
         reachable_min_interval: float = 30.0,
         local_hostname: "str | None" = None,   # enables derived host: tags
         republish_version=None,
+        auto_upgrade: "bool | None" = None,   # effective flag to keep published
     ) -> None:
         super().__init__(interval, "reconcile")
         # For the rename-mesh grace marker (rename_grace.json): while it's
@@ -538,6 +539,10 @@ class ReconcileLoop(Loop):
         self._last_reachable: "list[str] | None" = None
         self._last_reachable_pub = 0.0
         self._republish_version = republish_version
+        # The effective auto_upgrade flag (upgrade.auto_upgrade_active) this
+        # record should advertise; None = don't manage it. Captured once —
+        # a config change restarts the daemon anyway.
+        self._auto_upgrade = auto_upgrade
 
     def set_local_caps(self, caps: list) -> None:
         """Adopt a new local role set live — used when the anchor changed our
@@ -619,23 +624,31 @@ class ReconcileLoop(Loop):
                 log.error("hosts sync error: %s", e)
 
     def _reconcile_version(self) -> None:
-        """Re-publish the running daemon's version in our own record so the
-        fleet can see it in `gw watch`. The version is an unsigned display field
-        (omitted from _body_dict), so older peers that don't parse it still
-        verify the self-signature. A no-op once the record matches."""
+        """Re-publish our own record when its self-reported display fields —
+        running version, effective auto_upgrade — drift from reality, so the
+        fleet sees them in `gw watch`. Both are unsigned (omitted from
+        _body_dict), so older peers that don't parse them still verify the
+        self-signature. A no-op once the record matches."""
         if self._data_dir is None or self._republish_version is None:
             return
         desired = read_daemon_version(self._data_dir)
-        if not desired:
-            return
         own = self._directory.get(self._local_id_pub.hex())
-        if own is not None and own.version != desired:
-            log.info("version: record=%s but daemon=%s — republishing",
-                     own.version or "(none)", desired)
-            try:
-                self._republish_version(desired)
-            except Exception as e:
-                log.warning("could not republish version: %s", e)
+        if own is None:
+            return
+        drift = []
+        if desired and own.version != desired:
+            drift.append(f"version {own.version or '(none)'} → {desired}")
+        if self._auto_upgrade is not None and own.auto_upgrade != self._auto_upgrade:
+            drift.append(f"auto_upgrade → {'on' if self._auto_upgrade else 'off'}")
+        if not drift:
+            return
+        log.info("own record is stale (%s) — republishing", "; ".join(drift))
+        try:
+            # The republish re-detects auto_upgrade itself; version rides the
+            # argument (None = keep what the record has).
+            self._republish_version(desired or None)
+        except Exception as e:
+            log.warning("could not republish own record: %s", e)
 
     def _stamp_reconcile(self) -> None:
         """Record the time of a completed reconcile pass, so `gw watch` can show
